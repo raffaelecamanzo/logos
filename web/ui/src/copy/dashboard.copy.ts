@@ -9,7 +9,7 @@
  */
 
 import { COVERAGE_VIEW_ABSENCE } from "./coverageView.copy.ts";
-import { gloss, type CopyEntry } from "./types.ts";
+import { gloss, plural, type CopyEntry } from "./types.ts";
 
 export const qualityIndex: CopyEntry = {
   what: ["The quality signal from the last scan, out of 10,000, and whether it holds its ", gloss("baseline"), "."],
@@ -32,7 +32,7 @@ export const languages: CopyEntry = {
 };
 
 export const graph: CopyEntry = {
-  what: "The size of the code graph — files, lines of code, symbols and the links between them — and the share of references it resolved.",
+  what: "The size of the code graph — files, lines of code, symbols and the links between them — and the share of internal candidate references it resolved, as a lower bound on the true share.",
   why: "Answers about callers and impact are only as complete as the references the graph resolved.",
 };
 
@@ -40,6 +40,11 @@ export const activity: CopyEntry = {
   what: "Calls to Logos over the window, their latency, and the file reads they are estimated to have saved.",
   why: "It shows whether Logos is in use here, and roughly what it saves.",
 };
+
+/** The Graph widget's one-sentence lower-bound explanation (FR-RS-49): why the
+ *  headline is not the whole story, and where the remaining gap is. */
+export const RESOLUTION_LOWER_BOUND =
+  "The share is a lower bound on what resolves: method calls on values of unknown type stay unresolved, so the true share is higher.";
 
 /** The named absences each widget states in its figure row. */
 export const DASHBOARD_ABSENCE = {
@@ -55,6 +60,14 @@ export const DASHBOARD_ABSENCE = {
   securityFault: (cause: string) => `The security state could not be read, so no count is shown: ${cause}`,
   /** The gate band's absence: no `[security]` table, so nothing is evaluated. */
   noSecurityTable: "No [security] table in .logos/rules.toml, so no security verdict is reached.",
+  /** The graph records no code reference, so there is no share to take. */
+  noCodeReferences: "No code references recorded, so there is no share of them to state.",
+  /** Every code reference is provably external: none could resolve here. */
+  allReferencesExternal: (provablyExternal: number) =>
+    `All ${provablyExternal.toLocaleString("en-US")} code ${plural(provablyExternal, "reference is", "references are")} provably external, so none could resolve here and there is no share to state.`,
+  /** No share can be read: a server older than the one that classifies references,
+   *  or an absence this build has no sentence for. */
+  resolutionUnreported: "This server reported no share of references resolved, so none is shown.",
   noLanguages: "No languages indexed yet; run logos index.",
   noLines: "Lines of code not yet counted; a full logos index counts them.",
   noTelemetry:

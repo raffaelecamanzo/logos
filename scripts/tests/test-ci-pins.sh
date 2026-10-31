@@ -221,6 +221,20 @@ if [ "$NUSES" -ge 1 ]; then ok "ci.yml: $NUSES uses: lines checked (a count of z
 NRELUSES="$(grep -Ec '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]' "$REL")"
 if [ "$NRELUSES" -ge 1 ]; then ok "release.yml: $NRELUSES uses: lines checked"; else OUT="no uses: line"; bad "release.yml has no uses: line"; fi
 
+# The workspace test step reports every failing binary (S-805, NFR-MA-11): without
+# --no-fail-fast cargo stops at the first, and a second failing binary surfaces
+# only after the first is fixed and pushed. Read the step's own `run:` line.
+ci_test_run() { # file -> the run: value of the `test (--workspace)` step
+    awk '/^[[:space:]]*- name: test \(--workspace\)[[:space:]]*$/ { p = 1; next }
+         p && /^[[:space:]]*- name:/ { exit }
+         p && /^[[:space:]]*run:/ { sub(/^[[:space:]]*run:[[:space:]]*/, ""); print; exit }' "$1"
+}
+RUN="$(ci_test_run "$CI")"
+if [ "$RUN" = "cargo test --workspace --no-fail-fast" ]; then ok "ci.yml: the workspace test step runs cargo test --workspace --no-fail-fast"; else OUT="step run: '$RUN'"; bad "ci.yml's workspace test step does not run --no-fail-fast"; fi
+mkdir -p "$WORK" && sed 's/cargo test --workspace --no-fail-fast/cargo test --workspace/' "$CI" >"$WORK/ci-fail-fast.yml"
+RUN="$(ci_test_run "$WORK/ci-fail-fast.yml")"
+if [ "$RUN" = "cargo test --workspace" ]; then ok "ci.yml: a test step without --no-fail-fast reads differently, so the pin can fail"; else OUT="step run: '$RUN'"; bad "the test-step pin cannot tell --no-fail-fast from its absence"; fi
+
 OUT="$(check_dependabot "$DEP" 2>&1)"; RC=$?
 if [ "$RC" -eq 0 ]; then ok "dependabot.yml: version 2, github-actions only, with a cooldown"; else bad "dependabot.yml carries a defect"; fi
 

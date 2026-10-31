@@ -81,7 +81,11 @@ fn a_sarif_report_dropped_in_the_security_directory_is_ingested_and_no_scanner_s
         if !listed.scanned.is_empty() {
             break listed;
         }
-        assert!(started.elapsed() < DEADLINE, "the report was not ingested within {DEADLINE:?}: {:?}", handle.stats());
+        assert!(
+            started.elapsed() < logos_core::perf::scaled(DEADLINE),
+            "the report was not ingested within {DEADLINE:?}: {:?}",
+            handle.stats()
+        );
         std::thread::sleep(Duration::from_millis(50));
     };
     assert_eq!(scanned.scanned[0].driver, "Semgrep OSS");

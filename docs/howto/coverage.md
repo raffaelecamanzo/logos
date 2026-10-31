@@ -189,8 +189,16 @@ rest from the end, with one line, `[… N bytes omitted …]`, saying how much l
 (64 KiB for stdout and 16 KiB for stderr; a stream that fits is kept whole). A failing test's
 name, its panic message and the runner's `failures:` summary therefore survive a run that
 printed far more than the bound. The payload and every log line Logos writes carry the masked
-excerpt only. `--json` prints the same as machine-readable JSON. The run records each
-started tool's end in `.logos/coverage/last-run.json`, which `coverage status` reads back.
+excerpt only. A tool that exited non-zero but wrote a report (`tests_failed`) carries the same
+excerpt as its `cause`, which names the failing tests. `--json` prints the same as
+machine-readable JSON. The run records each started tool's end in
+`.logos/coverage/last-run.json`, which `coverage status` reads back, with two optional fields:
+`duration_ms`, how long the tool's process ran, from its spawn to its end (a readying step such as
+an install or a dependency addition is not counted), and `cause`, why it did not pass, for `failed`,
+`tests_failed` and `timed_out` alone. `cause` is the masked excerpt above, bounded like it, or, for
+a `timed_out` run, the limit it hit. A `ran` or `cancelled` tool has no `cause`, and a tool that
+printed nothing has none either. A field Logos did not record is absent, never `0` or empty text, so
+a record written by 1.21.2 reads with both absent; the next run of a tool adds them to its entry.
 
 **Timeouts.** A tool that runs past its timeout, 30 minutes by default, has its whole process
 group killed and reads `timed_out`.
@@ -220,7 +228,8 @@ logos coverage status --json
 
 `coverage status` reports per-file freshness and the overall fresh-coverage fraction
 ([commands.md](commands.md#coverage-status)), plus a `runner` block: each tool's state (its
-detection, else its last run, else `never_run`), its last run, and the consent, with the tools a
+detection, else its last run, else `never_run`), its last run (outcome, exit code, commit, end
+time, log, `duration_ms` and `cause`), and the consent, with the tools a
 next run would ask for under `pending` and whether the custom command's text has `command_changed`.
 It reads stored evidence and records, and starts no run; the only process it may start is the
 version command of a binary outside your project.
@@ -274,10 +283,15 @@ failing suite never reads as 0 %.
   The button becomes **Cancel**, which kills each tool's whole process group, a forked test JVM or a
   build daemon included. Cancel stops this job alone: an MCP `coverage_refresh` is not a job, so
   Cancel does not stop it ([From an agent: MCP](#from-an-agent-mcp)).
-- A per-tool progress list follows the job over Server-Sent Events: queued, running with its
-  elapsed time, then each outcome, with a failed tool's error output in a disclosure and one
-  polite live line announcing each end. A page opened while a run goes joins it, and when a
-  followed run ends the page reloads its figures.
+- The **Coverage tools** table follows the job over Server-Sent Events. A tool's **State** reads
+  `queued`, `running`, its outcome as it settles, or `installing` / `adding dependency` while it is
+  set up, and its **Elapsed** counts up each second while it is set up or runs. One polite live line
+  above the table announces each end. A page opened while a run goes joins it, and when a followed
+  run ends the page reloads its figures: the rows then show their stored state, and Elapsed the
+  `duration_ms` the last run recorded (`—` when none was). Below the table, a tool that failed or
+  timed out (red) or ran with failing tests (orange) is listed with its cause and the path of its
+  whole output, and a set-up step that failed or was refused with its detail. An entry stays until
+  that tool runs again; with none, the area is not there.
 - **Install** (a not-installed `cargo-llvm-cov`) and **Add dependency** (a vitest without a coverage
   provider, or a `.venv` pytest without `pytest-cov`) open the one consent dialog described in
   [usage.md](usage.md#setting-up-a-coverage-tool-from-the-coverage-page).
@@ -341,7 +355,7 @@ consent, and it never refuses.
 `refresh_cmd` inside the request and answers with the outcome when the command ends, as `logos
 coverage refresh` does in a terminal, and not as a `coverage-run` job. So:
 
-- It is not listed as a job: `coverage_status`'s `job` and the page's progress list never show it.
+- It is not listed as a job: `coverage_status`'s `job` and the page's table never show it live.
 - The Coverage page's **Cancel** does not stop it. Cancel stops the page's own run only.
 - A page run and a `coverage_refresh` can run at the same time, and run `refresh_cmd` twice at
   once: the page's runs are single-flight against each other, but `coverage_refresh` takes no job

@@ -14,4 +14,4 @@ import type { SecurityExcluded, SecuritySeverityCounts } from "../api/types.ts";
 export const SCOPED_ONLY_COUNTED: SecuritySeverityCounts = { critical: 0, high: 0, medium: 2, low: 0, info: 0, unrated: 0, total: 2 };
 
 /** None left out. */
-export const SCOPED_ONLY_EXCLUDED: SecurityExcluded = { not_fresh: 0, suppressed: 0, test: 0 };
+export const SCOPED_ONLY_EXCLUDED: SecurityExcluded = { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 0 };

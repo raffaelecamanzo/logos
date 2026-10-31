@@ -1,0 +1,6 @@
+fn shell() {
+    sh("cargo metadata --offline --format-version 1");
+    sh("cargo metadata --offline --filter-platform aarch64-apple-darwin");
+    sh("cargo tree --offline");
+    sh("cargo tree --offline --target all");
+}

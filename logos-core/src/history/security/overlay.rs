@@ -14,6 +14,12 @@
 //!   production file with an inline test module counts only its production
 //!   findings; the rest are tallied apart as [`PathFindings::test`], what the
 //!   surface states as "N more in test code".
+//! - **Dev-only dependency** findings ([FR-SC-30]) — the lockfile marks the
+//!   package dev-only — are tallied apart as [`PathFindings::dev`]: "N more in
+//!   dev-only dependencies", never in `count`.
+//! - **Needs-review** findings ([FR-SC-31]) — the scanner marks them
+//!   low-confidence — are tallied apart as [`PathFindings::needs_review`]:
+//!   "N more need review", never in `count`.
 //! - **A project nothing was scanned in** has no overlay at all ([`None`]),
 //!   which is distinct from a scan that found nothing on a file (count `0`).
 //!   One whose every stored report comes from `--path` scans alone ([S-685])
@@ -28,6 +34,8 @@
 //!
 //! [FR-SC-14]: ../../../../docs/specs/requirements/FR-SC-14.md
 //! [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
+//! [FR-SC-30]: ../../../../docs/specs/requirements/FR-SC-30.md
+//! [FR-SC-31]: ../../../../docs/specs/requirements/FR-SC-31.md
 //! [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
 //! [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
 //! [S-666]: ../../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
@@ -60,6 +68,16 @@ pub struct PathFindings {
     ///
     /// [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
     pub test: usize,
+    /// Unsuppressed, fresh findings on a dev-only dependency ([FR-SC-30]): "N
+    /// more in dev-only dependencies", never part of `count`.
+    ///
+    /// [FR-SC-30]: ../../../../docs/specs/requirements/FR-SC-30.md
+    pub dev: usize,
+    /// Unsuppressed, fresh production-code findings their scanner marks
+    /// low-confidence ([FR-SC-31]): "N more need review", never part of `count`.
+    ///
+    /// [FR-SC-31]: ../../../../docs/specs/requirements/FR-SC-31.md
+    pub needs_review: usize,
 }
 
 /// The per-path findings of the latest stored reports, or `None` when no
@@ -114,6 +132,8 @@ fn tally(findings: &[LabelledFinding], scopes: &[CodeScope]) -> BTreeMap<String,
             }
             Some(LeftOut::NotFresh) => cell.stale += 1,
             Some(LeftOut::Test) => cell.test += 1,
+            Some(LeftOut::Dev) => cell.dev += 1,
+            Some(LeftOut::NeedsReview) => cell.needs_review += 1,
             Some(LeftOut::Suppressed) => {}
         }
     }
@@ -123,7 +143,7 @@ fn tally(findings: &[LabelledFinding], scopes: &[CodeScope]) -> BTreeMap<String,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::security::{FindingBinding, SecurityFinding, Suppression};
+    use crate::history::security::{FindingBinding, ScannerConfidence, SecurityFinding, Suppression};
     use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 
     fn item(path: Option<&str>, severity: Severity, freshness: &'static str) -> LabelledFinding {
@@ -135,6 +155,7 @@ mod tests {
                 fingerprint: "f".repeat(64),
                 rule_id: "sql-injection".into(),
                 severity,
+                confidence: ScannerConfidence::Unstated,
                 cwes: Vec::new(),
                 message: "tainted query".into(),
                 redacted: false,
@@ -149,6 +170,7 @@ mod tests {
                 legacy_fingerprints: Vec::new(),
                 anchor: None,
                 freshness,
+                reporters: Vec::new(),
             },
             suppression: None,
         }
@@ -165,7 +187,7 @@ mod tests {
     #[test]
     fn a_test_code_finding_is_tallied_apart_and_never_counted_or_ranked() {
         let mut suppressed = item(Some("a.rs"), Severity::Critical, FRESHNESS_FRESH);
-        suppressed.suppression = Some(Suppression::Suppressed { reason: "accepted".into(), expires: None, by: "a".into() });
+        suppressed.suppression = Some(Suppression::Suppressed { reason: "accepted".into(), expires: None, by: "a".into(), evidence: Vec::new() });
         let cells = tally(
             &[
                 item(Some("a.rs"), Severity::Critical, FRESHNESS_FRESH),
@@ -177,8 +199,59 @@ mod tests {
         );
         assert_eq!(
             cells["a.rs"],
-            PathFindings { count: 1, highest: Some(Severity::Low), stale: 1, test: 1 },
+            PathFindings { count: 1, highest: Some(Severity::Low), stale: 1, test: 1, dev: 0, needs_review: 0 },
             "the test-code critical must not lift the count or the highest severity"
+        );
+    }
+
+    /// A low-confidence finding is tallied apart and never counted or ranked,
+    /// but a stale or test-code one of them is left out for that reason first.
+    #[test]
+    fn a_needs_review_finding_is_tallied_apart_and_never_counted_or_ranked() {
+        let low = |severity, freshness| {
+            let mut f = item(Some("a.rs"), severity, freshness);
+            f.finding.confidence = ScannerConfidence::Low;
+            f
+        };
+        let mut medium = item(Some("a.rs"), Severity::Medium, FRESHNESS_FRESH);
+        medium.finding.confidence = ScannerConfidence::Medium;
+        let cells = tally(
+            &[
+                low(Severity::Critical, FRESHNESS_FRESH),
+                low(Severity::High, FRESHNESS_STALE),
+                low(Severity::High, FRESHNESS_FRESH),
+                medium,
+            ],
+            &[CodeScope::Production, CodeScope::Production, CodeScope::Test, CodeScope::Production],
+        );
+        assert_eq!(
+            cells["a.rs"],
+            PathFindings { count: 1, highest: Some(Severity::Medium), stale: 1, test: 1, dev: 0, needs_review: 1 },
+            "the needs-review critical must not lift the count or the highest severity"
+        );
+    }
+
+    /// S-810: a finding on a dev-only dependency is tallied apart and never
+    /// counted or ranked; a stale or test-code one of them is left out for that
+    /// reason first, and one that also needs review is a dev one (FR-SC-30).
+    #[test]
+    fn a_dev_only_dependency_finding_is_tallied_apart_and_never_counted_or_ranked() {
+        let mut review = item(Some("a.rs"), Severity::High, FRESHNESS_FRESH);
+        review.finding.confidence = ScannerConfidence::Low;
+        let cells = tally(
+            &[
+                item(Some("a.rs"), Severity::Critical, FRESHNESS_FRESH),
+                item(Some("a.rs"), Severity::High, FRESHNESS_STALE),
+                item(Some("a.rs"), Severity::High, FRESHNESS_FRESH),
+                review,
+                item(Some("a.rs"), Severity::Low, FRESHNESS_FRESH),
+            ],
+            &[CodeScope::Dev, CodeScope::Dev, CodeScope::Test, CodeScope::Dev, CodeScope::Production],
+        );
+        assert_eq!(
+            cells["a.rs"],
+            PathFindings { count: 1, highest: Some(Severity::Low), stale: 1, test: 1, dev: 2, needs_review: 0 },
+            "the dev-only critical must not lift the count or the highest severity"
         );
     }
 
@@ -191,7 +264,7 @@ mod tests {
         ]);
         assert_eq!(
             cells["a.rs"],
-            PathFindings { count: 3, highest: Some(Severity::High), stale: 0, test: 0 }
+            PathFindings { count: 3, highest: Some(Severity::High), stale: 0, test: 0, dev: 0, needs_review: 0 }
         );
     }
 
@@ -215,7 +288,7 @@ mod tests {
         ]);
         assert_eq!(
             cells["a.rs"],
-            PathFindings { count: 1, highest: Some(Severity::Low), stale: 1, test: 0 },
+            PathFindings { count: 1, highest: Some(Severity::Low), stale: 1, test: 0, dev: 0, needs_review: 0 },
             "the stale critical must not lift the highest severity or the count"
         );
     }
@@ -223,7 +296,7 @@ mod tests {
     #[test]
     fn only_stale_findings_leave_a_zero_count_with_no_severity() {
         let cells = production(&[item(Some("a.rs"), Severity::High, FRESHNESS_STALE)]);
-        assert_eq!(cells["a.rs"], PathFindings { count: 0, highest: None, stale: 1, test: 0 });
+        assert_eq!(cells["a.rs"], PathFindings { count: 0, highest: None, stale: 1, test: 0, dev: 0, needs_review: 0 });
     }
 
     #[test]
@@ -231,7 +304,7 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 1, 1);
         let mut suppressed = item(Some("a.rs"), Severity::High, FRESHNESS_FRESH);
         suppressed.suppression =
-            Some(Suppression::Suppressed { reason: "accepted".into(), expires: day, by: "a".into() });
+            Some(Suppression::Suppressed { reason: "accepted".into(), expires: day, by: "a".into(), evidence: Vec::new() });
         let mut expired = item(Some("b.rs"), Severity::High, FRESHNESS_FRESH);
         expired.suppression = Some(Suppression::Expired { reason: "accepted".into(), expires: day, by: "b".into() });
         let cells = production(&[suppressed, expired]);

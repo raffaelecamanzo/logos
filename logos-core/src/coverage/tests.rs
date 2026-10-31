@@ -1002,7 +1002,8 @@ fn a_failing_suite_keeps_its_report_and_a_missing_report_is_a_failure() {
         outcome,
         RunOutcome::TestsFailed {
             exit_code: Some(101),
-            reports: vec![w.root.join(".logos/coverage/rust.xml")]
+            reports: vec![w.root.join(".logos/coverage/rust.xml")],
+            cause: None,
         }
     );
 
@@ -1089,7 +1090,7 @@ fn the_timeout_kills_the_whole_process_group() {
     let outcome = w.open().unwrap().run_tool("go").unwrap();
     assert_eq!(outcome, RunOutcome::TimedOut { after_secs: 1 });
     assert!(
-        start.elapsed() < Duration::from_secs(20),
+        start.elapsed() < crate::perf::scaled(Duration::from_secs(20)),
         "{:?}",
         start.elapsed()
     );
@@ -1246,7 +1247,11 @@ fn a_cancelled_run_reads_cancelled_and_credits_nothing() {
         outcome
     });
     assert_eq!(outcome, RunOutcome::Cancelled);
-    assert!(begun.elapsed() < Duration::from_secs(20), "{:?}", begun.elapsed());
+    assert!(
+        begun.elapsed() < crate::perf::scaled(Duration::from_secs(20)),
+        "{:?}",
+        begun.elapsed()
+    );
 
     let w = World::with_project("go");
     w.stub("go", "go");

@@ -42,7 +42,7 @@
 //! 7. **Conciseness** ([FR-QM-10]) — `1 − brain-method ratio`.
 //! 8. **Cohesion** ([FR-QM-11]) — mean of `1/LCOM4` over the classes of
 //!    languages declaring `member_access` (v8); **n/a drop-out** when no such
-//!    class exists.
+//!    class exists, or fewer than `cohesion_min_classes` of them (v9).
 //! 9. **Focus** ([FR-QM-12]) — `1 − god-container ratio`; **n/a drop-out** when
 //!    no class-like container exists.
 //! 10. **Uniqueness** ([FR-QM-13]) — `1 − near-clone ratio`.
@@ -60,7 +60,8 @@
 //!   (a hard systemic pathology collapses the score; anti-gaming, [ADR-21]). The
 //!   new five are floored, never `0`, so they drag but never alone collapse the
 //!   signal.
-//! - **Applicability drop-out** — Cohesion/Focus with no construct store NULL +
+//! - **Applicability drop-out** — Cohesion/Focus with no construct (Cohesion
+//!   also below its class minimum) store NULL +
 //!   a `false` flag and drop out of the denominator ([ADR-21]); a class-less repo
 //!   gets a deterministic 9-dimension mean ([UAT-QM-10]). Modularity,
 //!   Acyclicity and Depth on a graph with fewer than [`MIN_CROSS_MODULE_EDGES`]
@@ -99,7 +100,11 @@
 //! effective [`Thresholds`]. Derived governance artifacts are excluded up front:
 //! `Layer`/`Boundary` policy vertices and `ForbiddenDependency` edges are flags
 //! the annotation pass re-materialises each run, not dependencies — the same
-//! derived-filter posture the annotation engine itself takes.
+//! derived-filter posture the annotation engine itself takes. A dispatch edge
+//! (a trait call's fan-out to an implementation) is no dependency either and
+//! leaves the graph dimensions too ([FR-QM-20]).
+//!
+//! [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
 //!
 //! [`snapshot`] orchestrates a full run: one reader-pool read, the pure
 //! compute, and one append-only `metric_snapshots` write ([FR-QM-07]) —
@@ -150,6 +155,8 @@ use crate::models::quality::{
 };
 use crate::runtime::Runtime;
 
+mod attribution;
+pub use attribution::ContainerLinks;
 mod extended;
 use extended::ContainerIndex;
 pub use extended::{GodContainer, Thresholds};
@@ -287,7 +294,87 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 ///
 ///   A graph with at least five cross-module edges whose classes are all in a
 ///   declaring language scores byte-identically to v7.
+/// - **v9** — Cohesion links inherited members and needs enough classes to
+///   score ([CR-252], [FR-QM-11], S-816); a v8 baseline is incomparable, so the
+///   first post-upgrade gate auto-re-baselines ([FR-GV-10]):
+///   - *Inherited-member links*: two methods that access one name through
+///     their own receiver (`this.state`), where the class declares no member
+///     of that name, are one LCOM4 component, as if they shared a declared
+///     field. Declared-field links are unchanged.
+///   - *Cohesion minimum*: below `[metric_thresholds] cohesion_min_classes`
+///     scoreable classes (default 5) Cohesion is not applicable ("too few
+///     classes") and leaves the aggregate and "where to start"; its LCOM4
+///     offender list still lists classes at LCOM4 ≥ 2. The key is always in
+///     the effective-thresholds hash, so the default set hashes apart from v8's
+///     as well.
+///   - *C# classes* ([FR-EX-22], S-556): C# declares `member_access`, so its
+///     classes are scored — from `this.x` and the bare field and property
+///     reads its queries now capture — where they read not applicable. v9 had
+///     not shipped, so this adds no version.
+///   - *C# partial types* (S-557, [FR-RS-29]): the parts of one partial type
+///     are one Focus and Cohesion container — every part's methods, the sum of
+///     the parts' spans — joined by their `partial` links
+///     ([`GraphStore::partial_type_links`](crate::graph_store::GraphStore::partial_type_links)).
+///   - *Rust and Go methods* (S-510, [CR-166], [FR-QM-12]): Focus counts a Rust
+///     `impl` method toward the one `Struct` of its crate, and a Go receiver
+///     method toward the one `Struct` of its package, that its recorded type
+///     names (`attribution.rs`); a method naming none or several counts toward
+///     none and is reported as `focus_attribution`. Ids, symbols, edges and
+///     Cohesion are unchanged. v9 had not shipped, so this adds no version.
+///   - *Python classes* (S-543, [FR-EX-20]): a `def` of a class body is a
+///     Method of its class, which Focus counts, and Python declares
+///     `member_access` (`.pyi` stubs carved out), so its classes are scored
+///     from the `self.x` accesses that bind to their Fields — where Cohesion
+///     over them read not applicable. Symbols are unchanged. v9 had not
+///     shipped, so this adds no version.
+///   - *Scala classes and traits* (S-575, [FR-EX-28]): Scala declares
+///     `member_access`, so its classes are scored — from `this.x` and the bare
+///     reads of a field or constructor parameter — where they read not
+///     applicable; and a trait with a bodied method is a Focus and Cohesion
+///     container (`bodied_traits_are_containers`). v9 had not shipped, so this
+///     adds no version.
+///   - *Kotlin classes* (S-562, [FR-EX-25]): Kotlin declares `member_access`, so
+///     its classes are scored — from `this.x` and the bare reads of a property
+///     or primary-constructor `val` — where they read not applicable. v9 had
+///     not shipped, so this adds no version.
+///   - *Ruby classes* (S-569, [FR-EX-27]): Ruby declares `member_access`, so its
+///     classes are scored from the `@x` reads and writes of a method that bind
+///     to their Fields — where they read not applicable. v9 had not shipped, so
+///     this adds no version.
+///   - *JavaScript classes* (S-542, [FR-EX-19]): JavaScript declares
+///     `member_access`, and each `this.x = …` of a class's constructor or method
+///     is a Field of that class, so its classes are scored from the `this.x`
+///     accesses that bind to their Fields — where they read not applicable; a
+///     call through `this` (`this.f()`) is no access in JavaScript, TypeScript
+///     or TSX. v9 had not shipped, so this adds no version.
+///   - *Kotlin member functions* (S-559): a member `fun` is a Method of its
+///     class, object, interface or companion, which Focus counts; an `enum
+///     class` is no container and a `companion object` is one of its own.
+///   - *Ruby methods* (S-564): a compact `class A::B` holds its body, and
+///     every `def`, setters and operators included, is a Method of its class.
+///   - *C++ methods* (S-577): a definition in its class's own file merges into
+///     the in-class declaration, so it counts as a bodied method of the class,
+///     and a constructor is a method.
+///   - *C++ classes* (S-580, [FR-EX-22]): C++ declares `member_access`, so its
+///     classes are scored from `this->x` and the bare field reads of a method
+///     that no parameter or local hides; `this->f()` is a call, not an access.
+///   - *C structs and C++ members* (S-582, [FR-EX-31]): a C `struct` or `union`
+///     with a body is a Focus container, a mention or forward declaration is
+///     none, and every C++ member declarator — pointer, array and
+///     function-pointer ones too — is a field Cohesion links through.
+///   - *Trait dispatch* (S-713, [FR-QM-20]): an edge reached through a trait is
+///     skipped by every architecture view and kept by every runtime one. v9
+///     had not shipped, so these add no version.
 ///
+/// [FR-EX-31]: ../../../docs/specs/requirements/FR-EX-31.md
+/// [FR-EX-19]: ../../../docs/specs/requirements/FR-EX-19.md
+/// [FR-EX-27]: ../../../docs/specs/requirements/FR-EX-27.md
+/// [FR-EX-25]: ../../../docs/specs/requirements/FR-EX-25.md
+/// [FR-EX-28]: ../../../docs/specs/requirements/FR-EX-28.md
+/// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
+/// [FR-EX-20]: ../../../docs/specs/requirements/FR-EX-20.md
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [ADR-12]: ../../../docs/specs/architecture/decisions/ADR-12.md
@@ -311,9 +398,11 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
 /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
+/// [FR-EX-22]: ../../../docs/specs/requirements/FR-EX-22.md
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 8;
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+pub const METRIC_SEMANTICS_VERSION: i64 = 9;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -335,6 +424,12 @@ pub const METRIC_SEMANTICS_VERSION: i64 = 8;
 /// reported as `test_function_count` ([FR-QM-07], [NFR-CC-04]). There is no
 /// configuration to re-include tests ([BR-18]).
 ///
+/// `links` unite declarations into containers: the partial types' part links
+/// ([`GraphStore::partial_type_links`](crate::graph_store::GraphStore::partial_type_links),
+/// S-557) make the parts of one type one container for Cohesion and Focus, and
+/// the Rust/Go method attribution (S-510, [`ContainerLinks`]) counts an `impl`
+/// or receiver method toward its struct for Focus.
+///
 /// `member_access` is the set of file extensions whose plugin declares the
 /// `member_access` capability
 /// ([`LanguageRegistry::member_access_extensions`](crate::plugin::LanguageRegistry::member_access_extensions));
@@ -354,10 +449,14 @@ pub const METRIC_SEMANTICS_VERSION: i64 = 8;
 /// [ADR-08]: ../../../docs/specs/architecture/decisions/ADR-08.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [CR-001]: ../../../docs/requests/CR-001-test-aware-quality-metrics.md
+// The scored inputs, one by one — the list `all_offenders` and the ranking take
+// too, so none can read a different set; bundling them would only rename it.
+#[allow(clippy::too_many_arguments)]
 pub fn compute(
     view: &GraphView,
     nodes: &[NodeRow],
     edges: &[EdgeRow],
+    links: &ContainerLinks,
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
@@ -404,9 +503,10 @@ pub fn compute(
     let nesting = extended::nesting(&production, &thresholds);
     let conciseness = extended::conciseness(&production, &thresholds);
     let uniqueness = extended::uniqueness(&production);
-    let containers = ContainerIndex::build(nodes, edges, functions, test_ids);
-    let cohesion = containers.cohesion(member_access);
+    let containers = ContainerIndex::build(nodes, edges, links, functions, test_ids);
+    let (cohesion, cohesion_not_applicable) = containers.cohesion(member_access, &thresholds);
     let focus = containers.focus(&thresholds);
+    let focus_attribution = containers.attribution();
 
     let mut snapshot = MetricSnapshot {
         modularity,
@@ -421,7 +521,9 @@ pub fn compute(
         nesting,
         conciseness,
         cohesion,
+        cohesion_not_applicable,
         focus,
+        focus_attribution,
         uniqueness,
         thresholds_hash: thresholds.hash(),
         node_count: graph.node_count() as u64,
@@ -658,26 +760,33 @@ pub fn snapshot(
         view,
         &inputs.nodes,
         &inputs.edges,
+        &inputs.links,
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
         member_access,
     );
     // Computed uncapped once (FR-QM-19); the display lists are its head.
-    let uncapped = all_offenders(
+    let mut uncapped = all_offenders(
         view,
         &inputs.nodes,
         &inputs.edges,
+        &inputs.links,
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
         member_access,
     );
+    // An entry in a file whose parse is damaged is flagged (S-571, FR-IX-14),
+    // from the same read the entries were computed from, and persisted with
+    // them: a read-back states what this snapshot recorded (FR-QM-15).
+    uncapped.flag_partial_parse(&inputs.damaged_paths);
     let offenders = uncapped.capped(WORST_OFFENDER_CAP);
     // Computed after — and from — the metrics, never into them (BR-61).
-    let ranking = insight::where_to_start(
+    let mut ranking = insight::where_to_start(
         &inputs.nodes,
         &inputs.edges,
+        &inputs.links,
         &inputs.functions,
         &inputs.test_ids,
         &inputs.duplicate_groups,
@@ -685,6 +794,7 @@ pub fn snapshot(
         member_access,
         &computed,
     );
+    ranking.flag_partial_parse(&inputs.damaged_paths);
 
     // created_at is bookkeeping, not part of the deterministic signal
     // (golden tests pin aggregate_signal, never the timestamp — ADR-08).
@@ -767,11 +877,20 @@ pub fn snapshot(
 struct SnapshotInputs {
     nodes: Vec<NodeRow>,
     edges: Vec<EdgeRow>,
+    /// The links that unite declarations into containers: the partial types'
+    /// part links ([`GraphStore::partial_type_links`](crate::graph_store::GraphStore::partial_type_links), S-557)
+    /// and the Rust/Go method attribution (S-510).
+    links: ContainerLinks,
     functions: Vec<FunctionMetricRow>,
     test_ids: HashSet<NodeId>,
     /// The exact-duplicate groups ([`GraphStore::duplicate_groups`](crate::graph_store::GraphStore::duplicate_groups));
     /// empty unless `with_duplicate_groups` asked for them.
     duplicate_groups: Vec<Vec<NodeId>>,
+    /// The files whose parse was damaged
+    /// ([`GraphStore::parse_damaged_paths`](crate::graph_store::GraphStore::parse_damaged_paths),
+    /// S-571), read with the inputs the entries are computed from; empty unless
+    /// `with_duplicate_groups` asked for them.
+    damaged_paths: HashSet<String>,
 }
 
 /// Read the [`SnapshotInputs`] in one `submit_read`. The reads are separate
@@ -779,13 +898,16 @@ struct SnapshotInputs {
 /// two of them can show through; the ranking therefore checks the duplicate
 /// groups against the function rows it scores rather than trusting them
 /// ([`insight`]). `with_duplicate_groups` is set by the recording pass alone:
-/// the read-only readout ranks nothing.
+/// the read-only readout ranks nothing and flags no entry.
 fn read_inputs(runtime: &Runtime, with_duplicate_groups: bool) -> Result<SnapshotInputs> {
-    let (nodes, edges, functions, test_ids, duplicate_groups) = runtime
+    let (nodes, edges, partial_links, self_types, impl_blocks, functions, test_ids, duplicate_groups, damaged_paths) = runtime
         .submit_read(move |store| {
             Ok((
                 store.all_nodes()?,
                 store.all_edges()?,
+                store.partial_type_links()?,
+                store.node_self_types()?,
+                store.impl_blocks()?,
                 store.function_metrics()?,
                 store.test_node_ids()?,
                 if with_duplicate_groups {
@@ -793,17 +915,25 @@ fn read_inputs(runtime: &Runtime, with_duplicate_groups: bool) -> Result<Snapsho
                 } else {
                     Vec::new()
                 },
+                if with_duplicate_groups {
+                    store.parse_damaged_paths()?
+                } else {
+                    HashSet::new()
+                },
             ))
         })
         .context("reading the metrics snapshot inputs")?;
     // Read the persisted is_test verdict — the single source of truth the
     // annotation pass computes (FR-AN-05, CR-001); never re-derived here.
+    let links = ContainerLinks::new(partial_links, &nodes, &self_types, &impl_blocks);
     Ok(SnapshotInputs {
         nodes,
         edges,
+        links,
         functions,
         test_ids: test_ids.into_iter().collect(),
         duplicate_groups,
+        damaged_paths,
     })
 }
 
@@ -843,6 +973,7 @@ pub fn compute_snapshot(
         view,
         &inputs.nodes,
         &inputs.edges,
+        &inputs.links,
         &inputs.functions,
         &inputs.test_ids,
         thresholds,
@@ -869,11 +1000,12 @@ pub fn compute_snapshot(
 pub fn god_containers(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
+    links: &ContainerLinks,
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
 ) -> Vec<GodContainer> {
-    ContainerIndex::build(nodes, edges, functions, test_ids).god_containers(&thresholds)
+    ContainerIndex::build(nodes, edges, links, functions, test_ids).god_containers(&thresholds)
 }
 
 /// The per-dimension worst-offender lists for nine dimensions — the five CR-005
@@ -904,10 +1036,13 @@ pub fn god_containers(
 /// [FR-QM-13]: ../../../docs/specs/requirements/FR-QM-13.md
 /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+// The inputs `compute` scored, one by one (see there).
+#[allow(clippy::too_many_arguments)]
 pub fn all_offenders(
     view: &GraphView,
     nodes: &[NodeRow],
     edges: &[EdgeRow],
+    links: &ContainerLinks,
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     thresholds: Thresholds,
@@ -934,6 +1069,7 @@ pub fn all_offenders(
             measure: Some(measured.measure),
             value: measured.value,
             threshold: measured.threshold,
+            partial_parse: false,
         })
     };
 
@@ -997,7 +1133,7 @@ pub fn all_offenders(
 
     // Cohesion/Focus read the class-like container index (FR-QM-11/12) over
     // bodied methods (metric-semantics v7).
-    let containers = ContainerIndex::build(nodes, edges, functions, test_ids);
+    let containers = ContainerIndex::build(nodes, edges, links, functions, test_ids);
 
     // Cohesion (FR-QM-11): low-cohesion classes (LCOM4 ≥ 2), most fragmented
     // first then id asc.
@@ -1087,6 +1223,7 @@ pub fn all_offenders(
             measure: Some("chain_length"),
             value: Some(length as i64),
             threshold: None,
+            partial_parse: false,
         })
         .collect();
 
@@ -1415,8 +1552,11 @@ struct MetricGraph {
 /// artifacts and test code, plus each vertex's directory community and node id.
 ///
 /// Filters `Layer`/`Boundary` policy vertices and `ForbiddenDependency`
-/// edges — annotation-materialised flags, not dependencies — and the
-/// `is_test` vertices in `test_ids` (the production scope, [FR-QM-08]/[BR-18]).
+/// edges — annotation-materialised flags, not dependencies — the dispatch
+/// edges a call through a trait fans out to its implementations (the caller
+/// depends on the trait, not on its implementors: [FR-QM-20],
+/// [`EdgeData::is_dispatch`](crate::hydrate::EdgeData::is_dispatch)), and
+/// the `is_test` vertices in `test_ids` (the production scope, [FR-QM-08]/[BR-18]).
 /// Dropping a vertex also drops its incident edges (they are skipped when an
 /// endpoint is not in `kept`), so the production subgraph the metrics score is
 /// closed. Surviving vertices keep the view's deterministic index order, edges
@@ -1424,6 +1564,7 @@ struct MetricGraph {
 /// ([NFR-RA-06]).
 ///
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 fn metric_graph(
     view: &GraphView,
@@ -1484,6 +1625,9 @@ fn metric_graph(
     for edge in source.edge_references() {
         if edge.weight().kind == Some(EdgeKind::ForbiddenDependency) {
             continue; // derived governance flag — not a dependency
+        }
+        if edge.weight().is_dispatch() {
+            continue; // a reach through a trait, not a dependency (FR-QM-20)
         }
         let (Some(&src), Some(&dst)) = (kept.get(&edge.source()), kept.get(&edge.target())) else {
             continue; // incident to a filtered policy vertex

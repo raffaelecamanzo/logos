@@ -61,7 +61,9 @@
 //!
 //! Two env knobs keep the budgets honest without editing them:
 //! - `LOGOS_PERF_TOLERANCE` (f64 ≥ 1.0, default 1.15 since 2026-09-21) widens every wall-clock band
-//!   for a slow/loaded CI host — the tolerance-banding the sprint mandates;
+//!   for a slow/loaded CI host — the tolerance-banding the sprint mandates. It is
+//!   read in one place, `logos_core::perf` (S-804), which every timing assertion
+//!   in the workspace scales through;
 //! - `LOGOS_PERF_LOC` (u64, default [`ENVELOPE_LOC`]) shrinks the fixture for a
 //!   fast harness smoke-test; the *budgets are unchanged*, so a reduced run only
 //!   proves the harness wiring, not the full-scale gate.
@@ -95,22 +97,10 @@ use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 use logos_core::observability::{self, ProcessSurface};
+use logos_core::perf::{scaled_ms, tolerance};
 use logos_core::{Engine, Granularity};
 
 // ── Tolerance & sizing knobs ────────────────────────────────────────────────
-
-/// Multiplier applied to every wall-clock budget so a loaded CI host can widen
-/// the bands without editing the budget. Defaults to `1.15` since 2026-09-21
-/// (Sprint 74 human review — see `runtime_concurrency.rs` for the measurement);
-/// values below `1.0` are ignored (a budget is never tightened by accident).
-/// Set `LOGOS_PERF_TOLERANCE=1.0` to measure against the raw budgets.
-fn tolerance() -> f64 {
-    std::env::var("LOGOS_PERF_TOLERANCE")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| *v >= 1.0)
-        .unwrap_or(1.15)
-}
 
 /// The target LOC for the in-envelope fixture: [`logos_core::perf::ENVELOPE_LOC`]
 /// by default, overridable down via `LOGOS_PERF_LOC` for a fast harness smoke
@@ -120,11 +110,6 @@ fn target_loc() -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(logos_core::perf::ENVELOPE_LOC)
-}
-
-/// A wall-clock budget scaled by [`tolerance`].
-fn budget(ms: u64) -> Duration {
-    Duration::from_millis(ms).mul_f64(tolerance())
 }
 
 // ── Fixture generation ──────────────────────────────────────────────────────
@@ -283,7 +268,7 @@ fn perf_envelope_full_budget() {
             "{index_elapsed:?} ({} files, {} nodes)",
             indexed.files_indexed, indexed.nodes_created
         ),
-        pass: index_elapsed <= budget(30_000),
+        pass: index_elapsed <= scaled_ms(30_000),
         gated: true,
     });
 
@@ -334,7 +319,7 @@ fn perf_envelope_full_budget() {
     report.push(Check {
         label: "NFR-PE-03 single-file sync ≤250ms",
         detail: format!("{sync_elapsed:?}"),
-        pass: sync_elapsed <= budget(250),
+        pass: sync_elapsed <= scaled_ms(250),
         gated: true,
     });
 
@@ -352,7 +337,7 @@ fn perf_envelope_full_budget() {
     report.push(Check {
         label: "NFR-PE-04 warm scan ≤2s",
         detail: format!("{scan_elapsed:?}"),
-        pass: scan_elapsed <= budget(2_000),
+        pass: scan_elapsed <= scaled_ms(2_000),
         gated: true,
     });
 
@@ -367,13 +352,13 @@ fn perf_envelope_full_budget() {
     report.push(Check {
         label: "NFR-PE-01 point-query p95<100ms (concurrent, telemetry on)",
         detail: format!("p50 {p50:?} · p95 {p95:?} ({} queries)", sorted.len()),
-        pass: p95 < budget(100),
+        pass: p95 < scaled_ms(100),
         gated: true,
     });
     report.push(Check {
         label: "NFR-PE-01 point-query p99<250ms (concurrent, telemetry on)",
         detail: format!("p99 {p99:?}"),
-        pass: p99 < budget(250),
+        pass: p99 < scaled_ms(250),
         gated: true,
     });
 
@@ -742,7 +727,7 @@ mod configuration_envelope {
     use logos_core::resolve::binding::{ConfigLookup, KeySource, Resolver};
     use logos_core::{Engine, Runtime};
 
-    use super::{budget, peak_rss_bytes, tolerance, write};
+    use super::{peak_rss_bytes, scaled_ms, tolerance, write};
 
     // ── The reference-estate corpus shape (CR-121 CRA-10) ───────────────────
 
@@ -1119,7 +1104,7 @@ mod configuration_envelope {
 
         let config_ms = full_ms.saturating_sub(bare_ms);
         let total_ms = config_ms + binding_ms;
-        let budget = budget(PHASE_BUDGET_MS);
+        let budget = scaled_ms(PHASE_BUDGET_MS);
 
         eprintln!(
             "\n── S-391 configuration/binding envelope ({SOURCES} sources, {KEYS} keys, \
@@ -1254,12 +1239,12 @@ mod configuration_envelope {
             "\n── S-391 single-key re-resolution ──\n  \
              sync of 1 of {} member files: {elapsed:?} / {:?} budget\n",
             SOURCES + BINDING_CLASSES + 1,
-            budget(250),
+            scaled_ms(250),
         );
         // The re-resolution assertions above run under coverage; only the wall
         // clock is meaningless there.
         assert!(
-            cfg!(coverage) || elapsed <= budget(250),
+            cfg!(coverage) || elapsed <= scaled_ms(250),
             "{}",
             amendment_request(
                 "NFR-PE-03 single-file sync",
@@ -1390,12 +1375,12 @@ mod configuration_envelope {
              difference: {delta:?}\n  \
              cost of ingesting that corpus (what eager ingestion would add): {ingest:?}\n  \
              budget: {:?}\n",
-            budget(600),
+            scaled_ms(600),
         );
 
         for (label, measured) in [("with a corpus", full_cold), ("without one", bare_cold)] {
             assert!(
-                measured <= budget(600),
+                measured <= scaled_ms(600),
                 "{}",
                 amendment_request(
                     "NFR-PE-05 cold start to a ready engine",

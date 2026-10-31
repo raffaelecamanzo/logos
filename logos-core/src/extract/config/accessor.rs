@@ -111,7 +111,7 @@
 //! [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tree_sitter::Node;
 
@@ -164,7 +164,8 @@ pub struct DeclaredTypes {
     /// file declares it with two that disagree.
     by_name: BTreeMap<String, Option<String>>,
     /// The same, restricted to names declared at a **field position** — outside
-    /// every callable the file declares (S-398).
+    /// every callable the file declares (S-398) — or stated a field by the
+    /// query (S-537, [`Declarations::field`]).
     ///
     /// A separate map rather than a flag on the one above, because the two
     /// answer different questions and poison **independently**: a field `api`
@@ -175,8 +176,79 @@ pub struct DeclaredTypes {
     fields_by_name: BTreeMap<String, Option<String>>,
 }
 
+/// The declarations a language's `references` query states for
+/// [`DeclaredTypes`] (S-558, [FR-RS-30]) — its opt-in to receiver typing
+/// beyond what the field walk reads, by the `@ref.receiver.declared` capture
+/// and its `.type` companion (`extract::receiver`).
+///
+/// Each names a declared name's node and the node whose text is its type, for
+/// a declaration the walk misreads — C#'s `var x = new T()` (the walk reads
+/// `var`), `T? x` (the walk reads `T?`, which names no type) — or never sees,
+/// a C# `foreach (T x in xs)`, whose variable carries no `name` field. The
+/// companion is the language's type-name normalisation: it names the node
+/// whose text the simple-name rule reads, so no grammar's node kind is named
+/// here ([NFR-MA-01]). A language whose query states none — Java, and the
+/// configuration-binding arm, which never asks — reads exactly what the walk
+/// reads. A stated declaration is a field by its position, as a walked one is
+/// ([`field_position`]), or because the query states it one (S-537, the
+/// `.field` companion): a TypeScript constructor parameter property, which
+/// declares a field of its class from the constructor's parameter list.
+///
+/// A language whose query states **every** declaration it means
+/// ([`stated_only`](Self::stated_only), S-537: TypeScript's fields) is read
+/// from its statements alone: the walk, which would read a type literal's
+/// property or an `a: T | U` union by its first name, does not run, and a
+/// declaration stated with no type a call is typed by (the `.untyped`
+/// companion: no annotation, a union, a qualified name) refuses its name.
+///
+/// [FR-RS-30]: ../../../../docs/specs/requirements/FR-RS-30.md
+/// [NFR-MA-01]: ../../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Default)]
+pub struct Declarations<'tree> {
+    /// name node id → the name node and the node naming its type.
+    typed: HashMap<usize, (Node<'tree>, Node<'tree>)>,
+    /// The name node ids of the stated declarations that declare a field
+    /// wherever they sit (S-537).
+    fields: HashSet<usize>,
+    /// name node id → the name node of a stated declaration whose type no call
+    /// is typed by (S-537) — unless a `typed` statement names the same node.
+    untyped: HashMap<usize, Node<'tree>>,
+    /// Whether the statements are the whole reading: no walk runs (S-537).
+    stated_only: bool,
+}
+
+impl<'tree> Declarations<'tree> {
+    /// State that `name` is declared with the type `declared` names.
+    pub fn declare(&mut self, name: Node<'tree>, declared: Node<'tree>) {
+        self.typed.insert(name.id(), (name, declared));
+    }
+
+    /// State that the declaration of `name` declares a field of its class,
+    /// though it sits in a callable's parameter list (S-537).
+    pub fn field(&mut self, name: Node<'tree>) {
+        self.fields.insert(name.id());
+    }
+
+    /// State that `name` is declared with no type a call is typed by (S-537):
+    /// it refuses the name, unless a typed statement names the same node.
+    pub fn untyped(&mut self, name: Node<'tree>) {
+        self.untyped.insert(name.id(), name);
+    }
+
+    /// No declaration stated yet, and none but the stated ones read (S-537).
+    pub fn stated_only() -> Self {
+        Self { stated_only: true, ..Self::default() }
+    }
+}
+
 impl DeclaredTypes {
-    /// Read every `name` → declared-type binding in the file.
+    /// Read every `name` → declared-type binding in the file, by the field walk
+    /// alone ([`build_with`](Self::build_with) and no stated declaration).
+    pub fn build(root: Node<'_>, src: &[u8]) -> Self {
+        Self::build_with(root, src, &Declarations::default())
+    }
+
+    /// Read every `name` → declared-type binding under `root`.
     ///
     /// The rule, in full: a node that carries a `name` field whose child is a
     /// leaf takes its type from its **own** `type` field, or failing that from
@@ -191,9 +263,15 @@ impl DeclaredTypes {
     /// position** — see [`field_position`] for what that means and what it
     /// costs — so that [`field`](Self::field) can answer the one question
     /// [`get`](Self::get) must not: *what does `this.<name>` denote?*
-    pub fn build(root: Node<'_>, src: &[u8]) -> Self {
+    ///
+    /// A declaration `stated` names (S-558) is read from its stated type
+    /// instead of by the walk, when its name lies under `root` — a callable's
+    /// own scope reads its own stated declarations only. Its array dimensions
+    /// are read from that type's text alone, and it is a field at a field
+    /// position or where it is stated one (S-537, [`Declarations::field`]).
+    pub fn build_with(root: Node<'_>, src: &[u8], stated: &Declarations<'_>) -> Self {
         let mut types = Self::default();
-        let mut stack = vec![root];
+        let mut stack = if stated.stated_only { Vec::new() } else { vec![root] };
         while let Some(node) = stack.pop() {
             let mut cursor = node.walk();
             stack.extend(node.named_children(&mut cursor));
@@ -210,6 +288,10 @@ impl DeclaredTypes {
             // A leaf, so a qualified or generic name node is not read as though
             // it were the identifier a use site spells.
             if name_node.named_child_count() > 0 {
+                continue;
+            }
+            // Read from its stated type, below.
+            if stated.typed.contains_key(&name_node.id()) {
                 continue;
             }
             let Some(name) = name_node.utf8_text(src).ok().map(str::trim) else {
@@ -232,17 +314,53 @@ impl DeclaredTypes {
                 .unwrap_or_default();
             let before_initializer = after_name.split('=').next().unwrap_or_default();
             let array = writes_dimensions(type_text) || writes_dimensions(before_initializer);
-            let declared = if array {
-                format!("{declared}[]")
-            } else {
-                declared.to_string()
+            types.declare(name, declared, array, field_position(node));
+        }
+        let under_root = |n: Node<'_>| root.start_byte() <= n.start_byte() && n.end_byte() <= root.end_byte();
+        let text = |n: Node<'_>| n.utf8_text(src).ok().map(str::trim);
+        for &(name_node, declared) in stated.typed.values() {
+            let (Some(name), Some(type_text)) = (text(name_node), text(declared)) else {
+                continue;
             };
-            record(&mut types.by_name, name, &declared);
-            if field_position(node) {
-                record(&mut types.fields_by_name, name, &declared);
+            let simple = simple_type_name(type_text);
+            if under_root(name_node) && !simple.is_empty() {
+                let field = field_position(name_node) || stated.fields.contains(&name_node.id());
+                types.declare(name, simple, writes_dimensions(type_text), field);
             }
         }
+        for (id, &name_node) in &stated.untyped {
+            let Some(name) = text(name_node).filter(|_| under_root(name_node) && !stated.typed.contains_key(id)) else {
+                continue;
+            };
+            let field = field_position(name_node) || stated.fields.contains(id);
+            types.refuse(name, field);
+        }
         types
+    }
+
+    /// Record that `name` is declared with no type a call is typed by — in
+    /// both maps when it declares a `field` — which refuses it ([`get`](Self::get)
+    /// and [`field`](Self::field) answer `None`) as two disagreeing
+    /// declarations do (S-537).
+    fn refuse(&mut self, name: &str, field: bool) {
+        self.by_name.insert(name.to_string(), None);
+        if field {
+            self.fields_by_name.insert(name.to_string(), None);
+        }
+    }
+
+    /// Record that `name` is declared with the simple type `declared` — an
+    /// array of it when `array` — in both maps when it declares a `field`.
+    fn declare(&mut self, name: &str, declared: &str, array: bool, field: bool) {
+        let declared = if array {
+            format!("{declared}[]")
+        } else {
+            declared.to_string()
+        };
+        record(&mut self.by_name, name, &declared);
+        if field {
+            record(&mut self.fields_by_name, name, &declared);
+        }
     }
 
     /// The simple type this file declares for `name`, when it declares exactly

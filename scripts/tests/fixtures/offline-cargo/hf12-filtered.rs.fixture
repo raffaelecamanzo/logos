@@ -1,0 +1,13 @@
+// HF-12's fix: the host's platform is named.
+fn the_resolved_rmcp_features_are_the_stdio_server_set() {
+    let host = host_triple();
+    let metadata = cargo(&[
+        "metadata",
+        "--offline",
+        "--format-version",
+        "1",
+        "--filter-platform",
+        &host,
+    ])
+    .expect("cargo metadata resolves offline for the host (the build warmed the host's crates)");
+}

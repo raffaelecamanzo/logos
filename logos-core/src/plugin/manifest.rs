@@ -134,6 +134,49 @@ pub enum ImportSpecifier {
     Path,
 }
 
+/// What a **bare** path specifier — one neither relative nor otherwise
+/// resolved (`@/features/auth`, `@acme/ui`, `react`) — binds through (S-531,
+/// [CR-173] §3.2 (1), [FR-RS-02]).
+///
+/// The default, [`BareSpecifiers::External`], is the behaviour every
+/// descriptor had before this field existed: such a specifier names a package
+/// and stays unbound ([NFR-MA-01]).
+///
+/// [CR-173]: ../../../docs/requests/CR-173-typescript-resolves-aliases-barrels-defaults-relations-and-injected-calls.md
+/// [FR-RS-02]: ../../../docs/specs/requirements/FR-RS-02.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BareSpecifiers {
+    /// A bare specifier names an external package: never a workspace file.
+    #[default]
+    External,
+    /// The importing file's nearest `tsconfig.json`/`jsconfig.json` (its
+    /// `extends` chain followed) rewrites it through `paths` and `baseUrl`,
+    /// and a workspace package's `package.json` `name` resolves it to that
+    /// package's entry ([`crate::resolve`]'s `ts_config`).
+    Tsconfig,
+    /// The repository's load roots resolve it (S-566, [FR-RS-34]): each gem's
+    /// `require_paths` (`lib/` unless its `*.gemspec` says otherwise) and the
+    /// repository root, exactly one file across them ([`crate::resolve`]'s
+    /// `load_path`) — Ruby's `require 'a/b'`. A specifier no root holds a
+    /// file for names an external gem. Such a language's relative specifier
+    /// names its file only, never a directory's `index` file.
+    ///
+    /// [FR-RS-34]: ../../../docs/specs/requirements/FR-RS-34.md
+    LoadPath,
+    /// The repository's include roots resolve it (S-579, [FR-RS-38]): every
+    /// `include/` and `src/` directory, and every directory holding an
+    /// `include/` one, exactly one file across them ([`crate::resolve`]'s
+    /// binder `includes`) — C++'s `#include <a/b.h>`. A quoted `#include
+    /// "a/b.h"` is read against the including file's directory first. The
+    /// specifier names its file whole, extension included; one no root holds a
+    /// file for (`<vector>`) is a system header and stays external.
+    ///
+    /// [FR-RS-38]: ../../../docs/specs/requirements/FR-RS-38.md
+    IncludeRoots,
+}
+
 /// What an **unqualified** call inside a class body means in this language —
 /// the implicit-receiver policy of the receiver-shape seam (S-514, [FR-EX-13]).
 ///
@@ -367,6 +410,14 @@ pub struct PackageModules {
 /// [module_model]
 /// kind = "namespace"
 /// enclosing_namespaces = true    # a namespace sees its enclosing namespaces' types
+/// companion_objects = true       # a type and its same-named singleton are one name
+/// top_level_callables = true     # a top-level function is a namespace member
+/// wildcards_outrank_package = true  # a wildcard outranks the namespace's other files
+/// extension_functions = true     # a top-level function with a receiver type is callable on a value
+/// file_facade = "Kt"             # another language reaches top-level functions through `<File>Kt`
+/// companion_name = "Companion"   # a type's nested `Companion` is its companion object
+/// global_function_fallback = true  # an unqualified call its namespace lacks reaches the global function
+/// type_arity = true              # `Result` and `Result<T>` are two types
 /// ```
 ///
 /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
@@ -415,13 +466,153 @@ pub struct ModuleModel {
     /// name — that the source's own namespace does not supply is looked up in
     /// each enclosing namespace of the source's declared one, nearest first
     /// (`A.B.C` → `A.B` → `A`, never the global namespace), before any
-    /// namespace wildcard is read. Exactly one type decides a level; two stop
-    /// the walk unbound, and none passes outward. Defaults to `false`, so a
-    /// language that does not declare it binds exactly as before.
+    /// file-level namespace wildcard is read. Exactly one type decides a level;
+    /// two stop the walk unbound, and none passes outward. A namespace wildcard
+    /// written inside a namespace block records that block and is read at its
+    /// level, after its types and before the next level out (S-603).
+    /// Defaults to `false`, so a language that does not declare it binds
+    /// exactly as before.
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     #[serde(default)]
     pub enclosing_namespaces: bool,
+    /// The `path` model's **lexical constants** (S-565, [FR-RS-33]): when
+    /// `true`, every class and module declaration is the constant its nesting
+    /// spells, and a constant a reference names is read through the
+    /// reference's lexical nesting outward, then the top level — Ruby's
+    /// constant lookup. The file's module key is unchanged. Defaults to
+    /// `false`, so a language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    #[serde(default)]
+    pub lexical_constants: bool,
+    /// The `path` model's **directory packages** (S-528, [FR-RS-17]): when
+    /// `true`, the files of one directory that declare one `package` clause
+    /// share one package scope — Go's — and a bare name its own file does not
+    /// declare binds to the exactly-one top-level declaration of that name
+    /// among them. A file is placed by the clause its `symbols` query captures
+    /// with `@package.name`; one whose clause is unknown is in no package. The
+    /// file's module key is unchanged. Defaults to `false`, so a language that
+    /// does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    #[serde(default)]
+    pub directory_packages: bool,
+    /// The `path` model's **link unit** (S-584, [FR-RS-40]): when `true`, a
+    /// bare call that neither its own file nor the files its includes reach
+    /// defines binds to the one non-`static` definition of the name among the
+    /// language's files — C's linker, read without a build file. A `static`
+    /// definition is its own file's alone, and two non-`static` ones (platform
+    /// variants) bind neither. Defaults to `false`, so a language that does not
+    /// declare it binds exactly as before.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    #[serde(default)]
+    pub link_unit: bool,
+    /// The `namespace` model's **companion objects** (S-573, [FR-RS-36]): when
+    /// `true`, a type and the same-named singleton declared beside it in one
+    /// file — Scala's `class Chain` and `object Chain` — are one name. A path
+    /// through the name reads the members of both, and a call on it binds
+    /// among the singleton's callables only (those recorded as taking no
+    /// instance receiver). The name itself still names two declarations, so
+    /// an import or an instantiation of it binds neither. Defaults to `false`,
+    /// so a language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    #[serde(default)]
+    pub companion_objects: bool,
+    /// The `namespace` model's **top-level callables** (S-573, [FR-RS-36]):
+    /// when `true`, a function a file declares at its top level — a Scala 3
+    /// top-level `def` — is a member of the namespace the file declares, as
+    /// its types are: an import names it, a wildcard of the namespace brings it
+    /// into view, and a call from the same namespace reaches it. Defaults to
+    /// `false`, so a language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    #[serde(default)]
+    pub top_level_callables: bool,
+    /// The `namespace` model's **wildcard precedence** (S-573, [FR-RS-36]):
+    /// when `true`, a name a wildcard import brings into view outranks one the
+    /// file's namespace declares in another file — Scala's rule, where Java's
+    /// and Kotlin's same-package rung comes first. The file's own declarations
+    /// and its explicit imports still come before both. Defaults to `false`,
+    /// so a language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    #[serde(default)]
+    pub wildcards_outrank_package: bool,
+    /// The `namespace` model's **extension functions** (S-560, [FR-RS-31]):
+    /// when `true`, a top-level function that names a receiver type (the
+    /// `@symbol.self_type` its `symbols` query captures — Kotlin's `fun
+    /// String.toSlug()`) is callable on a value: a receiver call `x.f()` no
+    /// receiver type proves binds the one such function `f` the file imports,
+    /// its namespace declares or a wildcard brings into view — unless a member
+    /// of that name could be the one called. Defaults to `false`, so a language
+    /// that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    #[serde(default)]
+    pub extension_functions: bool,
+    /// The `namespace` model's **file facade** (S-560, [FR-RS-31]): the suffix
+    /// that names the class another language of the family reaches a file's
+    /// top-level functions through — Kotlin's `"Kt"`, so `Utils.kt`'s functions
+    /// are `UtilsKt`'s static methods to Java. The class is the file's stem,
+    /// its first letter upper-cased, then the suffix, in the file's declared
+    /// namespace. The language itself never names it. `None` (omitted): no
+    /// facade.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    #[serde(default)]
+    pub file_facade: Option<String>,
+    /// The `namespace` model's **companion name** (I4-INT, [FR-RS-31]): the
+    /// name a type's companion object takes when written without one —
+    /// Kotlin's `"Companion"`, which its `symbols` query gives an anonymous
+    /// `companion object` (S-559, [FR-EX-24]). A nested type of that name is
+    /// its type's companion, whose members the type lends its name to: a call
+    /// on the type (`C.make()`) binds among the companion's callables before
+    /// the type's own, and a bare call inside the type reaches them once the
+    /// type and its supertypes hold no applicable one. A companion declared
+    /// under another name is an ordinary nested type here. `None` (omitted):
+    /// no type has a companion.
+    ///
+    /// Because the written `T::m` reaches the companion first, a call on a
+    /// receiver the file proves of type `T` (S-563, [FR-RS-32]) is recorded
+    /// apart from it — `T::m` with the `other` shape, its declared type read
+    /// as written, peeling no wrapper — and bound among `T`'s own members.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    /// [FR-RS-32]: ../../../docs/specs/requirements/FR-RS-32.md
+    /// [FR-EX-24]: ../../../docs/specs/requirements/FR-EX-24.md
+    #[serde(default)]
+    pub companion_name: Option<String>,
+    /// The `namespace` model's **global function fallback** (S-551,
+    /// [FR-RS-26]): when `true`, an unqualified call its file's namespace
+    /// declares no function for binds to the global namespace's function of
+    /// that name — PHP's fallback, which a class name never takes. Exactly one,
+    /// as every rung is. Requires `top_level_callables`, the key that makes a
+    /// top-level function a namespace member at all. Defaults to `false`, so a
+    /// language that does not declare it binds exactly as before.
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    #[serde(default)]
+    pub global_function_fallback: bool,
+    /// The `namespace` model's **type arity** (S-602, [CR-199], [FR-RS-13],
+    /// [FR-RS-45]): when `true`, a type is told apart from a same-named one by
+    /// its generic arity — C#'s `Result` and `Result<T>` are two types. Each
+    /// type declaration records its type-parameter count (the list its
+    /// `symbols` query captures with `@item.type_parameters`, none for 0), and
+    /// each base type or `new` its written type-argument count; the
+    /// own-namespace, enclosing-namespace and namespace-wildcard rungs then
+    /// admit only a type of the written arity, and two types are ambiguous
+    /// only when both match it ([FR-RS-46]). A reference of unknown arity — a
+    /// call through a type name — admits any. Defaults to `false`, so a
+    /// language that does not declare it binds exactly as before.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    /// [FR-RS-46]: ../../../docs/specs/requirements/FR-RS-46.md
+    #[serde(default)]
+    pub type_arity: bool,
 }
 
 /// The module models a language may declare ([`ModuleModel`]).
@@ -473,6 +664,12 @@ pub(crate) const SUPERTYPE_CAPTURE: &str = "ref.extends";
 /// must capture, checked when its queries compile (`queries::check_capture`).
 pub(crate) const UNINHERITED_CAPTURE: &str = "item.uninherited";
 
+/// The capture a `symbols` query records a type declaration's type-parameter
+/// list under (S-602): what a language that declares
+/// [`type_arity`](ModuleModel::type_arity) must capture, checked when its
+/// queries compile (`queries::check_capture`).
+pub(crate) const TYPE_PARAMETERS_CAPTURE: &str = "item.type_parameters";
+
 /// The marker a `symbols` query puts beside [`NAMESPACE_CAPTURE`] when the
 /// language's bodiless namespace declarations **compose** rather than replace
 /// one another — Scala's chained `package a` / `package b` is `a.b`, where
@@ -523,7 +720,7 @@ pub enum TestConvention {
     PythonTest,
     /// TS/JS: a function lexically enclosed by an `it`/`test`/`describe` call.
     JsCallback,
-    /// Go: a `Test`/`Benchmark`/`Fuzz` function defined in a `*_test.go` file.
+    /// Go: a `Test`/`Benchmark`/`Fuzz`/`Example` function defined in a `*_test.go` file.
     GoTestFunc,
     /// Java: a `@Test`-family annotation on the method (`@Test`,
     /// `@ParameterizedTest`, `@RepeatedTest`, …).
@@ -545,14 +742,15 @@ pub enum TestConvention {
     ///
     /// [CR-009]: ../../../docs/requests/CR-009-seven-language-plugins.md
     CSharpAttributes,
-    /// C++ (S-058): a GoogleTest function-like test macro — a function whose
-    /// name is `TEST`/`TEST_F`/`TEST_P`/`TYPED_TEST`/`TYPED_TEST_P` (the
-    /// `TEST(Suite, Name) { … }` form parses as a return-type-less
-    /// `function_definition` named for the macro). The Catch2 macros
-    /// (`TEST_CASE`/`SCENARIO`) are recognised too, but their string-argument
-    /// form (`TEST_CASE("name", "[tag]")`) does not parse as a function under
-    /// `tree-sitter-cpp`, so no function node exists to mark — the measured
-    /// precision floor, surfaced honestly rather than fabricated ([NFR-RA-05]).
+    /// C++ (S-058, S-580): a GoogleTest function-like test macro — a function
+    /// written with the keyword `TEST`/`TEST_F`/`TEST_P`/`TYPED_TEST`/
+    /// `TYPED_TEST_P` (the `TEST(Suite, Name) { … }` form parses as a
+    /// return-type-less `function_definition` whose declarator is the macro) —
+    /// or a Catch2/doctest `TEST_CASE("name", "[tag]") { … }` / `SCENARIO`, which
+    /// parses as a call statement and the block after it, so the block is the
+    /// test. The keyword is read off the tree, not off the declared name, which
+    /// is the test's own (`Suite.Name`, the string; `extract::test_name`)
+    /// ([NFR-RA-05]).
     ///
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     CppTestMacros,
@@ -577,6 +775,40 @@ pub enum TestConvention {
     /// positive-evidence-only: only the `test`/`it` marker names are recognised,
     /// so a production call enclosing a helper is never misread as a test.
     ScalaTest,
+    /// C (S-583, [CR-185]): a function whose *type* is a known test macro, a
+    /// Unity or cmocka case, or a function a cmocka registration names.
+    /// `TEST_IMPL(name) { … }` (libuv) parses as a `function_definition` whose
+    /// type is the macro and whose declarator is the parenthesised `(name)`, so
+    /// the test is named by the macro's argument; `TEST name(void)` (greatest) is
+    /// the same shape with an ordinary declarator. Unity and cmocka cases are
+    /// plain functions: a `test_*` function of a file that includes `unity.h`,
+    /// `unity_fixture.h` or `cmocka.h`, and, for cmocka, the first argument of a
+    /// `cmocka_unit_test*(f, …)` registration whatever its name. Positive
+    /// evidence only: the macro names are an exact list and the header is read
+    /// from the file's own includes, never inferred ([ADR-18]).
+    ///
+    /// [CR-185]: ../../../docs/requests/CR-185-c-resolves-includes-prototypes-headers-and-macros.md
+    /// [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
+    CTestMacros,
+}
+
+/// The source pre-pass a language runs before parsing (S-555, [FR-EX-23]) —
+/// the descriptor's `preprocessor` key, interpreted by `extract::preprocess`.
+///
+/// The default is [`Preprocessor::None`]: a descriptor that declares nothing is
+/// parsed as written ([NFR-MA-01]).
+///
+/// [FR-EX-23]: ../../../docs/specs/requirements/FR-EX-23.md
+/// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Preprocessor {
+    /// The file is parsed as written.
+    #[default]
+    None,
+    /// C#: each `#if … #elif … #else … #endif` region is reduced to its first
+    /// branch, the rest blanked to spaces so every position is kept.
+    CSharp,
 }
 
 /// The parsed `plugin.toml` descriptor for one grammar.
@@ -611,6 +843,12 @@ pub struct PluginManifest {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(default)]
     pub specifier_extensions: Vec<String>,
+    /// What a bare path specifier binds through ([`BareSpecifiers`], S-531).
+    /// Only meaningful under [`ImportSpecifier::Path`]; declaring
+    /// `"tsconfig"`, `"load-path"` (S-566) or `"include-roots"` (S-579) under
+    /// [`ImportSpecifier::Name`] is a descriptor error.
+    #[serde(default)]
+    pub bare_specifiers: BareSpecifiers,
     /// What an unqualified call inside a class body means
     /// ([`ImplicitReceiver`], S-514), as declared: `None` when the key is
     /// omitted. Read through [`implicit_receiver`](Self::implicit_receiver),
@@ -663,6 +901,51 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub inherits_interface_bodies: bool,
+    /// Whether this language's traits are containers for Focus and Cohesion
+    /// when they declare a bodied method (S-575, [FR-QM-11]): Scala, whose
+    /// traits carry state and behaviour (the cake pattern's service traits). A
+    /// trait of abstract declarations only stays no container. Defaults to
+    /// `false`: a trait is no container, as a Rust trait's default methods or
+    /// a PHP trait are not. Consumed by the metrics engine through
+    /// [`bodied_trait_container_extensions`](crate::plugin::registry::bodied_trait_container_extensions).
+    ///
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    #[serde(default)]
+    pub bodied_traits_are_containers: bool,
+    /// Whether this language's types are structural, and every type relation
+    /// it captures relates its declaration (S-535, [FR-EX-17]): TypeScript. A
+    /// type use or an instantiation then binds from any declaration — a
+    /// function's parameter, a field, a module-level variable — not only from
+    /// a package-shaped source's, and a supertype clause binds any type-like
+    /// declaration it names (`implements` an abstract class or a type alias,
+    /// an interface `extends` a class), where it would bind an interface or a
+    /// trait (`implements`) or the declaration's own kind (`extends`). A
+    /// class's `extends` still binds a class, and `new` a class. A type
+    /// relation written through an import (`<module>::<Name>`) binds only
+    /// within what that import binds to. A call on a receiver whose type the
+    /// file proves keeps its `other` shape and binds among that type's
+    /// members, an abstract class's or an interface's bodyless method
+    /// included (S-537, [FR-RS-21]). Defaults to `false`: type relations
+    /// bind as the module model and each clause say ([NFR-MA-01]).
+    ///
+    /// [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub structural_types: bool,
+    /// Whether this language's modules are CommonJS as well as ECMAScript
+    /// (S-540, [FR-RS-22]): JavaScript. A top-level `const m = require('./x')`
+    /// then qualifies `m.f()` as `x::f` and `m()` as `x`'s default export,
+    /// `const { f, g: h } = require('./x')` binds `f` and `h` as named imports,
+    /// and `module.exports = X` (or `const X = module.exports`) records `X` as
+    /// the module's export object, whose members are the module's names.
+    /// Defaults to `false`: a `require()` call binds no name ([NFR-MA-01]).
+    ///
+    /// [FR-RS-22]: ../../../docs/specs/requirements/FR-RS-22.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub commonjs: bool,
     /// Whether this language overloads callables by name (S-592, [FR-RS-43]):
     /// Java, Kotlin, Scala, C#, C++. A bare call of such a language binds only
     /// a callable whose parameter range admits its argument count, and a scope
@@ -688,9 +971,26 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub impl_block_lookup: bool,
+    /// Whether a bare call never names a local value (S-594, FR-RS-44): calls
+    /// and values are separate namespaces (Java, Ruby's `f()`). See
+    /// `docs/howto/configuration.md`. Defaults to `false`.
+    #[serde(default)]
+    pub separate_call_namespace: bool,
+    /// Whether a type implements an interface by its method set (S-529,
+    /// [FR-RS-18]): the language writes no `implements` clause, so the
+    /// resolution pass records `Implements` from each type whose methods —
+    /// matched by name and parameter count, its embedded fields' promoted —
+    /// cover every method an in-repository interface declares, its embedded
+    /// interfaces expanded. Go alone. Defaults to `false`: a type implements
+    /// only what a captured relation says ([NFR-MA-01]).
+    ///
+    /// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub method_set_implements: bool,
     /// The extensions, among this plugin's own, of a language that enforces no
-    /// arity (S-592, [FR-RS-43]): JavaScript, which the TypeScript grammars
-    /// also parse (`js`, `mjs`, `cjs`, `jsx`). A call in such a file may pass
+    /// arity (S-592, [FR-RS-43]): JavaScript, whose own plugin lists all four
+    /// of its extensions (`js`, `mjs`, `cjs`, `jsx`; S-538). A call in such a file may pass
     /// any number of arguments to any function, so no candidate is ever dropped
     /// for its parameter range there; the range is still recorded. Defaults to
     /// empty: every file of the language is filtered. Each entry must be one of
@@ -762,6 +1062,25 @@ pub struct PluginManifest {
     /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
     #[serde(default)]
     pub reach: Option<Reach>,
+    /// One sentence a reader of `logos languages` should know about how this
+    /// language is applied (S-572, [FR-PL-07]) — the C and C++ rows state the
+    /// `.h` ownership rule here. `None` for a language with nothing to disclose.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    #[serde(default)]
+    pub note: Option<String>,
+    /// The extensions, among this plugin's own, it shares with another plugin
+    /// that also claims them (S-582, [FR-PL-07]): C's `.h`, which C++ claims
+    /// too. A shared file is this plugin's only in a repository whose sources
+    /// of this plugin — its other extensions — outnumber the other plugin's;
+    /// otherwise the other plugin reads it
+    /// ([`LanguageRegistry::shared_owners_for`](crate::plugin::LanguageRegistry::shared_owners_for)).
+    /// Defaults to empty: every extension is claimed outright. Each entry must
+    /// be one of [`extensions`](Self::extensions), written bare.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    #[serde(default)]
+    pub shared_extensions: Vec<String>,
     /// The tree-sitter ABI version this grammar was generated against. Asserted
     /// against the compiled grammar at load ([FR-PL-02], `abi::assert_abi`).
     pub abi_version: usize,
@@ -818,6 +1137,8 @@ pub struct PluginManifest {
     /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
     #[serde(default)]
     pub framework_detectors: Vec<String>,
+    /// The `[framework_candidacy]` table (S-541; see [`FrameworkCandidacy`]).
+    pub framework_candidacy: Option<FrameworkCandidacy>,
     /// Canonical (`::`-joined) reference-path prefixes whose presence in a
     /// file's ledger makes the file an **HTTP client-call** candidate (S-341,
     /// [CR-108], [FR-WS-08]) — the consumer-side twin of `framework_detectors`,
@@ -851,30 +1172,14 @@ pub struct PluginManifest {
     pub framework_methods: BTreeMap<String, String>,
     /// Captured `@invoke.http.method` text → upper-cased HTTP method for the
     /// **consumer** side (S-346, [CR-108], [FR-WS-08]) — the client-call twin of
-    /// [`framework_methods`](Self::framework_methods), and it plays the same
-    /// two roles: it *normalizes* a verb whose source spelling is not a bare
-    /// HTTP verb, and it *filters*, because a captured text with no entry here
-    /// is dropped.
-    ///
-    /// **Empty (the default) means "no normalization and no filter"**: the
-    /// captured text goes straight to `extract::is_http_method`, which is what
-    /// every language whose verbs are already bare spells (Rust, Go, Java,
-    /// TypeScript) relies on. Only a language that declares rows opts into the
-    /// filter.
-    ///
-    /// C# is the first such language and the reason this field exists: its verbs
-    /// carry an `Async` suffix (`GetAsync`) or live in a named constant
-    /// (`HttpMethod.Get`), and `is_http_method` speaks only bare verbs. Keys are
-    /// matched **exactly**, like `framework_methods`, so a row spells the token
-    /// as the language's own API does.
-    ///
-    /// The mapped value is **still** passed through `is_http_method`, so a
-    /// mistyped value (`"GTE"`) captures nothing rather than inventing a method
-    /// ([NFR-RA-05]).
+    /// [`framework_methods`](Self::framework_methods): an exact-match normalizer
+    /// and filter, except that **empty (the default) is a pass-through**. C#
+    /// declares rows (`GetAsync`, `HttpMethod.Get`). The rule is stated once on
+    /// `extract::normalize_invocation_method` (private, so named rather than
+    /// linked).
     ///
     /// [CR-108]: ../../../docs/requests/CR-108-per-language-http-client-call-capture.md
     /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     #[serde(default)]
     pub invocation_methods: BTreeMap<String, String>,
     /// How this language marks a declaration exported ([`ExportConvention`]).
@@ -889,6 +1194,9 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub test_convention: TestConvention,
+    /// The source pre-pass run before parsing ([`Preprocessor`]).
+    #[serde(default)]
+    pub preprocessor: Preprocessor,
     /// Whether this language declares the optional **reachability capability**
     /// (S-159, [CR-043], [ADR-39]) — the signal the [annotation-engine] Pass-3
     /// dead-code detector gates on ([FR-AN-01]). `true` asserts the language's
@@ -909,6 +1217,18 @@ pub struct PluginManifest {
     /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
     #[serde(default)]
     pub reachability: bool,
+    /// The names of the functions this language's runtime calls itself, with no
+    /// source-visible caller (S-530, [FR-AN-01]): Go's `main` and `init`. A
+    /// top-level function of one of these names, declared in a file of this
+    /// language, is a dead-code live root — beside the project's
+    /// `[semantics].entry_points`, which name roots in every language. Scoped to
+    /// the language, so a Rust `fn init` stays an ordinary function. Defaults to
+    /// empty: the language's runtime calls nothing by name ([NFR-MA-01]).
+    ///
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    /// [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
+    #[serde(default)]
+    pub entry_points: Vec<String>,
     /// Whether this language declares the optional **member-access capability**
     /// (S-523, [CR-171], [FR-QM-11]) — the gate the metrics engine's Cohesion
     /// dimension reads, declared and consumed the way
@@ -917,11 +1237,10 @@ pub struct PluginManifest {
     /// [FR-QM-11] defines to include bare and implicit forms — so LCOM4's
     /// shared-field links exist for its classes; `false` (the default) makes
     /// every class of the language not applicable for Cohesion rather than
-    /// scored from calls alone ([NFR-CC-04]). Declared by Java, TypeScript/TSX
-    /// and PHP. JavaScript, which the TypeScript grammars also parse, is carved
-    /// out through [`member_access_excluded_extensions`](Self::member_access_excluded_extensions):
-    /// a JavaScript class whose fields are assigned only in its constructor has
-    /// no `Field` node for `this.x` to bind to. Java declares it while capturing
+    /// scored from calls alone ([NFR-CC-04]). Declared by Java, TypeScript/TSX,
+    /// PHP, C# (S-556), Python (S-543), Scala (S-575), Kotlin (S-562), C++ (S-580),
+    /// Ruby (S-569) and JavaScript (S-542): JavaScript's symbols layer declares a `Field` for
+    /// each `this.x = …` of a class's constructor or method, so its `this.x` reads bind. Java declares it while capturing
     /// `this.x` but not a bare `x`. A language CR declares the flag once its
     /// capture is complete ([NFR-MA-01]).
     ///
@@ -934,9 +1253,8 @@ pub struct PluginManifest {
     pub member_access: bool,
     /// The extensions, among this plugin's own, that do **not** carry its
     /// [`member_access`](Self::member_access) declaration (S-523, [CR-171]):
-    /// JavaScript files (`js`, `mjs`, `cjs`, `jsx`), which the TypeScript
-    /// grammars parse but whose constructor-assigned fields no query captures.
-    /// A class in such a file is not applicable for Cohesion. Defaults to
+    /// Python's `.pyi` stubs, which declare signatures and access nothing. A
+    /// class in such a file is not applicable for Cohesion. Defaults to
     /// empty: the declaration covers every extension. The same shape as
     /// [`arity_unchecked_extensions`](Self::arity_unchecked_extensions): each
     /// entry must be one of [`extensions`](Self::extensions), and the key
@@ -974,33 +1292,53 @@ pub struct PluginManifest {
     /// no useful extension that this plugin claims, e.g. `["Dockerfile"]` or
     /// `["Makefile", "makefile", "GNUmakefile"]`. The registry indexes these
     /// beside extensions; discovery admits a file when its extension **or**
-    /// basename is claimed. The match rule is exact **plus** a documented `Name.*`
-    /// prefix (so `Dockerfile.dev` binds to the `Dockerfile` plugin). Defaults to
-    /// empty — any code/doc descriptor that omits it is unaffected.
+    /// basename is claimed. The match rule is exact; an **artifact** plugin's claim
+    /// also takes the documented `Name.*` prefix (so `Dockerfile.dev` binds to the
+    /// `Dockerfile` plugin, while a code plugin's `Gemfile` leaves `Gemfile.lock`
+    /// alone, S-564). Defaults to empty — any descriptor that omits it is
+    /// unaffected.
     ///
     /// [FR-CG-01]: ../../../docs/specs/requirements/FR-CG-01.md
     #[serde(default)]
     pub filenames: Vec<String>,
-    /// The structural config-extraction descriptor (S-062, [CR-010], [FR-CG-02]):
-    /// the tree-sitter node kinds the generic `ConfigSection` walk treats as
-    /// sections, and how to read each section's key. Meaningful only when
-    /// [`artifact`](Self::artifact) is `true`; absent for a plain `ConfigFile`-only
-    /// artifact or a typed-anchor-only format. See [`ConfigDescriptor`].
-    ///
-    /// [FR-CG-02]: ../../../docs/specs/requirements/FR-CG-02.md
+    /// The structural config-extraction descriptor ([`ConfigDescriptor`]).
+    /// Meaningful only when [`artifact`](Self::artifact) is `true`; absent for a
+    /// plain `ConfigFile`-only artifact or a typed-anchor-only format.
     #[serde(default)]
     pub config: Option<ConfigDescriptor>,
-    /// The configuration-**binding** descriptor (S-381, [CR-121], [FR-WS-19]):
-    /// the annotation vocabulary that marks a properties class and the accessor
-    /// convention a use site reads it by, driving the generic interpreter in
-    /// [`crate::extract::config::binding`]. Meaningful only alongside the
-    /// `properties` capability and its query; absent for every language that
-    /// binds no configuration. See [`PropertiesDescriptor`].
-    ///
-    /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
-    /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
+    /// The configuration-**binding** descriptor ([`PropertiesDescriptor`]).
+    /// Meaningful only alongside the `properties` capability and its query;
+    /// absent for every language that binds no configuration.
     #[serde(default)]
     pub properties: Option<PropertiesDescriptor>,
+}
+
+/// The `[framework_candidacy]` descriptor table (S-541, [CR-174], [FR-FW-03]):
+/// how a file of this language becomes a framework candidate beyond a ledger
+/// row naming one of its [`framework_detectors`](PluginManifest::framework_detectors).
+/// Absent = candidacy is the detectors', matched on every reference kind.
+///
+/// [CR-174]: ../../../docs/requests/CR-174-javascript-is-its-own-language-and-its-node-idioms-resolve.md
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameworkCandidacy {
+    /// Whether the detectors match only a file's **import** references. A
+    /// detector that is also an ordinary identifier — JavaScript's `next` —
+    /// otherwise admits a file through any reference spelled the same: an
+    /// Express middleware calling its `next()` callback read as Next.js.
+    /// Defaults to `false`: a detector matches every reference kind, which a
+    /// language whose framework is named only through a constant or a base
+    /// class (Rails's `ApplicationController`) needs.
+    #[serde(default)]
+    pub detectors_import_only: bool,
+    /// Parameter names that make a file a candidate with no detector reference
+    /// at all: an Express router module is a function that receives the `app`
+    /// or `router` it registers on, and imports nothing from `express`. Read
+    /// from the file's recorded local bindings (the `locals` capability,
+    /// S-593), never from its text. Empty = none.
+    #[serde(default)]
+    pub receiver_parameters: Vec<String>,
 }
 
 /// The `[config]` descriptor sub-table for an artifact-class plugin (S-062,
@@ -1229,6 +1567,84 @@ impl PluginManifest {
         self.module_model.as_ref().is_some_and(|m| m.enclosing_namespaces)
     }
 
+    /// Whether this language names its classes and modules by lexical
+    /// constants ([`ModuleModel::lexical_constants`], S-565): `false` unless
+    /// the descriptor declares it.
+    pub fn lexical_constants(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.lexical_constants)
+    }
+
+    /// Whether the files of one directory that declare one `package` clause
+    /// share one package scope ([`ModuleModel::directory_packages`], S-528):
+    /// `false` unless the descriptor declares it.
+    pub fn directory_packages(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.directory_packages)
+    }
+
+    /// Whether a bare call no included declaration supplies binds the one
+    /// non-`static` definition of its name among the language's files
+    /// ([`ModuleModel::link_unit`], S-584): `false` unless the descriptor
+    /// declares it.
+    pub fn link_unit(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.link_unit)
+    }
+
+    /// Whether a type and the same-named singleton beside it are one name
+    /// ([`ModuleModel::companion_objects`], S-573): `false` unless the
+    /// descriptor declares it.
+    pub fn companion_objects(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.companion_objects)
+    }
+
+    /// Whether a file's top-level functions are members of its declared
+    /// namespace ([`ModuleModel::top_level_callables`], S-573): `false` unless
+    /// the descriptor declares it.
+    pub fn top_level_callables(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.top_level_callables)
+    }
+
+    /// Whether a wildcard import outranks the namespace's other files
+    /// ([`ModuleModel::wildcards_outrank_package`], S-573): `false` unless the
+    /// descriptor declares it.
+    pub fn wildcards_outrank_package(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.wildcards_outrank_package)
+    }
+
+    /// Whether a top-level function with a receiver type is callable on a
+    /// value ([`ModuleModel::extension_functions`], S-560): `false` unless the
+    /// descriptor declares it.
+    pub fn extension_functions(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.extension_functions)
+    }
+
+    /// The suffix of the class another language reaches a file's top-level
+    /// functions through ([`ModuleModel::file_facade`], S-560): `None` unless
+    /// the descriptor declares one.
+    pub fn file_facade(&self) -> Option<&str> {
+        self.module_model.as_ref().and_then(|m| m.file_facade.as_deref())
+    }
+
+    /// The name a type's anonymous companion object takes
+    /// ([`ModuleModel::companion_name`], I4-INT): `None` unless the descriptor
+    /// declares one.
+    pub fn companion_name(&self) -> Option<&str> {
+        self.module_model.as_ref().and_then(|m| m.companion_name.as_deref())
+    }
+
+    /// Whether an unqualified call its namespace does not supply falls back to
+    /// the global function ([`ModuleModel::global_function_fallback`], S-551):
+    /// `false` unless the descriptor declares it.
+    pub fn global_function_fallback(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.global_function_fallback)
+    }
+
+    /// Whether a type of this language is told apart from a same-named one by
+    /// its generic arity ([`ModuleModel::type_arity`], S-602): `false` unless
+    /// the descriptor declares it.
+    pub fn type_arity(&self) -> bool {
+        self.module_model.as_ref().is_some_and(|m| m.type_arity)
+    }
+
     /// What an unqualified call inside a class body means ([`ImplicitReceiver`],
     /// S-514): the declared policy, else [`ImplicitReceiver::None`].
     pub fn implicit_receiver(&self) -> ImplicitReceiver {
@@ -1286,13 +1702,17 @@ impl PluginManifest {
     ///   bare extension.
     /// - `arity_unchecked_extensions` names extensions the plugin claims (S-592,
     ///   [FR-RS-43]): one it does not would never match a file of this
-    ///   language.
+    ///   language. So does `shared_extensions` (S-582): a plugin can share
+    ///   only an extension it claims.
     /// - `member_access_excluded_extensions` names extensions the plugin claims and
     ///   requires `member_access = true` (S-523): an exclusion from a declaration
     ///   the plugin does not make, or of a file it never parses, excludes nothing.
     /// - `implicit_call_falls_through` is a rule of the unqualified in-class
     ///   call on the instance, so it requires `implicit_receiver = "self"`, and
     ///   `implicit_root_members` only qualifies it.
+    /// - `link_unit` (S-584) is a rung of the include-scope call lookup, so it
+    ///   requires `bare_specifiers = "include-roots"`: without it no call
+    ///   reaches the rung, and no sync re-binds a row the rung reads.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     fn validate_extension_lists(&self) -> Result<(), String> {
@@ -1305,6 +1725,12 @@ impl PluginManifest {
         if !self.specifier_extensions.is_empty() && self.import_specifier != ImportSpecifier::Path {
             return Err("`specifier_extensions` requires `import_specifier = \"path\"`".to_string());
         }
+        if self.bare_specifiers != BareSpecifiers::External && self.import_specifier != ImportSpecifier::Path {
+            return Err("`bare_specifiers` requires `import_specifier = \"path\"`".to_string());
+        }
+        if self.link_unit() && self.bare_specifiers != BareSpecifiers::IncludeRoots {
+            return Err("`link_unit` requires `bare_specifiers = \"include-roots\"`".to_string());
+        }
         if let Some(bad) = self
             .specifier_extensions
             .iter()
@@ -1316,6 +1742,9 @@ impl PluginManifest {
         }
         if let Some(bad) = self.arity_unchecked_extensions.iter().find(|e| !self.extensions.contains(e)) {
             return Err(format!("`arity_unchecked_extensions` entry '{bad}' is not one of `extensions`"));
+        }
+        if let Some(bad) = self.shared_extensions.iter().find(|e| !self.extensions.contains(e)) {
+            return Err(format!("`shared_extensions` entry '{bad}' is not one of `extensions`"));
         }
         if !self.member_access_excluded_extensions.is_empty() && !self.member_access {
             return Err("`member_access_excluded_extensions` requires `member_access = true`".to_string());
@@ -1490,6 +1919,20 @@ impl PluginManifest {
         if self.framework_detectors.iter().any(|d| d.trim().is_empty()) {
             return bail("`framework_detectors` entries must not be empty".to_string());
         }
+        // A receiver parameter is compared with a recorded binding name
+        // verbatim: an empty or space-padded entry matches no parameter, and the
+        // router modules it was declared for would silently stay unscanned.
+        if self
+            .framework_candidacy
+            .iter()
+            .flat_map(|c| &c.receiver_parameters)
+            .any(|p| p.is_empty() || p != p.trim())
+        {
+            return bail(
+                "`[framework_candidacy] receiver_parameters` entries must be non-empty names without surrounding whitespace"
+                    .to_string(),
+            );
+        }
         // Same trap on the consumer side: an empty client detector would make
         // every file an outbound-call candidate, which is exactly the
         // over-capture the ledger gate exists to prevent ([NFR-RA-05]).
@@ -1663,13 +2106,67 @@ fn validate_module_model(
 /// `import_roots` are the `path` model's data, and nothing else reads them; a
 /// stem is a bare file stem, a root a relative `/`-separated directory, and the
 /// family a bare token — an entry that could never match is a descriptor bug,
-/// not data that silently matches nothing. `enclosing_namespaces` (S-595) is
-/// the `namespace` model's data, and is refused under any other kind for the
-/// same reason.
+/// not data that silently matches nothing. `enclosing_namespaces` (S-595),
+/// `companion_objects`, `top_level_callables` and `wildcards_outrank_package`
+/// (S-573), `extension_functions` and `file_facade` (S-560),
+/// `companion_name` (I4-INT), `global_function_fallback` (S-551, which needs
+/// `top_level_callables` beside it) and `type_arity` (S-602) are the
+/// `namespace` model's data, and
+/// `lexical_constants` (S-565), `directory_packages` (S-528) and `link_unit`
+/// (S-584) the `path` model's: each is refused under any other kind for the same reason. A file
+/// facade's suffix and a companion's name are bare identifiers: one is spelled
+/// into a class name, the other names a declaration.
 fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
     if m.enclosing_namespaces && m.kind != ModuleModelKind::Namespace {
         return Err(format!(
             "`enclosing_namespaces` is the data of the 'namespace' module model, but \
+             `[module_model]` declares kind '{}'",
+            m.kind.as_str()
+        ));
+    }
+    let namespace_data = [
+        ("companion_objects", m.companion_objects),
+        ("top_level_callables", m.top_level_callables),
+        ("wildcards_outrank_package", m.wildcards_outrank_package),
+        ("extension_functions", m.extension_functions),
+        ("file_facade", m.file_facade.is_some()),
+        ("companion_name", m.companion_name.is_some()),
+        ("global_function_fallback", m.global_function_fallback),
+        ("type_arity", m.type_arity),
+    ];
+    if let Some((key, _)) = namespace_data.iter().find(|(_, on)| *on && m.kind != ModuleModelKind::Namespace) {
+        return Err(format!(
+            "`{key}` is the data of the 'namespace' module model, but \
+             `[module_model]` declares kind '{}'",
+            m.kind.as_str()
+        ));
+    }
+    if m.global_function_fallback && !m.top_level_callables {
+        return Err(
+            "`global_function_fallback` reaches the global namespace's top-level functions, \
+             which only `top_level_callables = true` makes namespace members"
+                .to_string(),
+        );
+    }
+    let identifiers = [("file facade suffix", &m.file_facade), ("companion name", &m.companion_name)];
+    if let Some((what, bad)) = identifiers.iter().find_map(|(what, value)| {
+        value
+            .as_deref()
+            .filter(|s| s.is_empty() || !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+            .map(|bad| (what, bad))
+    }) {
+        return Err(format!(
+            "`[module_model]` {what} '{bad}' must be a bare identifier (ASCII letters, digits, `_`)"
+        ));
+    }
+    let path_flags = [
+        ("lexical_constants", m.lexical_constants),
+        ("directory_packages", m.directory_packages),
+        ("link_unit", m.link_unit),
+    ];
+    if let Some((key, _)) = path_flags.iter().find(|(_, on)| *on && m.kind != ModuleModelKind::Path) {
+        return Err(format!(
+            "`{key}` is the data of the 'path' module model, but \
              `[module_model]` declares kind '{}'",
             m.kind.as_str()
         ));
@@ -2106,6 +2603,198 @@ mod tests {
         assert!(with("[module_model]\nkind = \"namespace\"\nenclosing_namespaces = \"yes\"\n").is_err());
     }
 
+    /// The namespace model's type-arity key (S-602, CR-199) sits beside `kind`:
+    /// omitted, a language binds as before, and a path or package model has no
+    /// namespace rungs for it to narrow.
+    #[test]
+    fn the_type_arity_key_is_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        assert!(with("[module_model]\nkind = \"namespace\"\ntype_arity = true\n").unwrap().type_arity());
+        assert!(!with("[module_model]\nkind = \"namespace\"\ntype_arity = false\n").unwrap().type_arity());
+        assert!(!with("[module_model]\nkind = \"namespace\"\n").unwrap().type_arity());
+        assert!(!with("").unwrap().type_arity());
+        let err = with("[module_model]\nkind = \"path\"\ntype_arity = true\n").unwrap_err().to_string();
+        assert!(err.contains("x/plugin.toml") && err.contains("`type_arity`") && err.contains("kind 'path'"), "{err}");
+        assert!(with("[module_model]\nkind = \"namespace\"\ntype_arity = 1\n").is_err());
+    }
+
+    /// The namespace model's companion-object, top-level-callable and
+    /// wildcard-precedence keys (S-573, FR-RS-36) sit beside `kind`: each
+    /// parses under `namespace`,
+    /// defaults to off, and is refused under any other kind and when it is not
+    /// a boolean.
+    #[test]
+    fn the_companion_and_top_level_keys_are_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        type Read = fn(&PluginManifest) -> bool;
+        let keys: [(&str, Read); 3] = [
+            ("companion_objects", PluginManifest::companion_objects),
+            ("top_level_callables", PluginManifest::top_level_callables),
+            ("wildcards_outrank_package", PluginManifest::wildcards_outrank_package),
+        ];
+        for (key, read) in keys {
+            let on = with(&format!("[module_model]\nkind = \"namespace\"\n{key} = true\n")).unwrap();
+            assert!(read(&on), "{key}");
+            let off = with(&format!("[module_model]\nkind = \"namespace\"\n{key} = false\n")).unwrap();
+            assert!(!read(&off), "{key}");
+            assert!(!read(&with("[module_model]\nkind = \"namespace\"\n").unwrap()), "{key}");
+            assert!(!read(&with("").unwrap()), "{key}");
+            let err = with(&format!("[module_model]\nkind = \"path\"\n{key} = true\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(key) && err.contains("kind 'path'"), "{err}");
+            assert!(with(&format!("[module_model]\nkind = \"namespace\"\n{key} = \"yes\"\n")).is_err(), "{key}");
+        }
+        // The keys are independent.
+        let one = with("[module_model]\nkind = \"namespace\"\ncompanion_objects = true\n").unwrap();
+        assert!(one.companion_objects() && !one.top_level_callables() && !one.wildcards_outrank_package());
+    }
+
+    /// The namespace model's extension-function and file-facade keys (S-560,
+    /// FR-RS-31) sit beside `kind`: each parses under `namespace`, defaults to
+    /// off, and is refused under any other kind; the facade suffix is refused
+    /// when it is not a bare identifier, and the extension key when it is not a
+    /// boolean.
+    #[test]
+    fn the_extension_and_file_facade_keys_are_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let namespace = |extra: &str| with(&format!("[module_model]\nkind = \"namespace\"\n{extra}"));
+        assert!(namespace("extension_functions = true\n").unwrap().extension_functions());
+        assert!(!namespace("extension_functions = false\n").unwrap().extension_functions());
+        assert!(!namespace("").unwrap().extension_functions());
+        assert!(!with("").unwrap().extension_functions());
+        assert!(namespace("extension_functions = \"yes\"\n").is_err());
+        assert_eq!(namespace("file_facade = \"Kt\"\n").unwrap().file_facade(), Some("Kt"));
+        assert_eq!(namespace("").unwrap().file_facade(), None);
+        assert_eq!(with("").unwrap().file_facade(), None);
+        for bad in ["", "K.t", "K t", "Kt/", "K-t"] {
+            let err = namespace(&format!("file_facade = \"{bad}\"\n")).unwrap_err().to_string();
+            assert!(err.contains("file facade suffix") && err.contains("bare identifier"), "{bad}: {err}");
+        }
+        for key in ["extension_functions = true", "file_facade = \"Kt\""] {
+            let err = with(&format!("[module_model]\nkind = \"path\"\n{key}\n")).unwrap_err().to_string();
+            let name = key.split(' ').next().unwrap();
+            assert!(err.contains(name) && err.contains("kind 'path'"), "{err}");
+        }
+        // The keys are independent.
+        let one = namespace("file_facade = \"Kt\"\n").unwrap();
+        assert!(!one.extension_functions() && !one.top_level_callables());
+    }
+
+    /// The namespace model's companion-name key (I4-INT, FR-RS-31) sits beside
+    /// `kind`: it parses under `namespace`, defaults to none, and is refused
+    /// under any other kind and when it is not a bare identifier.
+    #[test]
+    fn the_companion_name_key_is_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let namespace = |extra: &str| with(&format!("[module_model]\nkind = \"namespace\"\n{extra}"));
+        let one = namespace("companion_name = \"Companion\"\n").unwrap();
+        assert_eq!(one.companion_name(), Some("Companion"));
+        assert!(one.file_facade().is_none() && !one.companion_objects());
+        assert_eq!(namespace("").unwrap().companion_name(), None);
+        assert_eq!(with("").unwrap().companion_name(), None);
+        for bad in ["", "Com.panion", "Com panion", "Companion/"] {
+            let err = namespace(&format!("companion_name = \"{bad}\"\n")).unwrap_err().to_string();
+            assert!(err.contains("companion name") && err.contains("bare identifier"), "{bad}: {err}");
+        }
+        let err = with("[module_model]\nkind = \"path\"\ncompanion_name = \"Companion\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("companion_name") && err.contains("kind 'path'"), "{err}");
+    }
+
+    /// The namespace model's global-function-fallback key (S-551, FR-RS-26)
+    /// sits beside `kind`: it parses under `namespace` beside
+    /// `top_level_callables`, defaults to off, and is refused under any other
+    /// kind, without `top_level_callables`, and when it is not a boolean.
+    #[test]
+    fn the_global_function_fallback_key_is_the_namespace_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let namespace = |extra: &str| with(&format!("[module_model]\nkind = \"namespace\"\n{extra}"));
+        let on = namespace("top_level_callables = true\nglobal_function_fallback = true\n").unwrap();
+        assert!(on.global_function_fallback() && on.top_level_callables());
+        let off = namespace("top_level_callables = true\nglobal_function_fallback = false\n").unwrap();
+        assert!(!off.global_function_fallback());
+        assert!(!namespace("top_level_callables = true\n").unwrap().global_function_fallback());
+        assert!(!with("").unwrap().global_function_fallback());
+        let err = namespace("global_function_fallback = true\n").unwrap_err().to_string();
+        assert!(err.contains("global_function_fallback") && err.contains("top_level_callables"), "{err}");
+        let err = with("[module_model]\nkind = \"path\"\nglobal_function_fallback = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("global_function_fallback") && err.contains("kind 'path'"), "{err}");
+        assert!(namespace("top_level_callables = true\nglobal_function_fallback = \"yes\"\n").is_err());
+    }
+
+    /// The path model's lexical-constants key (S-565, FR-RS-33) sits beside
+    /// `kind`: it parses under `path`, defaults to off, and is refused under
+    /// any other kind and when it is not a boolean.
+    #[test]
+    fn the_lexical_constants_key_is_the_path_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        assert!(with("[module_model]\nkind = \"path\"\nlexical_constants = true\n").unwrap().lexical_constants());
+        assert!(!with("[module_model]\nkind = \"path\"\nlexical_constants = false\n").unwrap().lexical_constants());
+        assert!(!with("[module_model]\nkind = \"path\"\n").unwrap().lexical_constants());
+        assert!(!with("").unwrap().lexical_constants());
+        let err = with("[module_model]\nkind = \"namespace\"\nlexical_constants = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("x/plugin.toml") && err.contains("kind 'namespace'"), "{err}");
+        assert!(with("[module_model]\nkind = \"path\"\nlexical_constants = \"yes\"\n").is_err());
+    }
+
+    /// The path model's directory-packages key (S-528, FR-RS-17) sits beside
+    /// `kind`: it parses under `path`, defaults to off, and is refused under
+    /// any other kind and when it is not a boolean.
+    #[test]
+    fn the_directory_packages_key_is_the_path_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        assert!(with("[module_model]\nkind = \"path\"\ndirectory_packages = true\n").unwrap().directory_packages());
+        assert!(!with("[module_model]\nkind = \"path\"\ndirectory_packages = false\n").unwrap().directory_packages());
+        assert!(!with("[module_model]\nkind = \"path\"\n").unwrap().directory_packages());
+        assert!(!with("").unwrap().directory_packages());
+        let err = with("[module_model]\nkind = \"namespace\"\ndirectory_packages = true\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("x/plugin.toml") && err.contains("`directory_packages`") && err.contains("kind 'namespace'"),
+            "{err}"
+        );
+        assert!(with("[module_model]\nkind = \"path\"\ndirectory_packages = \"yes\"\n").is_err());
+        // The two path-model flags are independent.
+        let one = with("[module_model]\nkind = \"path\"\ndirectory_packages = true\n").unwrap();
+        assert!(!one.lexical_constants());
+    }
+
+    /// The path model's link-unit key (S-584, FR-RS-40) sits beside `kind`: it
+    /// parses under `path`, defaults to off, and is refused under any other
+    /// kind and when it is not a boolean.
+    #[test]
+    fn the_link_unit_key_is_the_path_models_data() {
+        // The key is a rung of the include-scope lookup: declared beside
+        // include roots, and refused without them.
+        let roots = GOOD.replace(
+            "[queries]",
+            "import_specifier = \"path\"\nbare_specifiers = \"include-roots\"\n[queries]",
+        );
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{roots}\n{extra}"));
+        let bare = format!("{GOOD}\n[module_model]\nkind = \"path\"\nlink_unit = true\n");
+        let err = PluginManifest::parse("x/plugin.toml", &bare).unwrap_err().to_string();
+        assert!(err.contains("`link_unit` requires `bare_specifiers = \"include-roots\"`"), "{err}");
+        assert!(with("[module_model]\nkind = \"path\"\nlink_unit = true\n").unwrap().link_unit());
+        assert!(!with("[module_model]\nkind = \"path\"\nlink_unit = false\n").unwrap().link_unit());
+        assert!(!with("[module_model]\nkind = \"path\"\n").unwrap().link_unit());
+        assert!(!with("").unwrap().link_unit());
+        let err = with("[module_model]\nkind = \"namespace\"\nlink_unit = true\n").unwrap_err().to_string();
+        assert!(
+            err.contains("x/plugin.toml") && err.contains("`link_unit`") && err.contains("kind 'namespace'"),
+            "{err}"
+        );
+        assert!(with("[module_model]\nkind = \"path\"\nlink_unit = \"yes\"\n").is_err());
+        let one = with("[module_model]\nkind = \"path\"\nlink_unit = true\n").unwrap();
+        assert!(!one.directory_packages());
+    }
+
     /// The path model's data (S-519, FR-RS-14) sits beside `kind` in the one
     /// table: stems and import roots parse under `path` and are refused under
     /// any other kind, a malformed entry fails loudly by file, and the family
@@ -2262,6 +2951,43 @@ mod tests {
         assert!(with("supertype_kind_follows_target = \"yes\"").is_err());
     }
 
+    /// The structural-types key (S-535) defaults to `false` — type relations
+    /// bind as the module model and each clause say — and refuses a
+    /// non-boolean.
+    #[test]
+    fn the_structural_types_key_defaults_off_and_refuses_a_non_boolean() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.structural_types);
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("structural_types = true").unwrap().structural_types);
+        assert!(!with("structural_types = false").unwrap().structural_types);
+        assert!(with("structural_types = \"yes\"").is_err());
+    }
+
+    /// The CommonJS key (S-540) defaults to `false` — a `require()` call binds
+    /// no name — and refuses a non-boolean.
+    #[test]
+    fn the_commonjs_key_defaults_off_and_refuses_a_non_boolean() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.commonjs);
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("commonjs = true").unwrap().commonjs);
+        assert!(!with("commonjs = false").unwrap().commonjs);
+        assert!(with("commonjs = \"yes\"").is_err());
+    }
+
     /// The interface-body key (S-609) defaults to `false` — the walk ends with
     /// the `Extends` chain — and refuses a non-boolean.
     #[test]
@@ -2278,6 +3004,24 @@ mod tests {
         assert!(with("inherits_interface_bodies = true").unwrap().inherits_interface_bodies);
         assert!(!with("inherits_interface_bodies = false").unwrap().inherits_interface_bodies);
         assert!(with("inherits_interface_bodies = \"yes\"").is_err());
+    }
+
+    /// The trait-container key (S-575) defaults to `false` — a trait is no
+    /// container — and refuses a non-boolean.
+    #[test]
+    fn the_trait_container_key_defaults_off_and_refuses_a_non_boolean() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(!m.bodied_traits_are_containers);
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert!(with("bodied_traits_are_containers = true").unwrap().bodied_traits_are_containers);
+        assert!(!with("bodied_traits_are_containers = false").unwrap().bodied_traits_are_containers);
+        assert!(with("bodied_traits_are_containers = \"yes\"").is_err());
     }
 
     /// The arity keys (S-592): overloading defaults off and refuses a
@@ -2300,6 +3044,11 @@ mod tests {
         assert!(!m.impl_block_lookup);
         assert!(with("impl_block_lookup = true").unwrap().impl_block_lookup);
         assert!(with("impl_block_lookup = \"yes\"").is_err());
+        assert!(!m.separate_call_namespace);
+        assert!(with("separate_call_namespace = true").unwrap().separate_call_namespace);
+        assert!(!m.method_set_implements);
+        assert!(with("method_set_implements = true").unwrap().method_set_implements);
+        assert!(with("method_set_implements = \"yes\"").is_err());
         let claimed = with("arity_unchecked_extensions = [\"rs\"]").unwrap();
         assert_eq!(claimed.arity_unchecked_extensions, ["rs"]);
         let err = with("arity_unchecked_extensions = [\"js\"]").unwrap_err().to_string();
@@ -2312,6 +3061,24 @@ mod tests {
         assert!(both.implicit_call_falls_through);
         let err = with("implicit_root_members = [\"equals\"]").unwrap_err().to_string();
         assert!(err.contains("requires `implicit_call_falls_through`"), "{err}");
+    }
+
+    /// A shared extension (S-582) defaults to none and must be one the plugin
+    /// claims: C shares `.h` with C++ only because it lists `h` itself.
+    #[test]
+    fn a_shared_extension_must_be_claimed() {
+        let m = PluginManifest::parse("rust/plugin.toml", GOOD).unwrap();
+        assert!(m.shared_extensions.is_empty());
+        let with = |keys: &str| {
+            let text = GOOD.replace(
+                "module_separator = \"::\"",
+                &format!("module_separator = \"::\"\n{keys}"),
+            );
+            PluginManifest::parse("x/plugin.toml", &text)
+        };
+        assert_eq!(with("shared_extensions = [\"rs\"]").unwrap().shared_extensions, ["rs"]);
+        let err = with("shared_extensions = [\"h\"]").unwrap_err().to_string();
+        assert!(err.contains("`shared_extensions` entry 'h' is not one of `extensions`"), "{err}");
     }
 
     /// The specifier grammar is declared apart from the member-path separator
@@ -2351,6 +3118,47 @@ mod tests {
             "module_separator = \"::\"",
             "module_separator = \".\"\nimport_specifier = \"url\"",
         );
+        assert!(PluginManifest::parse("x/plugin.toml", &unknown).is_err());
+    }
+
+    /// `bare_specifiers` defaults to `external`, opts a path grammar into
+    /// `tsconfig` resolution, and is a descriptor error on a name grammar
+    /// (S-531).
+    #[test]
+    fn bare_specifiers_opt_a_path_grammar_into_tsconfig_resolution() {
+        assert_eq!(PluginManifest::parse("x/plugin.toml", GOOD).unwrap().bare_specifiers, BareSpecifiers::External);
+        let ts = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \".\"\nimport_specifier = \"path\"\nbare_specifiers = \"tsconfig\"",
+        );
+        let m = PluginManifest::parse("typescript/plugin.toml", &ts).unwrap();
+        assert_eq!(m.bare_specifiers, BareSpecifiers::Tsconfig);
+        // Ruby's load roots (S-566) are a path grammar's opt-in too.
+        let rb = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nimport_specifier = \"path\"\nbare_specifiers = \"load-path\"",
+        );
+        let m = PluginManifest::parse("ruby/plugin.toml", &rb).unwrap();
+        assert_eq!(m.bare_specifiers, BareSpecifiers::LoadPath);
+        // C++'s include roots (S-579) too.
+        let cpp = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nimport_specifier = \"path\"\nbare_specifiers = \"include-roots\"",
+        );
+        let m = PluginManifest::parse("cpp/plugin.toml", &cpp).unwrap();
+        assert_eq!(m.bare_specifiers, BareSpecifiers::IncludeRoots);
+        let on_a_name_grammar = GOOD.replace("module_separator = \"::\"", "module_separator = \"::\"\nbare_specifiers = \"include-roots\"");
+        assert!(PluginManifest::parse("x/plugin.toml", &on_a_name_grammar).is_err());
+
+        let on_a_name_grammar = GOOD.replace(
+            "module_separator = \"::\"",
+            "module_separator = \"::\"\nbare_specifiers = \"tsconfig\"",
+        );
+        let err = PluginManifest::parse("x/plugin.toml", &on_a_name_grammar)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`bare_specifiers` requires `import_specifier"), "{err}");
+        let unknown = GOOD.replace("module_separator = \"::\"", "module_separator = \".\"\nimport_specifier = \"path\"\nbare_specifiers = \"webpack\"");
         assert!(PluginManifest::parse("x/plugin.toml", &unknown).is_err());
     }
 
@@ -2733,6 +3541,7 @@ mod tests {
             ("ruby-test", TestConvention::RubyTest),
             ("php-unit", TestConvention::PhpUnit),
             ("scala-test", TestConvention::ScalaTest),
+            ("c-test-macros", TestConvention::CTestMacros),
         ] {
             let toml = format!(
                 r#"
@@ -2791,6 +3600,23 @@ mod tests {
             !m.reachability,
             "a descriptor that omits the flag is not reachability-capable"
         );
+    }
+
+    #[test]
+    fn parses_the_runtime_entry_points() {
+        // S-530: `entry_points` names the functions the language's runtime calls
+        // itself; omitted, it is empty; a non-list is refused.
+        let base = r#"
+            name = "go"
+            extensions = ["go"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+        "#;
+        let with = |key: &str| PluginManifest::parse("go/plugin.toml", &format!("{base}{key}\n"));
+        assert_eq!(with(r#"entry_points = ["main", "init"]"#).unwrap().entry_points, ["main", "init"]);
+        assert!(with("").unwrap().entry_points.is_empty(), "omitted, no name is a root");
+        assert!(with(r#"entry_points = "init""#).is_err());
     }
 
     #[test]
@@ -2897,6 +3723,57 @@ mod tests {
         "#;
         let err = PluginManifest::parse("x/plugin.toml", toml).unwrap_err();
         assert!(err.to_string().contains("framework_detectors"));
+    }
+
+    /// The S-541 `[framework_candidacy]` table: absent by default, so every
+    /// descriptor that omits it keeps matching its detectors on any reference
+    /// kind; and a misspelt key in it fails the load.
+    #[test]
+    fn the_s541_candidacy_table_defaults_off_and_parses() {
+        let base = r#"
+            name = "x"
+            extensions = ["x"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+        "#;
+        let m = PluginManifest::parse("x/plugin.toml", base).unwrap();
+        assert_eq!(m.framework_candidacy, None);
+
+        let toml = format!(
+            "{base}\n[framework_candidacy]\ndetectors_import_only = true\nreceiver_parameters = [\"app\", \"router\"]\n"
+        );
+        let m = PluginManifest::parse("x/plugin.toml", &toml).unwrap();
+        let candidacy = m.framework_candidacy.expect("the table parses");
+        assert!(candidacy.detectors_import_only);
+        assert_eq!(candidacy.receiver_parameters, ["app", "router"]);
+
+        let toml = format!("{base}\n[framework_candidacy]\nreceiver_parameter = [\"app\"]\n");
+        assert!(PluginManifest::parse("x/plugin.toml", &toml).is_err(), "a misspelt key is refused");
+    }
+
+    /// An empty or space-padded receiver parameter matches no recorded binding,
+    /// so it fails the load instead of silently scanning nothing.
+    #[test]
+    fn a_blank_or_padded_receiver_parameter_is_rejected() {
+        for entry in ["", " app", "router "] {
+            let toml = format!(
+                r#"
+                name = "x"
+                extensions = ["x"]
+                module_separator = "."
+                abi_version = 15
+                capabilities = []
+                [framework_candidacy]
+                receiver_parameters = ["{entry}"]
+            "#
+            );
+            let err = PluginManifest::parse("x/plugin.toml", &toml).unwrap_err();
+            assert!(
+                err.to_string().contains("receiver_parameters"),
+                "{entry:?}: {err}"
+            );
+        }
     }
 
     /// The consumer-side twin of [`empty_framework_detector_is_rejected`]: the

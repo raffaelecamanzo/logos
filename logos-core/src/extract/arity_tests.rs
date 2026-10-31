@@ -417,7 +417,8 @@ fn csharp_ranges_and_counts() {
 /// C++: a default is optional, `...` and a pack are variadic, `(void)` and `()`
 /// declare none; a pack expansion spreads. A definition outside a class body
 /// records no range — its defaults may sit on a separate declaration — while a
-/// prototype and an in-class definition do.
+/// prototype and an in-class definition do. A definition paired with its
+/// prototype is emitted before it (S-577).
 #[test]
 fn cpp_ranges_and_counts() {
     let src = "class K {\n\
@@ -443,8 +444,8 @@ fn cpp_ranges_and_counts() {
             ("z".to_string(), range(0, Some(0))),
             ("y".to_string(), range(0, Some(0))),
             ("d".to_string(), range(1, Some(2))),
-            ("out".to_string(), range(1, Some(2))),
             ("out".to_string(), None),
+            ("out".to_string(), range(1, Some(2))),
         ],
         "the prototype carries the default; the out-of-class definition records no range"
     );
@@ -664,7 +665,7 @@ fn ruby_ranges_and_counts() {
     assert_eq!(counts["m"], vec![Some(1), Some(2)]);
     assert_eq!(counts["n"], vec![Some(0)]);
     assert_eq!(counts["cfg"], vec![None], "a bare `key:` run is one hash or several keywords");
-    assert_eq!(counts["User"], vec![None], "the receiver row is no callee");
+    assert_eq!(counts["User::find"], vec![Some(1)], "a call on a constant counts its own arguments, never its constant's");
     assert_eq!(counts["gb"], vec![Some(1)], "a `&block` is no argument");
     assert_eq!((&counts["hs"], &counts["fa"]), (&vec![None], &vec![None]), "`**h` and `...` spread");
 }

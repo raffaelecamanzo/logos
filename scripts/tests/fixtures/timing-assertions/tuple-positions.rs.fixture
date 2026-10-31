@@ -1,0 +1,7 @@
+// `let (res, took) = (run(), t.elapsed())`: `took` is the elapsed time, `res` is not.
+fn tuple_elements() {
+    let t = Instant::now();
+    let (res, took) = (run(), t.elapsed());
+    assert!(res.len() < 10);
+    assert!(took < Duration::from_secs(1));
+}

@@ -710,6 +710,17 @@ fn location_key(rule: &str, path: &str) -> String {
     blake3::hash(format!("logos-finding-v1\u{1f}location\u{1f}{rule}\u{1f}{path}\u{1f}:::").as_bytes()).to_hex().to_string()
 }
 
+/// The key of a dependency result naming `package` (`name@version`) at
+/// `path` — what history.db migration 13 gives an OSV-Scanner lockfile result
+/// — spelled out here apart from the code under test.
+fn package_key(rule: &str, path: &str, package: &str) -> String {
+    let (name, version) = package.rsplit_once('@').unwrap();
+    blake3::hash(format!("logos-finding-v1\u{1f}package\u{1f}{rule}\u{1f}{path}\u{1f}{name}\u{1f}{version}").as_bytes()).to_hex().to_string()
+}
+
+/// The package every [`osv_report`] result names.
+const PACKAGE: &str = "rmcp@1.7.0";
+
 /// The D3 stopgap switched off on this test's thread until dropped
 /// ([`crate::security::STOPGAP_OFF`]), so a checked-in baseline knows a
 /// finding by its key alone.
@@ -773,7 +784,7 @@ fn a_baseline_blessed_in_one_checkout_holds_in_a_clone_by_its_key_alone() {
     let blessed: Vec<(String, String)> =
         read_latest(&a).unwrap().findings.into_iter().map(|f| (f.scanner_name, f.fingerprint)).collect();
     assert_eq!(blessed.len(), 1);
-    assert_eq!(blessed[0].1, location_key(ADVISORY, "Cargo.lock"), "keyed by the project-relative path");
+    assert_eq!(blessed[0].1, package_key(ADVISORY, "Cargo.lock", PACKAGE), "keyed by the project-relative path");
     super::save_baseline(&a, None, "config", &blessed).unwrap();
     bless(&dir, &a, 1);
     assert_eq!(ratchet_violations(&a), Vec::<String>::new());
@@ -860,26 +871,44 @@ fn osv_rows(root: &Path, report: &Path) -> Vec<(String, String, String, Vec<Stri
 /// upstream reports of one scan at each version — two advisories, one of them
 /// twice, every result pointed at one lockfile under the root — give one key
 /// per finding: the version never re-keys it, though it did before migration
-/// 10, whose keys each row lists as its legacy fingerprints.
+/// 10, whose keys each row lists as its legacy fingerprints — each version's
+/// own, as a store's first ingest of it records them. The repeated result is
+/// one finding (migration 13), listing both of its old keys. A later ingest
+/// of the other version into the same store records none of its own: the
+/// row keeps the old keys it has.
 #[test]
 fn osv_scanner_1_9_2_and_2_7_0_reports_of_one_lockfile_give_one_key() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().canonicalize().unwrap();
     let root = lockfile_project(&dir, "project");
     let target = format!("file://{}/Cargo.lock", root.display());
+    let fresh = || {
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", crate::history::db_path(&root).display()));
+        }
+    };
     let v1 = osv_rows(&root, &fixture_at(&dir, "osv-scanner-1.9.2.sarif", &target));
+    let v2_after_v1 = osv_rows(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &target));
+    assert_eq!(v2_after_v1, v1, "a later ingest of the other version keeps each row's key and old keys");
+    fresh();
     let v2 = osv_rows(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &target));
     let keys = |rows: &[(String, String, String, Vec<String>)]| rows.iter().map(|r| (r.0.clone(), r.2.clone())).collect::<Vec<_>>();
     assert_eq!(keys(&v1), keys(&v2), "one key per finding at either version");
     let distinct: std::collections::BTreeSet<&str> = v1.iter().map(|r| r.2.as_str()).collect();
-    assert_eq!((v1.len(), distinct.len()), (3, 3), "two advisories, one twice: three findings, three keys");
-    assert!(v1.iter().any(|r| r.2 == location_key("CVE-2021-3121", "Cargo.lock")), "{v1:?}");
+    assert_eq!((v1.len(), distinct.len()), (2, 2), "two advisories, one twice: two findings, two keys");
+    assert!(v1.iter().any(|r| r.2 == package_key("CVE-2021-3121", "Cargo.lock", "github.com/gogo/protobuf@1.3.1")), "{v1:?}");
     let legacy = |rows: &[(String, String, String, Vec<String>)]| rows.iter().map(|r| r.3.clone()).collect::<Vec<_>>();
     assert_ne!(legacy(&v1), legacy(&v2), "before migration 10 the version re-keyed them");
-    assert!(v1.iter().all(|r| r.3.len() == 1 && r.3[0] != r.2), "a 1.x row lists the one key it had");
+    let go = v1.iter().find(|r| r.0 == "CVE-2021-3121").unwrap();
+    let lockfile = format!("{}/Cargo.lock", root.display());
+    let mut had = vec![location_key("CVE-2021-3121", &lockfile), location_key("CVE-2021-3121", "Cargo.lock")];
+    had.sort();
+    assert_eq!(go.3, had, "a 1.x row lists the keys it had before migrations 10 and 13");
+    let repeated = v1.iter().find(|r| r.0 == "CVE-2022-24713").unwrap();
+    assert_eq!(repeated.3.len(), 4, "the repeat's row lists both results' keys before each: {repeated:?}");
     for (one, two) in v1.iter().zip(&v2) {
-        assert_eq!(two.3.len(), 2, "a 2.x row lists both keys it could have had: {two:?}");
-        assert!(two.3.contains(&one.3[0]), "one of them the key its 1.x report gave it: {one:?} {two:?}");
+        assert!(one.3.iter().all(|old| two.3.contains(old)), "a 2.x row lists every key its 1.x report gave it: {one:?} {two:?}");
+        assert!(two.3.len() > one.3.len(), "and the keys its own identity gave it before migration 10: {two:?}");
     }
 }
 
@@ -922,7 +951,11 @@ fn the_first_ingest_after_migration_10_from_osv_scanner_2_x_rekeys_a_1_x_store()
     write(&root, super::IGNORE_FILE, &format!("[[ignore]]\nfingerprint = \"{}\"\nreason = \"unreachable\"\n", old[0]));
 
     ingest(&root, &fixture_at(&dir, "osv-scanner-2.7.0.sarif", &format!("file://{lockfile}")), &["src/main.rs".to_string()]).unwrap();
-    let new: Vec<String> = rules.iter().map(|rule| location_key(rule, "Cargo.lock")).collect();
+    let new: Vec<String> = rules
+        .iter()
+        .zip(["github.com/gogo/protobuf@1.3.1", "regex@1.5.1"])
+        .map(|(rule, package)| package_key(rule, "Cargo.lock", package))
+        .collect();
     let conn = Connection::open(&path).unwrap();
     let older: Vec<String> = conn
         .prepare("SELECT fingerprint FROM security_findings WHERE snapshot_id = 1 ORDER BY rule_id")
@@ -942,11 +975,11 @@ fn the_first_ingest_after_migration_10_from_osv_scanner_2_x_rekeys_a_1_x_store()
     baseline.sort();
     assert_eq!(baseline, new, "and so is the baseline");
     drop(conn);
-    // The baseline does not record the 2.x report's second CVE-2022-24713
-    // result, so it is the one new finding — and the old-key suppression
-    // keeps CVE-2021-3121 out of the ratchet.
+    // The 2.x report's second CVE-2022-24713 result is the first one again
+    // (migration 13), so nothing is new — and the old-key suppression keeps
+    // CVE-2021-3121 out of the ratchet.
     let violations = ratchet_violations(&root);
-    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert_eq!(violations, Vec::<String>::new());
     let today = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
     let labelled = label(&read_latest(&root).unwrap().findings, &IgnoreFile::load(&root).unwrap(), &root, today);
     let entry = &labelled.entries[0];
@@ -978,7 +1011,7 @@ fn upgrade_reads_nothing_as_new(at: BaselineAt) {
     let paths = ["src/main.rs".to_string()];
     ingest(&root, &fixture_at(&dir, "osv-scanner-1.9.2.sarif", &target), &paths).unwrap();
     let before = read_latest(&root).unwrap().findings;
-    assert_eq!(before.len(), 3, "{at:?}: two advisories, one of them twice: {before:#?}");
+    assert_eq!(before.len(), 2, "{at:?}: two advisories, one of them twice, are two findings: {before:#?}");
     assert!(before.iter().all(|f| f.severity.as_str() == "unrated"), "{at:?}: 1.9.2 gives no rating: {before:#?}");
     assert!(before.iter().all(|f| f.severity.gated_as().as_str() == "medium"), "{at:?}: and is gated as medium: {before:#?}");
     let keys = |findings: &[SecurityFinding]| {
@@ -989,9 +1022,9 @@ fn upgrade_reads_nothing_as_new(at: BaselineAt) {
     let blessed: Vec<(String, String)> = before.iter().map(|f| (f.scanner_name.clone(), f.fingerprint.clone())).collect();
     super::save_baseline(&root, None, "config", &blessed).unwrap();
     if matches!(at, BaselineAt::CheckedIn) {
-        bless(&dir, &root, 3);
+        bless(&dir, &root, 2);
     }
-    let suppressed = location_key("CVE-2021-3121", "Cargo.lock");
+    let suppressed = package_key("CVE-2021-3121", "Cargo.lock", "github.com/gogo/protobuf@1.3.1");
     write(&root, super::IGNORE_FILE, &format!("[[ignore]]\nfingerprint = \"{suppressed}\"\nreason = \"unreachable\"\n"));
     assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "{at:?}: green before the upgrade");
 
@@ -1064,8 +1097,8 @@ fn a_path_outside_the_root_keeps_its_report_spelling() {
     let v2 = osv_rows(&root, &fixture("osv-scanner-2.7.0.sarif"));
     assert_eq!(v1.iter().map(|r| &r.2).collect::<Vec<_>>(), v2.iter().map(|r| &r.2).collect::<Vec<_>>());
     let go = v1.iter().find(|r| r.0 == "CVE-2021-3121").unwrap();
-    assert_eq!(go.2, location_key("CVE-2021-3121", "/path/to/go.mod"), "the report's own spelling");
-    assert!(v1.iter().all(|r| r.3.is_empty()), "1.9.2's key is unchanged by migration 10: {v1:?}");
+    assert_eq!(go.2, package_key("CVE-2021-3121", "/path/to/go.mod", "github.com/gogo/protobuf@1.3.1"), "the report's own spelling");
+    assert_eq!(go.3, [location_key("CVE-2021-3121", "/path/to/go.mod")], "1.9.2's key is unchanged by migration 10, and moved by 13 alone: {v1:?}");
 }
 
 /// Any scanner: a result at an absolute path under the root that binds to no
@@ -1079,6 +1112,7 @@ fn an_unbound_absolute_path_under_the_root_is_keyed_project_relative() {
     let at = |path: &str, identity: &[&str]| super::ParsedFinding {
         rule_id: "python.lang.security.audit.eval".to_string(),
         severity: super::Severity::High,
+        confidence: super::ScannerConfidence::Unstated,
         cwes: Vec::new(),
         message: "m".to_string(),
         redacted: false,
@@ -1087,6 +1121,7 @@ fn an_unbound_absolute_path_under_the_root_is_keyed_project_relative() {
         identity: identity.iter().map(|s| s.to_string()).collect(),
         commit: None,
         committed_at: None,
+        package: None,
     };
     let key = |f: &super::ParsedFinding, scanner: &str| super::fingerprint(f, scanner, root, None);
     let relative = key(&at("scripts/gen.py", &[]), "Semgrep OSS");
@@ -1153,7 +1188,9 @@ fn migration_10_marks_osv_snapshots_and_the_next_ingest_rekeys_every_surface() {
     let head = git(&root, None, &["rev-parse", "HEAD"]).trim().to_string();
     let abs = |p: &str| format!("{}/{p}", root.display());
     let old = [location_key(ADVISORY, &abs("Cargo.lock")), location_key(ADVISORY, &abs("sub/Cargo.lock"))];
-    let new = [location_key(ADVISORY, "Cargo.lock"), location_key(ADVISORY, "sub/Cargo.lock")];
+    // Each finding's key at the latest version, and the one migration 10 gave it.
+    let new = [package_key(ADVISORY, "Cargo.lock", PACKAGE), package_key(ADVISORY, "sub/Cargo.lock", PACKAGE)];
+    let at10 = [location_key(ADVISORY, "Cargo.lock"), location_key(ADVISORY, "sub/Cargo.lock")];
     let path = crate::history::db_path(&root);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     {
@@ -1228,7 +1265,15 @@ fn migration_10_marks_osv_snapshots_and_the_next_ingest_rekeys_every_surface() {
     let mut current: Vec<(String, Vec<String>)> =
         read_latest(&root).unwrap().findings.into_iter().map(|f| (f.fingerprint, f.legacy_fingerprints)).collect();
     current.sort();
-    let mut want: Vec<(String, Vec<String>)> = new.iter().cloned().zip(old.iter().map(|k| vec![k.clone()])).collect();
+    let mut want: Vec<(String, Vec<String>)> = new
+        .iter()
+        .cloned()
+        .zip(old.iter().zip(&at10).map(|(k, ten)| {
+            let mut keys = vec![k.clone(), ten.clone()];
+            keys.sort();
+            keys
+        }))
+        .collect();
     want.sort();
     assert_eq!(current, want);
     let mut baseline: Vec<String> = conn
@@ -1880,4 +1925,447 @@ fn a_pre_migration_11_row_at_head_alone_is_re_keyed_by_its_place() {
     let entry = &labelled.entries[0];
     assert_eq!((entry.orphaned, entry.suppressed, entry.should_name.as_deref()), (false, 1, Some(new.as_str())), "C4");
     assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "C4: nothing reads as new");
+}
+
+/// `base` as its second occurrence in one report — what [`super::occurrence`]
+/// gives a repeat — spelled out here apart from the code under test.
+fn second(base: &str) -> String {
+    blake3::hash(format!("{base}#2").as_bytes()).to_hex().to_string()
+}
+
+/// One advisory OSV-Scanner reports for two records of one alias group.
+const REPEATED: &str = "CVE-2026-107214";
+/// One advisory two npm packages of one lockfile share.
+const SHARED: &str = "CVE-2026-84373";
+
+/// A report shaped on desk-picker's (CR-252, re-measured for S-808): an
+/// osv-scanner 2.7.0 run holding one `go.mod` result twice, byte for byte —
+/// its writer emits a group's results once per record of the alias group, and
+/// `GO-2026-6684` and `GHSA-2j4c-ffch-9f23` both matched the module — and one
+/// advisory on two packages of `frontend/package-lock.json`; and a Trivy run
+/// holding two packages of `go.mod` on one advisory, both at Trivy's
+/// `go.mod` region `1:1-1:1`, one of them twice. Paths are absolute `file://`
+/// URIs under `root` for OSV-Scanner, `ROOTPATH`-relative for Trivy, as each
+/// writes them. Without `with_trivy`, the OSV-Scanner run alone.
+fn dependency_report(dir: &Path, root: &Path, with_trivy: bool) -> PathBuf {
+    let osv = |package: &str, rule: &str, aka: &str, path: &str| {
+        serde_json::json!({
+            "kind": "fail", "level": "warning", "ruleId": rule, "ruleIndex": 0,
+            "message": {"arguments": [], "text": format!("Package '{package}' is vulnerable to '{rule}' (also known as {aka}).")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"index": -1, "uri": format!("file://{}/{path}", root.display())}}}],
+            "partialFingerprints": {"primaryLocationLineHash": "f20a0292f3d0ba728afbcd47b156996a"}
+        })
+    };
+    let excelize = osv("github.com/xuri/excelize/v2@2.11.0", REPEATED, "'GO-2026-6684', 'GHSA-2j4c-ffch-9f23'", "go.mod");
+    let lockfile = "frontend/package-lock.json";
+    let trivy = |package: &str, version: &str| {
+        serde_json::json!({
+            "ruleId": REPEATED, "ruleIndex": 0, "level": "error",
+            "message": {"text": format!("Package: {package}\nInstalled Version: {version}\nVulnerability {REPEATED}\nSeverity: HIGH")},
+            "locations": [{
+                "physicalLocation": {"artifactLocation": {"uri": "go.mod", "uriBaseId": "ROOTPATH"}, "region": {"startLine": 1, "startColumn": 1, "endLine": 1, "endColumn": 1}},
+                "message": {"text": format!("go.mod: {package}@{version}")}
+            }]
+        })
+    };
+    let mut runs = vec![serde_json::json!(
+        {"tool": {"driver": {"name": "osv-scanner", "version": "2.7.0", "rules": []}}, "results": [
+            excelize,
+            osv("vitest@3.2.7", SHARED, "'GHSA-82fw-gwwq-j7x9'", lockfile),
+            excelize,
+            osv("@vitest/mocker@3.2.7", SHARED, "'GHSA-82fw-gwwq-j7x9'", lockfile),
+        ]}
+    )];
+    if with_trivy {
+        runs.push(serde_json::json!(
+            {"tool": {"driver": {"name": "Trivy", "version": "0.76.0", "rules": []}}, "results": [
+                trivy("github.com/xuri/excelize/v2", "v2.11.0"),
+                trivy("golang.org/x/crypto", "v0.58.0"),
+                trivy("github.com/xuri/excelize/v2", "v2.11.0"),
+            ]}
+        ));
+    }
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": runs});
+    let report = dir.join(format!("dependencies-{}.sarif", root.file_name().unwrap().to_string_lossy()));
+    std::fs::write(&report, sarif.to_string()).unwrap();
+    report
+}
+
+/// The findings of `scanner` stored under `root`, as `(fingerprint, sorted
+/// legacy fingerprints)`, sorted: each reporter of a finding the read merges
+/// across scanners (S-809) as the row it is stored as.
+fn keyed(root: &Path, scanner: &str) -> Vec<(String, Vec<String>)> {
+    let mut rows: Vec<(String, Vec<String>)> = read_latest(root)
+        .unwrap()
+        .findings
+        .into_iter()
+        .flat_map(|f| -> Vec<(String, String, Vec<String>)> {
+            if f.reporters.is_empty() {
+                vec![(f.scanner_name, f.fingerprint, f.legacy_fingerprints)]
+            } else {
+                f.reporters.into_iter().map(|r| (r.scanner_name, r.fingerprint, r.legacy_fingerprints)).collect()
+            }
+        })
+        .filter(|(name, ..)| name == scanner)
+        .map(|(_, fingerprint, legacy)| (fingerprint, legacy))
+        .collect();
+    rows.sort();
+    rows
+}
+
+/// S-808 (CR-252, FR-SC-02): a dependency result is keyed by its rule, path
+/// and package. OSV-Scanner's byte-identical repeat is one finding listing
+/// both keys it had before migration 13, its occurrence-suffixed second one
+/// among them; the two npm packages sharing one advisory in one lockfile stay
+/// two, as do Trivy's two `go.mod` packages sharing an advisory and a region,
+/// while Trivy's own repeat is one.
+#[test]
+fn a_repeated_dependency_result_is_one_finding_and_two_packages_on_one_advisory_are_two() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let summary = ingest(&root, &dependency_report(&dir, &root, true), &["src/main.rs".to_string()]).unwrap();
+    assert_eq!(summary.findings, 5, "seven results, two of them repeats: {summary:?}");
+
+    let lockfile = "frontend/package-lock.json";
+    let excelize = package_key(REPEATED, "go.mod", "github.com/xuri/excelize/v2@2.11.0");
+    let vitest = package_key(SHARED, lockfile, "vitest@3.2.7");
+    let mocker = package_key(SHARED, lockfile, "@vitest/mocker@3.2.7");
+    let osv = keyed(&root, "osv-scanner");
+    let mut keys: Vec<&str> = osv.iter().map(|(key, _)| key.as_str()).collect();
+    keys.sort_unstable();
+    let mut want = [excelize.as_str(), vitest.as_str(), mocker.as_str()];
+    want.sort_unstable();
+    assert_eq!(keys, want, "the repeat is one finding; one advisory on two packages is two");
+    let legacy = |key: &str| osv.iter().find(|(k, _)| k == key).unwrap().1.clone();
+    let abs = |path: &str| format!("{}/{path}", root.display());
+    // Each result's key before migration 13, and its location key before 10;
+    // its `partialFingerprints` key before 10 makes the sixth and seventh.
+    let had = [
+        location_key(REPEATED, "go.mod"),
+        second(&location_key(REPEATED, "go.mod")),
+        location_key(REPEATED, &abs("go.mod")),
+        second(&location_key(REPEATED, &abs("go.mod"))),
+    ];
+    let listed = legacy(&excelize);
+    assert!(had.iter().all(|old| listed.contains(old)), "both results' keys before migrations 10 and 13 are the one finding's: {listed:?}");
+    assert_eq!(listed.len(), 6, "{listed:?}");
+    assert!(legacy(&vitest).contains(&location_key(SHARED, lockfile)), "the first package takes the unsuffixed old key");
+    assert!(legacy(&mocker).contains(&second(&location_key(SHARED, lockfile))), "the second the suffixed one, in report order");
+
+    let trivy = keyed(&root, "Trivy");
+    let mut keys: Vec<&str> = trivy.iter().map(|(key, _)| key.as_str()).collect();
+    keys.sort_unstable();
+    let mut want = [
+        package_key(REPEATED, "go.mod", "github.com/xuri/excelize/v2@v2.11.0"),
+        package_key(REPEATED, "go.mod", "golang.org/x/crypto@v0.58.0"),
+    ];
+    want.sort();
+    assert_eq!(keys, want.iter().map(String::as_str).collect::<Vec<_>>(), "Trivy's repeat is one; its two packages at one region are two");
+}
+
+/// history.db 12 → 13, and the ingest after it (S-808, CR-252). Migration 13
+/// marks every OSV-Scanner, Trivy and Dependency-Check snapshot whose report
+/// hash no earlier migration marked, by driver name in any case, and nothing
+/// else; the next ingest of the very report the current snapshot came from is
+/// no no-op. It re-keys the rows of every snapshot — the repeat's two rows
+/// merging into one listing both old keys — and the ratchet's baseline, so
+/// nothing reads as new. A checked-in baseline and an ignore file written
+/// before the migration still know each finding by its old keys, and the
+/// ignore file is told the key to write. Another scanner's snapshot, rows and
+/// baseline entry are untouched.
+#[test]
+fn migration_13_marks_dependency_snapshots_and_the_next_ingest_rekeys_every_surface() {
+    let _off = StopgapOff::new();
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let report = dependency_report(&dir, &root, false);
+    let bytes = std::fs::read(&report).unwrap();
+    let head = git(&root, None, &["rev-parse", "HEAD"]).trim().to_string();
+    let lockfile = "frontend/package-lock.json";
+    let abs = |path: &str| format!("{}/{path}", root.display());
+    // What Logos 1.21 stored for the OSV-Scanner run, in report order: the
+    // repeat keyed apart by its occurrence suffix, as were the two packages.
+    let old = [
+        (location_key(REPEATED, "go.mod"), REPEATED, "go.mod"),
+        (location_key(SHARED, lockfile), SHARED, lockfile),
+        (second(&location_key(REPEATED, "go.mod")), REPEATED, "go.mod"),
+        (second(&location_key(SHARED, lockfile)), SHARED, lockfile),
+    ];
+    let excelize = package_key(REPEATED, "go.mod", "github.com/xuri/excelize/v2@2.11.0");
+    let vitest = package_key(SHARED, lockfile, "vitest@3.2.7");
+    let mocker = package_key(SHARED, lockfile, "@vitest/mocker@3.2.7");
+    let semgrep_key = "5".repeat(64);
+    let path = crate::history::db_path(&root);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    {
+        let conn = crate::history::db::open_at_version(&path, 12).unwrap();
+        let (older, other) = ("1".repeat(40), "3".repeat(40));
+        // The snapshot at HEAD is OSV-Scanner's latest, so only its mark
+        // keeps its own report's ingest from being a no-op.
+        let snapshots: [(i64, &str, &str, String); 8] = [
+            (1, older.as_str(), "osv-scanner", "older".to_string()),
+            (2, other.as_str(), "osv-scanner", "pre-12:marked".to_string()),
+            (3, head.as_str(), "osv-scanner", blake3::hash(&bytes).to_hex().to_string()),
+            (4, older.as_str(), "Semgrep OSS", "other".to_string()),
+            (5, older.as_str(), " TRIVY ", "trivy".to_string()),
+            (6, older.as_str(), "dependency-check", "dc".to_string()),
+            (7, older.as_str(), "trivy-operator", "near".to_string()),
+            (8, older.as_str(), "osv-scanner-wrapper", "near".to_string()),
+        ];
+        for (id, head, scanner, hash) in &snapshots {
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, ?3, '1', ?4, 'sarif', 1, ?2)",
+                rusqlite::params![id, head, scanner, hash],
+            )
+            .unwrap();
+        }
+        for id in [1, 3] {
+            for (key, rule, file) in &old {
+                conn.execute(
+                    "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding, report_path)
+                     VALUES (?1, ?2, ?3, 'unrated', '', 'm', 0, 'unmatched', ?4)",
+                    rusqlite::params![id, key, rule, abs(file)],
+                )
+                .unwrap();
+            }
+        }
+        conn.execute(
+            "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding, report_path)
+             VALUES (4, ?1, 'python.lang.security.audit.eval', 'high', '', 'm', 0, 'unmatched', 'app/db.py')",
+            [&semgrep_key],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO security_baseline (id, head_sha, config_hash, created_at) VALUES (1, 'h', 'c', 1)", []).unwrap();
+        for (key, _, _) in &old {
+            conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'osv-scanner')", [key]).unwrap();
+        }
+        conn.execute("INSERT INTO security_baseline_findings (fingerprint, scanner_name) VALUES (?1, 'Semgrep OSS')", [&semgrep_key]).unwrap();
+    }
+
+    let before = dump(&path, &["report_hash"]);
+    let migrated = crate::history::db::open_at_version(&path, 13).unwrap();
+    let marked: Vec<String> = migrated
+        .prepare("SELECT report_hash FROM security_snapshots ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            "pre-13:older".to_string(),
+            "pre-12:marked".to_string(),
+            format!("pre-13:{}", blake3::hash(&bytes).to_hex()),
+            "other".to_string(),
+            "pre-13:trivy".to_string(),
+            "pre-13:dc".to_string(),
+            "near".to_string(),
+            "near".to_string(),
+        ],
+        "every dependency scanner's snapshot is marked once, and nothing else"
+    );
+    drop(migrated);
+    assert_eq!(dump(&path, &["report_hash"])[1..], before[1..], "nothing else changes");
+    for version in 14..=crate::history::latest_schema_version() {
+        drop(crate::history::db::open_at_version(&path, version).unwrap());
+    }
+
+    assert!(!ingest(&root, &report, &["src/main.rs".to_string()]).unwrap().already_ingested, "the marked snapshot's own report re-ingests");
+    let conn = Connection::open(&path).unwrap();
+    let rows = |snapshot: i64| -> Vec<(String, String)> {
+        conn.prepare("SELECT fingerprint, legacy_fingerprints FROM security_findings WHERE snapshot_id = ?1 ORDER BY fingerprint")
+            .unwrap()
+            .query_map([snapshot], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    let joined = |keys: &[&String]| {
+        let mut keys: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        keys.join(",")
+    };
+    let mut want = vec![
+        (excelize.clone(), joined(&[&old[0].0, &old[2].0])),
+        (vitest.clone(), joined(&[&old[1].0])),
+        (mocker.clone(), joined(&[&old[3].0])),
+    ];
+    want.sort();
+    assert_eq!(rows(1), want, "an older snapshot's rows are re-keyed, the repeat's two merged into one listing both old keys");
+    assert_eq!(rows(4), [(semgrep_key.clone(), String::new())], "another scanner's row keeps its key");
+    let mut baseline: Vec<String> = conn
+        .prepare("SELECT fingerprint FROM security_baseline_findings")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    baseline.sort();
+    let mut want = vec![excelize.clone(), vitest.clone(), mocker.clone(), semgrep_key.clone()];
+    want.sort();
+    assert_eq!(baseline, want, "the baseline names each new key once, and another scanner's key as it was");
+    drop(conn);
+    let current = keyed(&root, "osv-scanner");
+    for (key, olds) in [(&excelize, vec![&old[0].0, &old[2].0]), (&vitest, vec![&old[1].0]), (&mocker, vec![&old[3].0])] {
+        let row = current.iter().find(|(k, _)| k == key).unwrap();
+        assert!(olds.iter().all(|old| row.1.contains(old)), "the current finding still lists its old keys: {row:?}");
+    }
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "nothing reads as new");
+
+    // A checked-in file blessed before migration 13 records the old keys —
+    // the repeat's two — and still knows each finding by them.
+    let checked_in = |keys: &[&String]| {
+        let findings: Vec<serde_json::Value> =
+            keys.iter().map(|key| serde_json::json!({"fingerprint": key, "rule_id": REPEATED, "path": null})).collect();
+        write(&root, ".logos/security-baseline.json", &format!("{:#}\n", serde_json::json!({"version": 1, "findings": findings})));
+    };
+    checked_in(&old.iter().map(|(k, _, _)| k).collect::<Vec<_>>());
+    assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "the file's old keys know every finding");
+    checked_in(&[&old[0].0, &old[1].0]);
+    let unknown = ratchet_violations(&root);
+    assert_eq!(unknown.len(), 1, "the repeat is known by its first old key, vitest by its own; mocker is new: {unknown:?}");
+    checked_in(&[&old[2].0]);
+    let unknown = ratchet_violations(&root);
+    assert_eq!(unknown.len(), 2, "the repeat is known by its occurrence-suffixed old key alone: {unknown:?}");
+    assert!(unknown.iter().all(|v| v.contains(lockfile)), "the two new ones are the lockfile's: {unknown:?}");
+    std::fs::remove_file(root.join(".logos/security-baseline.json")).unwrap();
+
+    // An ignore file written before the migration: the repeat's second old
+    // key, and the second package's.
+    let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+    let text = format!(
+        "[[ignore]]\nfingerprint = \"{}\"\nreason = \"unreachable\"\n\n[[ignore]]\nfingerprint = \"{}\"\nreason = \"dev only\"\n",
+        old[2].0, old[3].0
+    );
+    write(&root, super::IGNORE_FILE, &text);
+    let labelled = label(&read_latest(&root).unwrap().findings, &IgnoreFile::load(&root).unwrap(), &root, today);
+    let mut states: Vec<(bool, usize, Option<&str>)> =
+        labelled.entries.iter().map(|e| (e.orphaned, e.suppressed, e.should_name.as_deref())).collect();
+    states.sort();
+    let mut want = [(false, 1, Some(excelize.as_str())), (false, 1, Some(mocker.as_str()))];
+    want.sort();
+    assert_eq!(states, want, "each old key suppresses and names the new one");
+}
+
+/// S-808: a result whose scanner names no package keeps the key it had — a
+/// Trivy secret or misconfiguration beside Trivy's own vulnerabilities, keyed
+/// by rule, path and region exactly as before migration 13 (spelled out here),
+/// with no legacy key; each vulnerability is keyed by its package and lists
+/// that location key as its old one.
+#[test]
+fn a_trivy_secret_or_misconfiguration_keeps_its_key_beside_re_keyed_vulnerabilities() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let report = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif/trivy.sarif");
+    let summary = ingest(&root, &report, &["src/main.rs".to_string()]).unwrap();
+    assert_eq!(summary.findings, 46, "no result of the captured report repeats another");
+    let findings = read_latest(&root).unwrap().findings;
+    let at = |f: &SecurityFinding| {
+        let pos = |v: Option<i64>| v.map(|n| n.to_string()).unwrap_or_default();
+        let spelled = format!(
+            "logos-finding-v1\u{1f}location\u{1f}{}\u{1f}{}\u{1f}{}:{}:{}:{}",
+            f.rule_id,
+            f.location().unwrap_or_default(),
+            pos(f.start_line),
+            pos(f.start_column),
+            pos(f.end_line),
+            pos(f.end_column)
+        );
+        blake3::hash(spelled.as_bytes()).to_hex().to_string()
+    };
+    let (vulns, others): (Vec<&SecurityFinding>, Vec<&SecurityFinding>) = findings.iter().partition(|f| f.message.starts_with("Package: "));
+    assert_eq!((vulns.len(), others.len()), (40, 6), "{findings:#?}");
+    for f in &others {
+        assert_eq!(f.fingerprint, at(f), "{} keeps its key", f.rule_id);
+        assert!(f.legacy_fingerprints.is_empty(), "{} is not re-keyed", f.rule_id);
+    }
+    for f in &vulns {
+        assert_ne!(f.fingerprint, at(f), "{} is keyed by its package", f.rule_id);
+        assert_eq!(f.legacy_fingerprints, [at(f)], "{} lists its location key as its old one", f.rule_id);
+    }
+}
+
+/// S-808 review: a dependency result's key before migration 13 is recorded
+/// on the scanner's first ingest since it alone, in that report's order. A
+/// later report that lists a new package ahead of the others — so the old
+/// keys, suffixed by report order, would fall on other packages — hands none
+/// of them on: an ignore entry written under the first package's old key
+/// still suppresses that package alone and names its key, and the newcomer
+/// carries no old key at all.
+#[test]
+fn an_old_key_stays_on_its_package_when_a_later_report_lists_a_new_one_first() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let lockfile = "frontend/package-lock.json";
+    let report = |name: &str, packages: &[&str]| {
+        let results: Vec<serde_json::Value> = packages
+            .iter()
+            .map(|package| {
+                serde_json::json!({
+                    "ruleId": SHARED, "level": "warning",
+                    "message": {"text": format!("Package '{package}' is vulnerable to '{SHARED}'.")},
+                    "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/{lockfile}", root.display())}}}]
+                })
+            })
+            .collect();
+        let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+            "tool": {"driver": {"name": "osv-scanner", "version": "2.7.0", "rules": []}}, "results": results
+        }]});
+        let path = dir.join(name);
+        std::fs::write(&path, sarif.to_string()).unwrap();
+        path
+    };
+    let paths = ["src/main.rs".to_string()];
+    ingest(&root, &report("first.sarif", &["vitest@3.2.7", "@vitest/mocker@3.2.7"]), &paths).unwrap();
+    let vitest = package_key(SHARED, lockfile, "vitest@3.2.7");
+    let mocker = package_key(SHARED, lockfile, "@vitest/mocker@3.2.7");
+    let gamma = package_key(SHARED, lockfile, "tinypool@1.1.1");
+    let (first_old, second_old) = (location_key(SHARED, lockfile), second(&location_key(SHARED, lockfile)));
+    let text = format!("[[ignore]]\nfingerprint = \"{first_old}\"\nreason = \"dev only\"\n");
+    write(&root, super::IGNORE_FILE, &text);
+
+    ingest(&root, &report("second.sarif", &["tinypool@1.1.1", "vitest@3.2.7", "@vitest/mocker@3.2.7"]), &paths).unwrap();
+    let rows = keyed(&root, "osv-scanner");
+    let legacy = |key: &str| rows.iter().find(|(k, _)| k == key).unwrap().1.clone();
+    assert!(legacy(&vitest).contains(&first_old) && !legacy(&vitest).contains(&second_old), "{rows:?}");
+    assert!(legacy(&mocker).contains(&second_old) && !legacy(&mocker).contains(&first_old), "{rows:?}");
+    assert!(legacy(&gamma).iter().all(|old| *old != first_old && *old != second_old), "the newcomer takes no old key: {rows:?}");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+    let labelled = label(&read_latest(&root).unwrap().findings, &IgnoreFile::load(&root).unwrap(), &root, today);
+    let entry = &labelled.entries[0];
+    assert_eq!((entry.suppressed, entry.should_name.as_deref()), (1, Some(vitest.as_str())), "{entry:?}");
+    let suppressed: Vec<&str> = labelled.findings.iter().filter(|f| f.is_suppressed()).map(|f| f.finding.fingerprint.as_str()).collect();
+    assert_eq!(suppressed, [vitest.as_str()]);
+}
+
+/// S-808 review (BR-99): results merged into one dependency finding give it
+/// the highest severity any of them carries, whichever sorts first.
+#[test]
+fn a_merged_dependency_finding_takes_its_results_highest_severity() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
+    let root = lockfile_project(&dir, "project");
+    let result = |line: i64, score: &str| {
+        serde_json::json!({
+            "ruleId": "CVE-9", "level": "error", "properties": {"security-severity": score},
+            "message": {"text": "Package: lodash\nInstalled Version: 4.17.20\nVulnerability CVE-9"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "package-lock.json"}, "region": {"startLine": line}}}]
+        })
+    };
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "Trivy", "version": "0.76.0", "rules": []}},
+        "results": [result(40, "9.8"), result(10, "3.1")]
+    }]});
+    let path = dir.join("lodash.sarif");
+    std::fs::write(&path, sarif.to_string()).unwrap();
+    ingest(&root, &path, &["src/main.rs".to_string()]).unwrap();
+    let findings = read_latest(&root).unwrap().findings;
+    assert_eq!(findings.len(), 1, "{findings:#?}");
+    assert_eq!((findings[0].start_line, findings[0].severity.as_str()), (Some(10), "critical"), "placed first by position, rated by the highest");
 }

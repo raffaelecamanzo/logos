@@ -212,7 +212,7 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(names("Workspace")).toEqual([
       "Dashboard",
       "Workspace",
-      "Health",
+      "Quality",
       "Security",
       "Coverage",
       "Statistics",
@@ -224,7 +224,7 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     // hidden-widget register hides (CR-208).
     expect(names("Service")).toEqual([
       "Dashboard",
-      "Health",
+      "Quality",
       "Security",
       "Coverage",
       "Graph",
@@ -243,7 +243,7 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     expect(links.map((a) => a.textContent)).toEqual([
       "Dashboard",
       "Workspace",
-      "Health",
+      "Quality",
       "Security",
       "Coverage",
       "Statistics",
@@ -375,7 +375,7 @@ describe("Sidebar scope sections (S-425, FR-UI-35, ADR-66)", () => {
     await waitFor(() => expect(screen.getByRole("link", { name: /Dashboard/ })).toBeInTheDocument());
 
     // Keyed on the PATH, never the label: two of these items are called
-    // "Dashboard" and "Health" exactly like their member-scoped twins, which
+    // "Dashboard" and "Quality" exactly like their member-scoped twins, which
     // ADR-66 chose deliberately — so a label query matches the member-scoped
     // link that SHOULD be there and proves nothing. The route is what separates
     // the levels.

@@ -76,9 +76,9 @@ pub const COVERAGE_TOOLS: &[&str] =
     &["coverage_ingest", "coverage_status", "coverage_refresh", "coverage_run"];
 
 /// The security tools wired to the evidence store and the scanner orchestrator
-/// (S-667, CR-217, FR-SC-01/06/07/08).
+/// (S-667, CR-217, FR-SC-01/06/07/08; `security_reconfirm` by S-818, FR-SC-32).
 pub const SECURITY_TOOLS: &[&str] =
-    &["security_scan", "security_ingest", "security_status", "security_findings"];
+    &["security_scan", "security_ingest", "security_status", "security_findings", "security_reconfirm"];
 
 /// The cross-service tools the **federated** backing adds on top of the
 /// single-root roster (S-248/CR-061 FR-WS-05; `workspace_reachability` by

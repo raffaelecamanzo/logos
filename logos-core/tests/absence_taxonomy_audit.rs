@@ -129,7 +129,27 @@
 //! counts and verdicts are unchanged, and the S-444 addendum above, which names
 //! `main.rs`, is left as it was written. Caught by this suite on the move itself.
 //!
+//! **Addendum, 2026-10-28 ([S-635]) — 0 rows, 0 occurrences; one lexicon
+//! word added, no correction.** The reference-resolution figures of `status`
+//! name their absence through `ReferenceFigureAbsence` in `models/quality.rs`:
+//! `no-references-recorded` as written, and `no-internal-candidates`, the one
+//! wording the internal-candidate headline coined, for a graph whose every code
+//! reference is provably external. Both are serde-derived tags, not source
+//! literals, so the walk finds no site;
+//! `the_resolution_denominator_speaks_only_the_lexicon` pins them structurally,
+//! and the lexicon now holds twenty-one spellings.
+//!
+//! **Addendum, 2026-10-29 ([S-637]) — 1 row, +1 test-scope occurrence; no
+//! production site, no correction.** The Workspace Dashboard's reference
+//! resolution states an absent pooled figure in words, never 0% or 100%. Its
+//! view test fixes the absent payload with the server's own tag,
+//! `no-references-recorded` (`WorkspaceDashboardView.test.tsx`), which the view
+//! never reads — it words the absence from the figure's counts — so the SPA
+//! gains no site. [`S637_ADDITION`].
+//!
+//! [S-637]: ../../docs/planning/journal.md#s-637-the-workspace-states-a-workspace-level-reference-resolution-counting-other-members-references-as-internal
 //! [S-639]: ../../docs/planning/journal.md#s-639-an-extension-host-composes-optional-capabilities-at-one-composition-root
+//! [S-635]: ../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
 //! [CR-203]: ../../docs/requests/CR-203-every-web-widget-explains-itself.md
 //! [CR-206]: ../../docs/requests/CR-206-the-widget-frame-drops-the-action-line.md
 //! [S-615]: ../../docs/planning/journal.md#s-615-health-explains-its-gate-and-signal-and-gives-each-of-the-ten-dimensions-a-widget
@@ -221,7 +241,9 @@
 use std::path::{Path, PathBuf};
 
 use logos_core::models::navigation::{DenominatorAbsence, ResolutionDenominator};
-use logos_core::models::quality::{absence, CrossFileAbsence, EvaluatedSetAbsence, SignalAbsence};
+use logos_core::models::quality::{
+    absence, CrossFileAbsence, EvaluatedSetAbsence, ReferenceFigureAbsence, SignalAbsence,
+};
 
 /// The date the figures in this module's header were taken. A census is a
 /// reading of one tree at one moment, and an undated one invites being read as
@@ -257,7 +279,7 @@ const AUDITED_ON: &str = "2026-09-20";
 /// # The two exclusions, both stated rather than silent
 ///
 /// `logos-core/src/models/quality.rs` holds [`absence::SENTINELS`], so walking
-/// it would report the lexicon as twenty sites — the self-reference [S-435]'s
+/// it would report the lexicon as twenty-one sites — the self-reference [S-435]'s
 /// sibling harness records hitting. It is checked separately, and more
 /// strictly, by [`the_taxonomy_module_is_not_a_reporting_site`].
 ///
@@ -394,7 +416,7 @@ fn a_second_unrecorded_site() -> String {
 /// moves when the *absences* move rather than when the code around them does.
 /// The occurrence counts carry what the key drops: a second `n/a` added to a
 /// file that already has one moves its count and fails.
-const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
+const CENSUS: [(&str, &str, &str, usize, usize, &str); 85] = [
     (
         "core",
         "logos-core/src/config/discovery.rs",
@@ -1061,6 +1083,14 @@ const CENSUS: [(&str, &str, &str, usize, usize, &str); 84] = [
     ),
     (
         "spa",
+        "web/ui/src/views/workspace/WorkspaceDashboardView.test.tsx",
+        "no-references-recorded",
+        0,
+        1,
+        "NO PRODUCTION SITE — 1 test occurrence(s): the server's serde-derived `ReferenceFigureAbsence` tag in an absent workspace-figure fixture (S-637); the view words the absence from the counts and reads no tag",
+    ),
+    (
+        "spa",
         "web/ui/src/views/workspace/WorkspaceView.tsx",
         "n/a",
         1,
@@ -1507,7 +1537,7 @@ fn whole_token(code: &str, start: usize, end: usize) -> bool {
 /// Match `sentinel` at `at`, tolerating any run of whitespace where it has a
 /// single space; the end offset, or `None`.
 ///
-/// Nine of the twenty sentinels contain a space, and both languages on these
+/// Nine of the twenty-one sentinels contain a space, and both languages on these
 /// surfaces routinely split a rendered sentence across source lines — Rust with
 /// a `\` continuation inside a `format!`, TSX with a formatter wrapping a JSX
 /// text node. `readout.rs` and `governance/mod.rs` are written almost entirely
@@ -2065,7 +2095,7 @@ fn a_character_that_folds_to_a_different_length_does_not_move_a_site() {
 
 /// **A sentinel the formatter wrapped is still one site.**
 ///
-/// Nine of the twenty sentinels contain a space, and `readout.rs` and
+/// Nine of the twenty-one sentinels contain a space, and `readout.rs` and
 /// `governance/mod.rs` are written almost entirely in `\`-continued `format!`
 /// strings. A plain substring match needs exactly one space, so a reflow of the
 /// wrong line makes a conformant site invisible — under-capture, the silent
@@ -2373,11 +2403,31 @@ const SPRINT93_DELTA: (usize, usize, usize) = (2, 2, 24);
 /// [CR-206]: ../../docs/requests/CR-206-the-widget-frame-drops-the-action-line.md
 const HF1_REMOVAL: (usize, usize, usize) = (0, 5, 10);
 
+/// What [S-637] added to the census on 2026-10-29: `(production rows added,
+/// production occurrences added, test occurrences added)` — no production
+/// site, one test-scope fixture of an absent workspace reference resolution
+/// (`WorkspaceDashboardView.test.tsx`).
+///
+/// [S-637]: ../../docs/planning/journal.md#s-637-the-workspace-states-a-workspace-level-reference-resolution-counting-other-members-references-as-internal
+const S637_ADDITION: (usize, usize, usize) = (0, 0, 1);
+
 #[test]
 fn the_audit_reports_its_count_with_its_denominator() {
     let production_rows_now = CENSUS.iter().filter(|r| r.3 > 0).count();
     let production_occurrences_now: usize = CENSUS.iter().map(|r| r.3).sum();
     let test_occurrences: usize = CENSUS.iter().map(|r| r.4).sum();
+    assert_eq!(
+        (production_occurrences_now, production_rows_now, test_occurrences),
+        (84, 44, 136),
+        "the census as it stands after S-637's addendum, 2026-10-29: 84 production \
+         occurrences over 44 production rows, beside 136 test-scope occurrences"
+    );
+    // The reading before S-637: Sprint 93 HF-1's addendum, 2026-10-08.
+    let (production_occurrences_now, production_rows_now, test_occurrences) = (
+        production_occurrences_now - S637_ADDITION.1,
+        production_rows_now - S637_ADDITION.0,
+        test_occurrences - S637_ADDITION.2,
+    );
     assert_eq!(
         (production_occurrences_now, production_rows_now, test_occurrences),
         (84, 44, 135),
@@ -2737,7 +2787,7 @@ fn one_condition_has_one_wording_across_the_language_boundary() {
 /// **The lexicon's own home is not a reporting site.**
 ///
 /// `models/quality.rs` is deliberately off the scanned surfaces — it holds
-/// [`absence::SENTINELS`], so scanning it would report the lexicon as twenty
+/// [`absence::SENTINELS`], so scanning it would report the lexicon as twenty-one
 /// sites, the self-reference [S-435]'s sibling harness records hitting. That
 /// exclusion is the one hole in the walk, so it is closed here rather than
 /// assumed: the file is a serde read-model and renders nothing, and the only
@@ -2845,6 +2895,29 @@ fn the_resolution_denominator_speaks_only_the_lexicon() {
     })
     .collect();
     assert_eq!(answer_tags, ["unindexed", "no-language-recorded", "n/a"]);
+    // The reference-resolution figures' absences (S-635): every arm, each
+    // reached through the only constructors that produce them.
+    let figure_tags: Vec<String> = [
+        logos_core::models::InternalResolution::measured(0, 0, 0).absence,
+        logos_core::models::InternalResolution::measured(2, 0, 2).absence,
+        logos_core::models::DocResolution::measured(0, 0).absence,
+    ]
+    .into_iter()
+    .map(|absence: Option<ReferenceFigureAbsence>| {
+        serde_json::to_value(absence.expect("an empty denominator, so an absence"))
+            .expect("serialises")["cause"]
+            .as_str()
+            .expect("a string tag")
+            .to_string()
+    })
+    .collect();
+    assert_eq!(figure_tags[0], figure_tags[2], "one wording for no reference, on both figures");
+    for tag in &figure_tags {
+        assert!(
+            absence::SENTINELS.contains(&tag.as_str()),
+            "{tag:?} is a reference figure's named state the closed lexicon does not carry"
+        );
+    }
     for tag in &answer_tags {
         assert!(
             absence::SENTINELS.contains(&tag.as_str()),
@@ -2854,9 +2927,9 @@ fn the_resolution_denominator_speaks_only_the_lexicon() {
 
     assert_eq!(
         absence::SENTINELS.len(),
-        20,
-        "the closed lexicon holds twenty spellings (sixteen before S-441, \
-         nineteen before S-442). An addition is a new absence wording on some \
+        21,
+        "the closed lexicon holds twenty-one spellings (sixteen before S-441, \
+         nineteen before S-442, twenty before S-635). An addition is a new absence wording on some \
          surface: name its producer and its census row, then change this figure \
          and the prose counts in this file together"
     );

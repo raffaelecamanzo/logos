@@ -117,7 +117,7 @@ fn yes_returns_promptly_without_blocking_on_indexing() {
 
     assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(
-        cfg!(coverage) || elapsed.as_secs() < 10,
+        cfg!(coverage) || elapsed < logos_core::perf::scaled(std::time::Duration::from_secs(10)),
         "init --workspace must return promptly, not block on indexing N members: {elapsed:?}"
     );
 
@@ -851,7 +851,7 @@ fn run_with_stdin_held_open(project: &Path, args: &[&str], feed: &str) -> Output
     stdin.write_all(feed.as_bytes()).expect("the pipe accepts the answer");
     stdin.flush().ok();
 
-    let deadline = Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = Instant::now() + logos_core::perf::scaled(std::time::Duration::from_secs(60));
     while child.try_wait().expect("the child is waitable").is_none() {
         assert!(
             Instant::now() < deadline,

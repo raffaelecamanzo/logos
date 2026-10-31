@@ -16,6 +16,8 @@
 #   skills/logos-sec-review/scripts/sec-coverage.sh     the scanners and the uncovered OWASP categories
 #   skills/logos-sec-review/scripts/suppress-draft.sh   the ignore entry a false positive gets
 #   skills/logos-sec-review/scripts/sec-check-report.sh the rules on the report
+#   skills/logos-sec-review/scripts/sec-backlog.sh     the backlog selection, bounded (--backlog)
+#   skills/logos-sec-review/scripts/sec-context.sh     the graph context each finding is handed with
 #
 # and the logos-review scripts it reuses in place (edit-scope.sh, merge-base.sh).
 #
@@ -36,7 +38,10 @@
 #   6. the re-scan: every way it did not happen;
 #   7. the report check: each rule, each by a report one line from valid, and the
 #      claim grep with its near misses;
-#   8. the draft, and the guardrail that holds its write.
+#   8. the draft, and the guardrail that holds its write;
+#   12. the backlog (S-819): the selection and its bounds, the context each finding reaches
+#      the agent with, the draft's evidence, the report's BACKLOG line, and a backlog fix
+#      proven with the findings the bound left out still known.
 #
 # Usage: bash scripts/tests/test-plugin-sec-review-skill.sh
 # Exit:  0 all cases behaved, 1 a case did not
@@ -108,9 +113,25 @@ case "$sub" in
         exit "${STUB_REVIEW_RC:-0}"
         ;;
     sync) exit "${STUB_SYNC_RC:-0}" ;;
+    node | callers | callees)
+        # The symbol is always the first argument. <sub>.<symbol letters and digits>.json answers it; a symbol
+        # the graph does not hold answers as the real logos does, with exit 0 and nothing resolved.
+        slug="${1//[^A-Za-z0-9]/}"
+        if [ -f "$STUB_DIR/$sub.$slug.json" ]; then
+            emit "$STUB_DIR/$sub.$slug.json"
+        elif [ "$sub" = node ]; then
+            echo '{"query":"x","node":null,"suggestions":[],"warnings":[]}'
+        else
+            echo '{"query":"x","resolved":null,"total":0,"'"$sub"'":[],"suggestions":[],"warnings":[]}'
+        fi
+        ;;
     security)
         what="${1:-} ${2:-}"
         case "$what" in
+            "reconfirm --help")
+                [ -z "${STUB_NO_RECONFIRM:-}" ] || { echo "error: unrecognized subcommand 'reconfirm'" >&2; exit 2; }
+                echo "Usage: logos security reconfirm [OPTIONS] <FINGERPRINT>"
+                ;;
             "scan --help")
                 if [ -n "${STUB_OLD_SCAN:-}" ]; then
                     echo "Usage: logos security scan [OPTIONS]"
@@ -1471,6 +1492,588 @@ RC=0
 STUB_DIR="$FX" STUB_CALLS="$CALLS" STUB_VERSION=1.20.5 "$BIN/logos" security findings --json --scope all >/dev/null 2>&1 || RC=$?
 expect "the 1.20.x stub rejects --scope (so the omission above is what keeps the proof answering)" "$RC" 2
 (cd "$GR" && rm -rf tests)
+
+# --- 12. the backlog (S-819, FR-SC-19 amended, FR-SC-32, UAT-SC-15) ----------------------
+
+echo "== 12. sec-backlog.sh, sec-context.sh, the evidence draft, the backlog report"
+for f in sec-backlog sec-context; do
+    [ -f "$SCR/$f.sh" ] && ok "$f.sh exists" || bad "$f.sh is missing"
+done
+python3 -I - "$FX" <<'PY'
+import hashlib, json, re, sys
+
+fx = sys.argv[1]
+fp = lambda s: hashlib.sha256(s.encode()).hexdigest()
+slug = lambda s: re.sub(r"[^A-Za-z0-9]", "", s)
+sym = lambda path, name: f"logos . ex . {path}/`{path.rsplit('/', 1)[-1]}`/{name}()."
+SYMS = {}
+
+
+def ref(key, path, name, line):
+    SYMS[key] = sym(path, name)
+    return {"symbol": SYMS[key], "name": name, "kind": "function", "file": path, "line": line}
+
+
+def stored(name, rule, severity, path, line, scanner="Semgrep OSS", scope="production", conf="medium",
+           needs_review=False, redacted=False, enclosing=None, suppression=None, freshness="fresh", **kw):
+    reach = "resolved" if enclosing else "unbound"
+    f = {
+        "scanner_name": scanner, "scanner_version": "1.85.0", "head_sha": "abc", "fingerprint": fp(name),
+        "rule_id": rule, "severity": severity, "confidence": conf, "cwes": [], "message": f"{rule} at {path}",
+        "redacted": redacted, "binding": "bound" if path else "unbound", "report_path": path, "path": path,
+        "start_line": line, "end_line": line, "freshness": freshness if path else "n/a", "owasp": ["A05:2025"],
+        "suppression": suppression, "code_scope": scope, "needs_review": needs_review,
+        "context": {"line": line, "enclosing": {"confidence": "resolved" if enclosing else "unbound", "symbol": enclosing,
+                                                 "unbound_because": None if enclosing else "no_location"},
+                    "reachability": {"confidence": reach, "verdict": "unknown", "route": None, "unresolved_because": None},
+                    "blast_radius": {}},
+    }
+    f.update(kw)
+    return f
+
+
+fs = [
+    # the backlog: nine findings, in the order the selection must give them
+    stored("stale", "rule.stale", "critical", "app/stale.go", 5, enclosing=ref("stale", "app/stale.go", "Stale", 1), freshness="stale"),
+    stored("sql", "string-formatted-query", "high", "app/query.go", 30, conf="low", needs_review=True,
+           enclosing=ref("sql", "app/query.go", "BuildQuery", 20)),
+    stored("cookie", "cookie-missing-secure", "medium", "app/cookie.go", 12,
+           enclosing=ref("cookie", "app/cookie.go", "SessionCookie", 10)),
+    stored("exp", "rule.exp", "medium", "app/exp.go", 8, enclosing=ref("exp", "app/exp.go", "Exp", 5),
+           suppression={"state": "expired", "reason": "old reason", "expires": "2026-01-01", "by": {"fingerprint": fp("exp")}}),
+    stored("exp2", "rule.exp2", "medium", "app/exp.go", 20, enclosing=ref("exp2", "app/exp.go", "Exp2", 18)),
+    stored("app2", "rule.app2", "medium", "app2/other.go", 3, enclosing=ref("app2", "app2/other.go", "Other", 1)),
+    stored("infra", "AVD-KSV-0014", "medium", "k8s/deploy.yaml", 20, scanner="trivy"),
+    stored("ood", "rule.ood", "low", "app/legacy.go", 9, enclosing=ref("ood", "app/legacy.go", "Legacy", 4),
+           suppression={"state": "out_of_date", "reason": "the cookie is Secure", "expires": None, "by": {"fingerprint": fp("ood")},
+                        "changed": [{"symbol": "logos . ex . app/`cfg.go`/DefaultConfig().", "name": "DefaultConfig", "change": "changed"}]}),
+    stored("nofile", "CKV_K8S_21", "low", None, None, scanner="checkov"),
+    # left to other flows or to nobody: a suppressed finding, test code, a dev-only dependency, a secret, two dependency findings
+    stored("sup", "rule.sup", "high", "app/sup.go", 2, enclosing=ref("sup", "app/sup.go", "Sup", 1),
+           suppression={"state": "suppressed", "reason": "fine", "expires": None, "by": {"fingerprint": fp("sup")}}),
+    stored("test", "rule.test", "high", "app/x_test.go", 2, scope="test", enclosing=ref("test", "app/x_test.go", "TestX", 1)),
+    stored("dev", "GHSA-aaaa-bbbb-cccc", "high", "web/package-lock.json", 2, scanner="osv-scanner", scope="dev"),
+    stored("secret", "aws-access-key", "high", "config/loader.py", 4, scanner="gitleaks", redacted=True,
+           message="secret-class finding redacted"),
+    stored("osv", "GHSA-dddd-eeee-ffff", "high", "requirements.txt", 2, scanner="osv-scanner"),
+    stored("trivydep", "CVE-2024-12345", "high", "go.mod", 3, scanner="trivy"),
+    stored("unscoped", "rule.unscoped", "high", "app/u.go", 2, scope=None, enclosing=ref("unscoped", "app/u.go", "U", 1)),
+]
+cats = [{"id": "A02:2025", "name": "Security Misconfiguration", "scanners": [], "enabled_scanners": [], "state": {"state": "not_covered"}}]
+scanned = [{"driver": "Semgrep OSS", "version": "1.85.0", "head_sha": "abc", "findings": 9},
+           {"driver": "trivy", "version": "0.50.0", "head_sha": "abc", "findings": 2}]
+base = {"edition": "2025", "as_of": "2026-10-30", "scanned": scanned, "never_run": [], "notice": None, "total": len(fs),
+        "scope": "all", "hidden_by_scope": 0, "hidden_needs_review": 0, "hidden_dev": 0, "categories": cats}
+json.dump(dict(base, findings=fs), open(f"{fx}/bk-findings.json", "w"))
+json.dump(dict(base, scanned=[], findings=[], notice="no security report is stored: run `logos security scan`"),
+          open(f"{fx}/bk-none.json", "w"))
+json.dump(dict(base, findings=[]), open(f"{fx}/bk-empty.json", "w"))
+# After the exp fix: its fingerprint is gone, its neighbour in the file (deferred by the bound) remains.
+json.dump(dict(base, findings=[f for f in fs if f["fingerprint"] == fp("exp2")]), open(f"{fx}/bk-after-exp.json", "w"))
+scan = {"consent_recorded": [], "findings": 0, "scanners": [
+    {"scanner": "semgrep", "driver": "Semgrep OSS", "version": "1.85.0", "outcome": "ran", "scope": {"kind": "paths", "paths": ["app/exp.go"]}}]}
+json.dump(scan, open(f"{fx}/scan-exp.json", "w"))
+
+# The graph: the cookie's enclosing function calls the function that sets Secure and is called by a handler.
+cookie_dc = ref("cookie_dc", "app/cookie.go", "DefaultCookieConfig", 1)
+sql_ph = ref("sql_ph", "app/query.go", "Placeholders", 40)
+serve = ref("serve", "app/server.go", "Serve", 7)
+
+
+def put(kind, symbol, doc):
+    json.dump(doc, open(f"{fx}/{kind}.{slug(symbol)}.json", "w"))
+
+
+def node(r, code):
+    return {"query": r["symbol"], "node": dict(r, end_line=r["line"] + 3, signature=None, annotations=[], edges=[], code=code),
+            "suggestions": [], "warnings": []}
+
+
+put("node", SYMS["cookie"], node(fs[2]["context"]["enclosing"]["symbol"], "func SessionCookie() *http.Cookie {\n\treturn &http.Cookie{Secure: DefaultCookieConfig().Secure}\n}"))
+put("node", SYMS["cookie_dc"], node(cookie_dc, "func DefaultCookieConfig() Config {\n\treturn Config{Secure: true}\n}"))
+put("node", SYMS["sql"], node(fs[1]["context"]["enclosing"]["symbol"], "func BuildQuery(n int) string {\n\treturn fmt.Sprintf(\"select %s\", Placeholders(n))\n}"))
+put("node", SYMS["sql_ph"], node(sql_ph, "func Placeholders(n int) string {\n\treturn strings.Repeat(\"$\", n)\n}"))
+put("callers", SYMS["cookie"], {"query": SYMS["cookie"], "resolved": fs[2]["context"]["enclosing"]["symbol"], "total": 1, "callers": [serve],
+                                "suggestions": [], "warnings": []})
+put("callees", SYMS["cookie"], {"query": SYMS["cookie"], "resolved": fs[2]["context"]["enclosing"]["symbol"], "total": 1, "callees": [cookie_dc],
+                                "suggestions": [], "warnings": []})
+put("callees", SYMS["sql"], {"query": SYMS["sql"], "resolved": fs[1]["context"]["enclosing"]["symbol"], "total": 1, "callees": [sql_ph],
+                             "suggestions": [], "warnings": []})
+# Two nodes of one bare name: the name is not an identity, only the canonical symbol is.
+json.dump({"query": "Placeholders", "node": dict(sql_ph, edges=[], code="x"), "suggestions": [], "warnings": []},
+          open(f"{fx}/node.Placeholders.json", "w"))
+for k, v in SYMS.items():
+    open(f"{fx}/sym-{k}", "w").write(v)
+for n in ("stale", "sql", "cookie", "exp", "exp2", "app2", "infra", "ood", "nofile", "sup", "test", "dev", "secret", "osv", "trivydep", "unscoped"):
+    open(f"{fx}/fp-{n}", "w").write(fp(n))
+PY
+mkdir -p "$GR/k8s" "$GR/app"
+python3 -I -c 'print("\n".join(f"line{n}" for n in range(1, 41)))' >"$GR/k8s/deploy.yaml"
+printf 'package app\n' >"$GR/app/exp.go"
+BK="$WORK/bk.json"
+bkrun() { run STUB_FINDINGS=bk-findings "$@"; }
+sel() { bkrun -- "$B0" "$SCR/sec-backlog.sh" --out "$BK" "$@"; }
+bkdoc() { py 'import json,sys; d=json.load(open(sys.argv[1])); b=d["backlog"]; exec(sys.argv[2])' "$BK" "$1"; }
+FPOF() { cat "$FX/fp-$1"; }
+SYMOF() { cat "$FX/sym-$1"; }
+
+# --- selection ---
+: >"$CALLS"
+sel
+expect "the whole backlog: exit 0" "$RC" 0
+den "sec-backlog"
+contains "the selection reads every stored finding, every code scope" "$(grep '^security findings' "$CALLS")" "security findings --json --scope all"
+contains "the summary: nine selected of nine eligible, none not reached" "$OUT" "9 selected of 9 eligible; 0 not reached"
+contains "the denominator names the population and what was left to other flows" "$ERR" "16 stored finding(s)"
+expect "selected: the nine, by severity then place" "$(bkdoc 'print(",".join(f["rule_id"] for f in d["security"]["findings"] if f["status"]=="backlog"))')" \
+    "rule.stale,string-formatted-query,cookie-missing-secure,rule.exp,rule.exp2,rule.app2,AVD-KSV-0014,rule.ood,CKV_K8S_21"
+expect "the doc is a backlog doc" "$(bkdoc 'print(d["mode"], b["population"], b["eligible"], b["selected"], b["not_reached"])')" "backlog 16 9 9 0"
+expect "excluded, counted by why" "$(bkdoc 'print(sorted(b["excluded"].items()))')" \
+    "[('dependency', 2), ('dev', 1), ('secret', 1), ('suppressed', 1), ('test', 1), ('unscoped', 1)]"
+expect "a suppressed finding is not a row, and is in the suppressed list the proof reads" "$(bkdoc 'print([f["rule_id"] for f in d["security"]["suppressed"]])')" "['rule.sup']"
+expect "test, dev, secret and dependency findings stay in the findings list, outside the backlog (the proof must know them)" \
+    "$(bkdoc 'print(sorted(f["rule_id"] for f in d["security"]["findings"] if f["status"]=="outside"))')" \
+    "['CVE-2024-12345', 'GHSA-aaaa-bbbb-cccc', 'GHSA-dddd-eeee-ffff', 'aws-access-key', 'rule.test', 'rule.unscoped']"
+expect "a needs-review finding is selected and says so" "$(bkdoc 'print([f["needs_review"] for f in d["security"]["findings"] if f["rule_id"]=="string-formatted-query"])')" "[True]"
+expect "an infrastructure finding with no enclosing symbol is selected" "$(bkdoc 'print(sum(1 for f in d["security"]["findings"] if f["rule_id"]=="AVD-KSV-0014" and f["status"]=="backlog"))')" "1"
+expect "a finding of no file is selected" "$(bkdoc 'print(sum(1 for f in d["security"]["findings"] if f["rule_id"]=="CKV_K8S_21" and f["status"]=="backlog"))')" "1"
+expect "an expired suppression is active again: selected" "$(bkdoc 'print(sum(1 for f in d["security"]["findings"] if f["rule_id"]=="rule.exp" and f["status"]=="backlog"))')" "1"
+expect "an out-of-date verdict is selected, carrying why" "$(bkdoc 'print([f["suppression"]["changed"][0]["name"] for f in d["security"]["findings"] if f["rule_id"]=="rule.ood"])')" "['DefaultConfig']"
+
+expect "the counts of rows that need review and rows that re-open a verdict" "$(bkdoc 'print(b["needs_review"], b["reopened"])')" "1 2"
+contains "...and the summary line says them" "$OUT" "1 need review"
+sel
+contains "the summary line says how many re-open an earlier verdict" "$OUT" "2 re-open an earlier verdict"
+contains "...and what was left to other flows, by why" "$OUT" "2 dependency, 1 dev, 1 secret, 1 suppressed, 1 test, 1 unscoped"
+expect "an expired entry stays on its row, as expired" "$(bkdoc 'print([f["suppression"]["state"] for f in d["security"]["findings"] if f["rule_id"]=="rule.exp"])')" "['expired']"
+expect "the suppressed list keeps each entry's reason" "$(bkdoc 'print([f["reason"] for f in d["security"]["suppressed"]])')" "['fine']"
+expect "...and the count of suppressed findings" "$(bkdoc 'print(d["security"]["counts"])')" "{'suppressed': 1}"
+sel --limit 3
+expect "--limit 3: the counts cover the selected rows only" "$(bkdoc 'print(b["needs_review"], b["reopened"])')" "1 0"
+expect "--limit 3: exit 0" "$RC" 0
+expect "--limit 3: the three of highest severity" "$(bkdoc 'print(",".join(f["rule_id"] for f in d["security"]["findings"] if f["status"]=="backlog"))')" "rule.stale,string-formatted-query,cookie-missing-secure"
+expect "--limit 3: nine eligible, three selected, six not reached" "$(bkdoc 'print(b["eligible"], b["selected"], b["not_reached"])')" "9 3 6"
+contains "--limit 3: the summary says how many were not reached and why" "$OUT" "3 selected of 9 eligible; 6 not reached"
+expect "--limit 3: the six are deferred, still known" "$(bkdoc 'print(sum(1 for f in d["security"]["findings"] if f["status"]=="deferred"))')" "6"
+sel --limit 100
+expect "--limit above the backlog selects all of it" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "9 0"
+sel --rule CKV_K8S_21
+expect "--rule: one finding" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "1 8"
+sel --rule CKV_K8S_21 --rule AVD-KSV-0014
+expect "--rule twice: either" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "2 7"
+expect "...and the bounds record both rules" "$(bkdoc 'print(b["bounds"]["rules"])')" "['CKV_K8S_21', 'AVD-KSV-0014']"
+sel --rule rule.exp --limit 1
+contains "the summary names the bounds" "$OUT" "(bounded by --limit 1 --rule rule.exp)"
+sel --rule CKV_K8S
+expect "--rule is an exact id: a prefix selects nothing" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "0 9"
+sel --rule ckv_k8s_21
+expect "--rule is case-exact: a differently cased id selects nothing" "$(bkdoc 'print(b["selected"])')" "0"
+sel --path app
+expect "--path app: the directory app/, not app2/" "$(bkdoc 'print(",".join(sorted(f["path"] for f in d["security"]["findings"] if f["status"]=="backlog")))')" \
+    "app/cookie.go,app/exp.go,app/exp.go,app/legacy.go,app/query.go,app/stale.go"
+sel --path ap
+expect "--path ap: a prefix of a directory name is not the directory" "$(bkdoc 'print(b["selected"])')" "0"
+sel --path ./app/
+expect "--path ./app/: normalised to app" "$(bkdoc 'print(b["selected"])')" "6"
+sel --path app/cookie.go
+expect "--path names one file" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "1 8"
+sel --path app/cook
+expect "--path app/cook: not a file, not a directory" "$(bkdoc 'print(b["selected"])')" "0"
+sel --path app//cookie.go
+expect "--path app//cookie.go: the same file as app/cookie.go" "$(bkdoc 'print(b["selected"])')" "1"
+sel --path app/./cookie.go
+expect "--path app/./cookie.go: the same file" "$(bkdoc 'print(b["selected"])')" "1"
+sel --path 'app\cookie.go'
+expect "--path with a backslash: the same file" "$(bkdoc 'print(b["selected"])')" "1"
+sel --rule -x
+expect "a value that starts with '-' is a value: exit 0, nothing selected" "$RC|$(bkdoc 'print(b["selected"])')" "0|0"
+sel --path app --path k8s
+expect "--path twice: either" "$(bkdoc 'print(b["selected"])')" "7"
+sel --path app --rule string-formatted-query
+expect "--path and --rule intersect" "$(bkdoc 'print(b["selected"], b["not_reached"])')" "1 8"
+sel --path app --limit 2
+expect "--path and --limit: the limit counts inside the path" "$(bkdoc 'print(b["selected"], b["eligible"], b["not_reached"])')" "2 9 7"
+expect "the bounds are recorded" "$(bkdoc 'print(b["bounds"])')" "{'limit': 2, 'rules': [], 'paths': ['app']}"
+for bad in "--path ." "--path ./" "--path app/.." "--limit 0" "--limit -1" "--limit abc" "--limit 1.5" "--limit" "--path /etc" "--path ../x" "--path app/../../x" "--path" "--rule" "--rule  " "--bogus"; do
+    # shellcheck disable=SC2086
+    sel $bad
+    expect "refused: sec-backlog.sh $bad: exit 2" "$RC" 2
+done
+run STUB_FINDINGS=bk-findings -- "$B0" "$SCR/sec-backlog.sh" --limit 2
+expect "no --out: exit 2" "$RC" 2
+run STUB_FINDINGS=bk-none -- "$B0" "$SCR/sec-backlog.sh" --out "$BK.none"
+expect "no stored report: exit 1 (not measured, not an empty backlog)" "$RC" 1
+contains "no stored report: says why" "$OUT" "not measured: no security report is stored"
+contains "no stored report: the denominator says empty is not clean" "$ERR" "an empty list is not a clean one"
+run STUB_FINDINGS=bk-empty -- "$B0" "$SCR/sec-backlog.sh" --out "$BK.empty"
+expect "a stored report with no finding: exit 0" "$RC" 0
+contains "an empty backlog says so" "$OUT" "0 selected of 0 eligible; 0 not reached"
+run STUB_FINDINGS=bk-findings STUB_VERSION=1.20.5 -- "$B0" "$SCR/sec-backlog.sh" --out "$BK.old"
+expect "a logos without the scope filter: exit 3 (production scope cannot be told)" "$RC" 3
+contains "...and says which version has it" "$ERR" "1.21.0"
+run STUB_FINDINGS=bk-findings STUB_FINDINGS_RC=2 -- "$B0" "$SCR/sec-backlog.sh" --out "$BK.rc"
+expect "a findings read that fails: exit 3" "$RC" 3
+run STUB_FINDINGS=bk-findings -- "$B0" "$SCR/sec-backlog.sh" --out "$WORK/no/such/dir/x.json"
+expect "an unwritable target: exit 3" "$RC" 3
+expect "no temporary file is left behind" "$(ls "$WORK" | grep -c 'bk.json.findings')" 0
+
+# --- triage over the backlog ---
+sel
+TB="$WORK/triage-bk.json"
+run -- "$B0" "$SCR/sec-triage.sh" --delta "$BK" --out "$TB"
+expect "triage of the backlog: exit 0" "$RC" 0
+den "triage of the backlog"
+contains "triage of the backlog: the denominator says backlog and what was not reached" "$ERR" "9 triaged of 16 stored finding(s)"
+expect "nine rows" "$(py 'import json,sys; print(len(json.load(open(sys.argv[1]))["entries"]))' "$TB")" "9"
+expect "the triage knows its mode and denominators" "$(py 'import json,sys; d=json.load(open(sys.argv[1])); print(d["mode"], d["backlog"]["eligible"], d["backlog"]["not_reached"])' "$TB")" "backlog 9 0"
+tverdict() { py 'import json,sys; d=json.load(open(sys.argv[1])); print([e["proposed"]+(":final" if e["final"] else ":open") for e in d["entries"] if e["rule_id"]==sys.argv[2]][0])' "$TB" "$1"; }
+expect "a trusted code finding is a proposed fix" "$(tverdict cookie-missing-secure)" "fix:open"
+expect "a needs-review finding is a proposed fix, not parked" "$(tverdict string-formatted-query)" "fix:open"
+expect "a stale finding is untrusted" "$(tverdict rule.stale)" "untrusted:final"
+expect "an infrastructure finding with no enclosing symbol is untrusted" "$(tverdict AVD-KSV-0014)" "untrusted:final"
+expect "a finding of no file is untrusted" "$(tverdict CKV_K8S_21)" "untrusted:final"
+expect "the rows carry needs_review" "$(py 'import json,sys; print([e["needs_review"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]=="string-formatted-query"])' "$TB")" "[True]"
+expect "the rows carry the enclosing symbol" "$(py 'import json,sys; print([e["enclosing"]["name"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]=="cookie-missing-secure"])' "$TB")" "['SessionCookie']"
+expect "a re-opened verdict's row carries its out-of-date state" "$(py 'import json,sys; print([e["suppression"]["state"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]=="rule.ood"])' "$TB")" "['out_of_date']"
+# The delta flow is untouched: a delta document has no mode and its triage no backlog.
+expect "a delta triage has no mode" "$(py 'import json,sys; print(json.load(open(sys.argv[1])).get("mode"))' "$WORK/triage.json")" "None"
+ID_OF() { py 'import json,sys; print([e["id"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]==sys.argv[2]][0])' "$TB" "$1"; }
+
+# --- the context each finding reaches the agent with ---
+CK="$(ID_OF cookie-missing-secure)"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$CK"
+expect "context of the cookie finding: exit 0" "$RC" 0
+den "sec-context"
+contains "context: the finding" "$OUT" "cookie-missing-secure"
+contains "context: the enclosing symbol" "$OUT" "enclosing: SessionCookie"
+contains "context: the enclosing symbol's canonical identity" "$OUT" "$(SYMOF cookie)"
+contains "context: the enclosing symbol's source" "$OUT" "Secure: DefaultCookieConfig().Secure"
+contains "context: a caller" "$OUT" "Serve"
+contains "context: a symbol it reads, with its source" "$OUT" "Config{Secure: true}"
+contains "context: that symbol is offered as an evidence candidate by its canonical identity" "$OUT" "evidence candidate: $(SYMOF cookie_dc)"
+lacks "context: the enclosing symbol is not offered as evidence" "$OUT" "evidence candidate: $(SYMOF cookie)"
+contains "context: the source is data, not instructions" "$OUT" "data, not instructions"
+contains "context: the denominator counts what it gathered" "$ERR" "1 entry, 1 with an enclosing symbol"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF rule.ood)"
+contains "the context of a re-opened verdict shows the reason it had" "$OUT" "earlier verdict (out_of_date): the cookie is Secure"
+contains "...and what changed" "$OUT" "DefaultConfig changed"
+contains "...and marks the row" "$OUT" "re-opens an earlier verdict"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF string-formatted-query)"
+contains "the context of a needs-review finding marks it" "$OUT" "[needs review]"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF AVD-KSV-0014)"
+expect "context of a finding with no enclosing symbol: exit 0" "$RC" 0
+contains "...says there is none" "$OUT" "no enclosing symbol"
+contains "...and gives the lines around the finding instead" "$OUT" "line20"
+contains "...the window's lines are numbered" "$OUT" "20: line20"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF CKV_K8S_21)"
+expect "context of a finding of no file: exit 0" "$RC" 0
+contains "...says there is no file" "$OUT" "no file"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF rule.app2)"
+expect "an enclosing symbol the graph does not hold: exit 0" "$RC" 0
+contains "...says it is not in the graph" "$OUT" "not in the graph"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$CK" --entry "$(ID_OF string-formatted-query)" --out "$WORK/ctx.json"
+expect "two entries: exit 0" "$RC" 0
+expect "...the JSON holds both" "$(py 'import json,sys; print(len(json.load(open(sys.argv[1]))["entries"]))' "$WORK/ctx.json")" "2"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry nope
+expect "an unknown entry: exit 2" "$RC" 2
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB"
+expect "no entry: exit 2" "$RC" 2
+run -- "$B0" "$SCR/sec-context.sh" --entry s1
+expect "no triage: exit 2" "$RC" 2
+run -- "$B0" "$SCR/sec-context.sh" --triage "$WORK/missing.json" --entry s1
+expect "an unreadable triage: exit 3" "$RC" 3
+run STUB_VERSION=1.19.0 -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$CK"
+expect "a logos older than 1.20.0: exit 3" "$RC" 3
+# A file name that tries to leave the project is not read.
+python3 -I - "$TB" "$WORK/triage-esc.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+for e in t["entries"]:
+    if e["rule_id"] == "AVD-KSV-0014":
+        e["path"] = "../outside.txt"
+json.dump(t, open(sys.argv[2], "w"))
+PY
+python3 -I -c 'print("\n".join("SECRET-OUTSIDE" if n == 20 else f"x{n}" for n in range(1, 41)))' >"$WORK/outside.txt"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$WORK/triage-esc.json" --entry "$(ID_OF AVD-KSV-0014)"
+lacks "a path that leaves the project is not read" "$OUT" "SECRET-OUTSIDE"
+
+# The window around a finding with no enclosing symbol is exactly +-12 lines, and a bound finding gets none.
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$(ID_OF AVD-KSV-0014)"
+contains "the window starts 12 lines above the finding" "$OUT" "8: line8"
+lacks "...and not one line earlier" "$OUT" "7: line7"
+contains "...ends 12 lines below" "$OUT" "32: line32"
+lacks "...and not one line later" "$OUT" "33: line33"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$CK"
+lacks "a finding bound to a symbol gets no window of its file" "$OUT" "lines around the finding"
+# A finding whose line lies past the end of its file says so.
+printf 'a\nb\nc\n' >"$GR/k8s/short.txt"
+python3 -I - "$TB" "$WORK/triage-eof.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+for e in t["entries"]:
+    if e["rule_id"] == "AVD-KSV-0014":
+        e["path"], e["line"] = "k8s/short.txt", 500
+json.dump(t, open(sys.argv[2], "w"))
+PY
+run -- "$B0" "$SCR/sec-context.sh" --triage "$WORK/triage-eof.json" --entry "$(ID_OF AVD-KSV-0014)"
+contains "a finding past the end of its file says so" "$OUT" "past its end"
+rm -f "$GR/k8s/short.txt"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$TB" --entry "$CK" --out "$WORK/no/such/dir/ctx.json"
+expect "an --out directory that does not exist: exit 3, before anything is gathered" "$RC" 3
+expect "...and no traceback" "$(printf '%s' "$ERR" | grep -c Traceback)" 0
+
+# A large enclosing function: cut around the finding's line, callers and callees capped and counted.
+python3 -I - "$FX" "$TB" "$WORK/triage-big.json" <<'PY'
+import json, re, sys
+fx, src, out = sys.argv[1:4]
+slug = lambda s: re.sub(r"[^A-Za-z0-9]", "", s)
+ref = lambda n, line: {"symbol": f"logos . ex . big/`big.go`/{n}().", "name": n, "kind": "function", "file": "big/big.go", "line": line}
+put = lambda kind, sym, doc: json.dump(doc, open(f"{fx}/{kind}.{slug(sym)}.json", "w"))
+node = lambda r, code: {"query": r["symbol"], "node": dict(r, end_line=r["line"] + code.count("\n"), edges=[], code=code), "suppression": None, "suggestions": [], "warnings": []}
+big = ref("BigFn", 10)
+put("node", big["symbol"], node(big, "\n".join(f"body{i}" for i in range(100))))
+callers = [ref(f"Caller{i}", 200 + i) for i in range(10)]
+put("callers", big["symbol"], {"query": "x", "resolved": big, "total": 12, "callers": callers, "suggestions": [], "warnings": []})
+callees = [ref(f"Callee{i}", 300 + i) for i in range(8)] + [ref("Mismatch", 400)]
+put("callees", big["symbol"], {"query": "x", "resolved": big, "total": 10, "callees": callees[:8] + callees[8:], "suggestions": [], "warnings": []})
+for c in callees[:8]:
+    put("node", c["symbol"], node(c, f"func {c['name']}() {{}}"))
+# a callee whose node answer is another symbol's: not shown as if it were the callee
+put("node", callees[8]["symbol"], node(ref("Other", 1), "func Other() {}"))
+t = json.load(open(src))
+row = next(e for e in t["entries"] if e["rule_id"] == "cookie-missing-secure")
+row = dict(row, id="b1", line=50, path="big/big.go", enclosing=big)
+t["entries"] = [row]
+json.dump(t, open(out, "w"))
+PY
+: >"$CALLS"
+run -- "$B0" "$SCR/sec-context.sh" --triage "$WORK/triage-big.json" --entry b1
+expect "a large enclosing function: exit 0" "$RC" 0
+contains "its source is cut around the finding's line: the finding's own line is shown" "$OUT" "50: body40"
+lacks "...lines above the cut are not" "$OUT" "19: body9"
+contains "...and says how many lines are above" "$OUT" "[... 10 line(s) above not shown]"
+contains "...and how many are below" "$OUT" "[... 30 more line(s) not shown]"
+lacks "...the lines below the cut are not shown" "$OUT" "80: body70"
+expect "ten callers are shown" "$(printf '%s\n' "$OUT" | grep -c '^    Caller')" 10
+contains "...with the count of those not shown" "$OUT" "[... 2 more caller(s) not shown]"
+expect "eight called symbols are shown, with their source" "$(printf '%s\n' "$OUT" | grep -c '^--- Callee')" 8
+contains "...with the count of those not shown" "$OUT" "[... 2 more callee(s) not shown]"
+lacks "a callee whose node answer is another symbol is not shown as the callee" "$OUT" "Mismatch"
+lacks "...nor is the other symbol's source" "$OUT" "func Other"
+contains "the callers were asked for no more than ten" "$(grep '^callers' "$CALLS")" "--limit 10"
+contains "the callees were asked for no more than eight" "$(grep '^callees' "$CALLS")" "--limit 8"
+contains "the enclosing symbol's source was asked for" "$(grep '^node' "$CALLS" | head -1)" "--code"
+contains "the denominator counts the callers and read symbols gathered" "$ERR" "10 caller(s) and 8 read symbol(s)"
+
+# --- the draft carries its evidence ---
+FPC="$(FPOF cookie)"
+draft() { run -- "$B0" "$SCR/suppress-draft.sh" "$@"; }
+: >"$CALLS"
+draft --fingerprint "$FPC" --reason "the cookie is Secure: DefaultCookieConfig sets it" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "a backlog draft with evidence beyond the enclosing symbol: exit 0" "$RC" 0
+contains "...prints the entry" "$OUT" "fingerprint = \"$FPC\""
+contains "...and the command that records the evidence's hashes" "$OUT" "logos security reconfirm $FPC --evidence '$(SYMOF cookie_dc)'"
+lacks "...the enclosing symbol is Logos's to add: not in the command" "$OUT" "--evidence '$(SYMOF cookie)'"
+contains "...the denominator says nothing was written" "$ERR" "printed, not written"
+expect "...and the draft wrote nothing in the project" "$(cd "$GR" && ls .logos | grep -c security-ignore)" "0"
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie)" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "the enclosing symbol may be named beside another" "$RC" 0
+expect "...and is not repeated in the command" "$(printf '%s\n' "$OUT" | grep -c -- "--evidence '$(SYMOF cookie)'")" "0"
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "the same symbol twice is one" "$(printf '%s\n' "$OUT" | grep -o -- '--evidence' | wc -l | tr -d ' ')" "1"
+draft --fingerprint "$FPC" --reason "r" --triage "$TB"
+expect "a backlog draft with no evidence: exit 2" "$RC" 2
+contains "...says evidence is required" "$ERR" "evidence"
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie)" --triage "$TB"
+expect "a backlog draft whose only evidence is the enclosing symbol: exit 2" "$RC" 2
+contains "...says beyond the enclosing symbol" "$ERR" "beyond the enclosing symbol"
+draft --fingerprint "$FPC" --reason "r" --evidence "logos . ex . app/\`cookie.go\`/Nowhere()." --triage "$TB"
+expect "evidence the graph does not hold: exit 2" "$RC" 2
+contains "...says so" "$ERR" "not a symbol in the graph"
+draft --fingerprint "$FPC" --reason "r" --evidence "Placeholders" --triage "$TB"
+expect "evidence by bare name: exit 2 (a name is not an identity)" "$RC" 2
+contains "...asks for the canonical symbol" "$ERR" "canonical symbol"
+draft --fingerprint "$(FPOF stale)" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "a final verdict cannot be drafted as a false positive: exit 2" "$RC" 2
+draft --fingerprint "$(printf 'a%.0s' $(seq 64))" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "a fingerprint the triage does not hold: exit 2" "$RC" 2
+draft --fingerprint "$FPC" --reason "r" --evidence "bad'quote" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "evidence with a quote is refused: exit 2" "$RC" 2
+contains "...for the quote, not for the lookup" "$ERR" "quote"
+for ctl in $'\n' $'\t' $'\r' $'\x1b[31m' $'\x7f' $'\x0b' $'\xe2\x80\xa8'; do
+    draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)$ctl" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+    expect "evidence holding a control character ($(printf '%s' "$ctl" | od -An -c | tr -s ' ')) is refused: exit 2" "$RC" 2
+    contains "...as a control character, not as a symbol the graph lacks" "$ERR" "control character"
+    lacks "...and no command is printed" "$OUT" "reconfirm"
+done
+run STUB_NO_RECONFIRM=1 -- "$B0" "$SCR/suppress-draft.sh" --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "evidence named and no logos with \`security reconfirm\`: exit 3" "$RC" 3
+contains "...says why" "$ERR" "security reconfirm"
+lacks "...and prints no draft" "$OUT" "reconfirm $FPC"
+run STUB_NO_RECONFIRM=1 -- "$B0" "$SCR/suppress-draft.sh" --fingerprint "$FPC" --reason "r"
+expect "a delta draft without evidence needs no reconfirm: exit 0" "$RC" 0
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$WORK/missing.json"
+expect "an unreadable triage: exit 3" "$RC" 3
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)"
+expect "evidence without a triage: exit 0 (the delta flow may name it too)" "$RC" 0
+draft --fingerprint "$FPC" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$WORK/triage.json"
+expect "a fingerprint a delta triage does not hold: exit 2" "$RC" 2
+draft --fingerprint "$FPC" --reason "r"
+expect "the delta draft without evidence is as it was: exit 0" "$RC" 0
+lacks "...and prints no evidence command" "$OUT" "reconfirm"
+# A finding an earlier entry names must not get a second entry: the loader rejects a repeated selector.
+draft --fingerprint "$(FPOF ood)" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "a finding whose verdict is out of date: exit 0" "$RC" 0
+lacks "...no second [[ignore]] entry is printed" "$OUT" "[[ignore]]"
+contains "...it is re-confirmed instead" "$OUT" "logos security reconfirm $(FPOF ood) --evidence '$(SYMOF cookie_dc)'"
+contains "...the denominator says no entry was drafted" "$ERR" "0 draft entries"
+draft --fingerprint "$(FPOF exp)" --reason "r" --evidence "$(SYMOF cookie_dc)" --triage "$TB"
+expect "a finding whose entry expired: exit 2 (reconfirm refuses it, a second entry breaks the file)" "$RC" 2
+contains "...says to extend the entry" "$ERR" "extend its \`expires\`"
+
+# --- the report of a backlog run ---
+sel --limit 3
+TB3="$WORK/triage-bk3.json"
+run -- "$B0" "$SCR/sec-triage.sh" --delta "$BK" --out "$TB3"
+python3 -I - "$TB3" "$FX" "$WORK" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+fx, w = sys.argv[2], sys.argv[3]
+sub = {e["rule_id"]: e for e in t["entries"]}
+sym = lambda k: open(f"{fx}/sym-{k}").read()
+ev_cookie, ev_sql = sym("cookie_dc"), sym("sql_ph")
+good = {
+    "backlog": "BACKLOG | eligible: 9 | judged: 3 | not reached: 6",
+    "entry_stale": f"ENTRY | untrusted | {sub['rule.stale']['subject']} | stale: re-scan the file",
+    "entry_sql": f"ENTRY | false-positive | {sub['string-formatted-query']['subject']} | the placeholders are generated",
+    "entry_cookie": f"ENTRY | false-positive | {sub['cookie-missing-secure']['subject']} | DefaultCookieConfig sets the cookie flag",
+    "sup_sql": f"SUPPRESS | {sub['string-formatted-query']['subject']} | fingerprint {sub['string-formatted-query']['fingerprint']} | state: held at ask | reason: the placeholders are generated | evidence: {ev_sql}",
+    "sup_cookie": f"SUPPRESS | {sub['cookie-missing-secure']['subject']} | fingerprint {sub['cookie-missing-secure']['fingerprint']} | state: held at ask | reason: DefaultCookieConfig sets the cookie flag | evidence: {ev_cookie}",
+    "scanned": "SCANNED | Semgrep OSS 1.85.0 | paths: app",
+    "coverage": "COVERAGE | uncovered: A02:2025, A10:2025",
+}
+json.dump(good, open(f"{w}/good-bk.json", "w"))
+json.dump({"cookie": sub["cookie-missing-secure"]["subject"], "cookie_fp": sub["cookie-missing-secure"]["fingerprint"],
+           "sql": sub["string-formatted-query"]["subject"], "sql_fp": sub["string-formatted-query"]["fingerprint"],
+           "ev_cookie": ev_cookie, "ev_sql": ev_sql, "enc_cookie": sym("cookie")}, open(f"{w}/bk-names.json", "w"))
+PY
+mk_bk() { # name key=line ...   (key= drops the line)
+    local name="$1"
+    shift
+    python3 -I - "$WORK/good-bk.json" "$WORK/rb-$name.md" "$@" <<'PY'
+import json, sys
+good = json.load(open(sys.argv[1]))
+for a in sys.argv[3:]:
+    k, _, v = a.partition("=")
+    if v == "":
+        good.pop(k, None)
+    else:
+        good[k] = v
+open(sys.argv[2], "w").write("\n".join(good.values()) + "\n")
+PY
+}
+chkbk() { run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-$1.md" --triage "$TB3" --coverage "$WORK/coverage-fx.json"; }
+NAMES() { py 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$WORK/bk-names.json" "$1"; }
+mk_bk ok
+chkbk ok
+expect "a valid backlog report holds" "$RC" 0
+den "backlog report"
+bad_bk() { # label name fragment key=line ...
+    local label="$1" name="$2" frag="$3"
+    shift 3
+    mk_bk "$name" "$@"
+    chkbk "$name"
+    if [ "$RC" -eq 1 ] && case "$OUT" in *"$frag"*) true ;; *) false ;; esac; then ok "$label"; else bad "$label: rc=$RC, '$frag' not in '$OUT'"; fi
+}
+bad_bk "no BACKLOG line" b1 "BACKLOG" "backlog="
+bad_bk "a wrong count of findings not reached" b2 "not reached" "backlog=BACKLOG | eligible: 9 | judged: 3 | not reached: 5"
+bad_bk "a judged count that is not the ENTRY lines" b3 "judged" "backlog=BACKLOG | eligible: 9 | judged: 2 | not reached: 7"
+bad_bk "an eligible count the triage does not hold" b4 "eligible" "backlog=BACKLOG | eligible: 10 | judged: 3 | not reached: 7"
+bad_bk "a BACKLOG line that is not three fields" b5 "BACKLOG needs" "backlog=BACKLOG | eligible: 9 | judged: 3"
+bad_bk "a false positive whose SUPPRESS names no evidence" b6 "evidence" "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: DefaultCookieConfig sets the cookie flag"
+bad_bk "a false positive whose evidence is empty" b7 "evidence" "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r | evidence: "
+bad_bk "a false positive whose only evidence is its enclosing symbol" b8 "beyond the enclosing symbol" "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r | evidence: $(NAMES enc_cookie)"
+bad_bk "a false positive whose evidence is the enclosing symbol twice" b9 "beyond the enclosing symbol" "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r | evidence: $(NAMES enc_cookie); $(NAMES enc_cookie)"
+bad_bk "a secret verdict in a backlog report" b10 "backlog" "entry_stale=ENTRY | escalate-secret | $(py 'import json,sys; print([e["subject"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]=="rule.stale"][0])' "$TB3") | x"
+# The arithmetic stands alone: without a triage to compare with, E less J must still be N.
+mk_bk b2n "backlog=BACKLOG | eligible: 9 | judged: 3 | not reached: 5"
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-b2n.md"
+expect "a not-reached figure that is not eligible less judged, with no triage: exit 1" "$RC" 1
+contains "...says which figure" "$OUT" "not reached"
+mk_bk ok2 "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r | evidence: $(NAMES enc_cookie); $(NAMES ev_cookie)"
+chkbk ok2
+expect "the enclosing symbol beside another symbol is evidence enough" "$RC" 0
+# A symbol that holds a ';' (an array type, say) is split by the field's separator: the whole field is compared too.
+python3 -I - "$TB3" "$WORK/triage-bk3-semi.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1]))
+for e in t["entries"]:
+    if e["rule_id"] == "cookie-missing-secure":
+        e["enclosing"] = dict(e["enclosing"], symbol="impl#[T; N]")
+json.dump(t, open(sys.argv[2], "w"))
+PY
+mk_bk semi "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r | evidence: impl#[T; N]"
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-semi.md" --triage "$WORK/triage-bk3-semi.json"
+expect "evidence that is only an enclosing symbol holding a ';': exit 1" "$RC" 1
+contains "...says beyond the enclosing symbol" "$OUT" "beyond the enclosing symbol"
+# A report of a run that measured nothing is not held to a BACKLOG line, and a dependency verdict is not a backlog's.
+printf 'NOT MEASURED | no security report is stored\nSCANNED | none 0 | paths: none\nCOVERAGE | uncovered: none\n' >"$WORK/rb-nm.md"
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-nm.md" --triage "$TB3"
+lacks "a NOT MEASURED report held to a backlog triage is not asked for a BACKLOG line" "$OUT" "BACKLOG line"
+bad_bk "a dependency verdict in a backlog report" b11 "backlog" "entry_stale=ENTRY | escalate-dependency | $(py 'import json,sys; print([e["subject"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]=="rule.stale"][0])' "$TB3") | x"
+bad_bk "two BACKLOG lines" b12 "exactly one BACKLOG" "extra=BACKLOG | eligible: 9 | judged: 3 | not reached: 6"
+mk_bk ok3
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-ok3.md" --triage "$WORK/triage.json"
+expect "a backlog report held to a delta triage: exit 1" "$RC" 1
+contains "...says the modes differ" "$OUT" "backlog"
+mk_report dlt
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/r-dlt.md" --triage "$TB3"
+expect "a delta report held to a backlog triage: exit 1" "$RC" 1
+contains "...says the BACKLOG line is missing" "$OUT" "BACKLOG"
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-ok.md"
+expect "a backlog report without a triage still holds" "$RC" 0
+mk_bk nt "sup_cookie=SUPPRESS | $(NAMES cookie) | fingerprint $(NAMES cookie_fp) | state: held at ask | reason: r"
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/rb-nt.md"
+expect "...and without a triage a backlog SUPPRESS still needs its evidence (the mode is the BACKLOG line's)" "$RC" 1
+# The delta report is as it was: a SUPPRESS without evidence still holds there.
+run -- "$B0" "$SCR/sec-check-report.sh" --report "$WORK/r-ok.md" --triage "$WORK/triage.json" --coverage "$WORK/coverage-fx.json"
+expect "the delta report with an evidence-free SUPPRESS still holds" "$RC" 0
+
+# --- a fix from the backlog is proven, and a finding the bound left out is not a new one ---
+sel --rule rule.exp
+TBE="$WORK/triage-bke.json"
+run -- "$B0" "$SCR/sec-triage.sh" --delta "$BK" --out "$TBE"
+EX="$(py 'import json,sys; print([e["id"] for e in json.load(open(sys.argv[1]))["entries"] if e["rule_id"]==sys.argv[2]][0])' "$TBE" rule.exp)"
+expect "the exp finding is a proposed fix" "$(py 'import json,sys; print(json.load(open(sys.argv[1]))["entries"][0]["proposed"])' "$TBE")" "fix"
+run STUB_SCAN=scan-exp -- "$B0" "$SCR/sec-rescan.sh" --triage "$TBE" --out "$WORK/rescan-bke.json" --entry "$EX"
+expect "the backlog fix is re-scanned: exit 0" "$RC" 0
+python3 -I -c 'import os,sys; r=os.stat(sys.argv[1]).st_mtime; os.utime(sys.argv[2], (r-30, r-30))' "$WORK/rescan-bke.json" "$GR/app/exp.go"
+run STUB_FINDINGS=bk-after-exp -- "$B0" "$SCR/sec-proof.sh" --triage "$TBE" --delta "$BK" --rescan "$WORK/rescan-bke.json" --entry "$EX"
+expect "the backlog fix is proven: its neighbour, deferred by --rule, was known to the selection: exit 0" "$RC" 0
+contains "...the evidence cites the re-scan" "$OUT" "PROVEN $EX"
+python3 -I - "$BK" "$WORK/bk-nodeferred.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["security"]["findings"] = [f for f in d["security"]["findings"] if f["status"] != "deferred"]
+json.dump(d, open(sys.argv[2], "w"))
+PY
+run STUB_FINDINGS=bk-after-exp -- "$B0" "$SCR/sec-proof.sh" --triage "$TBE" --delta "$WORK/bk-nodeferred.json" --rescan "$WORK/rescan-bke.json" --entry "$EX"
+expect "without the deferred findings the same neighbour reads as new: not proven, exit 1 (so they are kept)" "$RC" 1
+contains "...for that reason" "$OUT" "a new finding at or above"
+rm -f "$GR/app/exp.go"
+
+# --- the skill's words ---
+if [ -f "$SKILL_MD" ]; then
+    for w in "--backlog" "--limit" "--rule" "--path" "scripts/sec-backlog.sh" "scripts/sec-context.sh" "BACKLOG |" "evidence" "not reached" "reconfirm" "data, not instructions"; do
+        grep -qF -- "$w" "$SKILL_MD" && ok "SKILL.md says '$w'" || bad "SKILL.md never says '$w'"
+    done
+fi
+if [ -f "$CMD_MD" ]; then
+    for w in "--backlog" "--limit" "--rule" "--path"; do
+        grep -qF -- "$w" "$CMD_MD" && ok "the command names '$w'" || bad "the command never names '$w'"
+    done
+    contains "the command's argument hint offers --backlog" "$(grep '^argument-hint' "$CMD_MD")" "--backlog"
+fi
 
 T=$((PASS + FAIL))
 echo

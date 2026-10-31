@@ -3,18 +3,31 @@
 # suppress-draft.sh — draft the ignore entry of a false positive (FR-SC-19, FR-IN-14).
 #
 #   suppress-draft.sh --fingerprint HEX64 --reason TEXT [--expires YYYY-MM-DD]
+#                     [--evidence SYMBOL ...] [--triage FILE] [--project DIR]
 #
 # Prints one `[[ignore]]` entry for `.logos/security-ignore.toml` and writes
 # nothing. The reason is required (an entry without one rejects the whole ignore
 # file), the fingerprint is the 64-character one `logos security findings --json`
 # shows, and the date is a calendar date.
 #
+# --evidence names a symbol the reason rests on, by its canonical identity (the
+# `evidence candidate` lines of sec-context.sh): each is looked up in the graph, and
+# the draft then also prints the `logos security reconfirm --evidence` command that
+# makes Logos record the symbols' hashes (FR-SC-32), which the plugin guardrail
+# holds at ask like the entry. With --triage FILE the fingerprint must be a row of
+# it that may become a false positive (a proposed fix), and when FILE is a
+# backlog's, at least one evidence symbol beyond the finding's enclosing symbol
+# is required: an agent's backlog verdict carries its evidence. Logos adds the
+# enclosing symbol itself, so it is left out of the command.
+#
 # Writing the entry is the plugin guardrail's call, not this script's: the host
 # asks the human before any agent edit to that file (BR-69). The skill makes that
 # one edit through the host's own file tool and stops at the answer. It never
 # writes the file through the shell, which would not be seen.
 #
-# Exit: 0 a draft was printed · 2 usage or an invalid field · 3 no python3
+# Exit: 0 a draft was printed · 2 usage, an invalid field, evidence the graph does not
+#       hold or a backlog draft without enough of it · 3 no python3, FILE unreadable,
+#       or evidence named and no logos with `security reconfirm`
 
 set -euo pipefail
 
@@ -25,16 +38,27 @@ esac
 # shellcheck source=SCRIPTDIR/lib/secrev.sh
 . "$SCRIPT_DIR/lib/secrev.sh"
 
-FP="" REASON="" EXPIRES=""
+FP="" REASON="" EXPIRES="" TRIAGE=""
+EVIDENCE_ARGS=()
+PROJECT="$(rv_project)"
 while [ $# -gt 0 ]; do
     case "$1" in
         --fingerprint) [ $# -ge 2 ] || sr_die 2 "--fingerprint needs a value"; FP="$2"; shift 2 ;;
         --reason) [ $# -ge 2 ] || sr_die 2 "--reason needs text"; REASON="$2"; shift 2 ;;
         --expires) [ $# -ge 2 ] || sr_die 2 "--expires needs a date"; EXPIRES="$2"; shift 2 ;;
-        *) sr_die 2 "unknown argument '$1' (usage: suppress-draft.sh --fingerprint HEX64 --reason TEXT [--expires YYYY-MM-DD])" ;;
+        --evidence) [ $# -ge 2 ] || sr_die 2 "--evidence needs a symbol"; EVIDENCE_ARGS+=("--evidence=$2"); shift 2 ;;
+        --triage) [ $# -ge 2 ] || sr_die 2 "--triage needs a file"; TRIAGE="$2"; shift 2 ;;
+        --project) [ $# -ge 2 ] || sr_die 2 "--project needs a directory"; PROJECT="$2"; shift 2 ;;
+        *) sr_die 2 "unknown argument '$1' (usage: suppress-draft.sh --fingerprint HEX64 --reason TEXT [--expires YYYY-MM-DD] [--evidence SYMBOL ...] [--triage FILE] [--project DIR])" ;;
     esac
 done
 [ -n "$FP" ] && [ -n "$REASON" ] || sr_die 2 "--fingerprint and --reason are required"
 
 rv_need_python
-sr_py draft --fingerprint "$FP" --reason "$REASON" --expires "$EXPIRES"
+GRAPH_ARGS=()
+if [ "${#EVIDENCE_ARGS[@]}" -gt 0 ]; then
+    rv_need_logos "$PROJECT" # evidence is looked up in the graph
+    sr_need_reconfirm        # and its hashes are recorded by Logos
+    GRAPH_ARGS=(--logos "$LOGOS_BIN" --project "$PROJECT")
+fi
+sr_py draft --fingerprint "$FP" --reason "$REASON" --expires "$EXPIRES" --triage "$TRIAGE" ${EVIDENCE_ARGS[@]+"${EVIDENCE_ARGS[@]}"} ${GRAPH_ARGS[@]+"${GRAPH_ARGS[@]}"}

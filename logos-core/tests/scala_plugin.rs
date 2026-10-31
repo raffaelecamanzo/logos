@@ -202,6 +202,8 @@ class MathSuite extends munit.FunSuite {
     def diff(): Int = 3 - 1
     assert(diff() == 2)
   }
+}
+object MathOps {
   def prod(): Int = 0
 }
 ",
@@ -227,4 +229,36 @@ class MathSuite extends munit.FunSuite {
         Some(&false),
         "a production def carries none (no proximity false positive)"
     );
+}
+
+#[test]
+fn scala_test_base_classes_carry_evidence_on_their_members_and_production_classes_none() {
+    // S-574 (CR-183): the gitbucket (`AnyFunSuite`/`AnyFlatSpec` with `Matchers`)
+    // and ox (`AnyFlatSpec with Matchers`) shapes. A suite's own defs are test
+    // callables whether or not they sit in a `test("…")` call; a production
+    // class in the same file, and a plain class, are not.
+    let facts = extract_scala(
+        "core/Mixed.scala",
+        "\
+class StoreSuite extends AnyFunSuite {
+  def fixture(): Int = 1
+  test(\"reads\") { assert(fixture() == 1) }
+}
+class FlowSpec extends AnyFlatSpec with Matchers {
+  def helper(): Int = 2
+}
+class Store {
+  def get(): Int = 3
+}
+",
+    );
+    let evidence: BTreeMap<String, bool> = facts
+        .nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
+        .map(|n| (n.name.clone(), n.test_evidence))
+        .collect();
+    assert_eq!(evidence.get("fixture"), Some(&true), "def of an AnyFunSuite");
+    assert_eq!(evidence.get("helper"), Some(&true), "def of an AnyFlatSpec");
+    assert_eq!(evidence.get("get"), Some(&false), "a production class's def");
 }

@@ -1382,7 +1382,7 @@ fn the_watcher_synced_step_by_step_equals_a_fresh_index() {
     for edits in CALLER_THEN_CALLEE {
         apply(&root, edits);
         written += edits.len() as u64;
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(15));
         while handle.stats().files_synced < written {
             let stats = handle.stats();
             assert!(Instant::now() < deadline, "the watcher never synced the step: {stats:?}");
@@ -2447,7 +2447,12 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 40 (S-761, the where-to-start rows' identity; its rebuilt
+    // Migrations 44 (S-571, the `files.parse_damaged` column and the snapshot
+    // entries' `partial_parse` flags), 43 (S-712,
+    // the dispatch re-bind), 42 (S-602, the
+    // `nodes.type_arity` column), 41 (S-593, the
+    // local-binding table), 40 (S-761, the
+    // where-to-start rows' identity; its rebuilt
     // tables go with migration 36's), 39 (S-755, the baseline's re-bless
     // record), 38 (S-523, the
     // graph-dimension flags and cross-module count),
@@ -2463,7 +2468,13 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "DELETE FROM schema_versions WHERE version = 40; \
+        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
+         DELETE FROM schema_versions WHERE version = 43; \
+         ALTER TABLE nodes DROP COLUMN type_arity; DELETE FROM schema_versions WHERE version = 42; \
+         DROP TABLE local_bindings; DELETE FROM schema_versions WHERE version = 41; \
+         DELETE FROM schema_versions WHERE version = 40; \
          ALTER TABLE baseline DROP COLUMN attribution; ALTER TABLE baseline DROP COLUMN reason; \
          DELETE FROM schema_versions WHERE version = 39; \
          ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
@@ -2545,7 +2556,7 @@ fn re_extracting_an_unchanged_file_yields_an_identical_has_body_column() {
 
     rt.submit_write(|w| {
         let id = w.file_id(rel)?.expect("the file row");
-        w.update_file(id, Some("java"), None)
+        w.update_file(id, Some("java"), None, None, false)
     })
     .expect("clear the recorded hash");
     let result = engine.sync(&[PathBuf::from(rel)]);

@@ -18,8 +18,8 @@ use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
 use super::manifest::{
-    CallTargets, ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier,
-    ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, TestConvention,
+    BareSpecifiers, CallTargets, ConfigDescriptor, ExportConvention, ImplicitReceiver, ImportSpecifier,
+    ModuleModelKind, PackageModules, PluginManifest, Preprocessor, PropertiesDescriptor, Reach, TestConvention,
 };
 use super::queries::{CompiledQueries, LanguageQueries};
 
@@ -38,6 +38,13 @@ pub struct Semantics {
     /// Extensions a relative path specifier may spell for the imported file
     /// itself (S-439; see [`PluginManifest::specifier_extensions`]).
     pub specifier_extensions: Vec<String>,
+    /// What a bare path specifier binds through (S-531; see
+    /// [`PluginManifest::bare_specifiers`]) — consumed by the resolution pass
+    /// through [`crate::plugin::LanguageRegistry::tsconfig_extensions`] and
+    /// [`crate::plugin::LanguageRegistry::load_path_extensions`], and by
+    /// extraction, which reads a load-path language's bare specifier apart
+    /// (S-566, `extract::refs::load_path_specifier_segments`).
+    pub bare_specifiers: BareSpecifiers,
     /// What an unqualified call inside a class body means (S-514; see
     /// [`PluginManifest::implicit_receiver`]) — consumed by reference
     /// extraction's receiver-shape pass.
@@ -62,6 +69,18 @@ pub struct Semantics {
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     pub impl_block_lookup: bool,
+    /// Whether a bare call never names a local value (S-594, [FR-RS-44]; see
+    /// [`PluginManifest::separate_call_namespace`]) — read by extraction's
+    /// local-binding rule (`extract::local_shadow`).
+    ///
+    /// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+    pub separate_call_namespace: bool,
+    /// Whether a type implements an interface by its method set (S-529,
+    /// [FR-RS-18]; see [`PluginManifest::method_set_implements`]) — consumed by
+    /// the resolution pass's method-set reconcile ([`crate::resolve`]).
+    ///
+    /// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+    pub method_set_implements: bool,
     /// The extensions of this plugin whose language enforces no arity (S-592,
     /// [FR-RS-43]; see [`PluginManifest::arity_unchecked_extensions`]) —
     /// consumed by the binder's arity filter through
@@ -106,6 +125,21 @@ pub struct Semantics {
     ///
     /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
     pub inherits_interface_bodies: bool,
+    /// Whether this language's types are structural and every type relation
+    /// it captures relates its declaration (S-535, [FR-EX-17]; see
+    /// [`PluginManifest::structural_types`]) — consumed by the binder's
+    /// type-relation admission and proven-receiver rung through
+    /// [`crate::resolve::package_key`], and by the receiver-typing pass
+    /// (S-537, `extract::receiver`).
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    pub structural_types: bool,
+    /// Whether this language's modules are CommonJS as well as ECMAScript
+    /// (S-540, [FR-RS-22]; see [`PluginManifest::commonjs`]) — consumed by
+    /// reference extraction's import reader and `module.exports` rows.
+    ///
+    /// [FR-RS-22]: ../../../docs/specs/requirements/FR-RS-22.md
+    pub commonjs: bool,
     /// Whether, and under which source roots, this language's module path is
     /// package-shaped (CR-149; see [`PluginManifest::package_modules`]) —
     /// consumed by the binder's module key through
@@ -134,10 +168,101 @@ pub struct Semantics {
     /// namespaces (S-595, [FR-RS-45]; see
     /// [`ModuleModel::enclosing_namespaces`](super::ModuleModel::enclosing_namespaces))
     /// — consumed by the binder's package rungs through
-    /// [`crate::resolve::package_key`].
+    /// [`crate::resolve::package_key`], and by reference extraction, which
+    /// records the namespace block a wildcard is written in (S-603).
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     pub enclosing_namespaces: bool,
+    /// Whether a type of this language is told apart from a same-named one by
+    /// its generic arity (S-602, [CR-199]; see
+    /// [`ModuleModel::type_arity`](super::ModuleModel::type_arity)) —
+    /// consumed by extraction, which records each type declaration's and each
+    /// written type's arity, and by the binder's package rungs through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    pub type_arity: bool,
+    /// Whether this language names its classes and modules by lexical
+    /// constants (S-565, [FR-RS-33]; see
+    /// [`ModuleModel::lexical_constants`](super::ModuleModel::lexical_constants))
+    /// — consumed by the binder's constant index through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    pub lexical_constants: bool,
+    /// Whether the files of one directory that declare one `package` clause
+    /// share one package scope (S-528, [FR-RS-17]; see
+    /// [`ModuleModel::directory_packages`](super::ModuleModel::directory_packages))
+    /// — consumed by extraction, which records the clause, and by the binder's
+    /// same-package rung through [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    pub directory_packages: bool,
+    /// Whether a bare call no included declaration supplies binds the one
+    /// non-`static` definition of its name among the language's files (S-584,
+    /// [FR-RS-40]; see [`ModuleModel::link_unit`](super::ModuleModel::link_unit))
+    /// — consumed by the binder's link-unit rung through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    pub link_unit: bool,
+    /// Whether a type and the same-named singleton beside it are one name
+    /// (S-573, [FR-RS-36]; see
+    /// [`ModuleModel::companion_objects`](super::ModuleModel::companion_objects))
+    /// — consumed by the binder's path walk and wildcard lookup through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub companion_objects: bool,
+    /// Whether a file's top-level functions are members of its declared
+    /// namespace (S-573, [FR-RS-36]; see
+    /// [`ModuleModel::top_level_callables`](super::ModuleModel::top_level_callables))
+    /// — consumed by the binder's fully-qualified index through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub top_level_callables: bool,
+    /// Whether a wildcard import outranks the namespace's other files (S-573,
+    /// [FR-RS-36]; see
+    /// [`ModuleModel::wildcards_outrank_package`](super::ModuleModel::wildcards_outrank_package))
+    /// — consumed by the binder's package rungs through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub wildcards_outrank_package: bool,
+    /// Whether a top-level function with a receiver type is callable on a
+    /// value (S-560, [FR-RS-31]; see
+    /// [`ModuleModel::extension_functions`](super::ModuleModel::extension_functions))
+    /// — consumed by the binder's receiver-call arm through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub extension_functions: bool,
+    /// The suffix of the class another language reaches a file's top-level
+    /// functions through (S-560, [FR-RS-31]; see
+    /// [`ModuleModel::file_facade`](super::ModuleModel::file_facade)) —
+    /// consumed by the binder's fully-qualified index through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub file_facade: Option<String>,
+    /// The name a type's anonymous companion object takes (I4-INT,
+    /// [FR-RS-31]; see
+    /// [`ModuleModel::companion_name`](super::ModuleModel::companion_name)) —
+    /// consumed by the binder's call rungs through
+    /// [`crate::resolve::package_key`], and by reference extraction's receiver
+    /// pass, which records a typed receiver's call as a proven row (S-563).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub companion_name: Option<String>,
+    /// Whether an unqualified call its namespace does not supply falls back to
+    /// the global function (S-551, [FR-RS-26]; see
+    /// [`ModuleModel::global_function_fallback`](super::ModuleModel::global_function_fallback))
+    /// — consumed by the binder's package rungs through
+    /// [`crate::resolve::package_key`].
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    pub global_function_fallback: bool,
     /// The interop family this language binds within, resolved (S-519; see
     /// [`PluginManifest::module_family`]): the declared one, else the plugin's
     /// own name.
@@ -166,6 +291,16 @@ pub struct Semantics {
     ///
     /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
     pub framework_detectors: Vec<String>,
+    /// Whether [`Self::framework_detectors`] match only import references
+    /// (S-541; see [`FrameworkCandidacy::detectors_import_only`]).
+    ///
+    /// [`FrameworkCandidacy::detectors_import_only`]: crate::plugin::FrameworkCandidacy::detectors_import_only
+    pub framework_detectors_import_only: bool,
+    /// Parameter names that make a file a framework candidate by themselves
+    /// (S-541; see [`FrameworkCandidacy::receiver_parameters`]).
+    ///
+    /// [`FrameworkCandidacy::receiver_parameters`]: crate::plugin::FrameworkCandidacy::receiver_parameters
+    pub framework_receiver_parameters: Vec<String>,
     /// Canonical reference-path prefixes that gate **HTTP client-call**
     /// candidacy (S-341, [FR-WS-08]; see
     /// [`PluginManifest::http_client_detectors`]) — the consumer-side twin of
@@ -190,6 +325,11 @@ pub struct Semantics {
     /// [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
     /// [CR-001]: ../../../docs/requests/CR-001-test-aware-quality-metrics.md
     pub test_convention: TestConvention,
+    /// The source pre-pass run before parsing (S-555, [FR-EX-23]; see
+    /// [`Preprocessor`]); consumed by `extract::preprocess`.
+    ///
+    /// [FR-EX-23]: ../../../docs/specs/requirements/FR-EX-23.md
+    pub preprocessor: Preprocessor,
     /// Whether this language declares the optional reachability capability
     /// (S-159, [CR-043], [ADR-39]); gates Pass-3 dead-code reachability in the
     /// annotation engine ([FR-AN-01]). `false` (the default) makes the
@@ -200,6 +340,12 @@ pub struct Semantics {
     /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub reachability: bool,
+    /// The functions this language's runtime calls by name (S-530, [FR-AN-01];
+    /// see [`PluginManifest::entry_points`]) — dead-code live roots in this
+    /// language's files only.
+    ///
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    pub entry_points: Vec<String>,
     /// Whether this language declares the optional member-access capability
     /// (S-523, [CR-171]; see [`PluginManifest::member_access`]); gates Cohesion
     /// in the metrics engine ([FR-QM-11]) through
@@ -227,8 +373,9 @@ pub struct Semantics {
     /// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
     /// [ADR-25]: ../../../docs/specs/architecture/decisions/ADR-25.md
     pub artifact: bool,
-    /// Basename claims for extensionless artifact formats (S-062, [FR-CG-01]):
-    /// exact + `Name.*` prefix. Empty for code/doc plugins.
+    /// Basename claims for extensionless formats (S-062, [FR-CG-01]): exact,
+    /// plus `Name.*` prefix for an artifact plugin. A code plugin claims exact
+    /// names only (Ruby's `Gemfile`, S-564); a doc plugin claims none.
     ///
     /// [FR-CG-01]: ../../../docs/specs/requirements/FR-CG-01.md
     pub filenames: Vec<String>,
@@ -309,8 +456,10 @@ pub trait LanguagePlugin {
         false
     }
 
-    /// Basename claims for this plugin (S-062, [FR-CG-01]); exact + `Name.*`
-    /// prefix at lookup. Empty for code/doc plugins. Defaults to none.
+    /// Basename claims for this plugin (S-062, [FR-CG-01]); exact at lookup, plus
+    /// the `Name.*` prefix for an artifact plugin's claim (`Dockerfile.dev`).
+    /// A code plugin may claim exact names too (Ruby's `Gemfile`, S-564); a
+    /// doc plugin claims none. Defaults to none.
     ///
     /// [FR-CG-01]: ../../../docs/specs/requirements/FR-CG-01.md
     fn filenames(&self) -> &[String] {
@@ -333,6 +482,15 @@ pub trait LanguagePlugin {
     /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
     /// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
     fn reach(&self) -> Option<&Reach> {
+        None
+    }
+
+    /// The one-sentence disclosure this plugin's descriptor carries (`note`,
+    /// S-572, [FR-PL-07]), surfaced beside the language by `logos languages`.
+    /// Defaults to none.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    fn note(&self) -> Option<&str> {
         None
     }
 }
@@ -360,6 +518,11 @@ pub struct CompiledPlugin {
     ///
     /// [FR-PL-09]: ../../../docs/specs/requirements/FR-PL-09.md
     reach: Option<Reach>,
+    /// The descriptor's `note` (S-572); `None` when it declares none.
+    note: Option<String>,
+    /// The extensions this plugin shares with another that claims them too
+    /// (S-582, [`PluginManifest::shared_extensions`]).
+    shared_extensions: Vec<String>,
 }
 
 impl CompiledPlugin {
@@ -377,9 +540,21 @@ impl CompiledPlugin {
         let module_model = manifest.module_model_kind();
         let family = manifest.module_family();
         let call_targets = manifest.call_targets();
+        let candidacy = manifest.framework_candidacy.clone().unwrap_or_default();
         let implicit_receiver = manifest.implicit_receiver();
         let bare_calls_free_only = manifest.bare_calls_free_only();
         let enclosing_namespaces = manifest.enclosing_namespaces();
+        let type_arity = manifest.type_arity();
+        let lexical_constants = manifest.lexical_constants();
+        let directory_packages = manifest.directory_packages();
+        let link_unit = manifest.link_unit();
+        let companion_objects = manifest.companion_objects();
+        let top_level_callables = manifest.top_level_callables();
+        let wildcards_outrank_package = manifest.wildcards_outrank_package();
+        let extension_functions = manifest.extension_functions();
+        let file_facade = manifest.file_facade().map(str::to_string);
+        let companion_name = manifest.companion_name().map(str::to_string);
+        let global_function_fallback = manifest.global_function_fallback();
         let (package_stems, import_roots) = manifest
             .module_model
             .as_ref()
@@ -389,10 +564,13 @@ impl CompiledPlugin {
             module_separator: manifest.module_separator,
             import_specifier: manifest.import_specifier,
             specifier_extensions: manifest.specifier_extensions,
+            bare_specifiers: manifest.bare_specifiers,
             implicit_receiver,
             bare_calls_free_only,
             overloaded_calls: manifest.overloaded_calls,
             impl_block_lookup: manifest.impl_block_lookup,
+            separate_call_namespace: manifest.separate_call_namespace,
+            method_set_implements: manifest.method_set_implements,
             arity_unchecked_extensions: manifest.arity_unchecked_extensions,
             implicit_call_falls_through: manifest.implicit_call_falls_through,
             implicit_root_members: manifest.implicit_root_members,
@@ -400,23 +578,40 @@ impl CompiledPlugin {
             call_targets,
             supertype_kind_follows_target: manifest.supertype_kind_follows_target,
             inherits_interface_bodies: manifest.inherits_interface_bodies,
+            structural_types: manifest.structural_types,
+            commonjs: manifest.commonjs,
             package_modules: manifest.package_modules,
             module_model,
             package_stems,
             import_roots,
             enclosing_namespaces,
+            type_arity,
+            lexical_constants,
+            directory_packages,
+            link_unit,
+            companion_objects,
+            top_level_callables,
+            wildcards_outrank_package,
+            extension_functions,
+            file_facade,
+            companion_name,
+            global_function_fallback,
             family,
             complexity_keywords: manifest.complexity_keywords,
             nesting_block_kinds: manifest.nesting_block_kinds,
             body_node_kinds: manifest.body_node_kinds,
             abi_version: manifest.abi_version,
             framework_detectors: manifest.framework_detectors,
+            framework_detectors_import_only: candidacy.detectors_import_only,
+            framework_receiver_parameters: candidacy.receiver_parameters,
             http_client_detectors: manifest.http_client_detectors,
             framework_methods: manifest.framework_methods,
             invocation_methods: manifest.invocation_methods,
             export_convention: manifest.export_convention,
             test_convention: manifest.test_convention,
+            preprocessor: manifest.preprocessor,
             reachability: manifest.reachability,
+            entry_points: manifest.entry_points,
             member_access: manifest.member_access,
             member_access_excluded_extensions: manifest.member_access_excluded_extensions,
             documentation: manifest.documentation,
@@ -434,6 +629,8 @@ impl CompiledPlugin {
             queries,
             overridden,
             reach: manifest.reach,
+            note: manifest.note,
+            shared_extensions: manifest.shared_extensions,
         }
     }
 }
@@ -446,6 +643,12 @@ impl CompiledPlugin {
     /// The [`PluginError`] that refused the language's compile, naming its file.
     pub(crate) fn compiled_queries(&self) -> Result<&CompiledQueries, &PluginError> {
         self.queries.get(&self.language)
+    }
+
+    /// The extensions this plugin shares with another plugin claiming them
+    /// (S-582) — the registry routes each by the repository's sources.
+    pub(crate) fn shared_extensions(&self) -> &[String] {
+        &self.shared_extensions
     }
 
     /// Whether this language's queries are compiled yet — at load for an
@@ -510,5 +713,9 @@ impl LanguagePlugin for CompiledPlugin {
 
     fn reach(&self) -> Option<&Reach> {
         self.reach.as_ref()
+    }
+
+    fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 }

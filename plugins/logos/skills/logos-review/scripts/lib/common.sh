@@ -36,8 +36,9 @@ rv_die() { # code message
     exit "$code"
 }
 
-# The directory this lib sits in: <skill>/scripts/lib.
-RV_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# The directory this lib sits in: <skill>/scripts/lib. No `dirname`: the lib
+# must load on a PATH without coreutils, so the python3 check below can speak.
+RV_LIB="$(cd "${BASH_SOURCE[0]%/*}" && pwd -P)"
 
 rv_project() {
     printf '%s\n' "${LOGOS_PROJECT_DIR:-$PWD}"

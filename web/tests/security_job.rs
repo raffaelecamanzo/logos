@@ -121,7 +121,7 @@ impl Fixture {
 
     /// The member's job, once it is no longer running.
     async fn ended(&self) -> Value {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (status, body) = self.get("/api/v1/security/scan").await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -137,7 +137,7 @@ impl Fixture {
     /// shell (its group leader) and the sleeping grandchild.
     async fn sleeping(&self, name: &str) -> (u32, u32) {
         let path = self.rec.join(format!("{name}.pids"));
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             if let Some(line) = std::fs::read_to_string(&path).ok().filter(|s| s.ends_with('\n')) {
                 let pids: Vec<u32> = line.split_whitespace().map(|p| p.parse().unwrap()).collect();

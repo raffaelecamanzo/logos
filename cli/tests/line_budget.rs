@@ -894,12 +894,28 @@ fn adapter_lines() -> usize {
 /// [FR-CV-18]: ../../docs/specs/requirements/FR-CV-18.md
 ///
 /// **Merged at Sprint 108 Iteration 5 assembly: 1149 + 10 + 2 = 1161.**
+///
+/// **S-818 1161→1169** for `security reconfirm` ([FR-SC-32]), measured 1161→1169
+/// (+8), no headroom. Sibling sessions in Sprint 109 Iteration 4 add their own
+/// deltas to the 1161 this one branched from; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `lib.rs`: the `Reconfirm` variant of `SecurityCommands` (`fingerprint`, repeatable `--evidence`) | **+6** |
+/// | `dispatch.rs`: the arm, one `Engine::security_reconfirm_with_evidence` call | **+3** |
+/// | `lib.rs`: the `MCP_SURFACE` row (test table, outside the production count) | **0** |
+/// | | **+8** |
+///
+/// Routing, not logic: the entry lookup, the evidence pinning and the write are
+/// `Engine::security_reconfirm_with_evidence`'s.
+///
+/// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 1161,
-        "cli adapter exceeds the 1161 production-LOC budget (NFR-MA-02): \
+        lines <= 1169,
+        "cli adapter exceeds the 1169 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

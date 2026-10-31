@@ -80,7 +80,7 @@ use crate::extract::declared_types::{self, SchemaFacts};
 use crate::extract::{extract_files, Facts, FileInput, SymbolContext};
 use crate::graph_store::{
     BatchWriter, CoordinateMigration, GraphStore, NewAvroSchema, NewBuildArtifact, NewBuildManifest, NewConfigSource, NewDeclaredType, NewImplBlock,
-    NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
+    NewLocalBinding, NewNode, NewUnresolvedRef, StoreCounts, BUILD_FACTS_EXTRACTED_KEY, CONFIG_FINGERPRINT_KEY,
     DECLARED_TYPES_EXTRACTED_KEY, LAST_FULL_INDEX_AT_KEY, PROJECT_ID_KEY, SYMBOL_COORDINATE_KEY,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
@@ -166,6 +166,10 @@ pub fn index(
     let (loaded, load_ms) = crate::observability::traced_infallible_timed(Tool::Load, || {
         load_files(runtime, &candidates, &mut warnings, &mut files_failed)
     });
+    // Who reads `.h` (S-582), decided again over the files that loaded — the
+    // set a later sync decides over, as an unreadable source is never stored.
+    // Every loaded file was admitted, so no allowlist applies twice.
+    registry.set_shared_owners(&shared_owners::decide(registry, None, loaded.iter().map(|l| l.rel.as_str())));
 
     // The LOC this index ingests, for the beyond-envelope advisory (NFR-PE-09)
     // and, as of CR-085/FR-IX-12, the total of the source/test physical-LOC
@@ -323,6 +327,8 @@ pub fn index(
     // when the project was last fully indexed.
     record_full_index_at(runtime, persistence)?;
     record_index_coordinate(runtime, carries, coordinate)?;
+    // The `.h` reader discovery decided, which every file above was read by (S-582).
+    shared_owners::record(runtime, &registry.shared_owners())?;
 
     // FR-SY-09 / ADR-32: a completed index always rebuilds the graph, so it
     // always advances the persisted revision — done last (after every pass
@@ -602,10 +608,10 @@ pub fn sync(
         if !seen.insert(rel.clone()) {
             continue; // the same file requested twice
         }
-        // A Go module descriptor is never indexed, yet its `module` line is what
-        // every Go import binds against (S-439): record it so the resolve pass
+        // A module descriptor is never indexed, yet imports bind through it
+        // (`resolve::is_module_descriptor`): record it so the resolve pass
         // re-binds them. The admission gate below then skips it as usual.
-        if rel == "go.mod" || rel.ends_with("/go.mod") {
+        if crate::resolve::is_module_descriptor(&rel) {
             module_descriptors.push(rel.clone());
         }
         // Nor is an ignore file, but its directory is re-gated below (CR-210).
@@ -690,36 +696,21 @@ pub fn sync(
         removals.extend(newly_ignored(&stored, &seen, &ignore_dirs, &canon_root, &authority));
     }
 
-    // CR-052 / FR-SY-10 + CR-054 / FR-RC-06 (Channel B): on a FULL-WALK sync,
-    // converge the stored set to the freshly-discovered admitted candidate set.
-    // `paths` here is that complete candidate set (`discover_candidates` = the walk
-    // ∪ `admits_file`), so every path it names is already in `seen`. Any stored
-    // file NOT in `seen` is therefore absent from the current admission — gone from
-    // disk *or* still on disk but now unadmitted (gitignored, under a nested-`.git`
-    // boundary, glob-excluded, or oversize) — and is routed to the same removal
-    // path a full `index` uses ([FR-RC-01]). This makes a full-walk reconcile
-    // byte-identical to a fresh index ([NFR-RA-06]): the [CR-052] version escaped
-    // any still-on-disk file (`|| …is_file()`), so a now-gitignored file that
-    // never left disk survived — the exact CR-054 drift. `.gitignore` edits do not
-    // move the config fingerprint, so the fingerprint-gated purge ([FR-SY-07]) in
-    // `reconcile` could not catch them; this convergence does.
-    //
-    // Gated to full walks by construction: a PARTIAL watcher/hook/CLI batch carries
-    // no evidence about files outside its set, so sweeping there could purge live
-    // files (the filesystem-watcher path-set contract, [ADR-46] open question).
-    // Every path processed above is already in `seen` (its own admission handled
-    // inline), so the sweep scans only stored-minus-seen.
-    //
-    // [FR-RC-06]: ../../../docs/specs/requirements/FR-RC-06.md
-    // [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    // CR-052 / FR-SY-10 + CR-054 / FR-RC-06 (Channel B): see [`full_walk_removals`].
     if scope == SyncScope::FullWalk {
-        for rel in stored.keys() {
-            if seen.contains(rel) {
-                continue;
-            }
-            removals.push(rel.clone());
-        }
+        removals.extend(full_walk_removals(&stored, &seen));
     }
+    // S-582: the post-sync sources decide which plugin reads `.h`; a moved
+    // decision re-reads every stored header under the new reader.
+    let admits = |rel: &str| {
+        let abs = canon_root.join(rel);
+        let admitted = abs.is_file()
+            && authority.admits_path(&abs)
+            && admits_file(registry, doc_globs.as_ref(), config_globs.as_ref(), langs.as_ref(), rel);
+        admitted.then_some(abs)
+    };
+    let owners_moved =
+        shared_owners::reread_on_change(runtime, registry, langs.as_ref(), &stored, &mut loaded, &mut removals, &admits)?;
 
     // CR-015 incremental resolution change-set (part 1 of 2): the project-relative
     // files this sync re-extracts or removes, and the node names they carry *now*.
@@ -868,6 +859,7 @@ pub fn sync(
     if result.files_added + result.files_modified + result.files_removed > 0 || facts_changed {
         advance_graph_revision(runtime)?;
     }
+    owners_moved.map_or(Ok(()), |owners| shared_owners::record(runtime, &owners))?;
 
     // CR-052 / NFR-RA-13: a completed sync must leave the graph structurally
     // sound (one node per symbol_id, no orphan rows). Asserted in debug builds.
@@ -878,6 +870,41 @@ pub fn sync(
     result.warnings = warnings;
     result.files_failed = files_failed;
     Ok(result)
+}
+
+/// The stored files a FULL-WALK [`sync`] removes: every one its walk did not see.
+///
+/// CR-052 / FR-SY-10 + CR-054 / FR-RC-06 (Channel B): on a FULL-WALK sync,
+/// converge the stored set to the freshly-discovered admitted candidate set.
+/// `paths` here is that complete candidate set (`discover_candidates` = the walk
+/// ∪ `admits_file`), so every path it names is already in `seen`. Any stored
+/// file NOT in `seen` is therefore absent from the current admission — gone from
+/// disk *or* still on disk but now unadmitted (gitignored, under a nested-`.git`
+/// boundary, glob-excluded, or oversize) — and is routed to the same removal
+/// path a full `index` uses ([FR-RC-01]). This makes a full-walk reconcile
+/// byte-identical to a fresh index ([NFR-RA-06]): the [CR-052] version escaped
+/// any still-on-disk file (`|| …is_file()`), so a now-gitignored file that
+/// never left disk survived — the exact CR-054 drift. `.gitignore` edits do not
+/// move the config fingerprint, so the fingerprint-gated purge ([FR-SY-07]) in
+/// `reconcile` could not catch them; this convergence does.
+///
+/// Gated to full walks by construction: a PARTIAL watcher/hook/CLI batch carries
+/// no evidence about files outside its set, so sweeping there could purge live
+/// files (the filesystem-watcher path-set contract, [ADR-46] open question).
+/// Every path processed above is already in `seen` (its own admission handled
+/// inline), so the sweep scans only stored-minus-seen.
+///
+/// [FR-RC-01]: ../../../docs/specs/requirements/FR-RC-01.md
+/// [FR-RC-06]: ../../../docs/specs/requirements/FR-RC-06.md
+/// [FR-SY-07]: ../../../docs/specs/requirements/FR-SY-07.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
+/// [CR-052]: ../../../docs/requests/CR-052-graph-update-correctness.md
+fn full_walk_removals<'s>(
+    stored: &'s HashMap<String, Option<String>>,
+    seen: &'s HashSet<String>,
+) -> impl Iterator<Item = String> + 's {
+    stored.keys().filter(|rel| !seen.contains(*rel)).cloned()
 }
 
 /// Reconcile the working tree into the graph before an aggregate run
@@ -1688,6 +1715,9 @@ pub fn purge_on_config_change(
     // immaterial to the prologue (best-effort, [ADR-11]) and dropped.
     let mut warnings = Vec::new();
     let candidates = discover_candidates(root, config, registry, &mut warnings)?.candidates;
+    // The walk decided who reads `.h` for the working tree; this read re-reads
+    // no header, so the registry goes back to the graph's decision (S-582).
+    shared_owners::route_by_record(runtime, registry)?;
     let admitted: HashSet<&str> = candidates.iter().map(|c| c.rel.as_str()).collect();
     // The navigation prologue deliberately defers inbound-ref demotion to the
     // next governance reconcile ([FR-SY-08], [NFR-PE-01]); take only the count
@@ -1894,14 +1924,24 @@ fn discover_candidates(
     // compiled-in code grammars; a non-empty `languages` restricts to those).
     let langs = config.language_allowlist();
 
+    // Defence in depth — discovery already contains the walk.
+    let files: Vec<(PathBuf, String)> = report
+        .files
+        .into_iter()
+        .filter_map(|abs| {
+            let rel = to_forward_slash(abs.strip_prefix(&canon_root).ok()?);
+            Some((abs, rel))
+        })
+        .collect();
+    // Which plugin reads `.h` is decided by the sources this walk admits
+    // (S-582, FR-PL-07) before any file is admitted, so a header is admitted —
+    // and later read — by the plugin the repository gives it to.
+    registry.set_shared_owners(&shared_owners::decide(registry, langs.as_ref(), files.iter().map(|(_, rel)| rel.as_str())));
+
     let mut candidates = Vec::new();
     let mut build_manifests = Vec::new();
     let mut avro_schemas = Vec::new();
-    for abs in report.files {
-        let Ok(rel_path) = abs.strip_prefix(&canon_root) else {
-            continue; // defence in depth — discovery already contains the walk
-        };
-        let rel = to_forward_slash(rel_path);
+    for (abs, rel) in files {
         if build_manifest::manifest_format(&rel).is_some() {
             build_manifests.push(Candidate {
                 abs: abs.clone(),
@@ -2463,8 +2503,13 @@ fn persist_file(
                 Vec::new()
             };
             w.delete_nodes_for_file(file_id)?;
-            w.update_file(file_id, Some(&facts.language), Some(hash))?;
-            w.set_file_namespace(file_id, facts.namespace.as_deref())?;
+            w.update_file(
+                file_id,
+                Some(&facts.language),
+                Some(hash),
+                facts.namespace.as_deref(),
+                facts.parse_damaged,
+            )?;
             // Replace the file's ledger rows wholesale: stale refs from the
             // previous version never linger.
             w.delete_unresolved_refs_for_file(file_id)?;
@@ -2473,6 +2518,7 @@ fn persist_file(
             persist_config_source(w, facts, file_id)?;
             persist_declared_types(w, facts, file_id)?;
             persist_impl_blocks(w, facts, file_id)?;
+            persist_local_bindings(w, facts, file_id)?;
             for cap in &captured {
                 let kind = EdgeKind::try_from(cap.kind)
                     .with_context(|| format!("captured edge has an unknown kind {}", cap.kind))?;
@@ -2504,8 +2550,16 @@ fn persist_file(
         }
         None => w.insert_file(&facts.path, Some(&facts.language), Some(hash))?,
     };
-    // The namespace the file declares (S-518), which the binder keys it by.
-    w.set_file_namespace(file_id, facts.namespace.as_deref())?;
+    // The namespace the file declares (S-518), which the binder keys it by,
+    // and whether its parse was damaged (S-571, FR-IX-14), written on the new
+    // row by the same write the replace path makes.
+    w.update_file(
+        file_id,
+        Some(&facts.language),
+        Some(hash),
+        facts.namespace.as_deref(),
+        facts.parse_damaged,
+    )?;
 
     let counts = insert_facts(w, facts, file_id)?;
     insert_refs(w, facts, file_id)?;
@@ -2519,6 +2573,9 @@ fn persist_file(
     // The file's impl blocks (S-606): replace-wholesale per file, like the
     // declared types.
     persist_impl_blocks(w, facts, file_id)?;
+    // The names its callable bodies bind locally (S-593): replace-wholesale per
+    // file, like the impl blocks.
+    persist_local_bindings(w, facts, file_id)?;
     Ok(PersistCounts {
         nodes: counts.nodes,
         edges: counts.edges,
@@ -3012,6 +3069,27 @@ fn persist_impl_blocks(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Resu
     w.replace_file_impl_blocks(file_id, &rows)
 }
 
+/// Persist a file's local bindings (S-593, FR-EX-33), replacing whatever the
+/// file recorded before — the [`persist_impl_blocks`] shape.
+fn persist_local_bindings(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
+    let rows: Vec<NewLocalBinding<'_>> = facts
+        .local_bindings
+        .iter()
+        .map(|b| NewLocalBinding {
+            name: &b.name,
+            kind: b.kind,
+            line: b.line,
+            column: b.column,
+            scope_start_line: b.scope_start_line,
+            scope_start_column: b.scope_start_column,
+            scope_end_line: b.scope_end_line,
+            scope_end_column: b.scope_end_column,
+            hoisted: b.hoisted,
+        })
+        .collect();
+    w.replace_file_local_bindings(file_id, &rows)
+}
+
 /// Persist a file's extracted references into the `unresolved_refs` ledger
 /// (S-011). Insertion is idempotent over the ledger's uniqueness rule.
 fn insert_refs(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<()> {
@@ -3105,6 +3183,9 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // The S-609 marker on an interface member its implementors do not
             // inherit (FR-RS-48) — NULL wherever not recorded.
             uninherited: n.uninherited,
+            // The S-602 generic arity of a type whose plugin tells types apart
+            // by it — NULL wherever not recorded.
+            type_arity: n.type_arity,
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         let Some(node_id) = inserted else {
@@ -3341,16 +3422,17 @@ fn annotate_pass(
         let rules = config::load_rules_from_root(root)?;
         // CR-043 / ADR-39: dead-code reachability is computed only for languages
         // that declare the reachability capability on their descriptor; the
-        // others render `is_dead = NULL`. The capable-extension set is derived
-        // fresh from the loaded registry each run, so it tracks the compiled-in
-        // grammars deterministically (NFR-RA-06).
-        let reachable_exts = registry.reachability_extensions();
+        // others render `is_dead = NULL`. The capable-extension set — and the
+        // language-scoped roots (S-530) — are derived fresh from the loaded
+        // registry each run, so they track the compiled-in grammars
+        // deterministically (NFR-RA-06).
+        let reach = crate::annotate::Reachability::of(registry);
         crate::annotate::run(
             runtime,
             &rules,
             &config.semantics.entry_points,
             &config.semantics.test_markers,
-            &reachable_exts,
+            &reach,
             ctx,
             incremental,
         )
@@ -3363,7 +3445,8 @@ fn hash_source(source: &str) -> String {
     blake3::hash(source.as_bytes()).to_hex().to_string()
 }
 
-/// Does any loaded **code** grammar claim this file's extension?
+/// Does any loaded **code** grammar claim this file — by its extension, or by
+/// the exact basename it claims (Ruby's `Gemfile`, S-564)?
 ///
 /// Documentation grammars (S-033, [ADR-19]) are excluded here: this is the
 /// *code*-discovery gate. Whether a markdown file enters the pipeline is the
@@ -3377,10 +3460,8 @@ fn supported_extension(
     langs: Option<&HashSet<String>>,
     rel: &str,
 ) -> bool {
-    Path::new(rel)
-        .extension()
-        .and_then(|e| e.to_str())
-        .and_then(|ext| registry.for_extension(ext))
+    registry
+        .for_path(rel)
         // Documentation (S-033) and config/artifact (S-062, CR-010) grammars are
         // excluded here: this is the *code*-discovery gate. Each has its own gate
         // ([`is_doc_admitted`]/[`is_config_admitted`]) so an artifact file with a
@@ -3544,6 +3625,11 @@ fn relativize(canon_root: &Path, path: &Path) -> Option<String> {
         Some(s)
     }
 }
+
+// Which plugin reads `.h` in this repository, and the re-read a moved decision
+// costs a sync (S-582, FR-PL-07).
+mod shared_owners;
+pub(crate) use shared_owners::route_by_record as route_shared_extensions;
 
 #[cfg(all(test, feature = "lang-rust"))]
 mod tests;

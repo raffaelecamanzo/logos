@@ -70,7 +70,7 @@ import {
   workspaceRules,
 } from "../../copy/workspaceHealth.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { freshnessStatement, resolutionStatement } from "../dashboard/dashboardModel.ts";
+import { freshnessStatement, memberResolution } from "../dashboard/dashboardModel.ts";
 import styles from "./Workspace.module.css";
 
 /** What a cell says when the figure behind it was never read — a member whose
@@ -233,7 +233,7 @@ function memberRow(member: MemberStatus, nowUnix: number): MemberRow {
     // verbatim diagnostic when it did not, and `error` for a member that opened
     // and failed a later walk. Additive, never a replacement.
     reason: member.degraded_reason ?? member.reason ?? member.error ?? null,
-    resolution: member.result ? resolutionStatement(member.result) : null,
+    resolution: member.result?.internal_resolution ? memberResolution(member.result.internal_resolution) : null,
   };
 }
 

@@ -6,9 +6,9 @@
 
 use logos_core::Runtime;
 
-/// A rowid-independent fingerprint of the whole graph (nodes with their arity
-/// and associated-item facts, edges, the whole reference ledger, the impl
-/// blocks, annotation verdicts), each section a sorted multiset of lines. `clone_group` is deliberately excluded: its representative is the
+/// A rowid-independent fingerprint of the whole graph (nodes with their arity,
+/// associated-item and type-arity facts, edges and their dispatch markers, the whole reference ledger, the impl
+/// blocks, the local bindings, annotation verdicts), each section a sorted multiset of lines. `clone_group` is deliberately excluded: its representative is the
 /// component's minimum rowid, which is insertion-order-sensitive and so differs
 /// between two independently built stores even for identical clusters — and
 /// near-clone clustering is orthogonal to (and unchanged by) CR-015.
@@ -60,12 +60,16 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         // supertype walk's interface levels never bind.
         let uninherited: std::collections::BTreeSet<i64> =
             store.uninherited_members()?.into_iter().map(|id| id.0).collect();
+        // Each type's generic arity (S-602, migration 42) — what the C#
+        // namespace rungs match a written type's arity against.
+        let type_arity: std::collections::BTreeMap<i64, u32> =
+            store.type_arities()?.into_iter().map(|(id, arity)| (id.0, arity)).collect();
 
         let mut node_lines: Vec<String> = nodes
             .iter()
             .map(|n| {
                 format!(
-                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}",
+                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{:?}",
                     n.symbol.as_str(),
                     n.kind,
                     n.name,
@@ -75,6 +79,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     arity_of.get(&n.id.0).map_or("None|None", String::as_str),
                     item_of.get(&n.id.0).map_or("None|None|false", String::as_str),
                     uninherited.contains(&n.id.0),
+                    type_arity.get(&n.id.0),
                 )
             })
             .collect();
@@ -85,6 +90,16 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .map(|e| format!("E {} -> {} [{:?}]", key(e.source.0), key(e.target.0), e.kind))
             .collect();
         edge_lines.sort();
+
+        // Every dispatch marker (S-712): which call edges a trait fan-out
+        // reached as an implementation, and through which trait method — a
+        // synced edge must be marked exactly as a fresh index's.
+        let mut dispatch_lines: Vec<String> = store
+            .dispatch_links()?
+            .into_iter()
+            .map(|(source, target, method)| format!("D {} -> {} via {method}", key(source.0), key(target.0)))
+            .collect();
+        dispatch_lines.sort();
 
         // Every ledger row, every column but its rowid (the file by path) —
         // the peeled wrappers of a proven Rust receiver (S-587), a call's
@@ -131,6 +146,29 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
             .collect();
         impl_lines.sort();
 
+        // Every local binding (S-593, migration 41), by file and position — a
+        // synced file must carry a fresh index's bindings and no stale one.
+        let mut local_lines: Vec<String> = store
+            .local_bindings()?
+            .iter()
+            .map(|b| {
+                format!(
+                    "L {}|{}:{}|{}|{}|{}:{}-{}:{}|{}",
+                    b.file_path,
+                    b.line,
+                    b.column,
+                    b.name,
+                    b.kind.as_str(),
+                    b.scope_start_line,
+                    b.scope_start_column,
+                    b.scope_end_line,
+                    b.scope_end_column,
+                    b.hoisted,
+                )
+            })
+            .collect();
+        local_lines.sort();
+
         let mut ann_lines: Vec<String> = anns
             .iter()
             .map(|a| {
@@ -150,7 +188,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         ann_lines.sort();
 
         let mut out = String::new();
-        for section in [node_lines, edge_lines, ref_lines, impl_lines, ann_lines] {
+        for section in [node_lines, edge_lines, dispatch_lines, ref_lines, impl_lines, local_lines, ann_lines] {
             for line in section {
                 out.push_str(&line);
                 out.push('\n');

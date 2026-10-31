@@ -55,10 +55,10 @@ pub mod registry;
 pub use abi::AbiRange;
 pub use error::{PluginError, SkipReason, SkippedGrammar};
 pub use manifest::{
-    AnchorDescriptor, CallTargets, ConfigDescriptor, CrossFileRelation, ExportConvention,
-    ImplicitReceiver,
-    ImportSpecifier, ModuleModel, ModuleModelKind, PackageModules, PluginManifest, PropertiesDescriptor, Reach, ReachLevel,
-    TestConvention,
+    AnchorDescriptor, BareSpecifiers, CallTargets, ConfigDescriptor, CrossFileRelation, ExportConvention,
+    FrameworkCandidacy, ImplicitReceiver,
+    ImportSpecifier, ModuleModel, ModuleModelKind, PackageModules, PluginManifest, Preprocessor, PropertiesDescriptor,
+    Reach, ReachLevel, TestConvention,
 };
 pub use plugin::{CompiledPlugin, LanguagePlugin, Semantics};
-pub use registry::{LanguageRegistry, PathModelDecl};
+pub use registry::{LanguageRegistry, PathModelDecl, SharedOwners};

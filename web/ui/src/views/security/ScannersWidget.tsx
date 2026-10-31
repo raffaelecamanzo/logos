@@ -124,7 +124,7 @@ function FailedScan({ row }: { row: SecurityScannerStatus }) {
 function FindingsCell({ row }: { row: SecurityScannerStatus }) {
   const count =
     row.state === "fresh" || row.state === "stale"
-      ? SCANNER_STATE_TEXT.fresh(row.findings, row.suppressed)
+      ? SCANNER_STATE_TEXT.fresh(row.findings, row.suppressed, row.merged)
       : row.state === "never_run"
         ? FINDINGS_CELL_TEXT.neverRun
         : FINDINGS_CELL_TEXT.none;

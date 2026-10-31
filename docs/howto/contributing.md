@@ -33,7 +33,15 @@ a change that is already public.
    git merge --no-ff sprint/N
    ```
 
-2. Do a dry run. It writes one unreferenced commit object and nothing else: no
+2. Run the Linux leg on that `main`. `--push` publishes only a tree that passed it
+   (step 4), so this comes before it; [The Linux leg before a
+   publish](#the-linux-leg-before-a-publish) says what it runs:
+
+   ```bash
+   bash scripts/gate.sh ci
+   ```
+
+3. Do a dry run. It writes one unreferenced commit object and nothing else: no
    branch, no tag, no remote call.
 
    ```bash
@@ -41,10 +49,11 @@ a change that is already public.
    ```
 
    It prints the commit id, the commit message, and the exact `git push` and
-   `gh pr create` commands it would run. `--help` prints every option (and exits 2,
-   like any usage message).
+   `gh pr create` commands it would run, and whether the evidence of step 2 is
+   present for `main`'s tree (`gate evidence: present` or `absent`, with what is
+   missing). `--help` prints every option (and exits 2, like any usage message).
 
-3. Publish. Only the owner runs this:
+4. Publish. Only the owner runs this:
 
    ```bash
    bash scripts/publish-sprint.sh --sprint N --push
@@ -56,9 +65,15 @@ a change that is already public.
    what the term gate scanned. A re-run after a
    push that already landed goes straight to the pull request.
 
-4. Wait for CI, then merge the pull request on GitHub with **Rebase and merge**.
+   It exits 2, naming `bash scripts/gate.sh ci` and pushing nothing, unless
+   passing tier `ci` evidence exists for local `main`'s tree. Evidence for any
+   other tree counts as absent: a commit after the run, or the run on another
+   branch, means running step 2 again. `scripts/publish-public.sh --tag-only`
+   (a release tag) is not held to it.
 
-5. Restore the local ancestry (the merge is trivial, as the trees match):
+5. Wait for CI, then merge the pull request on GitHub with **Rebase and merge**.
+
+6. Restore the local ancestry (the merge is trivial, as the trees match):
 
    ```bash
    git fetch origin && git merge origin/main
@@ -69,6 +84,78 @@ runs on the message and the tree, and its exit codes are described once, in
 [CI integration](ci-integration.md#publishing-a-sprint-one-pull-request). The
 plan files it reads for the commit message are not part of a public checkout;
 without them the commit gets a one-line summary and the output says so.
+
+## The Linux leg before a publish
+
+A test can pass on a fast machine with a warm cargo cache and fail on CI: a
+timing band that CI's slower host overruns, or a call that needs every platform's
+crates offline when CI's cache holds only its own. Run the tests the way CI does,
+once per publish, on the `main` you are about to publish (after step 1 above, so
+the evidence is for the tree that is pushed), before step 4:
+
+```bash
+bash scripts/gate.sh ci
+```
+
+It starts a native arm64 Linux container and runs, from the tree it certifies (the
+tracked and untracked files, minus the ignored ones), the steps of the CI test job
+that a developer machine can hide a failure in: every `scripts/tests/test-*.sh`
+suite, the web UI build (`npm ci && npm run build`), and
+`cargo test --workspace --no-fail-fast` with `LOGOS_PERF_TOLERANCE=3`, CI's value.
+The legs run as an unprivileged user and every one of them runs even after another
+fails, so one run names every red leg. The script that does the work in the
+container is `scripts/ci-container.sh`; the counting is `scripts/gate.sh`'s, from
+the logs the container leaves.
+
+What makes it a different run from the full tier:
+
+- **The cargo home is empty at every start.** The container is removed with its
+  cargo home (`docker run --rm`, nothing mounted over it), so every dependency is
+  downloaded for the platform being built, as on CI. Expect the download on every
+  run.
+- **Only the build directory persists**, in the named Docker volume
+  `logos-ci-target` (`GATE_CI_VOLUME` renames it), so the compile is not repeated.
+  It grows to tens of GB. Current versions of the sprint-coordinator's
+  `disk-check.sh` report its size and print the command that reclaims it, which is:
+
+  ```bash
+  docker volume rm logos-ci-target
+  ```
+
+- **The image is pinned by digest**, in `CI_IMAGE` at the top of `scripts/gate.sh`,
+  and its Rust must be the local toolchain's: every run compares the two and exits
+  2 on a mismatch. When the local toolchain moves, resolve the digest of the new
+  version's `rust:<version>-bookworm` image and replace the line.
+- **Node is the exact release pinned in `scripts/ci-container.sh`**, with its
+  checksum; CI installs the latest 22.x.
+
+The run reports, for the workspace tests, the binaries expected, started and
+finished and the tests passed and failed, and writes tier `ci` evidence for the
+tree (`ci-ui-build`, `ci-script-suites` and `ci-test` under the worktree's
+`gate-evidence` directory). Check it:
+
+```bash
+bash scripts/verify-evidence.sh --strict --tier ci
+```
+
+That accepts tier `ci` evidence for the tree as it is now and refuses the fast and
+full tiers' evidence in its place, as they refuse it in theirs. `publish-sprint.sh
+--push` asks the same question of local `main`'s tree
+(`--tier ci --tree <that tree>`), so the answer does not depend on which branch is
+checked out where you publish; run `gate.sh ci` where `main`'s tree is the one
+being certified.
+
+It exits 2, and never reports a pass it did not run, when there is nothing to run
+it on, and says which: Docker is not installed, the Docker daemon is not running,
+the engine is not a native arm64 one (the leg does not emulate), the image cannot
+be pulled or run, or the image's Rust is not the local toolchain's. Any Docker runtime with a native arm64 engine will
+do; start it before the run. The compile is bounded to two jobs
+(`GATE_CI_JOBS`) and the tests run on four threads (`GATE_CI_TEST_THREADS`), CI's
+core count; give the Docker VM enough memory for the former.
+
+It does not replace the full tier, and CI still runs on x86_64, which this leg does
+not: it catches what a cold cargo home and Linux show, not what only that
+architecture does.
 
 ## Contributor pull requests during a sprint
 

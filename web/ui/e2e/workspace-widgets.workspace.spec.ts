@@ -34,13 +34,36 @@ test("the Workspace Dashboard stacks its widgets at one gap, left-aligned, in on
     "Spec conformance (declared endpoints vs controllers)",
     "Coverage by intake",
     "Cross-service reachability",
+    "Reference resolution across the workspace",
     "Members",
   ]);
   const m = await expectWidgetStackLayout(stack);
-  // The workspace callout and the six widgets (Security leads, S-790): six gaps,
-  // all the stack's one.
-  expect(m.gaps).toHaveLength(6);
-  expect(m.bodySizes).toHaveLength(6);
+  // The workspace callout and the seven widgets (Security leads, S-790; the
+  // workspace reference resolution sits before Members, S-637): seven gaps, all
+  // the stack's one.
+  expect(m.gaps).toHaveLength(7);
+  expect(m.bodySizes).toHaveLength(7);
+});
+
+// S-637 (FR-RS-49, FR-UI-36): the workspace reference resolution states its
+// pooled figure with its population line and the members it summed over, and the
+// Members column reads each member's own figure over its internal candidates —
+// over the real two-member fixture, as the served view renders it.
+test("the Workspace Dashboard states the pooled reference resolution beside each member's own", async ({ page }) => {
+  await page.goto("/workspace-dashboard");
+  const stack = await stackWith(page.locator("main#view-root"), "Members");
+  const widget = stack
+    .locator("section")
+    .filter({ has: page.getByRole("heading", { name: "Reference resolution across the workspace", exact: true }) });
+  const figure = widget.locator('[data-widget-part="figure"]');
+  await expect(figure).toContainText(/\d+\.\d% at least, of the internal candidates resolved|No figure:/);
+  await expect(figure).toContainText(/internal candidates of [\d,]+ code references \([\d,]+ provably external\)\./);
+  await expect(figure).toContainText("Pooled over 2 of 2 members");
+  const members = stack.locator("section").filter({ has: page.getByRole("heading", { name: "Members", exact: true }) });
+  for (const member of ["api", "web"]) {
+    const row = members.getByRole("row", { name: new RegExp(`^${member}\\b`) });
+    await expect(row).toContainText(/internal candidates; [\d,]+ code references, [\d,]+ provably external\)|no code reference recorded|provably external/);
+  }
 });
 
 // S-790 (FR-UI-36): the Security widget leads the Workspace Dashboard with one row

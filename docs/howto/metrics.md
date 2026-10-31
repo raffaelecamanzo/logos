@@ -123,21 +123,61 @@ access that binds to nothing connects nothing.
 **Only languages that capture member access are scored** (since version 8): a
 class counts only when its language's plugin declares the `member_access`
 capability — Java (`this.x`; a bare implicit `x` is not captured), TypeScript
-(`.ts`), TSX (`.tsx`) and PHP (`$this->x`). A class in any other language —
-JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`), Python, C++, Ruby and the rest — is
+(`.ts`), TSX (`.tsx`), PHP (`$this->x`), C# (`this.x`, and the bare field and
+property reads inside a method), Python (`self.x`, since version 9; `.pyi`
+stubs excluded), Scala (`this.x`, and the bare reads of a field or
+constructor parameter inside a method), Kotlin (`this.x`, and the bare reads
+of a property or primary-constructor `val` inside a method), C++ (`this->x`,
+and the bare reads of a field inside a method of a class the file declares),
+Ruby (`@x` reads and writes inside a method) and JavaScript (`.js`, `.mjs`,
+`.cjs`, `.jsx`; `this.x`, since version 9). A
+class in any other language is
 not scored, because without captured field access its LCOM4 would rest on
 intra-class calls alone (see
 [configuration.md](configuration.md#member-access-member_access-member_access_excluded_extensions)). In TypeScript
 and TSX, declared class fields, `#private` fields and constructor parameter
 properties (`constructor(private readonly http: Client)`) are fields of the
-class. Getters, inherited members, and the fields of an abstract class or a
-class expression are not, so accesses to them stay unbound. A TypeScript class
+class. Getters, inherited members, and the fields of an abstract class (whose
+methods are its members) or a class expression are not, so accesses to them
+stay unbound. A TypeScript class
 whose methods share fields can therefore score higher on Cohesion after a
 re-index with this version than it did before.
+In JavaScript, a class's fields are its body's `x = …` and `#x` declarations
+and the `this.x = …` writes of its constructor and methods, once per class
+(a constructor's `this.pubClient = …` is the Field `pubClient`); `this.x`
+reads and writes bind to them. A `this.x += …`, a `this.#x` write (the body
+declares it), a destructuring target, a `this.x = …` inside a `function`
+expression's own body (a callback binds its own `this`; an arrow function does
+not), and a `this.x = …` of a constructor *function* or an object literal's
+method (no class owns it) declare no field.
+In JavaScript, TypeScript and TSX alike, `this.f()` is a call, not an access of
+a field named `f`: a method that only calls a field holding a function
+(`this.callback()`) links nothing through it, so a class that leans on such
+callbacks reads less cohesive than it is.
+In Python, a class's fields are its body's assignments and annotations (a
+dataclass's, attrs', a Django or pydantic model's fields) and the `self.x = …`
+writes of its methods, each name of a tuple target included, once per class;
+`self.x` reads and writes bind to them. An attribute only a base class
+declares, the names after the first of a chained assignment (`a = b = 0`), an
+augmented assignment (`self.n += 1`), a `cls.x = …`, an assignment under an
+`if` or other compound statement of the class body, and a `self.x = …` outside
+a method of the class (in a function nested in one, say) declare no field, so
+accesses to them stay unbound.
+**Inherited members link too** (since version 9): two methods that access the
+same name through their own receiver (`this.state`), where the class declares
+no member of that name, are one component, as if they shared a field. React's
+`render` and `componentDidUpdate` both reading the inherited `this.state` are
+one component, not two. The access still binds to no field, and a name the
+class does declare links only through the access that binds to it.
 **n/a drop-out:** a class with no bodied production method, or in a language
 that does not declare `member_access`, is not scored, and a repo with no
 scoreable class reports Cohesion as `n/a` rather than a
-fabricated score — see
+fabricated score. So does a repo with fewer scoreable classes than
+`[metric_thresholds] cohesion_min_classes` (default 5, since version 9): a mean
+over one or two classes lets one class move the whole signal. Below the minimum
+Cohesion reads `n/a` ("too few classes") and no class is ranked for it in
+"where to start", but the Cohesion worst-offender list still lists every class
+at LCOM4 ≥ 2 — see
 [Applicability and the n/a drop-out](#applicability-and-the-na-drop-out).
 
 #### 9. Focus — *are containers god-objects?*
@@ -153,13 +193,53 @@ counts the *same* containers, so the gate and the dimension never disagree.
 Carries the same **n/a drop-out** as Cohesion when the repo has no applicable
 containers.
 
+**A Scala trait with a body is a container** (since version 9): a trait with at
+least one method with a body counts for Focus, and for Cohesion, as a class does —
+Scala writes its services as traits (the cake pattern's `trait AccountService`).
+A trait of abstract declarations only is no container. Only Scala declares this
+(`bodied_traits_are_containers`,
+[configuration.md](configuration.md#trait-containers-bodied_traits_are_containers)):
+a Rust trait's default methods never make a container.
+
+**A C# partial type is one container** (since version 9): the `partial`
+declarations of one fully-qualified name in one directory tree (every part in or
+below one part's directory) — `Form1.cs` and `Form1.Designer.cs` — are counted once, with the methods of every part and the sum of the parts'
+spans, under the first-declared part (by file path). Each part keeps its own
+node, and every later part records an `Extends` to the first. Cohesion reads the
+same union: a `this.x` read of a field another part declares links the reading
+method, but a bare `x` does not — a bare name is an access only of a field the
+method's own part declares.
+
 Two limits of the method count, both from what extraction records rather than
 from the formula. A C++ class whose members are all defined out of line in a
-`.cpp` has only bodyless in-class prototypes in the graph (out-of-line
-definitions are not captured), so it counts zero bodied methods: it is never
-god by method count, only by span, and Cohesion does not score it. And a Rust
-`impl` method or a Go receiver method is attached to its module rather than to
-its struct, so Rust and Go containers are god by span alone.
+`.cpp` has only bodyless in-class prototypes in its header: each `.cpp`
+definition is a method of its own, not merged into a class another file
+declares (a definition in the class's own file is merged, and counts), so the
+class counts zero bodied methods: it is never god by method count, only by
+span, and Cohesion does not score it.
+
+**Rust and Go methods count toward their struct** (since version 9). Extraction
+attaches a Rust `impl` method or a Go receiver method to its module, not its
+struct, and leaves it there. Focus attributes each one to the `Struct` its
+recorded type names: a Rust method to the struct of that name in its **crate**
+(the `impl` may sit in any module of it, inherent or trait, associated functions
+included; a crate is the directory above its `src/`), a Go method to the struct
+of that name in its **package** — the directory of its file, pointer and value
+receivers alike. A candidate is also declared in a file of the method's own
+language. A method naming no
+struct of its crate/package (an enum, an alias, a type from elsewhere) or two
+same-named ones counts toward none, and a same-named struct of another
+crate/package is never a candidate. `scan --json` gives the count under
+`metrics.focus_attribution` as `{"unattributed": N, "denominator": M}` — the
+methods that reached no struct, of every production method that records a type
+(`null` when none does, and on a stored snapshot). The attribution feeds Focus
+only: node ids, symbols and edges, and Cohesion, are unchanged.
+
+Two cases leave a method unattributed that a reader may not expect. A struct of
+the same name declared inside a Rust `#[cfg(test)]` module, and a Go external
+test package (`package svc_test`) declaring the type again, are each a second
+same-named struct of the crate/package, so the production struct's methods count
+toward none; `focus_attribution` is where that shows.
 
 #### 10. Uniqueness — *how much code is near-duplicated?*
 
@@ -200,6 +280,13 @@ marker, a JUnit/pytest/PHPUnit test annotation, …) **or** from its file path:
   `#[test]`, PHPUnit markers) is unaffected by the root.
 - **PHP:** a `test*` method counts as a test only inside a `*TestCase` subclass
   or in a test file; `#[Test]` and `@test` count anywhere.
+- **Scala:** a `*Spec.scala`, `*Suite.scala` or `*Test.scala` file is a test file
+  (beneath a production source root it is not, as for any JVM file). A `def` of a
+  class, trait or object that extends a ScalaTest, MUnit or Specs2 base —
+  `AnyFunSuite`, `AnyFlatSpec`, `FunSuite`, `Specification`, … — counts anywhere, and
+  so does one inside a `test("…")`/`it("…")` call. Only the framework's own base names
+  match: a class extending a base of your own (`class FooTests extends BaseSuite`) is
+  not recognised by its base, though its file name or path still marks it.
 
 The exclusion then applies as:
 
@@ -236,6 +323,23 @@ documentation needs to be safe to add: **adding or removing markdown leaves the
 aggregate signal byte-identical** and raises no new constraint violations. See
 the `[documentation]` table in
 [configuration.md](configuration.md#documentation--indexing-markdown).
+
+## Dispatch through a trait is excluded too
+
+A call through a trait (`t.m()` with `t: &dyn Tr` or `&impl Tr`) binds to the
+trait's method and to every implementation of it. Each edge to an
+implementation is marked **dispatch**: the caller reaches it at run time, but
+depends only on the trait. Every architecture view skips a dispatch edge — the
+metric graph and its module rollup (Modularity, Acyclicity, Depth), the DSM and
+the module and file tiers of the graph view, the layer and boundary rules, and
+the `max_fan_in` / `max_fan_out` budgets — so a
+dependency-inversion seam no longer reads as the core depending on its plugins,
+or as a cycle between them. Every runtime view keeps it: `callers`, `callees`
+and `impact` (which label the row `via: "<Trait>::<method>"`), `affected`,
+reachability, and dead code, so an implementation reached only through its trait
+is never dead. A direct call to an implementation is a dependency, even when the
+same caller also reaches it through the trait. Since
+[metric semantics version 9](#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes).
 
 ## The aggregate signal
 
@@ -274,6 +378,18 @@ dimension out**: it stores NULL for that metric with an `applicable = 0` flag,
 and the geometric-mean denominator shrinks accordingly — a class-less repo is
 scored on 8 or 9 dimensions, not 10.
 
+Cohesion also drops out this way when it has classes to score, but fewer than
+`[metric_thresholds] cohesion_min_classes` (default 5, since version 9; see
+[configuration.md](configuration.md#metric_thresholds--tuning-the-structural-dimensions)). `scan --json` carries
+the reason under `metrics` as `cohesion_not_applicable`, for example
+`{"classes": 2, "min_classes": 5, "reason": "2 of 5 classes — too few classes
+to score"}` (`null` when Cohesion applies or has no class to score), and
+`quality-report --json` carries it at the top level beside the graph
+dimensions' reasons. The stored snapshot records the drop-out but not its
+cause, so readers of a stored snapshot — the dashboard — show the plain `n/a`.
+The classes stay in the Cohesion worst-offender list; only the signal and "where
+to start" skip them.
+
 Modularity, Acyclicity and Depth drop out the same way, together, on a graph
 with fewer than 5 cross-module edges, with one difference: their computed raw
 and normalized values are still stored (beside `modularity_applicable`,
@@ -285,7 +401,7 @@ computable — it is the evidence that is too thin. `scan --json` and
 `{"edges": 3, "min_edges": 5, "reason": "3 of 5 cross-module edges — too few to
 measure module structure"}` (`null` when the dimension applies), and
 `scan --json` carries the count as `cross_module_edge_count`. The dashboard's
-Health view shows **not applicable** with that reason in place of a score.
+Quality view shows **not applicable** with that reason in place of a score.
 `evolution` marks the same point's entry `not_applicable` with that reason and
 reports no delta for it across a drop-out, and `gate`'s per-metric regression
 detail never names a graph dimension that is not applicable on either side — a
@@ -304,7 +420,7 @@ session-start readout each carry one warning for it (in `warnings` under
 `--json`), for example:
 
 ```text
-coverage: ruby is 33% of production callables (warned at 10% or more) and binds no call or import across files (same-file-only) — Modularity, Acyclicity and Depth cannot see its cross-module structure
+coverage: c is 33% of production callables (warned at 10% or more) and binds no call or import across files (same-file-only) — Modularity, Acyclicity and Depth cannot see its cross-module structure
 ```
 
 The share is floored, never rounded up. The cause in parentheses is the same
@@ -381,9 +497,9 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **8** (the graph dimensions drop out below 5 cross-module edges, and
-  Cohesion counts only languages that capture member access — see
-  [Metric semantics version 8](#metric-semantics-version-8--the-signal-drops-what-it-cannot-measure)).
+  is **9** (Cohesion links inherited members and needs `cohesion_min_classes`
+  classes to score — see
+  [Metric semantics version 9](#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
   A formula change bumps it, so the first `gate` after an upgrade that bumps it
   re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
@@ -404,6 +520,149 @@ pass it always was. Either way, the *next* gate finds a matching version/hash
 and compares normally — so an existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
+
+### Metric semantics version 9 — Cohesion links inherited members and needs enough classes
+
+Version 9 ([CR-252](../requests/CR-252-findings-and-offenders-without-the-noise.md))
+changes Cohesion in three ways, counts a C# partial type once in Focus and
+Cohesion, and counts Rust and Go methods toward their struct in Focus
+([CR-166](../requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md)),
+so a project re-baselines **once** for all of them.
+
+| Change | Before (v8) | Since v9 |
+|---|---|---|
+| **Inherited members** (LCOM4) | an access that bound to no field linked nothing, so two methods sharing only React's `this.state` were two components | two methods accessing one name through `this` that the class does not declare are one component; declared-field links are unchanged |
+| **Cohesion minimum** | scored over any number of classes, one included | n/a ("too few classes") below `[metric_thresholds] cohesion_min_classes` scoreable classes (default 5); out of the aggregate and "where to start", still in the worst-offender list |
+| **C# classes** ([FR-EX-22](../specs/requirements/FR-EX-22.md)) | n/a: C# declared no `member_access` | scored, from `this.x` and the bare field and property reads inside a method (`_count`, `Name`, `_log.Add(x)`) |
+| **C# partial types** (Focus, Cohesion) | each `partial` declaration was a container of its own, scored over its own methods and span | the parts of one type are one container: its methods are every part's, its span the sum of the parts', so a type split across files can be god where no part is ([S-557](../planning/journal.md#s-557-the-parts-of-a-c-partial-type-form-one-type)) |
+| **Rust and Go methods** (Focus) | an `impl` method or receiver method counted toward no container, so a Rust or Go struct was god by span alone | counted toward the one same-crate/same-package struct its recorded type names ([S-510](../planning/journal.md#s-510-focus-counts-rust-and-go-methods-toward-their-type-and-metric-semantics-move-to-v8)); a method naming none or several is unattributed and reported with its denominator |
+| **Python classes** (Focus, Cohesion; [FR-EX-20](../specs/requirements/FR-EX-20.md)) | a `def` in a class body was a Function, counted toward no container, and Python declared no `member_access`, so every Python class had 0 methods and Cohesion over Python classes was n/a | a `def` of a class body — decorated, `@staticmethod`, `@classmethod` and `@property` ones too — is a Method of its class, and Python declares `member_access` (`.pyi` stubs carved out): its classes are scored from the `self.x` accesses that bind to their fields ([S-543](../planning/journal.md#s-543-python-classes-have-methods-fields-and-self-accesses)) |
+| **Scala classes and traits** (Cohesion, Focus) ([FR-EX-28](../specs/requirements/FR-EX-28.md)) | n/a: Scala declared no `member_access`; a trait was no container | scored, from `this.x` and the bare reads of a field or constructor parameter inside a method (`semaphore.acquire(n)`, `rate - n`); a trait with a bodied method is a container for Focus and Cohesion ([S-575](../planning/journal.md#s-575-scala-class-parameters-relations-and-field-access-are-captured-and-bodied-traits-count-for-cohesion)) |
+| **Kotlin classes** (Cohesion) ([FR-EX-25](../specs/requirements/FR-EX-25.md)) | n/a: Kotlin declared no `member_access` | scored, from `this.x` and the bare reads of a property or primary-constructor `val` inside a method (`balance + amount`, `repo.find(id)`, `"${name}"`) ([S-562](../planning/journal.md#s-562-a-bare-kotlin-property-read-is-an-access)) |
+| **Kotlin member functions and containers** (Focus) | a member `fun` was a Function, counted toward no container, so a Kotlin class was god by span alone; an `enum class` was a container, and a `companion object` was none | a member `fun` of a class, object, interface or companion is a Method, counted toward its container ([S-559](../planning/journal.md#s-559-kotlin-declarations-are-kinded-and-complete-and-a-misparse-is-never-silent)); an `enum class` is an Enum, which is no container, and a `companion object` is a container of its own, holding its members |
+| **Ruby methods and containers** (Focus) | a compact `class A::B` spanned its header alone, so its methods belonged to the file and counted toward no class; a setter or operator `def` (`def x=`, `def []`, `def <=>`) was no node | a compact class holds its body, and every `def` is a Method counted toward its class ([S-564](../planning/journal.md#s-564-ruby-declarations-are-complete-and-ruby-build-files-are-indexed)); `attr_*` symbols and the first assignment of each `@ivar` are Fields of their class |
+| **Ruby classes** (Cohesion; [FR-EX-27](../specs/requirements/FR-EX-27.md)) | n/a: Ruby declared no `member_access`, and no `@x` was captured, so its Fields linked nothing | scored, from the `@x` reads and writes inside a method (`@q`, `@q = …`, `@total ||= 0`) that bind to the Field their class declares ([S-569](../planning/journal.md#s-569-ruby-instance-variable-reads-and-writes-are-accesses)) |
+| **C++ classes** (Cohesion; [FR-EX-22](../specs/requirements/FR-EX-22.md)) | n/a: C++ declared no `member_access`, and only `this->x` was captured — which also recorded `this->f()` calls as accesses | scored, from `this->x` and the bare reads of a field inside a method (`m_balance`, `m_log.push_back(x)`) unless a parameter or local of the method hides it; `this->f()` is a call, not an access ([S-580](../planning/journal.md#s-580-c-tests-are-named-and-bare-member-reads-are-accesses)) |
+| **C++ methods** (Focus, Cohesion) | a method defined out of line below its class (`void Widget::set() {…}`) was not extracted, so its in-class declaration stayed bodiless and counted as no bodied method of the class; a constructor was no method | a definition in its class's own file merges into the in-class declaration, which is bodied and counts toward the class; a constructor is a method; a definition whose class another file declares stays a method of its own ([S-577](../planning/journal.md#s-577-c-out-of-line-members-merge-into-their-declaration-prototypes-pair-with-definitions-and-constructors-are-methods)) |
+| **C structs** (Focus; [FR-EX-31](../specs/requirements/FR-EX-31.md)) | C extracted no struct, so a `.c` file held no container; a header's structs were read as C++, one per mention (`struct X *p` was a struct) | a `struct` or `union` with a body is one container, scored by its span (C has no methods), so Focus applies to a C repository; a mention or a forward declaration is none, in C++ too ([S-582](../planning/journal.md#s-582-c-repositories-own-their-headers-and-c-declarations-are-faithful)) |
+| **C++ members** (Cohesion, Focus; [FR-EX-31](../specs/requirements/FR-EX-31.md)) | a pointer, array or function-pointer member (`T *p_`, `int a_[4]`, `R (*f_)(…)`) was no field, so a method reading one linked to nothing; `struct X *p` and `struct X;` each made a struct | every member declarator is a field, so a method reading one links through it in LCOM4, and only a struct with a body is a container (ccache at `052c47fb`: fields 666 → 770, structs 213 → 167, Cohesion 0.572 → 0.613, Focus 0.978 → 0.975) |
+| **JavaScript classes** (Cohesion; [FR-EX-19](../specs/requirements/FR-EX-19.md)) | n/a: JavaScript declared no `member_access`, a constructor's `this.x = …` declared no Field, and a callee through `this` (`this.setState()`) was recorded as an access of a field of that name | scored, from the `this.x` accesses that bind to the Field their class declares — one per name per class, for each `this.x = …` of a constructor or method; a callee is a call, not an access, in JavaScript, TypeScript and TSX alike ([S-542](../planning/journal.md#s-542-constructor-assigned-fields-are-declared-and-a-callee-is-never-an-access)) |
+| **Trait dispatch** (Modularity, Acyclicity, Depth, DSM, layer and boundary rules, coupling budgets; [FR-QM-20](../specs/requirements/FR-QM-20.md)) | a call through a trait counted as a dependency of the caller on every implementation, so a crate calling its own trait depended on each crate implementing it — a cycle Cargo forbids | an edge to an implementation reached through a trait is skipped by every architecture view and kept by every runtime one ([S-713](../planning/journal.md#s-713-architecture-views-exclude-dispatch-edges-under-metric-semantics-v8)); see [Dispatch through a trait is excluded too](#dispatch-through-a-trait-is-excluded-too) |
+
+**Why signals move.** A React class component read as several unrelated
+classes, and with two classes in a project one of them could become the top
+"where to start" entry at hundreds of points. Class-based code with
+inherited state now scores more cohesive, and a project with fewer than five
+scoreable classes loses Cohesion from its signal. A C# project gains Cohesion:
+its methods' bare reads of their own class's fields and properties now link
+them, so LCOM4 has its shared-field edges. A bare name only an inherited base
+class or another part of a `partial` type declares, and a constructor's or
+accessor's body, link nothing, so a class that
+leans on them reads less cohesive than it is. A C# type split across `partial`
+files is one container, so a type that is large only as a whole — an EF Core
+migration with its generated `.Designer.cs` — can turn god and lower Focus. The
+C# changes are part of the same v9 re-baseline. A Rust or Go struct with 20 or
+more methods across its impls or receivers is now god, which it was not before
+unless its span was 500 lines: Focus on a Rust or Go project can fall, and the
+`no_god_containers` budget (which counts the same containers) can start
+reporting such a struct.
+A Kotlin class, object or companion with 20 or more member `fun`s is god in the
+same way, and a Kotlin project's containers change: its enums leave them and
+each companion object joins them.
+A Kotlin project gains Cohesion: a method's bare reads of its class's properties
+and primary-constructor `val`s link it, so LCOM4 has its shared-field edges. A
+property a class inherits or an outer class declares links nothing, a name any
+local of the method declares hides the property in the whole method, the bodies
+of an `object : T { … }`, of an extension function and of an `apply`, `run` or
+`with` lambda are not read, a property
+initialiser, `init` block or accessor is no method, and a short `"$name"`
+interpolation is not seen, so a class that leans on them reads less cohesive
+than it is. The Kotlin change is part of the same v9 re-baseline; the property
+links read the rows a Kotlin file records when it is extracted, so they count
+once the file is next extracted.
+A Python project gains Cohesion, scored from its `self.x` accesses, and its
+classes gain their methods: a Python class (a `.pyi` stub's included) with 20 or
+more methods is now god, so Focus on a Python project can fall. No symbol
+changes: a method keeps the symbol it had as a function.
+A Ruby class that is written compact (`class Mod::FlaggedController`) now owns
+its methods, so it can be god where its file was not, and a class's setter and
+operator methods count toward its Focus. `.rake`, `.ru`, `.gemspec`, `Gemfile`
+and `Rakefile` are now Ruby files, so a Ruby project's file count, and with it
+the per-file measures, include them.
+A Ruby project gains Cohesion: a method's `@x` reads and writes link it to the
+Field its class declares, so LCOM4 has its shared-field edges. A `@x` no class
+declares (one an `attr_*` or an assignment of a superclass or mixin owns) binds to
+no Field, but two methods that both access it are one component, as for any
+inherited member (see **Inherited members link too** above). A
+`@@x` class variable, a `module`'s own `@x` (a mixin's `self` is whatever includes
+it, so a module nested in a class binds nothing either), a bare call to an `attr_*`
+reader (`name` for `@name`) and a class body's, `def self.x`'s or `class << self`
+method's `@x` — the class object's own state, bound to the instance Field of the
+same name when the class declares it once; a class body's is recorded from the
+class itself, which Cohesion ignores — are the reach of the capture: a class that leans on a reader reads
+less cohesive than it is. The Ruby change is part of the same v9 re-baseline;
+the field links read the rows a Ruby file records when it is extracted, so they
+count once the file is next extracted.
+A Scala project gains Cohesion: a method's bare reads of its class's fields and
+constructor parameters link it, so LCOM4 has its shared-field edges, and each
+trait with a bodied method joins the containers, so Focus moves too — a trait
+with 20 or more bodied methods is god. A field a class inherits or an outer class
+declares links nothing, and a name any local of the method declares hides the
+field in the whole method, so a class that leans on them reads less cohesive
+than it is. The Scala changes are part of the same v9 re-baseline. The trait
+containers count from the next `scan`; the field links read the rows a Scala file
+records when it is extracted, so they count once the file is next extracted.
+A C++ project gains Cohesion: a method's bare reads of its class's fields link it,
+so LCOM4 has its shared-field edges, and `this->f()` no longer links a method to a
+callee's name as if it read a field. A pointer, array or function-pointer member is
+a field like any other (since S-582, see the v9 table above); a
+field a base class declares, one an outer class declares, and one a method reads in
+a source file that does not declare the class (a class written in a header and
+defined in a `.cpp`) link nothing either, so a class that leans on them reads less
+cohesive than it is. A name any parameter or local of the method declares hides the
+field in the whole method. The C++ changes are part of the same v9 re-baseline; the
+field links read the rows a C++ file records when it is extracted, so they count once
+the file is next extracted. The tests it names (`Suite.Name`, a `TEST_CASE`
+string) carry test evidence like every test function, so a Catch2 or doctest
+`TEST_CASE`, which was no node, joins the test nodes the production-scope measures
+leave out. A test named like a function it calls (`TEST_CASE("parse")` calling
+`parse`) can bind that call to itself, which adds a self-call edge to the test.
+
+A JavaScript project with `class` declarations gains Cohesion: a class's constructor and methods assign
+`this.x`, which are now its Fields, and a method's `this.x` reads link it to
+them, so LCOM4 has its shared-field edges. The constructor's own writes are
+accesses too, so a class whose constructor assigns every field links the
+methods that read any of them. A field a base class declares, a `this.x` of a
+constructor function or an object literal's method, and an assignment through
+any receiver but `this` declare nothing, so a class that leans on them reads
+less cohesive than it is. A callee through `this` (`this.setState()`) is no
+longer an access in JavaScript, TypeScript or TSX, so the accesses of a React
+class component are its field reads alone. The JavaScript change is part of the
+same v9 re-baseline; the fields and links read the rows a JavaScript file
+records when it is extracted, so they count once the file is next extracted.
+
+A Rust project whose code calls through its traits loses those calls from
+its architecture views. Modularity usually rises (fewer edges cross between
+directories), and a module cycle held together only by dispatch splits, which
+can raise Depth: the condensed tangle becomes the layers it is. On this
+repository the 70 production dispatch edges that crossed a directory all pointed
+along existing dependencies (into `graph_store` and `plugin`), so Modularity
+moved 0.6905 → 0.6948, Depth and Acyclicity stayed put and the signal moved
+8276 → 8279; the 14 cross-crate edges that ran against Cargo's dependency
+direction (`logos-ext`'s extension registry reaching the test extensions of
+`cli`, `mcp` and `web` through its trait) left the DSM. The markers are already in the store
+(the upgrade re-binds every trait call once), so the change counts from the
+next `scan`.
+
+**What you see on upgrade.** The effective-thresholds hash always includes
+`cohesion_min_classes`, so it changes too; a baseline taken before resets
+**once**: the first `gate` (or `session_end`) after the upgrade reports
+`baseline reset: metric semantics changed (v8 8292 → v9 8295)` and passes
+informationally, and the next one compares normally. Nothing is re-extracted:
+the next `scan` scores under v9 — except the partial-type union, which reads
+the rows a C# file records when it is extracted, so it counts from the next
+`index`. The Rust and Go attribution reads the self type those files already
+record, so it counts from the next `scan`.
 
 ### Metric semantics version 8 — the signal drops what it cannot measure
 
@@ -506,30 +765,32 @@ A few specifics:
 - A row names at most three directories. A larger directory cycle reads `{a, b, c +4 more}`, and an Acyclicity row spanning more than three directories ends in `…` after its stated count.
 - At a fork, a Depth chain follows the longer continuation, then the lower name.
 - Redundancy lists a function as dead only where its language's reachability analysis gives a verdict. Where it does not (`is_dead` is NULL), the function is never listed as dead.
+- An Equality row is not a violation. Equality has no per-function threshold: its list holds the functions with above-average complexity, the members of the distribution the score measures. The Quality page labels the list that way, and `logos offenders` lists these functions only under `--dimension equality`, so its total leaves them out.
 
 Modularity has no list: it scores the directory layout as a whole, so no single
 unit is responsible for it.
 
 The lists are report-only: they never gate, and they never change a dimension's
 score. They are emitted in the `worst_offenders` field of `logos scan --json`,
-persisted with the snapshot, and shown under each Health dimension widget. A
+persisted with the snapshot, and shown under each Quality dimension widget. A
 snapshot recorded before CR-209 has no rows for the four newer lists. The read
 names each of them whose score says it is not empty in `worst_offenders.unrecorded`,
-and Health shows it as "not recorded", never as "none flagged". Run `logos scan`
+and the Quality page shows it as "not recorded", never as "none flagged". Run `logos scan`
 to record them. Together the lists are the "which code do I fix first?" surface
 that turns a dropped dimension into an actionable to-do list.
 
 Each list is capped at ten entries. Every entry also carries the symbol's id,
 the number it was judged on and the threshold it met. `logos offenders` (MCP:
 `offenders`) lists every entry the last snapshot recorded, without the cap, and
-can narrow the list by path glob and dimension. See
+can narrow the list by path glob and dimension. It leaves out Equality's
+functions unless `--dimension equality` asks for them. See
 [commands.md](commands.md#offenders---path-glob---dimension-d).
 
 ### Where to start — what an estimate means
 
 The worst-offender lists say what is wrong in each dimension. The **where to
 start** list says which single fix would move the signal most. Every snapshot
-records it beside the lists, and it is shown by the Health **Where to start**
+records it beside the lists, and it is shown by the Quality page's **Where to start**
 card, `logos improvements --json`, the `improvements` MCP tool and
 `scan.where_to_start` in `GET /api/v1/health`. All four return the same list for
 one snapshot. See [commands.md](commands.md#improvements).
@@ -556,7 +817,7 @@ holds everything else fixed, so two fixes recover about the sum of their
 points, not exactly that. The signal is an integer on a 0–10000 scale, so a
 unit that would recover less than one whole point is **not listed** at all. And
 it says what removing the contribution would be worth, not how hard the fix is.
-The payload states this in its `basis` field, and the Health card shows it
+The payload states this in its `basis` field, and the Quality page's card shows it
 under the table; the card's caption says the figures are advisory and never gate.
 
 Equality, Depth, Acyclicity and Modularity never carry points. Splitting a

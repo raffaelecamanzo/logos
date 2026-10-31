@@ -60,6 +60,18 @@ pub(crate) fn canonicalize_symbol(raw: &str) -> anyhow::Result<String> {
     Ok(scip::symbol::format_symbol(parsed))
 }
 
+/// The names of `symbol`'s last two descriptors — a member and the
+/// declaration holding it (`…/Tr#m().` → `("Tr", "m")`) — or `None` when it
+/// has fewer than two, or is not a SCIP symbol. What a dispatch row's `via`
+/// label is read from ([`super::dispatch::via_label`]).
+pub(crate) fn owner_and_member(symbol: &str) -> Option<(String, String)> {
+    let parsed = scip::symbol::parse_symbol(symbol).ok()?;
+    let [.., owner, member] = parsed.descriptors.as_slice() else {
+        return None;
+    };
+    Some((owner.name.clone(), member.name.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,8 +20,9 @@ const DIMENSIONS = [
   "Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness",
 ];
 
-/** A populated `/api/v1/health` payload: a current FAIL, one listed offender, a
- *  Cohesion drop-out, and the not-applicable Modularity of CR-156. */
+/** A populated `/api/v1/health` payload: a current FAIL, one listed offender, one
+ *  above-average Equality function (CR-252), a Cohesion drop-out, and the
+ *  not-applicable Modularity of CR-156. */
 function populated(recorded: boolean) {
   return {
     status: {
@@ -52,7 +53,8 @@ function populated(recorded: boolean) {
         recorded,
         nesting: recorded ? [{ name: "deep_fn", file: "src/lib.rs", line: 12, detail: "nesting depth 6" }] : [],
         conciseness: [], cohesion: [], focus: [], uniqueness: [],
-        acyclicity: [], depth: [], equality: [], redundancy: [],
+        acyclicity: [], depth: [], redundancy: [],
+        equality: recorded ? [{ name: "branchy_fn", file: "src/lib.rs", line: 30, detail: "complexity 9" }] : [],
       },
       // The Where to start card (S-505): one ranked unit when recorded, and a
       // snapshot that recorded no ranking otherwise.
@@ -114,6 +116,9 @@ for (const recorded of [true, false]) {
     expect(await widgetTitles(stack)).toEqual(["Gate", "Quality signal", "Where to start", ...DIMENSIONS, "Signal trend"]);
     if (recorded) {
       await expect(page.getByRole("table", { name: "Worst offenders" })).toHaveCount(1);
+      // Equality's function is listed as what it is, not as an offender (CR-252).
+      await expect(page.getByRole("table", { name: "Functions above the mean complexity" })).toHaveCount(1);
+      await expect(stack.locator('[data-offender-state="members"]')).toContainText("not violations");
     } else {
       // Nine lists (CR-209), less Cohesion, which is n/a in this fixture.
       await expect(stack.locator('[data-offender-state="not-recorded"]')).toHaveCount(8);

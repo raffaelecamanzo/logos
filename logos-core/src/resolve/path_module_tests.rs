@@ -28,11 +28,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::binder::{bind, bind_counting_path_visits, Index, Outcome};
+use super::binder::{bind, bind_counting_path_visits, residue, Index, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, NodeRow, UnresolvedRefRow};
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, RefForm};
+use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ReceiverShape, RefForm};
 use crate::plugin::PathModelDecl;
 
 const MAP_PY: i64 = 30;
@@ -65,6 +65,7 @@ fn contains(source: i64, target: i64) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind: EdgeKind::Contains,
+        dispatch: false,
     }
 }
 
@@ -289,6 +290,248 @@ fn a_call_through_a_from_import_binds_across_files() {
         let imported = import(1, MAP_PY, 130, ".::rules::parse_rule");
         let call = row(2, MAP_PY, 132, "parse_rule", EdgeKind::Calls);
         bound(bind_last(&[imported, call], policy), 132, 122, EdgeKind::Calls);
+    }
+}
+
+/// [`graph`] plus a method `Map.add` (133) and, beside the class in `map.py`, a
+/// module function of the same name (134), a workspace `src/pkg/ns/os.py`
+/// declaring `getcwd` (135, 136), a top-level `rules.py` with its own
+/// `parse_rule` (137, 138), a submodule `src/pkg/version.py` (139, with
+/// `release` 140) beside the `version` its package declares, a `cache_clear`
+/// nested in `parse_rule` (141), and a getter/setter pair `Rule.endpoint` (142,
+/// 143) beside a module function `endpoint` (144) — the shapes a module- or
+/// class-qualified call (S-544) must tell apart.
+fn qualified_index(refs: &[UnresolvedRefRow]) -> Index {
+    let (mut nodes, mut edges) = graph();
+    nodes.extend([
+        node(133, "add", NodeKind::Function, "src/pkg/routing/map.py"),
+        node(134, "add", NodeKind::Function, "src/pkg/routing/map.py"),
+        node(135, "os", NodeKind::Module, "src/pkg/ns/os.py"),
+        node(136, "getcwd", NodeKind::Function, "src/pkg/ns/os.py"),
+        node(137, "rules", NodeKind::Module, "rules.py"),
+        node(138, "parse_rule", NodeKind::Function, "rules.py"),
+        node(139, "version", NodeKind::Module, "src/pkg/version.py"),
+        node(140, "release", NodeKind::Function, "src/pkg/version.py"),
+        node(141, "cache_clear", NodeKind::Function, "src/pkg/routing/rules.py"),
+        node(142, "endpoint", NodeKind::Function, "src/pkg/routing/rules.py"),
+        node(143, "endpoint", NodeKind::Function, "src/pkg/routing/rules.py"),
+        node(144, "endpoint", NodeKind::Function, "src/pkg/routing/rules.py"),
+    ]);
+    edges.extend([
+        contains(131, 133),
+        contains(130, 134),
+        contains(135, 136),
+        contains(137, 138),
+        contains(139, 140),
+        contains(122, 141),
+        contains(121, 142),
+        contains(121, 143),
+        contains(120, 144),
+    ]);
+    Index::build_with_layout(&nodes, &edges, refs, python_layout())
+}
+
+fn bind_qualified(refs: &[UnresolvedRefRow], policy: BindingPolicy) -> Outcome {
+    bind(refs.last().expect("a row"), &qualified_index(refs), policy)
+}
+
+/// A call extraction recorded through the import bound to `local` (S-544):
+/// its qualifier is that import's path.
+fn qualified(id: i64, file: i64, source: i64, target: &str, local: &str) -> UnresolvedRefRow {
+    UnresolvedRefRow {
+        alias: Some(local.to_string()),
+        ..row(id, file, source, target, EdgeKind::Calls)
+    }
+}
+
+/// S-544 ([FR-RS-23]): a call recorded through an imported module, absolute or
+/// relative, binds that module's function.
+///
+/// [FR-RS-23]: ../../../docs/specs/requirements/FR-RS-23.md
+#[test]
+fn a_call_through_an_imported_module_binds_its_function() {
+    for policy in POLICIES {
+        let call = qualified(1, TEST_MAP_PY, 161, "pkg::routing::rules::parse_rule", "rules");
+        bound(bind_qualified(&[call], policy), 161, 122, EdgeKind::Calls);
+        let call = qualified(2, MAP_PY, 132, ".::rules::parse_rule", "rules");
+        bound(bind_qualified(&[call], policy), 132, 122, EdgeKind::Calls);
+        // A module qualifier written as the name an import binds (a framework
+        // handler's `rules.parse_rule`) goes through that import — never the
+        // top-level `rules.py` a bare module name would otherwise reach.
+        let imported = import(3, MAP_PY, 130, ".::rules");
+        let call = row(4, MAP_PY, 132, "rules::parse_rule", EdgeKind::Calls);
+        bound(bind_qualified(&[imported, call], policy), 132, 122, EdgeKind::Calls);
+    }
+}
+
+/// S-544: an extracted qualifier is the import's own path, read as Python reads
+/// it — never through the file's alias table, which keys a plain `import
+/// pkg.routing.rules` by `rules` where Python binds `pkg`. `import rules.sub`
+/// binds `rules`, the top-level `rules.py`; `import os` beside `import
+/// pkg.ns.os` binds the external `os`, and its call binds nothing.
+#[test]
+fn an_extracted_qualifier_is_never_read_through_the_alias_table() {
+    for policy in POLICIES {
+        let refs = [
+            import(1, TEST_MAP_PY, 161, "rules::sub"),
+            import(2, TEST_MAP_PY, 161, "pkg::routing::rules"),
+            qualified(3, TEST_MAP_PY, 161, "rules::parse_rule", "rules"),
+        ];
+        bound(bind_qualified(&refs, policy), 161, 138, EdgeKind::Calls);
+        let refs = [
+            import(4, TEST_MAP_PY, 161, "os"),
+            import(5, TEST_MAP_PY, 161, "pkg::ns::os"),
+            qualified(6, TEST_MAP_PY, 161, "os::getcwd", "os"),
+        ];
+        assert_eq!(bind_qualified(&refs, policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// S-544: a written qualifier the file imports twice — a compat `try`/`except`
+/// import — names two modules, and a call through it binds neither.
+#[test]
+fn a_written_qualifier_imported_twice_binds_neither_import() {
+    for policy in POLICIES {
+        let fast = import(1, MAP_PY, 130, ".::rules");
+        let slow = UnresolvedRefRow {
+            alias: Some("rules".to_string()),
+            ..import(2, MAP_PY, 130, "..::routing::map")
+        };
+        let call = row(3, MAP_PY, 132, "rules::parse_rule", EdgeKind::Calls);
+        assert_eq!(bind_qualified(&[fast, slow, call], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// S-544: a class that declares a name twice (a property's getter and setter)
+/// decides its call unbound — never the module function of that name beside it.
+#[test]
+fn a_class_declaring_the_name_twice_binds_neither() {
+    for policy in POLICIES {
+        let call = qualified(1, TEST_MAP_PY, 161, "pkg::routing::rules::Rule::endpoint", "Rule");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// S-544: `from pkg import version` names the `version` that `pkg/__init__.py`
+/// declares or the submodule `pkg/version.py`, depending on what was imported
+/// first — so a call through it binds neither.
+#[test]
+fn a_name_a_package_declares_beside_a_submodule_of_that_name_names_neither() {
+    for policy in POLICIES {
+        let call = qualified(1, TEST_MAP_PY, 161, "pkg::version::release", "version");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// S-544: a call through an imported class binds among that class's methods —
+/// never the module function of the same name beside the class, which the
+/// `Type::func` collapse of the module tree would reach.
+#[test]
+fn a_call_through_an_imported_class_binds_among_its_methods() {
+    for policy in POLICIES {
+        let call = qualified(1, TEST_MAP_PY, 161, "pkg::routing::map::Map::add", "Map");
+        bound(bind_qualified(&[call], policy), 161, 133, EdgeKind::Calls);
+        let call = qualified(2, TEST_MAP_PY, 161, "pkg::routing::map::Map::build", "Map");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
+    }
+}
+
+/// A call extraction retyped from its proven receiver (S-546): `T::m`, of
+/// shape `other`, `T` written as the file names it.
+fn proven(id: i64, target: &str) -> UnresolvedRefRow {
+    UnresolvedRefRow {
+        receiver: Some(ReceiverShape::Other),
+        ..row(id, TEST_MAP_PY, 161, target, EdgeKind::Calls)
+    }
+}
+
+/// S-546 ([FR-RS-24]): a call on a proven receiver binds among the methods of
+/// the one class its type names through the file's imports. A type that names
+/// a function (`x = Factory()`) proved nothing, one no file declares is
+/// external, a class holding no such method up its chain says so, and a name
+/// two imports bind to two classes is ambiguous.
+///
+/// [FR-RS-24]: ../../../docs/specs/requirements/FR-RS-24.md
+#[test]
+fn a_call_on_a_proven_receiver_binds_among_its_classs_methods_or_says_why_not() {
+    let imports = [
+        import(1, TEST_MAP_PY, 160, "pkg::routing::map::Map"),
+        import(2, TEST_MAP_PY, 160, "pkg::routing::rules::parse_rule"),
+        import(3, TEST_MAP_PY, 160, "requests::Session"),
+    ];
+    for policy in POLICIES {
+        let refs = |call: UnresolvedRefRow| imports.iter().cloned().chain([call]).collect::<Vec<_>>();
+        bound(bind_qualified(&refs(proven(9, "Map::add")), policy), 161, 133, EdgeKind::Calls);
+        let why = |call: UnresolvedRefRow| {
+            let refs = refs(call);
+            residue(refs.last().expect("a row"), &qualified_index(&refs), policy)
+        };
+        assert_eq!(why(proven(9, "parse_rule::run")), Some(Residue::NoReceiverEvidence), "{policy:?}");
+        assert_eq!(why(proven(9, "Session::get")), Some(Residue::ExternalType { candidates: Vec::new() }), "{policy:?}");
+        assert_eq!(why(proven(9, "Map::missing")), Some(Residue::SupertypeUnreached), "{policy:?}");
+        // A compat `try`/`except` import of the name from two modules.
+        let rival = UnresolvedRefRow {
+            alias: Some("Map".to_string()),
+            ..import(4, TEST_MAP_PY, 160, "pkg::routing::rules::Rule")
+        };
+        let call = proven(9, "Map::add");
+        let refs = imports.iter().cloned().chain([rival, call]).collect::<Vec<_>>();
+        let r = refs.last().expect("a row");
+        assert_eq!(residue(r, &qualified_index(&refs), policy), Some(Residue::TypeAmbiguous), "{policy:?}");
+    }
+}
+
+/// S-546: a type the file both imports and declares at its top level
+/// (`class Map(Map)` beside `from pkg.routing.map import Map`) names whichever
+/// the statements' order makes it: the call is ambiguous.
+#[test]
+fn a_type_the_file_imports_and_declares_is_ambiguous() {
+    let refs = [import(1, TEST_MAP_PY, 160, "pkg::routing::map::Map"), proven(9, "Map::add")];
+    let (mut nodes, mut edges) = graph();
+    nodes.extend([
+        node(133, "add", NodeKind::Function, "src/pkg/routing/map.py"),
+        node(146, "Map", NodeKind::Class, "tests/test_map.py"),
+    ]);
+    edges.extend([contains(131, 133), contains(160, 146)]);
+    let ix = Index::build_with_layout(&nodes, &edges, &refs, python_layout());
+    for policy in POLICIES {
+        assert_eq!(bind(&refs[1], &ix, policy), Outcome::Unbound, "{policy:?}");
+        assert_eq!(residue(&refs[1], &ix, policy), Some(Residue::TypeAmbiguous), "{policy:?}");
+    }
+}
+
+/// S-546: an attribute of the name on the class — `add = other`, `self.add =
+/// cb` — is what the call reaches, never the method beside or above it.
+#[test]
+fn an_attribute_of_the_name_hides_its_classs_method() {
+    let refs = [import(1, TEST_MAP_PY, 160, "pkg::routing::map::Map"), proven(9, "Map::add")];
+    let (mut nodes, mut edges) = graph();
+    nodes.extend([
+        node(133, "add", NodeKind::Function, "src/pkg/routing/map.py"),
+        node(145, "add", NodeKind::Field, "src/pkg/routing/map.py"),
+    ]);
+    edges.extend([contains(131, 133), contains(131, 145)]);
+    let ix = Index::build_with_layout(&nodes, &edges, &refs, python_layout());
+    for policy in POLICIES {
+        assert_eq!(bind(&refs[1], &ix, policy), Outcome::Unbound, "{policy:?}");
+        assert_eq!(residue(&refs[1], &ix, policy), Some(Residue::NoReceiverEvidence), "{policy:?}");
+    }
+}
+
+/// S-544: a qualified call is decided by its module alone. A module that names
+/// nothing here (an external `os`), a qualifier that names a function, and a
+/// module without the name leave it unbound — never the workspace suffix match
+/// nor the unique-name guess, which would read `os::getcwd` as
+/// `src/pkg/ns/os.py`'s.
+#[test]
+fn a_qualified_call_whose_module_holds_no_such_member_stays_unbound() {
+    for policy in POLICIES {
+        let call = qualified(1, TEST_MAP_PY, 161, "os::getcwd", "os");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
+        let call = qualified(2, TEST_MAP_PY, 161, "pkg::routing::rules::parse_rule::cache_clear", "parse_rule");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
+        let call = qualified(3, TEST_MAP_PY, 161, "pkg::routing::rules::missing", "rules");
+        assert_eq!(bind_qualified(&[call], policy), Outcome::Unbound, "{policy:?}");
     }
 }
 
@@ -517,6 +760,7 @@ fn a_namespace_wildcard_reaches_only_its_own_familys_files() {
                 targets: vec![NodeId(210)],
                 kind: EdgeKind::Imports,
                 payload: None,
+                dispatch: None,
             }
         );
         // The PHP class of that namespace is not in view through the wildcard.

@@ -1,0 +1,12 @@
+// Every spelling of an upper bound on an elapsed time, none scaled.
+#[test]
+fn bypasses_are_caught() {
+    let start = Instant::now();
+    let took = start.elapsed();
+    let elapsed_ms = took.as_millis();
+    assert!(took.as_millis() < 500);
+    assert!(elapsed_ms <= 500);
+    assert!(Duration::from_secs(1) > took);
+    assert!(!(took > Duration::from_secs(1)));
+    debug_assert!(start.elapsed() < Duration::from_secs(3), "debug asserts count");
+}

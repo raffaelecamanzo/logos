@@ -318,7 +318,8 @@ fn go_project() -> (tempfile::TempDir, std::path::PathBuf, logos_core::security:
 /// `coverage_status` once its `job` — the coverage run `coverage_run` started
 /// (S-738) — is no longer running.
 async fn ended_status(client: &Client) -> Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline =
+        std::time::Instant::now() + logos_core::perf::scaled(std::time::Duration::from_secs(60));
     loop {
         let status = mcp_payload(client, "coverage_status", None).await;
         if status["job"]["state"] != "running" {
@@ -375,6 +376,9 @@ async fn cli_and_mcp_coverage_run_and_extended_status_payloads_are_identical() {
     assert_eq!((&row["state"], &row["version"], &row["origin"]), (&json!("ran"), &json!("1.23.1"), &json!("path")), "{status}");
     assert_eq!(status["runner"]["consent"]["consented"], json!(["go"]));
     assert_eq!(status["report_count"], 1, "{status}");
+    // S-802: the last run states how long the tool ran, and — it passed — no cause.
+    assert!(row["last_run"]["duration_ms"].is_u64(), "{status}");
+    assert!(row["last_run"].get("cause").is_none(), "a tool that ran has no cause: {status}");
 }
 
 #[cfg(unix)]
@@ -472,7 +476,8 @@ async fn a_second_coverage_run_during_a_run_returns_the_running_jobs_id() {
 
     let first = mcp_payload(&client, "coverage_run", None).await;
     assert_eq!((&first["joined"], &first["job"]["state"]), (&json!(false), &json!("running")), "{first}");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline =
+        std::time::Instant::now() + logos_core::perf::scaled(std::time::Duration::from_secs(30));
     while !runs.exists() {
         assert!(std::time::Instant::now() < deadline, "go never started");
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

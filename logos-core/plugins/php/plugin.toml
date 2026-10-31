@@ -22,7 +22,7 @@ abi_version = 15
 # `references.scm`.
 implicit_receiver = "none"
 
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
 
 # The optional member-access capability (S-523, CR-171, ADR-39): Cohesion
 # scores a class only in a language that declares it, so a class of a language
@@ -60,11 +60,13 @@ export_convention = "php-visibility"
 # (S-028). (S-060 bounded variant — see plugin::manifest::TestConvention.)
 test_convention = "php-unit"
 
-# The ratified v1 PHP framework set (FR-FW-03): Laravel. The candidacy gate
-# (FR-FW-04) promotes a file only once its ledger names the `Illuminate`
-# canonical prefix, so a plain `Route::` static call in a non-Laravel file
+# The ratified PHP framework set (FR-FW-03): Laravel and Symfony (S-549). The
+# candidacy gate (FR-FW-04) promotes a file only once its ledger names the
+# `Illuminate` or `Symfony` canonical prefix (`use Symfony\Component\Routing\
+# Attribute\Route;` canonicalises to `Symfony::Component::…`), so a plain
+# `Route::` static call or `#[Route]` attribute in a file that imports neither
 # never fabricates a route.
-framework_detectors = ["Illuminate"]
+framework_detectors = ["Illuminate", "Symfony"]
 
 # Canonical reference prefix gating outbound **HTTP client-call** capture
 # (S-348, CR-108, FR-WS-08) — the consumer-side twin of `framework_detectors`.
@@ -90,18 +92,32 @@ http_client_detectors = ["GuzzleHttp"]
 # declared twice under one name binds neither (NFR-RA-05). No `family` is
 # declared, so the language is its own interop family (S-519): its imports reach
 # only its own types and namespaces.
+#
+# A top-level `function` is a member of the namespace its file declares
+# (S-551, FR-RS-26): a call from that namespace reaches it, and so does a
+# `use function` import. A file declaring no namespace is in the global one,
+# so its bare call binds the exactly-one function another such file declares —
+# mantisbt's `gpc_get_int` — under every binding policy. A namespaced file's
+# bare call its namespace declares no function for falls back to the global
+# function, as PHP's does; a class name never falls back.
 [module_model]
 kind = "namespace"
+top_level_callables = true
+global_function_fallback = true
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
 # files through the declared namespace (S-518), and so do a type's supertypes
-# (S-522); calls bind only inside the file that wrote them.
+# (S-522) and the class a `new Foo()` constructs (S-547); so does a static call
+# on a class name (`Foo::bar()`, S-547), and a call on a receiver the file
+# types (`Mailer $m`, `$m = new Mailer()`, a typed or promoted property read
+# through `$this->`, S-552). A call on an untyped variable (`$other->run()`)
+# binds in no file, which is why the level stays `partial`.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports", "type_relations"]
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -117,8 +133,18 @@ frameworks = "queries/frameworks.scm"
 # REGISTRATION — Slim's `$app->get('/x', $handler)` — from being read as an
 # outbound call; see the query header.
 invocations = "queries/invocations.scm"
-# Captured `@fw.route.method` text (the `Route::` facade verb) → HTTP method
-# (S-060). `Route::match`/`Route::any` declare no single verb → ANY. A captured
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
+# Captured `@fw.route.method` text → HTTP method. Laravel's is the `Route::`
+# facade verb (S-060): `Route::any` declares no single verb → ANY, and
+# `resource`/`apiResource` have no row, so they promote nothing. Neither has
+# `match`: its first argument is the verb list or a verb string, never the path,
+# so a row would read `Route::match('get', '/x')` as a route at `/get` (S-549). Symfony's
+# (S-549) is each string of a `#[Route]`'s `methods:` argument, written
+# upper-case by convention (lower-case reuses Laravel's rows; `head` is there
+# for Symfony alone), or the name of a `Request::METHOD_*` constant, or the
+# attribute name `Route` itself when no verb is written — every verb, ANY. A captured
 # verb with no entry here is dropped — the table doubles as the
 # recognised-registration filter (FR-FW-04 best-effort).
 [framework_methods]
@@ -129,4 +155,19 @@ patch = "PATCH"
 delete = "DELETE"
 options = "OPTIONS"
 any = "ANY"
-match = "ANY"
+head = "HEAD"
+GET = "GET"
+POST = "POST"
+PUT = "PUT"
+PATCH = "PATCH"
+DELETE = "DELETE"
+OPTIONS = "OPTIONS"
+HEAD = "HEAD"
+METHOD_GET = "GET"
+METHOD_POST = "POST"
+METHOD_PUT = "PUT"
+METHOD_PATCH = "PATCH"
+METHOD_DELETE = "DELETE"
+METHOD_OPTIONS = "OPTIONS"
+METHOD_HEAD = "HEAD"
+Route = "ANY"

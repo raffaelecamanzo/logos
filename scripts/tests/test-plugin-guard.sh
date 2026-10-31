@@ -13,6 +13,8 @@
 #   1. the eight guarded actions, one fixture each, the reason naming its target;
 #   2. other spellings of the same actions: the MCP twin under both tool
 #      prefixes, other file tools, path spellings, shell writes and invocations;
+#      (S-801: a brace expansion in a guarded position, an expansion as logos's
+#      own subcommand, and a loop variable);
 #   3. pass-through: unguarded .logos/ edits, reads of guarded files, unrelated
 #      commands, and the near miss of each matcher;
 #   4. a malformed payload asks; an unenrolled project is silent;
@@ -54,6 +56,10 @@ for b in /bin/bash "$(command -v bash)"; do
     [ "$dup" = yes ] || BASHES+=("$r")
 done
 
+# A 300-character word and an unclosed brace, kept in variables: bash 3.2 brace-expands a
+# double-quoted string inside "$( )" that holds a brace pair.
+LONG_WORD="$(printf 'x%.0s' $(seq 1 300))"
+OPEN_BRACE='{a,'
 ENROLLED="$WORK/enrolled"
 PLAIN="$WORK/plain"
 mkdir -p "$ENROLLED/.logos" "$PLAIN"
@@ -162,6 +168,16 @@ save("equals-word.json", "Bash", {"command": "logos security status " + "=" * 80
 save("equals-assign.json", "Bash", {"command": "F=.logos/rules.toml; X=" + "=" * 160000 + "; rm notes.txt"})
 save("dollar-segments.json", "Bash", {"command": "cargo check $x;" * 64000})
 save("dollars-scan.json", "Bash", {"command": "logos scan && echo " + "$x " * 80000})
+# S-801: braces, an expanded subcommand and loop variables, each sized past a quadratic shape.
+save("braces-security.json", "Bash", {"command": "logos security status " + "{a,b} " * 8000})
+save("braces-reader.json", "Bash", {"command": "ls .logos " + "{a,b} " * 4000})
+save("brace-long-word.json", "Bash", {"command": "logos scan " + "{a," * 15000})
+save("expansions-scan.json", "Bash", {"command": "logos scan " + "$x " * 10000})
+save("logos-words.json", "Bash", {"command": "echo $x " + "logos a " * 40000})
+save("logos-then-words.json", "Bash", {"command": "logos " + "a " * 40000 + "$x"})
+save("logos-long-word.json", "Bash", {"command": "logos scan $x; " + "a" * 200000})
+save("for-words.json", "Bash", {"command": "for F in " + "a " * 10000 + ".logos/rules.toml; do rm $F; done"})
+save("for-segments.json", "Bash", {"command": "for F in a; do echo $F; done\n" * 1000 + "ls .logos"})
 PY
 
 for B in "${BASHES[@]}"; do
@@ -185,6 +201,26 @@ for B in "${BASHES[@]}"; do
         "$(file_payload Write file_path "$ENROLLED/.logos/security-baseline.json")" ".logos/security-baseline.json"
     asks "Bash 'logos security bless' asks, naming the command" \
         "$(bash_payload 'logos security bless')" "logos security bless"
+    # S-818 (FR-SC-32): re-confirming a suppression's evidence rewrites its hashes,
+    # so a verdict whose code changed reads suppressed again. Held like an entry write.
+    asks "Bash 'logos security reconfirm' asks, naming the command" \
+        "$(bash_payload 'logos security reconfirm 0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f92e43')" \
+        "logos security reconfirm"
+    asks "logos security reconfirm by path, with a global flag and --evidence" \
+        "$(bash_payload '~/.logos-bin/1.20.0/logos --json security reconfirm --evidence DefaultCookieConfig abc')" \
+        "logos security reconfirm"
+    asks "logos security reconfirm after another command in a list" \
+        "$(bash_payload 'cargo build && logos security reconfirm abc')" "logos security reconfirm"
+    asks "logos security reconfirm held in a variable" \
+        "$(bash_payload 'L=logos; $L security reconfirm abc')" "logos security reconfirm"
+    asks "logos security reconfirm inside bash -c" \
+        "$(bash_payload 'bash -c "logos security reconfirm abc"')" "logos security reconfirm"
+    asks "a backslash-newline inside 'reconfirm' asks" "$(bash_payload 'logos security recon\
+firm abc')" "logos security reconfirm"
+    asks "a subcommand left to an expansion may be reconfirm" \
+        "$(bash_payload 'S=reconfirm; logos security $S abc')" 'which may expand to bless, ingest or reconfirm'
+    asks "a brace expansion may complete reconfirm" \
+        "$(bash_payload 'logos security {reconfirm,status} abc')" 'gives `logos security` `{reconfirm,status}`'
 
     # --- 2. other spellings of the same actions ---------------------------------
     # A re-bless's reason (S-755, FR-GV-16) never waives the guard: an agent is
@@ -201,6 +237,10 @@ for B in "${BASHES[@]}"; do
         "$(mcp_payload mcp__plugin_logos_logos__security_ingest)" "logos security ingest"
     asks "the security-ingest MCP tool under the project .mcp.json prefix asks" \
         "$(mcp_payload mcp__logos__security_ingest)" "logos security ingest"
+    asks "the security-reconfirm MCP tool under the plugin prefix asks, naming the command" \
+        "$(mcp_payload mcp__plugin_logos_logos__security_reconfirm)" "logos security reconfirm"
+    asks "the security-reconfirm MCP tool under the project .mcp.json prefix asks" \
+        "$(mcp_payload mcp__logos__security_reconfirm)" "logos security reconfirm"
     # shellcheck disable=SC2088 # a literal tilde, as an agent writes it
     asks "logos security ingest by path, with a global flag and --json" \
         "$(bash_payload '~/.logos-bin/1.20.0/logos --json security ingest --json empty.sarif')" "logos security ingest"
@@ -403,7 +443,7 @@ line.json')" ".logos/rules-baseline.json"
         "$(bash_payload 'logos check --rules=$L')" 'gives `logos check` `--rules=$L`, which may expand to --bless'
     # shellcheck disable=SC2016
     asks "a substitution glued to security's global option asks" \
-        "$(bash_payload 'logos security --project=$(echo . bless)')" 'which may expand to bless or ingest'
+        "$(bash_payload 'logos security --project=$(echo . bless)')" 'which may expand to bless, ingest or reconfirm'
     # shellcheck disable=SC2016
     asks "a positional parameter as logos security's subcommand asks" \
         "$(bash_payload 'set -- bless; logos security $1')" 'gives `logos security` `$1`'
@@ -441,6 +481,167 @@ line.json')" ".logos/rules-baseline.json"
         "$(bash_payload 'F=.logos/rules.toml; echo x 2>| $F')" 'a shell redirection into `$F`'
     asks "a >| redirection into a guarded file asks as a redirection" \
         "$(bash_payload 'echo x >| .logos/rules.toml')" 'writes .logos/rules.toml through a shell redirection'
+
+    # A brace expansion in a guarded position (S-801, CR-249). The shell turns one word
+    # into several, so the word may spell the guarded subcommand, option or file.
+    # shellcheck disable=SC2016 # literal braces, for the guard to read
+    asks "a brace expansion completing gate's --save asks" \
+        "$(bash_payload 'logos gate --sa{ve,}')" 'gives `logos gate` `--sa{ve,}`, which may expand to --save'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace expansion completing check's --bless asks" \
+        "$(bash_payload 'logos check --{bless,x}')" 'gives `logos check` `--{bless,x}`, which may expand to --bless'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace expansion as logos security's subcommand asks" \
+        "$(bash_payload 'logos security {bless,status}')" 'gives `logos security` `{bless,status}` before its subcommand'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace expansion before security's subcommand, after a global option, asks" \
+        "$(bash_payload 'logos security --project . {ingest,status} r.sarif')" 'gives `logos security` `{ingest,status}`'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace sequence completing a guarded option asks" \
+        "$(bash_payload 'logos check --b{k..m}ess')" 'gives `logos check` `--b{k..m}ess`'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a nested brace expansion asks" "$(bash_payload 'logos gate --sa{v{e,x},}')" 'gives `logos gate` `--sa{v{e,x},}`'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace expansion behind the binary held in a variable asks" \
+        "$(bash_payload 'L=logos; $L gate --{save,x}')" 'gives `logos gate` `--{save,x}`'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    # shellcheck disable=SC2088 # a literal tilde, as an agent writes it
+    asks "a brace expansion after gate behind a path to the binary asks" \
+        "$(bash_payload '~/.logos-bin/1.21.0/logos --json gate --sa{ve,}')" 'gives `logos gate` `--sa{ve,}`'
+    asks "a brace expansion over a guarded file name asks, naming the brace expansion" \
+        "$(bash_payload 'rm .logos/rules{.toml,-baseline.json}')" '.logos/rules{.toml,-baseline.json} (a brace expansion beside .logos)'
+    asks "a brace expansion over the .logos directory itself asks" \
+        "$(bash_payload 'rm {.logos,x}/rules.toml')" '{.logos,x}/rules.toml (a brace expansion beside .logos)'
+    asks "a brace expansion splitting the .logos name asks, naming the file it can spell" \
+        "$(bash_payload 'rm .lo{gos,}/rules.toml')" '(a brace expansion that can spell .logos/rules.toml)'
+    asks "a brace list over a guarded name beside cd .logos asks, by the older brace-list rule" \
+        "$(bash_payload 'cd .logos && rm security-{ignore,x}.toml rules{.toml,x}')" '(a brace list beside a mention of .logos)'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace list under .logos with no comma asks, by the older brace-list rule" \
+        "$(bash_payload 'rm .logos/${F}')" '(a brace list under .logos/)'
+    asks "a bare one-word brace list after cd .logos asks, by the older brace-list rule" \
+        "$(bash_payload 'cd .logos && rm {x}')" '(a brace list beside a mention of .logos)'
+    asks "a brace alternative holding .logos, after a comma, asks" \
+        "$(bash_payload 'rm {a,.logos}/x')" '{a,.logos}/x (a brace expansion beside .logos)'
+    asks "a brace alternative holding .logos below a path asks" \
+        "$(bash_payload 'rm -rf {a,b/.logos}')" '{a,b/.logos} (a brace expansion beside .logos)'
+    asks "a redirection into a brace expansion over a guarded file asks" \
+        "$(bash_payload 'echo x > .logos/rules{.toml,.bak}')" 'writes .logos/rules{.toml,.bak} (a brace expansion beside .logos) through a shell redirection'
+    asks "a glued option holding a brace expansion over a guarded file asks" \
+        "$(bash_payload 'dd if=/tmp/x of=.logos/rules{.toml,.bak}')" '(a brace expansion beside .logos)'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a word too long to read for a brace expansion, in a guarded position, asks" \
+        "$(bash_payload "logos gate --label $OPEN_BRACE$LONG_WORD")" 'gives `logos gate`'
+    passes "near miss: the same unclosed brace in a word short enough to read passes" \
+        "$(bash_payload "logos gate --label $OPEN_BRACE")"
+    # An expansion as logos's own subcommand (S-801): the first word after the
+    # binary, or the binary's own word, before a subcommand of logos's is read.
+    # shellcheck disable=SC2016 # literal expansions, for the guard to read
+    asks "an assigned subcommand after logos asks" \
+        "$(bash_payload 'S="gate --save"; logos $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "a braced parameter as logos's subcommand asks" \
+        "$(bash_payload 'logos ${CMD}')" 'gives `logos` `${CMD}` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "a substitution glued to logos's first argument asks" \
+        "$(bash_payload 'logos check$(printf " --b%s" less)')" 'gives `logos` `check$` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "a backtick substitution as logos's subcommand asks, whatever follows" \
+        "$(bash_payload 'logos `echo gate` --save')" 'gives `logos` a command substitution where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "an expansion after logos's global option asks" \
+        "$(bash_payload 'logos --json $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "an expansion after a global option's value asks: the value is no subcommand" \
+        "$(bash_payload 'logos --project . $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "an expansion as the subcommand of logos behind env asks" \
+        "$(bash_payload 'FOO=1 env logos $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016
+    # shellcheck disable=SC2088 # a literal tilde, as an agent writes it
+    asks "an expansion as the subcommand of logos by path asks" \
+        "$(bash_payload '~/.logos-bin/1.21.0/logos $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace expansion as logos's subcommand asks, whatever follows" \
+        "$(bash_payload 'logos {gate,scan} --save')" 'gives `logos` `{gate,scan}` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "logos glued to an expansion as the command word asks" \
+        "$(bash_payload 'logos$X')" 'the command word `logos$X` is logos glued to an expansion'
+    # shellcheck disable=SC2016
+    asks "logos glued to an expansion behind env asks" \
+        "$(bash_payload 'env FOO=1 logos${V} scan')" 'the command word `logos${V}` is logos glued to an expansion'
+    # shellcheck disable=SC2016
+    asks "logos glued to a brace pair as the command word asks" \
+        "$(bash_payload 'logos{,} gate --save')" 'the command word `logos{,}` is logos glued to an expansion'
+    # shellcheck disable=SC2016
+    asks "logos glued to a brace pair asks whatever follows" \
+        "$(bash_payload 'logos{,} $S')" 'the command word `logos{,}` is logos glued to an expansion'
+    # shellcheck disable=SC2016
+    asks "an expansion in the fifth word after logos asks: global options precede it" \
+        "$(bash_payload 'logos --json --quiet --project . $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "an expansion in the eighth word after logos asks" \
+        "$(bash_payload 'logos --a --b --c --d --e --f --g $S')" 'gives `logos` `$S` where its subcommand goes'
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "a brace as logos's subcommand asks when it names none of gate, check and security" \
+        "$(bash_payload 'logos {ga,x}te --sa{ve,}')" 'gives `logos` `{ga,x}te` where its subcommand goes'
+    # shellcheck disable=SC2016
+    asks "an ANSI-C quoted subcommand of logos asks" \
+        "$(bash_payload "logos \$'gate' --save")" 'gives `logos` `$gate` where its subcommand goes'
+    # A loop variable (S-801): `for NAME in WORDS` assigns NAME, as `NAME=` does.
+    # shellcheck disable=SC2016
+    asks "a writer given a loop variable over a guarded file asks" \
+        "$(bash_payload 'for F in .logos/rules.toml; do rm $F; done')" 'assigns the loop variable F (`for F in … .logos/rules.toml`)'
+    # shellcheck disable=SC2016
+    asks "a writer given a loop variable over the .logos directory's files asks" \
+        "$(bash_payload 'for F in .logos/*; do rm "$F"; done')" 'assigns the loop variable F (`for F in … .logos/*`)'
+    # shellcheck disable=SC2016
+    asks "a writer given a loop variable over the .logos directory asks" \
+        "$(bash_payload 'for D in .logos; do rm -rf $D; done')" 'assigns the loop variable D (`for D in … .logos`)'
+    # shellcheck disable=SC2016
+    asks "a loop over a member's contract asks, whichever word names .logos" \
+        "$(bash_payload 'for F in a.toml web/.logos/rules-baseline.json b.toml; do cp /tmp/x $F; done')" \
+        'for F in … web/.logos/rules-baseline.json'
+    # shellcheck disable=SC2016
+    asks "a loop over several lines asks" "$(bash_payload 'for F in a .logos/security-ignore.toml
+do
+    sed -i s/a/b/ $F
+done')" 'assigns the loop variable F'
+    # shellcheck disable=SC2016
+    asks "a redirection into a loop variable asks" \
+        "$(bash_payload 'for F in .logos/rules.toml; do echo x > $F; done')" 'a shell redirection into `$F`'
+    # shellcheck disable=SC2016
+    asks "a loop over a brace list under .logos asks" \
+        "$(bash_payload 'for F in .logos/rules.{toml,bak}; do rm $F; done')" 'for F in … .logos/rules.{toml,bak}'
+    # shellcheck disable=SC2016
+    asks "a loop inside an if asks" \
+        "$(bash_payload 'if true; then for F in .logos/rules.toml; do rm $F; done; fi')" 'assigns the loop variable F'
+    # shellcheck disable=SC2016
+    asks "a loop variable beside an unrelated assignment asks" \
+        "$(bash_payload 'X=1; for F in .logos/rules.toml; do cp /tmp/x $F; done')" 'assigns the loop variable F'
+    # shellcheck disable=SC2016
+    asks "a loop variable with a digit and an underscore in its name asks" \
+        "$(bash_payload 'for f_1 in .logos/rules.toml; do rm $f_1; done')" 'assigns the loop variable f_1'
+    # shellcheck disable=SC2016
+    asks "a loop over a member's .logos directory asks" \
+        "$(bash_payload 'for D in web/.logos; do rm -rf $D; done')" 'assigns the loop variable D (`for D in … web/.logos`)'
+    # shellcheck disable=SC2016
+    asks "a loop variable starting with an underscore asks" \
+        "$(bash_payload 'for _F in .logos/rules.toml; do rm $_F; done')" 'assigns the loop variable _F'
+    # shellcheck disable=SC2016
+    asks "a loop over a brace word holding .logos asks" \
+        "$(bash_payload 'for F in {.logos,x}/rules.toml; do rm $F; done')" 'for F in … {.logos,x}/rules.toml'
+    # shellcheck disable=SC2016
+    asks "a loop over a brace word spelling .logos around a guarded name asks" \
+        "$(bash_payload 'for F in .lo{gos,}/rules.toml; do rm $F; done')" 'for F in … .lo{gos,}/rules.toml'
+    # shellcheck disable=SC2016
+    asks "a loop over a bare guarded name beside cd .logos asks" \
+        "$(bash_payload 'cd .logos && for F in rules.toml; do rm $F; done')" 'for F in … rules.toml'
+    # shellcheck disable=SC2016
+    asks "a variable assigned a brace word holding .logos, then written through, asks" \
+        "$(bash_payload 'F={.logos,x}/rules.toml; rm $F')" 'assigns F={.logos,x}/rules.toml'
+    asks "a loop whose body writes the literal file asks as before" \
+        "$(bash_payload 'for i in 1 2; do rm .logos/rules.toml; done')" ".logos/rules.toml"
 
     # --- 3. pass-through --------------------------------------------------------
     passes "an Edit of an unguarded .logos/ file passes" \
@@ -501,6 +702,11 @@ line.json')" ".logos/rules-baseline.json"
         "$(bash_payload 'logos security status; echo bless')"
     passes "near miss: 'ingest' in another command of the list passes" "$(bash_payload 'logos security status; npm ingest x')"
     passes "near miss: security_ingest under a foreign server passes" "$(mcp_payload mcp__other__security_ingest)"
+    passes "near miss: security_reconfirm under a foreign server passes" "$(mcp_payload mcp__other__security_reconfirm)"
+    passes "near miss: 'reconfirm' before security passes" "$(bash_payload 'logos reconfirm security')"
+    passes "near miss: 'security reconfirm' without logos passes" "$(bash_payload 'echo security reconfirm abc')"
+    passes "near miss: 'reconfirm' in another command of the list passes" \
+        "$(bash_payload 'logos security status; npm reconfirm x')"
     passes "near miss: the other security MCP tools pass" "$(mcp_payload mcp__plugin_logos_logos__security_findings)"
     passes "near miss: bless_rules under a foreign server passes" "$(mcp_payload mcp__other__bless_rules)"
     # S-784 near misses: an expansion outside a guarded position, a value glued to its
@@ -544,6 +750,95 @@ line.json')" ".logos/rules-baseline.json"
     passes "near miss: a guarded path inside another file's content passes" \
         '{"tool_name":"Write","tool_input":{"file_path":"notes.md","content":"see \"file_path\":\".logos/rules.toml\""}}'
 
+    # S-801 near misses: a brace or an expansion outside a guarded position, a brace word that
+    # is no expansion, and a loop over files the guard does not hold.
+    passes "near miss: braces in a command that is not logos passes" "$(bash_payload 'echo {a,b}')"
+    passes "near miss: braces after logos scan pass" "$(bash_payload 'logos scan --path src/{a,b}')"
+    passes "near miss: braces after a security subcommand pass" "$(bash_payload 'logos security status {a,b}')"
+    passes "near miss: a brace word with no comma or range is no expansion" "$(bash_payload 'logos gate --label {x}')"
+    passes "near miss: an empty brace pair is no expansion" "$(bash_payload 'logos check --rules {} x')"
+    passes "near miss: braces in logos gate's option, spaced, are two words" "$(bash_payload 'logos gate --label {a, b}')"
+    passes "near miss: a brace expansion in a command beside a mention of gate passes" \
+        "$(bash_payload 'cargo check --features {a,b} -p logos-core')"
+    passes "near miss: braces over a path not under .logos pass" "$(bash_payload 'rm src/{a,b}.rs build/{x,y}/out')"
+    passes "near miss: braces over a bare name with no .logos in the command pass" "$(bash_payload 'cp a b{1,2}.txt')"
+    passes "near miss: a guarded name with braces and no .logos in the command passes" "$(bash_payload 'rm rules.toml{,.bak}')"
+    passes "near miss: a guarded name in braces below another directory passes" \
+        "$(bash_payload 'mv config/{rules.toml,rules.toml.bak} docs/{rules-baseline.json,x}')"
+    passes "near miss: a guarded name in braces below docs passes" "$(bash_payload 'rm docs/{rules.toml,x}')"
+    passes "near miss: braces over a lookalike .logosy directory pass" "$(bash_payload 'rm .logosy/{a,b}')"
+    passes "near miss: braces over a lookalike .logos-old directory pass" "$(bash_payload 'rm .logos-old/{a,b}')"
+    passes "near miss: a brace word with a single dot is no sequence" "$(bash_payload 'logos gate --label {x.y}')"
+    passes "near miss: a reader given a brace expansion over a guarded file passes" \
+        "$(bash_payload 'cat .logos/rules{.toml,-baseline.json}')"
+    passes "near miss: ls of braces under .logos passes" "$(bash_payload 'ls .logos/{rules.toml,x}')"
+    passes "near miss: braces over a lookalike directory pass" "$(bash_payload 'rm x.logosy/{a,b}')"
+    # shellcheck disable=SC2016 # literal expansions, for the guard to read
+    passes "near miss: an expansion after logos scan passes" "$(bash_payload 'logos scan $DIR')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after logos's subcommand and a global option's value passes" \
+        "$(bash_payload 'logos --project . context $TASK')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion after a subcommand of logos's, after an option, passes" \
+        "$(bash_payload 'logos --json status $X')"
+    # shellcheck disable=SC2016
+    passes "near miss: an expansion in a segment after logos's passes" "$(bash_payload 'logos scan && echo gate $X')"
+    # shellcheck disable=SC2016
+    passes "near miss: logos as an argument, not the command, passes" "$(bash_payload 'cargo build -p logos --features $F')"
+    # shellcheck disable=SC2016
+    passes "near miss: logos as an echo argument passes" "$(bash_payload 'echo logos $X')"
+    # shellcheck disable=SC2016
+    passes "near miss: a crate path ending in logos, then an expansion, passes" "$(bash_payload 'cd /src/logos && make $T')"
+    # shellcheck disable=SC2016
+    passes "near miss: a command word that only starts with logos passes" "$(bash_payload 'logos-tool $X')"
+    passes "near miss: logos alone passes" "$(bash_payload 'logos')"
+    # shellcheck disable=SC2016
+    passes "near miss: a path ending in /bin/logos, then a subcommand and an operand expansion, passes" \
+        "$(bash_payload '$HOME/bin/logos scan $X')"
+    # shellcheck disable=SC2016
+    asks "a path to logos glued to an expansion as the command word asks" \
+        "$(bash_payload '/usr/local/bin/logos$X')" 'the command word `/usr/local/bin/logos$X` is logos glued to an expansion'
+    # An unclosed brace is read for an expansion only past 256 characters.
+    passes "near miss: an unclosed brace of 100 characters passes" \
+        "$(bash_payload "logos gate --label $OPEN_BRACE${LONG_WORD:0:97}")"
+    passes "near miss: an unclosed brace of exactly 256 characters passes" \
+        "$(bash_payload "logos gate --label $OPEN_BRACE${LONG_WORD:0:253}")"
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    asks "an unclosed brace of 257 characters asks" \
+        "$(bash_payload "logos gate --label $OPEN_BRACE${LONG_WORD:0:254}")" 'gives `logos gate`'
+    # Every subcommand of logos's is read as one: a missing name would ask for `logos NAME $X`.
+    for sub in init index sync status search query context explore node callers callees impact impact-intersection \
+        precedent branch-overlap affected implements referencing-docs scan quality-report health session-start \
+        session-end doctor verify evolution dsm doc-gaps offenders review improvements hotspots coverage hook \
+        xservice workspace stats languages serve help; do
+        # shellcheck disable=SC2016
+        passes "near miss: an expansion after logos $sub passes" "$(bash_payload "logos $sub \$X")"
+    done
+    # shellcheck disable=SC2016
+    passes "near miss: a loop variable over files not under .logos passes" "$(bash_payload 'for F in src/*.rs; do rm $F; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: a reader given a loop variable over a guarded file passes" \
+        "$(bash_payload 'for F in .logos/rules.toml; do cat $F; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: git add given a loop variable over a guarded file passes" \
+        "$(bash_payload 'for F in .logos/rules.toml; do git add "$F"; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: a writer given no loop variable, over a guarded file, passes" \
+        "$(bash_payload 'for F in .logos/rules.toml; do rm notes.txt; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: a loop over a lookalike directory passes" "$(bash_payload 'for F in x.logos/rules.toml; do rm $F; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: a loop whose guarded name is in the body only, read, passes" \
+        "$(bash_payload 'for F in a b; do grep x .logos/rules.toml; done')"
+    # shellcheck disable=SC2016
+    passes "near miss: 'for' as an argument is no loop" "$(bash_payload 'echo for F in .logos/rules.toml')"
+    # shellcheck disable=SC2016
+    passes "near miss: a loop over .logos in the header, a command writing nothing named, passes" \
+        "$(bash_payload 'for F in .logos/rules.toml; do echo $F; done')"
+    # shellcheck disable=SC2016 # literal braces and backticks, for the guard to read
+    passes "a read of the whole contract in a loop passes" \
+        "$(bash_payload 'for F in rules.toml rules-baseline.json; do wc -l .logos/$F; done')"
+
     # --- 4. malformed payloads, and an unenrolled project -----------------------
     for m in "empty|" "not JSON|garbage" "a JSON array|[]" "no tool_name|{\"tool_input\":{}}" \
         "Write with no file_path|{\"tool_name\":\"Write\",\"tool_input\":{\"content\":\"x\"}}" \
@@ -582,6 +877,18 @@ line.json')" ".logos/rules-baseline.json"
     bounded passes "an assignment of 160000 '=' beside a guarded path: passes" "$WORK/equals-assign.json"
     bounded passes "64000 segments holding check and an expansion, logos not named: passes" "$WORK/dollar-segments.json"
     bounded passes "80000 expansions beside logos scan, no guarded subcommand named: passes" "$WORK/dollars-scan.json"
+    # S-801: sized past where a quadratic shape shows, as above.
+    bounded passes "8000 brace expansions after logos security status: passes" "$WORK/braces-security.json"
+    bounded passes "4000 brace expansions after ls .logos (a reader): passes" "$WORK/braces-reader.json"
+    bounded passes "a 45000-character brace word after logos scan: passes" "$WORK/brace-long-word.json"
+    bounded passes "10000 expansions after logos scan, whose subcommand is read: passes" "$WORK/expansions-scan.json"
+    bounded passes "40000 'logos a' words beside an expansion, logos not the command: passes" "$WORK/logos-words.json"
+    bounded passes "40000 words after logos, then an expansion past the eighth: passes" "$WORK/logos-then-words.json"
+    # ${word##*/} is quadratic in bash 3.2 on one long word with no slash (100 KB: 6-10 s).
+    bounded passes "a 200 KB word after logos scan \$x; : passes" "$WORK/logos-long-word.json"
+    bounded asks "a loop over 10000 words, the last naming .logos, then a writer: asks" "$WORK/for-words.json" \
+        'assigns the loop variable F'
+    bounded passes "1000 loops that name nothing guarded, then ls .logos: passes" "$WORK/for-segments.json"
     RUN_LANG=en_US.UTF-8 bounded asks "6000 multibyte words, then a guarded rm, under a UTF-8 locale: asks" \
         "$WORK/multibyte-rm.json" ".logos/rules.toml"
     RUN_LANG=en_US.UTF-8 asks "a UTF-8 path is quoted in a valid JSON reason" "$(cat "$WORK/utf8-path.json")" \
@@ -601,10 +908,11 @@ if len(hits) != 1:
 m, h = hits[0]
 want = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash",
         "mcp__logos__bless_rules", "mcp__plugin_logos_logos__bless_rules",
-        "mcp__logos__security_ingest", "mcp__plugin_logos_logos__security_ingest"]
+        "mcp__logos__security_ingest", "mcp__plugin_logos_logos__security_ingest",
+        "mcp__logos__security_reconfirm", "mcp__plugin_logos_logos__security_reconfirm"]
 miss = [t for t in want if not re.fullmatch(m, t)]
 extra = [t for t in ["Read", "Grep", "Glob", "mcp__logos__check_rules", "mcp__other__bless_rules",
-    "mcp__logos__security_findings", "mcp__other__security_ingest"] if re.fullmatch(m, t)]
+    "mcp__logos__security_findings", "mcp__other__security_ingest", "mcp__other__security_reconfirm"] if re.fullmatch(m, t)]
 print("missing %s" % miss if miss else "matches %s" % extra if extra else
       "ok %s %s" % (h["type"], h["command"]))
 PY

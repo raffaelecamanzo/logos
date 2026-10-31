@@ -1,0 +1,19 @@
+// The same bounds, scaled; the range keeps its minimum.
+const POINT_QUERY_MS: u128 = 100;
+
+fn reported_field() {
+    assert!(
+        cfg!(coverage) || u128::from(report.duration_ms) < logos_core::perf::scaled_ms(3_000).as_millis(),
+        "slow"
+    );
+}
+
+fn constant_bound(worst: u128) {
+    assert!(worst < logos_core::perf::scaled_ms(POINT_QUERY_MS as u64).as_millis(), "slow");
+}
+
+fn range_bound(ran: &Value) {
+    let took = ran["duration_ms"].as_u64().unwrap();
+    let upper = logos_core::perf::scaled_ms(5000).as_millis() as u64;
+    assert!((1000..upper).contains(&took), "the tool slept a second: {took} ms");
+}

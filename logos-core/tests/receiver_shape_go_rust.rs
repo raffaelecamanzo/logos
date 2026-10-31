@@ -250,9 +250,9 @@ fn a_go_call_on_the_methods_own_receiver_binds_its_types_method_and_no_other_doe
     );
 }
 
-/// A call inside a local `var` initialiser. Go's `symbols` query captures every
-/// `var_spec`, so the call is attributed to the variable `v`, not to the method:
-/// it misses the method's `self_name` and self type.
+/// A call inside a local `var` initialiser. A variable declared in a function
+/// body is no node (S-525), so the call is attributed to the method itself: it
+/// carries the method's `self_name` and self type like any other call in it.
 const GO_LOCAL: &str = "\
 package svc
 
@@ -266,19 +266,20 @@ func (s *Svc) Local() {
 }
 ";
 
-/// A **known limitation**, pinned so a change to it is deliberate (the S-514 seam
-/// notes name it): the own-receiver call in a local `var` initialiser records
-/// `other` and stays unbound. It loses a real edge and never invents one.
+/// Before S-525 Go's `symbols` query captured every `var_spec`, so this call was
+/// attributed to the local variable `v`, missed the method's `self_name` and
+/// stayed unbound (the S-514 seam's known limitation). With no local variable
+/// node it is the method's own-receiver call and binds like one.
 #[test]
-fn a_go_own_receiver_call_in_a_local_var_initialiser_stays_unbound() {
+fn a_go_own_receiver_call_in_a_local_var_initialiser_binds_as_the_methods_own() {
     let tmp = tree(&[(GO_FILE, GO_LOCAL)]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
     assert_eq!(
         call_rows(rt, GO_FILE),
-        vec![row(&format!("{GO_FILE}:v@8"), "F", RefForm::Method, OTHER, false)]
+        vec![row(&format!("{GO_FILE}:Local@7"), "Self::F", RefForm::Path, None, true)]
     );
-    assert!(call_edges(rt).is_empty());
+    assert_eq!(call_edges(rt), sorted_edges(vec![edge(&format!("{GO_FILE}:Local@7"), &format!("{GO_FILE}:F@5"))]));
 }
 
 /// The receiver's name rebound inside the method: a `for … range` variable, a
@@ -300,25 +301,24 @@ func (s *Svc) CloseAll(conns []*Conn) {
 }
 ";
 
-/// A **known gap**, pinned so a change to it is deliberate: `self` is decided by
-/// the operand's *text* equalling the method's receiver name, and nothing checks
-/// that the name still means the receiver. A name rebound inside the method is
-/// still read as `self`, so `s.Close()` — `Conn.Close` in fact — binds to
-/// `Svc.Close`. The same needs a same-named method on the receiver's type; on the
-/// two inspection repositories (zap, ollama; 902 methods that call on their own
-/// receiver) no such pair occurs. Closing it needs a rebinding marker in the
-/// shared seam (S-514's vocabulary), which is a design decision, not a query edit.
+/// The **known gap** S-517 pinned, closed by S-594 (FR-RS-44, FR-EX-13 as
+/// amended): `self` was decided by the operand's text equalling the method's
+/// receiver name, so a name rebound inside the method was still read as `self`
+/// and `s.Close()` — `Conn.Close` in fact — bound to `Svc.Close`. The S-593
+/// local-binding facts now say the `range` variable `s` is in force at the
+/// call: the receiver is `other` and binds nowhere. The other rebinding forms
+/// are pinned in `local_binding_shadowing.rs`.
 #[test]
-fn a_go_receiver_name_rebound_inside_the_method_is_still_read_as_self_known_gap() {
+fn a_go_receiver_name_rebound_inside_the_method_is_other() {
     let tmp = tree(&[(GO_FILE, GO_SHADOW)]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
     let a = |line: u32, name: &str| format!("{GO_FILE}:{name}@{line}");
     assert_eq!(
         call_rows(rt, GO_FILE),
-        vec![row(&a(10, "CloseAll"), "Self::Close", RefForm::Path, None, true)]
+        vec![row(&a(10, "CloseAll"), "Close", RefForm::Method, Some(ReceiverShape::Other), false)]
     );
-    assert_eq!(call_edges(rt), vec![edge(&a(10, "CloseAll"), &a(6, "Close"))]);
+    assert_eq!(call_edges(rt), Vec::<(String, String)>::new());
 }
 
 // ── Rust ──────────────────────────────────────────────────────────────────────

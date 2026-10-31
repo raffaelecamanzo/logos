@@ -16,7 +16,10 @@
 #                            failing [security] gate, required scanners included;
 #                            or logos security bless, as a shell command (it has
 #                            no MCP twin) — it rewrites the checked-in security
-#                            baseline
+#                            baseline; or logos security reconfirm, as a shell
+#                            command or its MCP twin security_reconfirm — it
+#                            rewrites an ignore entry's evidence hashes, so a
+#                            verdict that stopped holding reads suppressed again
 #
 #   not enrolled (no .logos/)   exit 0, no output
 #   a guarded action            one PreToolUse JSON object: permissionDecision
@@ -39,7 +42,16 @@
 # substitution where a subcommand or option goes asks, since it may become one
 # (`S=bless; logos security $S`); after a security subcommand
 # (`logos security status $X`) it passes. A writer given an expansion asks when
-# the same command line assigns a value naming .logos (`F=.logos/rules.toml; rm $F`).
+# the same command line assigns a value naming .logos (`F=.logos/rules.toml; rm $F`);
+# `for NAME in WORDS` assigns NAME the same way (the header itself writes nothing).
+#
+# A brace expansion, {a,b} or {a..b}, asks where an expansion asks
+# (`logos gate --sa{ve,}`, `logos security {bless,status}`) and in a writer's path
+# that can spell a file under .logos/ (`rm .lo{gos,}/rules.toml`). With logos as the
+# command word, an expansion or brace before any subcommand of logos's is read asks
+# (`S="gate --save"; logos $S`, `logos check$(…)`), as does logos glued to one
+# (`logos$X`); `logos scan $DIR` passes. A brace is read by shape, never expanded,
+# and quotes are already gone, so a quoted {a,b} asks too.
 #
 # This is a guardrail against an agent loosening the contract by habit or by
 # mistake, not a sandbox: a command that assembles the path at run time (an
@@ -56,8 +68,10 @@
 # through ${var//pattern/replacement}, which bash 3.2 runs in far worse than
 # linear time once matches are many (8 KB of quotes: 7 s; 16 KB: 54 s), nor
 # through a $( ) fork per word. The same holds, more quietly, for a `case`
-# pattern with two stars around a literal (`*=*\$*`) and for a loop over a long
-# array by index.
+# pattern with two stars around a literal (`*=*\$*`), for a loop over a long
+# array by index, and for ${word##*/} on one long word with no slash (100 KB:
+# 10 s) — the words that name a guarded path (reader_cmd, maybe_guarded) still
+# take it, as they did before; new code asks `case` for a path's last part.
 
 set -euo pipefail
 
@@ -87,8 +101,12 @@ READERS="cat head tail more grep egrep fgrep rg ag ack wc diff cmp comm stat fil
 # git subcommands that leave the working-tree file as it is (add and commit record it).
 GIT_READERS="diff log show status blame annotate ls-files ls-tree cat-file grep rev-parse shortlog check-ignore
     add commit"
-# logos security's subcommands: until one of them is read, an expansion may become bless or ingest.
-SECURITY_SUBS="scan install uninstall ingest status findings bless help"
+# logos security's subcommands: until one of them is read, an expansion may become bless, ingest or reconfirm.
+SECURITY_SUBS="scan install uninstall ingest status findings bless reconfirm help"
+# An expansion or brace in the first eight words after logos, in one simple command: where
+# logos's own subcommand may be (`logos $S`, `logos --json --quiet --project . {gate,x}`).
+# One regex over a bounded run of words, so it is linear however long the command.
+EXPANSION_NEAR_LOGOS=$'logos([^[:space:];&|()`]*[${]|([[:space:]]+[^[:space:];&|()`]+){0,7}[[:space:]]+[^[:space:];&|()`]*[${])'
 
 BS=\\
 
@@ -237,13 +255,45 @@ guarded_path() {
     return 1
 }
 
+# brace_expansion WORD — 0 when WORD holds an unquoted brace expansion, {a,b} or
+# {a..b}. The shell turns one word into several, so the word may spell what it
+# does not show (`--sa{ve,}`). It is read by shape, never expanded: an expansion
+# multiplies, and bash 3.2 gives no linear bound for that. ${X} is no brace
+# expansion (the `$` rules read it); a word too long to be read for one is taken
+# for one.
+brace_expansion() {
+    case "$1" in *\{*) ;; *) return 1 ;; esac
+    [ "${#1}" -le 256 ] || return 0
+    local re='\{[^{}]*(,|\.\.)[^{}]*\}'
+    [[ $1 =~ $re ]]
+}
+
+# names_dot_logos WORD — 0 when WORD names .logos as a path component or reaches a
+# guarded file (mention): the value of an assignment, a word of a `for` list.
+names_dot_logos() {
+    case "$1" in .logos | .logos/* | */.logos | */.logos/*) return 0 ;; esac
+    mention "$1"
+}
+
 # maybe_guarded TOKEN MENTIONS_DOT_LOGOS — a shell word that may reach a guarded
-# file without spelling it: the .logos directory itself, a glob or brace list
+# file without spelling it: the .logos directory itself, a brace expansion that
+# can spell a path under .logos/ (`.lo{gos,}/rules.toml`), a glob or brace list
 # under .logos/ that can match a guarded name, or a bare guarded name, glob or
 # brace list in a command line that also names .logos (`cd .logos && rm *`). 0,
 # with HIT set to what it reaches, or 1.
 maybe_guarded() {
-    local p n base
+    local p n base dir='(^|[/{,])\.logos($|[/},])'
+    if brace_expansion "$1"; then
+        # .logos as a path component, whole or opening a brace alternative.
+        if [[ $1 =~ $dir ]]; then HIT="$1 (a brace expansion beside .logos)" && return 0; fi
+        # A guarded name in a path whose component opens like .logos or a brace
+        # (`.lo{gos,}/rules.toml`); `config/{rules.toml,x}` is no .logos.
+        if [[ $1 == *.[l\{]* ]]; then
+            for n in $GUARDED_NAMES; do
+                case "$1" in *"$n"*) HIT="$1 (a brace expansion that can spell .logos/$n)" && return 0 ;; esac
+            done
+        fi
+    fi
     normalize "$1"
     p="$NORM"
     case "$p" in
@@ -349,8 +399,9 @@ reader_cmd() {
 }
 
 # shell_segment TEXT — one simple command of a Bash call. Asks on a guarded
-# action, returns otherwise, having set ASSIGNED (an assignment whose value names
-# .logos) and EXP_WRITE (a write handed an expansion) for shell_command to read
+# action, returns otherwise, having set ASSIGNED (an assignment, or a `for`
+# loop's words, naming .logos) and EXP_WRITE (a write handed an expansion) for
+# shell_command to read
 # once the whole line is walked. TEXT is cut at > and at < first: the first word
 # after a > is a redirection target (`>>` leaves an empty field between its two
 # halves, so the rule still lands on the target), and the first word after a <
@@ -376,7 +427,7 @@ shell_segment() {
         done
     done
 
-    local cmd="" args=() mentions=() i=0 logos_at=-1 gate_at=-1 check_at=-1 security_at=-1 security_sub=no shown own
+    local cmd="" args=() mentions=() i=0 logos_at=-1 gate_at=-1 check_at=-1 security_at=-1 security_sub=no logos_sub=no shown own may
     for w in ${words[@]+"${words[@]}"}; do
         # An assignment (or +=) whose value names .logos, for shell_command to read.
         # Matched by an anchored regex: a two-star `case` pattern is quadratic in bash 3.2.
@@ -384,7 +435,7 @@ shell_segment() {
             case "$w" in
                 [A-Za-z_]*=*)
                     if [[ $w =~ ^[A-Za-z_][A-Za-z0-9_]*\+?=(.*)$ ]]; then
-                        case "${BASH_REMATCH[1]}" in .logos | .logos/* | */.logos | */.logos/*) ASSIGNED="$w" ;; esac
+                        if names_dot_logos "${BASH_REMATCH[1]}"; then ASSIGNED="$w"; fi
                     fi
                     ;;
             esac
@@ -402,6 +453,17 @@ shell_segment() {
         case "$w" in
             logos | */logos) [ "$logos_at" -lt 0 ] && logos_at=$i ;;
         esac
+        # The command word itself glued to an expansion (`logos$X`) may be logos and
+        # anything: nothing says which subcommand it runs.
+        if [ "$i" -eq 0 ]; then
+            case "$w" in
+                logos\$* | */logos\$* | logos\{* | */logos\{*)
+                    if brace_expansion "$w" || [[ $w == *\$* ]]; then
+                        ask "the command word \`$w\` is logos glued to an expansion, which may run \`logos gate --save\`, \`logos check --bless\` or \`logos security bless\`."
+                    fi
+                    ;;
+            esac
+        fi
         if [ "$logos_at" -ge 0 ] || [ "$BIN_NAMED" = yes ]; then
             case "$w" in
                 gate) [ "$gate_at" -lt 0 ] && gate_at=$i ;;
@@ -413,35 +475,59 @@ shell_segment() {
                     ask "the command runs \`logos security ingest\`, which stores a SARIF report as the security evidence: an empty one clears a failing [security] gate." ;;
                 bless) [ "$security_at" -ge 0 ] &&
                     ask "the command runs \`logos security bless\`, which rewrites .logos/security-baseline.json, the security ratchet's checked-in baseline." ;;
+                reconfirm) [ "$security_at" -ge 0 ] &&
+                    ask "the command runs \`logos security reconfirm\`, which re-records an ignore entry's evidence hashes in .logos/security-ignore.toml: a verdict whose evidence changed reads suppressed again." ;;
                 --save) [ "$gate_at" -gt "$logos_at" ] &&
                     ask "the command runs \`logos gate --save\`, which replaces the blessed quality baseline." ;;
                 --bless) [ "$check_at" -gt "$logos_at" ] &&
                     ask "the command runs \`logos check --bless\`, which rewrites .logos/rules-baseline.json." ;;
             esac
             # An expansion where a guarded subcommand or option goes may become one when
-            # the shell runs it (`S=bless; logos security $S`, `logos check $(echo --bless)`):
+            # the shell runs it (`S=bless; logos security $S`, `logos check $(echo --bless)`),
+            # and so may a brace expansion (`logos gate --sa{ve,}`, `logos security {bless,status}`):
             # any word after gate or check, and any word after security until one of its
             # subcommands is read. A value glued to an option is no exception: unquoted,
             # `--label=$(echo x --save)` splits into a --save of its own. The subcommand
             # must be logos's own: the binary in this segment, a command word holding it
             # (`$L check`), or the subcommand at the head of a segment a substitution
             # left (`$(which logos) gate`), never `cd ~/src/logos && cargo check $X`.
+            # With logos as the command word, the same holds before any subcommand of
+            # logos's is read (`S="gate --save"; logos $S`, `logos check$(…)`), which asks
+            # for a harmless `logos $CMD` too.
+            may=no
             case "$w" in
-                *\$*)
-                    shown="\`$w\`"
-                    [ "$w" = "\$" ] && shown="a command substitution"
-                    own=no
-                    case "$cmd" in *\$*) own=yes ;; esac
-                    [ "$logos_at" -ge 0 ] && own=yes
-                    [ "$gate_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$gate_at" -eq 0 ]; } &&
-                        ask "the command gives \`logos gate\` $shown, which may expand to --save: \`logos gate --save\` replaces the blessed quality baseline."
-                    [ "$check_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$check_at" -eq 0 ]; } &&
-                        ask "the command gives \`logos check\` $shown, which may expand to --bless: \`logos check --bless\` rewrites .logos/rules-baseline.json."
-                    [ "$security_at" -ge 0 ] && [ "$security_sub" = no ] && { [ "$own" = yes ] || [ "$security_at" -eq 0 ]; } &&
-                        ask "the command gives \`logos security\` $shown before its subcommand, which may expand to bless or ingest: \`logos security bless\` rewrites .logos/security-baseline.json, and \`logos security ingest\` stores a SARIF report as the security evidence."
-                    ;;
-                *) [ "$security_at" -ge 0 ] && [ "$security_at" -lt "$i" ] && one_of "$w" "$SECURITY_SUBS" && security_sub=yes ;;
+                *\$*) may=yes ;;
+                *\{*) brace_expansion "$w" && may=yes ;;
             esac
+            if [ "$may" = yes ]; then
+                shown="\`$w\`"
+                [ "$w" = "\$" ] && shown="a command substitution"
+                own=no
+                case "$cmd" in *\$*) own=yes ;; esac
+                [ "$logos_at" -ge 0 ] && own=yes
+                [ "$gate_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$gate_at" -eq 0 ]; } &&
+                    ask "the command gives \`logos gate\` $shown, which may expand to --save: \`logos gate --save\` replaces the blessed quality baseline."
+                [ "$check_at" -gt "$logos_at" ] && { [ "$own" = yes ] || [ "$check_at" -eq 0 ]; } &&
+                    ask "the command gives \`logos check\` $shown, which may expand to --bless: \`logos check --bless\` rewrites .logos/rules-baseline.json."
+                [ "$security_at" -ge 0 ] && [ "$security_sub" = no ] && { [ "$own" = yes ] || [ "$security_at" -eq 0 ]; } &&
+                    ask "the command gives \`logos security\` $shown before its subcommand, which may expand to bless, ingest or reconfirm: \`logos security bless\` rewrites .logos/security-baseline.json, \`logos security ingest\` stores a SARIF report as the security evidence, and \`logos security reconfirm\` re-records an ignore entry's evidence."
+                [ "$logos_at" -eq 0 ] && [ "$i" -gt 0 ] && [ "$logos_sub" = no ] &&
+                    ask "the command gives \`logos\` $shown where its subcommand goes, which may expand to gate --save, check --bless or security bless: \`logos gate --save\` replaces the blessed quality baseline, \`logos check --bless\` rewrites .logos/rules-baseline.json, and \`logos security bless\` rewrites .logos/security-baseline.json."
+            else
+                [ "$security_at" -ge 0 ] && [ "$security_at" -lt "$i" ] && one_of "$w" "$SECURITY_SUBS" && security_sub=yes
+                # logos's own subcommands (`logos --help`), as a case, not a list walked per
+                # word. One missing here only keeps the rule above armed, which asks.
+                if [ "$logos_sub" = no ] && [ "$logos_at" -ge 0 ] && [ "$logos_at" -lt "$i" ]; then
+                    case "$w" in
+                        init | index | sync | status | search | query | context | explore | node | callers | callees | \
+                            impact | impact-intersection | precedent | branch-overlap | affected | implements | \
+                            referencing-docs | scan | check | quality-report | gate | health | session-start | \
+                            session-end | doctor | verify | evolution | dsm | doc-gaps | offenders | review | \
+                            improvements | hotspots | coverage | security | hook | xservice | workspace | stats | \
+                            languages | serve | help) logos_sub=yes ;;
+                    esac
+                fi
+            fi
         fi
         i=$((i + 1))
     done
@@ -457,6 +543,18 @@ shell_segment() {
         done
     fi
     [ -n "$cmd" ] || return 0
+    # `for NAME in WORDS` assigns NAME each of WORDS, as `NAME=` does: one naming
+    # .logos is read for shell_command like an assignment. The header writes nothing.
+    if [ "$cmd" = for ] && [ "${args[1]:-}" = in ] && [[ ${args[0]} =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        for w in "${args[@]:2}"; do
+            if names_dot_logos "$w"; then
+                ASSIGNED="the loop variable ${args[0]} (\`for ${args[0]} in … $w\`)"
+                DOT_LOGOS=yes # a word spelled around .logos (`.lo{gos,}/rules.toml`) still names it
+                break
+            fi
+        done
+        return 0
+    fi
     for w in "$cmd" ${args[@]+"${args[@]}"}; do
         if mention "$w"; then mentions+=("$HIT"); fi
     done
@@ -514,19 +612,22 @@ shell_command() {
     # or an assignment's value: `$(which logos) gate --save` and
     # `L=logos; $L gate --save` put it in another simple command than the
     # subcommand, so a segment that saves or blesses then asks, failing safe.
+    # A `$` or `{` right after it is the binary glued to an expansion (`logos$X`).
     case " $c " in
-        *[[:space:]/=\(\`\;\&\|]logos[[:space:]\)\`\;\&\|]*) BIN_NAMED=yes ;;
+        *[[:space:]/=\(\`\;\&\|]logos[[:space:]\)\`\;\&\|\$\{]*) BIN_NAMED=yes ;;
         *) BIN_NAMED=no ;;
     esac
-    # Nothing guarded is named, nothing blessed, saved or ingested, and no expansion
-    # sits beside the binary: the call passes without the word-by-word walk, so a long
-    # heredoc costs one test. `*bless*` covers both `check --bless` and `security bless`.
+    # Nothing guarded is named, nothing blessed, saved, ingested or reconfirmed, and no expansion
+    # or brace sits beside the binary: the call passes without the word-by-word walk,
+    # so a long heredoc costs one test. `*bless*` covers both `check --bless` and
+    # `security bless`. An expansion or brace walks when gate, check or security is
+    # named, or when one sits where logos's subcommand goes (EXPANSION_NEAR_LOGOS).
     case "$c" in
         *.logos* | *rules.toml* | *rules-baseline.json* | *security-ignore.toml* | *security-baseline.json* | \
-            *--save* | *bless* | *ingest*) ;;
-        *\$*)
+            *--save* | *bless* | *ingest* | *reconfirm*) ;;
+        *\$* | *\{*)
             [ "$BIN_NAMED" = yes ] || return 0
-            case "$c" in *gate* | *check* | *security*) ;; *) return 0 ;; esac
+            case "$c" in *gate* | *check* | *security*) ;; *) [[ $c =~ $EXPANSION_NEAR_LOGOS ]] || return 0 ;; esac
             ;;
         *) return 0 ;;
     esac
@@ -569,6 +670,9 @@ case "$TOOL" in
         ;;
     mcp__logos__security_ingest | mcp__plugin_logos_logos__security_ingest)
         ask "the MCP tool $TOOL is \`logos security ingest\`: it stores a SARIF report as the security evidence, and an empty one clears a failing [security] gate."
+        ;;
+    mcp__logos__security_reconfirm | mcp__plugin_logos_logos__security_reconfirm)
+        ask "the MCP tool $TOOL is \`logos security reconfirm\`: it re-records an ignore entry's evidence hashes in .logos/security-ignore.toml, so a verdict whose evidence changed reads suppressed again."
         ;;
 esac
 

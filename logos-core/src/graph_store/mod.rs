@@ -45,6 +45,7 @@
 mod migrate;
 mod schema;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -52,7 +53,9 @@ use anyhow::{anyhow, Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 
-use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm};
+use crate::model::{
+    EdgeKind, LocalBindingKind, LogosSymbol, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm,
+};
 use crate::models::navigation::LanguageCount;
 use crate::models::quality::{
     FixUnit, FixUnitKind, Offender, OutlierLabel, OutlierMeasure, WhereToStart, WorstOffenders,
@@ -230,6 +233,22 @@ pub const PROJECT_ID_KEY: &str = "project_id";
 /// [ADR-85]: ../../../docs/specs/architecture/decisions/ADR-85.md
 pub const SYMBOL_COORDINATE_KEY: &str = "symbol_coordinate";
 
+/// The `project_metadata` key recording which plugin reads each shared
+/// extension in this store (S-582, [FR-PL-07]): the extensions the
+/// repository's sources gave to the plugin sharing them
+/// ([`SharedOwners::record`](crate::plugin::SharedOwners::record)) — `h` in a
+/// repository whose C sources outnumber its C++ ones.
+///
+/// Written by every full [`index`](crate::pipeline::index) and by a
+/// [`sync`](crate::pipeline::sync) whose files move the decision, after the
+/// headers it re-reads are stored; read when an engine opens the store, so
+/// every process routes `.h` as the graph was built. Absent means the
+/// default: every shared extension with its outright claimant — C++ reads
+/// `.h` — which is what a store built before S-582 holds.
+///
+/// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+pub const SHARED_OWNERS_KEY: &str = "shared_extension_owners";
+
 /// A row read back from the `nodes` table, mapped to model types.
 ///
 /// `kind` is recovered via [`NodeKind::try_from`] and `symbol` via
@@ -295,6 +314,24 @@ pub struct EdgeRow {
     pub target: NodeId,
     /// The relationship kind.
     pub kind: EdgeKind,
+    /// Whether the edge's payload is a [`dispatch`](crate::model::dispatch)
+    /// marker — read it through [`EdgeRow::is_dispatch`].
+    pub dispatch: bool,
+}
+
+impl EdgeRow {
+    /// `true` for a `calls` edge reached through a trait to one of the trait
+    /// method's implementations ([CR-226] BR-76) — a runtime reach, not a
+    /// dependency. The one predicate every **architecture** view skips by
+    /// ([FR-QM-20]): the metric graph and its module rollup, the DSM, the layer
+    /// and boundary evaluation and the coupling budgets. Every **runtime**
+    /// reader (callers, callees, impact, reachability, dead code) keeps the edge.
+    ///
+    /// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+    /// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+    pub fn is_dispatch(&self) -> bool {
+        self.dispatch && self.kind == EdgeKind::Calls
+    }
 }
 
 /// An edge read back **by symbol identity** rather than by storage rowid — the
@@ -414,7 +451,8 @@ pub struct NewNode<'a> {
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     pub params: Option<ParamRange>,
-    /// Whether a Rust `impl` function takes `self` ([CR-200]) — the
+    /// Whether a Rust `impl` function takes `self` ([CR-200]), and `false` for
+    /// a Ruby callable of the class or module object (S-565) — the
     /// `nodes.takes_self` column, migration 33. `None` for every other node.
     ///
     /// [CR-200]: ../../../docs/requests/CR-200-a-rust-method-call-binds-only-a-callable-that-takes-self.md
@@ -429,7 +467,8 @@ pub struct NewNode<'a> {
     /// An enum's variant names, space-joined (S-606) — the `nodes.variants`
     /// column, migration 34. `None` for every other node.
     pub variants: Option<&'a str>,
-    /// `true` for a required signature (S-606, [CR-202] F3) — the
+    /// `true` for a required signature (S-606, [CR-202] F3), or a C-family
+    /// prototype paired with a definition of its file (S-577) — the
     /// `nodes.signature` column, migration 34.
     ///
     /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
@@ -439,6 +478,12 @@ pub struct NewNode<'a> {
     ///
     /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
     pub uninherited: bool,
+    /// A type's generic arity (S-602, [CR-199]) — the `nodes.type_arity`
+    /// column, migration 42. `None` for every node of a plugin that does not
+    /// tell types apart by arity, and for every non-type node.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    pub type_arity: Option<u32>,
 }
 
 impl<'a> NewNode<'a> {
@@ -470,6 +515,7 @@ impl<'a> NewNode<'a> {
             variants: None,
             signature: false,
             uninherited: false,
+            type_arity: None,
         }
     }
 }
@@ -674,10 +720,169 @@ pub struct LanguageRefCounts {
     pub language: String,
     /// Indexed files tagged with this language.
     pub files: u64,
+    /// Of those, the files whose path ends in `.h` — the ambiguous header
+    /// extension (S-572, [FR-PL-07]).
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    pub header_files: u64,
+    /// Of those, the files whose parse held an ERROR or MISSING node
+    /// (`files.parse_damaged = 1`, S-571, [FR-IX-14]).
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    pub damaged_files: u64,
+    /// Of those, the files that record no parse damage either way
+    /// (`files.parse_damaged IS NULL`): indexed before migration 44 and not
+    /// re-extracted since.
+    pub unrecorded_files: u64,
     /// The `Calls` class.
     pub calls: RelationCounts,
     /// The `Imports` class.
     pub imports: RelationCounts,
+}
+
+/// The reported reference ledger as the reference classes read it ([FR-RS-49],
+/// S-635): the doc and code halves' counts, every **unbound** code reference
+/// grouped by what classifies it, and the names the graph could bind a target
+/// to — all from one read snapshot of [`GraphStore::reference_population`], so
+/// the halves describe one graph generation. The classification itself is the
+/// resolution engine's (`resolve::reference_classes`).
+///
+/// "Reported" is the [`StoreCounts`] population: the ledger less its
+/// capture-before-delete rows, so `doc_references + code_references` equals
+/// [`StoreCounts::refs_total`] over the same snapshot.
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReferencePopulation {
+    /// Reported `DocReference` rows.
+    pub doc_references: u64,
+    /// Of those, the bound ones.
+    pub doc_resolved: u64,
+    /// Every other reported row — the code references.
+    pub code_references: u64,
+    /// Of those, the bound ones.
+    pub code_resolved: u64,
+    /// The unbound code references, one entry per `(language, kind, target)`
+    /// with its row count, in that order ([NFR-RA-06]).
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub unbound_code: Vec<UnboundCodeTarget>,
+    /// The unbound code references that are the **consumer** side of an
+    /// invocation arm (an HTTP client call, a gRPC stub call, a broker publish
+    /// — the rows the workspace bridge binds across members, [FR-WS-04]), one
+    /// entry per `(source_symbol, target)` with its row count, in that order
+    /// ([NFR-RA-06]). A workspace counts the ones its bridge bound as resolved
+    /// (S-637); every one is already among [`unbound_code`](Self::unbound_code).
+    ///
+    /// [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    pub unbound_invocations: Vec<UnboundInvocation>,
+    /// The names the graph could bind a target to — see [`DeclaredNameSources`].
+    pub names: DeclaredNameSources,
+}
+
+/// One group of [`ReferencePopulation::unbound_invocations`]: the unbound
+/// invocation-consumer rows one declaration records for one target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundInvocation {
+    /// The call site's declaration — the ledger's `source_symbol`, as written.
+    pub source_symbol: String,
+    /// The target as the ledger records it.
+    pub target: String,
+    /// Rows of the group.
+    pub rows: u64,
+}
+
+/// One group of [`ReferencePopulation::unbound_code`]: the unbound code
+/// references of one language and kind that name one target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnboundCodeTarget {
+    /// The owning file's `files.language`; `None` for a file that records none.
+    pub language: Option<String>,
+    /// The `unresolved_refs.kind` discriminant ([`EdgeKind::as_i32`]).
+    pub kind: i64,
+    /// The target as the ledger records it.
+    pub target: String,
+    /// Rows of the group.
+    pub rows: u64,
+}
+
+/// What the graph declares that a reference's target could name — the raw
+/// sources of the reference classes' name universe ([FR-RS-49], S-635).
+///
+/// More than node names, because a binder lookup does not always end on a
+/// node's own name: an import binds an alias (`import X as Y`), a file or a
+/// directory (`#include "a.h"`, a Go package path), a declared namespace (a C#
+/// `using`), or a Kotlin file facade.
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredNameSources {
+    /// Every node name, repeats included — the universe built from it is a set.
+    pub names: Vec<String>,
+    /// Every distinct `(alias, target)` pair of the reported ledger, ordered —
+    /// the local name an import introduces, beside what it imports.
+    pub aliases: Vec<(String, String)>,
+    /// Every indexed file's path, with its declared namespace when it records
+    /// one.
+    pub files: Vec<(String, Option<String>)>,
+}
+
+/// Count `row` in `invocations` under its declaration and `target` when it is
+/// an invocation call site ([`invocation_consumer`]) — a helper so the ledger
+/// scan stays under the nesting threshold.
+fn tally_invocation(
+    invocations: &mut std::collections::BTreeMap<(String, String), u64>,
+    row: &rusqlite::Row<'_>,
+    target: &str,
+) -> rusqlite::Result<()> {
+    if let Some(source_symbol) = invocation_consumer(row)? {
+        *invocations.entry((source_symbol, target.to_string())).or_default() += 1;
+    }
+    Ok(())
+}
+
+/// The `source_symbol` of a [`GraphStore::reference_population`] ledger row
+/// (columns 5 and 6: `payload`, `source_symbol`) when its payload names the
+/// consumer side of an invocation arm, else `None` — the bridge's own test
+/// ([`ArtifactRelation::is_invocation_consumer`]). A `source_symbol` that is
+/// not UTF-8 is `None` too.
+///
+/// [`ArtifactRelation::is_invocation_consumer`]: crate::model::ArtifactRelation::is_invocation_consumer
+fn invocation_consumer(row: &rusqlite::Row<'_>) -> rusqlite::Result<Option<String>> {
+    let rusqlite::types::ValueRef::Text(payload) = row.get_ref(5)? else {
+        return Ok(None);
+    };
+    let consumer = std::str::from_utf8(payload)
+        .ok()
+        .and_then(crate::model::ArtifactRelation::from_wire)
+        .is_some_and(crate::model::ArtifactRelation::is_invocation_consumer);
+    if !consumer {
+        return Ok(None);
+    }
+    // A declaration that is not UTF-8 — a corrupt store, an outside writer —
+    // names no call site: the bridge could not parse it either, and a strict
+    // read would fail the whole `status` this scan serves.
+    Ok(row.get_ref(6)?.as_str().ok().map(str::to_string))
+}
+
+/// The index of `language` in `languages`, appended on first sight — the
+/// interning [`GraphStore::reference_population`] keys its ledger scan by.
+fn intern(languages: &mut Vec<Option<String>>, language: Option<String>) -> usize {
+    if let Some(index) = languages.iter().position(|known| *known == language) {
+        return index;
+    }
+    languages.push(language);
+    languages.len() - 1
+}
+
+/// Count one more row naming `target`, allocating its key only on first sight.
+fn tally(targets: &mut std::collections::HashMap<String, u64>, target: &str) {
+    if let Some(count) = targets.get_mut(target) {
+        *count += 1;
+        return;
+    }
+    targets.insert(target.to_string(), 1);
 }
 
 /// The class a `kind` discriminant from [`GraphStore::resolution_by_language`]'s
@@ -732,7 +937,10 @@ pub struct UnresolvedRefRow {
     /// The reference target text, interpreted per `form`.
     pub target: String,
     /// The in-scope name an import binds (`use a::b` → `b`, `use a::b as c`
-    /// → `c`); `None` for non-import forms.
+    /// → `c`); otherwise the marker extraction gave the row
+    /// ([`RefFact::alias`](crate::extract::RefFact::alias): a scope marker, a
+    /// qualified call's import binding, a bare call's local-binding mark), or
+    /// `None`.
     pub alias: Option<String>,
     /// How `target` is to be interpreted by the resolution pass.
     pub form: RefForm,
@@ -770,13 +978,19 @@ pub struct UnresolvedRefRow {
     pub peeled: Option<String>,
     /// How many arguments a `Calls` row's call passes (S-591, [FR-EX-32]; the
     /// `arg_count` column, migration 33). `None` when it cannot be counted, and
-    /// for every non-call row.
+    /// for every non-call row but two: a partial type part's own `Extends` row
+    /// (S-557), which records the declaration's type-parameter count, and — in
+    /// a language that tells types apart by arity (S-602) — a supertype's or a
+    /// `new`'s row, which records the type-argument count it writes.
     ///
     /// [FR-EX-32]: ../../../docs/specs/requirements/FR-EX-32.md
     pub arg_count: Option<u32>,
     /// Whether an import row's declaration is a re-export — a Rust `pub use`
-    /// (S-606, [FR-EX-34]; the `exported` column, migration 34). `None` for
-    /// every other row.
+    /// (S-606, [FR-EX-34]; the `exported` column, migration 34), or a
+    /// TypeScript-family `export` statement (S-534, `extract::ts_export_rows`):
+    /// a `Glob` row is `export * from`, a multi-segment `Path` row a named
+    /// re-export `<module>::<name>`, a single-segment `Path` row a local export
+    /// alias. `None` for every other row.
     ///
     /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
     pub exported: Option<bool>,
@@ -840,6 +1054,16 @@ pub struct FunctionMetricRow {
     /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     pub has_body: Option<bool>,
+    /// The member names the callable accesses through its own receiver
+    /// (`this.x`, [FR-EX-08]) that bound to no field — the unresolved
+    /// `Accesses` rows it is the source of, sorted and distinct. Cohesion links
+    /// two methods sharing one such name that their class does not declare, an
+    /// inherited member such as React's `this.state` (metric-semantics v9,
+    /// [FR-QM-11], [CR-252]).
+    ///
+    /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub unbound_accesses: Vec<String>,
 }
 
 /// What a re-bless records beside the gate baseline ([FR-GV-16], migration
@@ -1856,6 +2080,91 @@ pub struct ImplBlockRow {
     pub deref_target: Option<String>,
 }
 
+/// The fields needed to record one local binding (S-593, [FR-EX-33]; the
+/// `local_bindings` table, migration 41) — an
+/// [`extract::LocalBindingFact`](crate::extract::LocalBindingFact).
+///
+/// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
+#[derive(Debug, Clone, Copy)]
+pub struct NewLocalBinding<'a> {
+    /// The bound name as written.
+    pub name: &'a str,
+    /// What binds it.
+    pub kind: LocalBindingKind,
+    /// 1-based line of the name.
+    pub line: u32,
+    /// 0-based byte column of the name.
+    pub column: u32,
+    /// 1-based first line of the scope it binds in.
+    pub scope_start_line: u32,
+    /// 0-based byte column the scope starts at.
+    pub scope_start_column: u32,
+    /// 1-based last line of the scope.
+    pub scope_end_line: u32,
+    /// 0-based byte column the scope ends at (exclusive).
+    pub scope_end_column: u32,
+    /// Whether it is in force throughout its scope.
+    pub hoisted: bool,
+}
+
+/// One recorded local binding as [`GraphStore::local_bindings`] reads it
+/// (S-593, [FR-EX-33]): the [`NewLocalBinding`] fields and the declaring
+/// file's path.
+///
+/// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalBindingRow {
+    /// The declaring file's project-relative path.
+    pub file_path: String,
+    /// The bound name as written.
+    pub name: String,
+    /// What binds it.
+    pub kind: LocalBindingKind,
+    /// 1-based line of the name.
+    pub line: u32,
+    /// 0-based byte column of the name.
+    pub column: u32,
+    /// 1-based first line of the scope it binds in.
+    pub scope_start_line: u32,
+    /// 0-based byte column the scope starts at.
+    pub scope_start_column: u32,
+    /// 1-based last line of the scope.
+    pub scope_end_line: u32,
+    /// 0-based byte column the scope ends at (exclusive).
+    pub scope_end_column: u32,
+    /// Whether it is in force throughout its scope.
+    pub hoisted: bool,
+}
+
+/// One framework detector as the incremental footprint probe
+/// ([`GraphStore::has_framework_footprint`]) tests the ledger against: the
+/// canonical `::`-joined prefix, and whether only an **import** reference
+/// matches it (S-541) — `true` only when every loaded language declaring the
+/// prefix says so, so the probe never answers narrower than the framework
+/// pass's own candidacy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectorPrefix {
+    /// The canonical `::`-joined prefix.
+    pub prefix: String,
+    /// Whether only an `Imports` reference matches it.
+    pub import_only: bool,
+}
+
+/// The receiver parameters the incremental footprint probe
+/// ([`GraphStore::has_framework_footprint`]) looks for (S-541): every name a
+/// loaded language declares in its `[framework_candidacy] receiver_parameters`,
+/// bound in a file of one of those languages' `extensions`. Scoped to the
+/// declaring languages because `app` and `router` are ordinary parameter names
+/// in every language: a Python `def init_app(app)` must not put a
+/// framework-free repository on the whole-graph pass at every sync.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReceiverParameters {
+    /// The parameter names, deduplicated.
+    pub names: Vec<String>,
+    /// The file extensions (no dot) of the languages declaring any of them.
+    pub extensions: Vec<String>,
+}
+
 /// The fields needed to insert a reference-ledger row (S-011).
 ///
 /// Insertion is idempotent over `(source_symbol, target, form, kind, payload,
@@ -1892,7 +2201,9 @@ pub struct NewUnresolvedRef<'a> {
     pub peeled: Option<&'a str>,
     /// How many arguments a call passes (S-591, the `arg_count` column,
     /// migration 33); `None` when it cannot be counted and for every non-call
-    /// row.
+    /// row but a partial type part's own `Extends` row, whose type-parameter
+    /// count it is (S-557), and a type-arity language's supertype or `new` row,
+    /// whose written type-argument count it is (S-602).
     pub arg_count: Option<u32>,
     /// Whether an import row's declaration is a re-export (S-606, the
     /// `exported` column, migration 34); `None` for every other row. Outside
@@ -2091,6 +2402,15 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     fn production_callables_by_language(&self) -> Result<Vec<(String, u64)>>;
 
+    /// The paths of the files whose parse held an ERROR or MISSING node
+    /// (`files.parse_damaged = 1`, S-571, [FR-IX-14]) — what flags a
+    /// worst-offender or "where to start" entry `partial_parse` when a snapshot
+    /// is computed; the flag is persisted with the entry. A file indexed before
+    /// migration 44 records none and is not among them.
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    fn parse_damaged_paths(&self) -> Result<HashSet<String>>;
+
     /// Per-language resolution counts for the `Calls` and `Imports` classes
     /// ([FR-RS-09], [S-441]): one entry per language tagged on an indexed file,
     /// ordered by language name ascending ([NFR-RA-06]).
@@ -2116,6 +2436,20 @@ pub trait GraphStore {
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
     fn resolution_by_language(&self) -> Result<Vec<LanguageRefCounts>>;
+
+    /// The reported reference ledger as the reference classes read it
+    /// ([FR-RS-49], S-635): see [`ReferencePopulation`]. Capture-before-delete
+    /// (`Symbol`-form) rows are left out, as [`counts`](Self::counts) leaves
+    /// them out (S-598).
+    ///
+    /// A pure read: one grouped scan of the ledger and the name reads, in one
+    /// read transaction, so the counts, the groups and the names describe one
+    /// graph generation — [`resolution_by_language`](Self::resolution_by_language)'s
+    /// snapshot discipline. No write ([ADR-28]).
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+    fn reference_population(&self) -> Result<ReferencePopulation>;
 
     /// Best-effort "did you mean" name suggestions for `text` ([FR-NV-09]).
     ///
@@ -2211,11 +2545,108 @@ pub trait GraphStore {
         Ok(Vec::new())
     }
 
+    /// The unexported functions (S-584, [FR-RS-40]): every `Function` node,
+    /// of any language, whose plugin's export rule left it unexported
+    /// (`nodes.exported` 0), ordered by id. The binder's link-unit rung reads
+    /// only a link-unit file's — a C `static`, its own file's alone — and never
+    /// offers one to another file. `None` by default — only the SQLite store
+    /// implements it — so a non-SQLite or test store records no linkage, and
+    /// the rung, given none, binds nothing.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    fn unexported_functions(&self) -> Result<Option<Vec<NodeId>>> {
+        Ok(None)
+    }
+
+    /// Every type's generic arity (S-602, [CR-199]) — the `nodes.type_arity`
+    /// column (migration 42), ordered by node id: what the binder's namespace
+    /// rungs match a written type's arity against. A node with none recorded is
+    /// absent, and an absent arity admits any. The
+    /// [`node_arities`](GraphStore::node_arities) shape, empty by default —
+    /// only the SQLite store implements it — so a non-SQLite or test store
+    /// records none.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    fn type_arities(&self) -> Result<Vec<(NodeId, u32)>> {
+        Ok(Vec::new())
+    }
+
+    /// Every link from a later part of a partial type to its first-declared
+    /// part (S-557, [FR-RS-29]) as `(part, first part)`: the `Extends` edges
+    /// whose payload is [`PARTIAL_TYPE_ALIAS`](crate::resolve::PARTIAL_TYPE_ALIAS),
+    /// ordered by part. What Focus and Cohesion unite a type's parts by — no
+    /// other `Extends` edge carries that payload, so a supertype that shares
+    /// its subtype's name is never mistaken for one. The
+    /// [`uninherited_members`](GraphStore::uninherited_members) shape, empty
+    /// by default — only the SQLite store implements it — so a non-SQLite or
+    /// test store records none.
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    fn partial_type_links(&self) -> Result<Vec<(NodeId, NodeId)>> {
+        Ok(Vec::new())
+    }
+
+    /// Every `Calls` edge a trait fan-out reached by dispatch (S-712,
+    /// [CR-226] BR-76) as `(caller, implementation, trait method symbol)`:
+    /// the edges whose payload is a [`dispatch`](crate::model::dispatch)
+    /// marker, ordered by caller then implementation. The
+    /// [`partial_type_links`](GraphStore::partial_type_links) shape, empty by
+    /// default — only the SQLite store implements it.
+    ///
+    /// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+    fn dispatch_links(&self) -> Result<Vec<(NodeId, NodeId, String)>> {
+        Ok(Vec::new())
+    }
+
+    /// The trait method symbol of each `(caller, callee)` pair of `pairs`
+    /// whose `Calls` edge is marked dispatch ([`dispatch_links`]
+    /// (GraphStore::dispatch_links)'s marker), keyed by the pair; a pair with
+    /// no edge, or an unmarked one, is absent. What a navigation row's `via`
+    /// label is read from. Empty by default, like `dispatch_links`.
+    fn dispatched_via(&self, pairs: &[(NodeId, NodeId)]) -> Result<HashMap<(NodeId, NodeId), String>> {
+        let _ = pairs;
+        Ok(HashMap::new())
+    }
+
     /// Every recorded impl block (S-606, [CR-202] F1), ordered by file path
     /// and line — empty by default, as [`node_item_facts`](GraphStore::node_item_facts).
     ///
     /// [CR-202]: ../../../docs/requests/CR-202-one-rust-associated-item-lookup.md
     fn impl_blocks(&self) -> Result<Vec<ImplBlockRow>> {
+        Ok(Vec::new())
+    }
+
+    /// Every recorded local binding (S-593, [FR-EX-33]), ordered by file path
+    /// and position — empty by default, as [`impl_blocks`](GraphStore::impl_blocks).
+    ///
+    /// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
+    fn local_bindings(&self) -> Result<Vec<LocalBindingRow>> {
+        Ok(Vec::new())
+    }
+
+    /// The recorded local bindings (S-593, [FR-EX-33]) of the files whose
+    /// extension is one of `extensions` (normalised: lower-case, no dot),
+    /// ordered as [`local_bindings`](GraphStore::local_bindings) — what the
+    /// binder's link-unit rung reads to leave a call through a parameter or a
+    /// local unbound (S-584). A targeted read rather than `local_bindings`,
+    /// which materialises every language's. Empty for no extensions, and by
+    /// default.
+    ///
+    /// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
+    fn local_bindings_with_extensions(&self, extensions: &[String]) -> Result<Vec<LocalBindingRow>> {
+        let _ = extensions;
+        Ok(Vec::new())
+    }
+
+    /// The distinct `(file_id, name)` of every recorded **parameter** binding
+    /// whose name is one of `names` (S-541), ordered — the framework pass's
+    /// receiver-parameter candidacy (an Express router module receives the
+    /// `app` it registers on). A targeted read rather than
+    /// [`local_bindings`](GraphStore::local_bindings), which materialises every
+    /// binding of the graph to answer a question about a handful of names.
+    /// Empty for no names, and by default, as `local_bindings`.
+    fn files_binding_parameters(&self, names: &[String]) -> Result<Vec<(i64, String)>> {
+        let _ = names;
         Ok(Vec::new())
     }
 
@@ -2404,24 +2835,34 @@ pub trait GraphStore {
     fn shingle_index(&self) -> Result<Vec<(NodeId, u64)>>;
 
     /// Cheap existence check: does the graph carry **any** framework footprint —
-    /// a promoted `route`/`component` node, or an `unresolved_refs` target naming
-    /// one of `detector_prefixes` (canonical `::`-joined detector strings, the
-    /// per-plugin `framework_detectors`)?
+    /// a promoted `route`/`component` node, an `unresolved_refs` target naming
+    /// one of `detectors` (canonical `::`-joined detector strings, the
+    /// per-plugin `framework_detectors`; an import-only one matched by an
+    /// `Imports` row alone, S-541), or a parameter binding one of `receivers`'
+    /// names in a file of one of its extensions (S-541)?
     ///
     /// The incremental [`framework`](crate::resolve::framework) gate (S-024-HF):
     /// the framework-promotion pass is a pure, idempotent function of the
-    /// candidate files (those whose ledger names a detector) and the bound graph.
-    /// When the post-resolve graph has neither a promoted node nor a detector ref,
-    /// **no** promotion is possible, so an incremental `sync` skips the
+    /// candidate files (those whose ledger names a detector, or that bind a
+    /// receiver parameter their language declares) and the bound graph. When the
+    /// post-resolve graph has no promoted node, no detector ref and no such
+    /// binding, **no** promotion is possible, so an incremental `sync` skips the
     /// whole-graph framework snapshot entirely — the framework-free fast path the
     /// [NFR-PE-03] single-file-sync budget needs. A full [`index`](crate::pipeline::index)
     /// never calls this (it always runs the whole-graph pass). The match mirrors
     /// [`matches_detector`](crate::resolve::framework): a target equals a detector
-    /// or extends it by whole `::` segments. Returns `false` for an empty prefix
-    /// list with no promoted nodes.
+    /// or extends it by whole `::` segments. The receiver clause pairs every
+    /// declared name with every declaring language's extension where the pass
+    /// pairs each language with its own names — a superset, so the probe can
+    /// cost a needless pass but never skip a due one. Returns `false` for empty
+    /// lists with no promoted nodes.
     ///
     /// [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
-    fn has_framework_footprint(&self, detector_prefixes: &[String]) -> Result<bool>;
+    fn has_framework_footprint(
+        &self,
+        detectors: &[DetectorPrefix],
+        receivers: &ReceiverParameters,
+    ) -> Result<bool>;
 
     /// Whether this graph carries any **broker footprint** — a promoted
     /// `topic`/`producer`/`consumer` node, or a broker-arm reference in the ledger
@@ -3035,6 +3476,61 @@ impl SqliteGraphStore {
     }
 }
 
+/// Decode the rows of a local-binding read — [`GraphStore::local_bindings`]
+/// and [`GraphStore::local_bindings_with_extensions`] select the same columns.
+fn local_binding_rows(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+) -> Result<Vec<LocalBindingRow>> {
+    let raws = stmt
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                [
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, i64>(8)?,
+                ],
+                row.get::<_, i64>(9)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collecting local bindings")?;
+    raws.into_iter()
+        .map(|(file_path, name, kind, at, hoisted)| {
+            let corrupt = |what: &str, v: i64| {
+                anyhow!("corrupt local-binding {what} {v} in {file_path}: rebuild advised (NFR-RA-08)")
+            };
+            let kind = i32::try_from(kind)
+                .ok()
+                .and_then(|k| LocalBindingKind::try_from(k).ok())
+                .ok_or_else(|| corrupt("kind", kind))?;
+            let mut pos = [0u32; 6];
+            for (slot, v) in pos.iter_mut().zip(at) {
+                *slot = u32::try_from(v).map_err(|_| corrupt("position", v))?;
+            }
+            let [line, column, scope_start_line, scope_start_column, scope_end_line, scope_end_column] = pos;
+            Ok(LocalBindingRow {
+                file_path: file_path.clone(),
+                name,
+                kind,
+                line,
+                column,
+                scope_start_line,
+                scope_start_column,
+                scope_end_line,
+                scope_end_column,
+                hoisted: hoisted != 0,
+            })
+        })
+        .collect()
+}
+
 impl GraphStore for SqliteGraphStore {
     fn node(&self, id: NodeId) -> Result<Option<NodeRow>> {
         let mut stmt = self.conn.prepare_cached(
@@ -3355,6 +3851,15 @@ impl GraphStore for SqliteGraphStore {
         Ok(composition)
     }
 
+    fn parse_damaged_paths(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT path FROM files WHERE parse_damaged = 1")?;
+        let paths = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<HashSet<_>>>()
+            .context("reading the parse-damaged files")?;
+        Ok(paths)
+    }
+
     fn production_callables_by_language(&self) -> Result<Vec<(String, u64)>> {
         // Sorted in Rust, not by SQLite's collation, so the order is identical
         // on every platform ([NFR-RA-06]).
@@ -3397,17 +3902,29 @@ impl GraphStore for SqliteGraphStore {
         let mut rows: std::collections::BTreeMap<String, LanguageRefCounts> =
             std::collections::BTreeMap::new();
         let mut files = self.conn.prepare_cached(
-            "SELECT language, COUNT(*) FROM files WHERE language IS NOT NULL GROUP BY language",
+            "SELECT language, COUNT(*), COALESCE(SUM(path LIKE '%.h'), 0), \
+                    COALESCE(SUM(parse_damaged = 1), 0), COALESCE(SUM(parse_damaged IS NULL), 0) \
+             FROM files WHERE language IS NOT NULL GROUP BY language",
         )?;
         for row in files.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? as u64,
+                row.get::<_, i64>(2)? as u64,
+                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(4)? as u64,
+            ))
         })? {
-            let (language, count) = row.context("reading per-language file counts")?;
+            let (language, count, headers, damaged, unrecorded) =
+                row.context("reading per-language file counts")?;
             rows.insert(
                 language.clone(),
                 LanguageRefCounts {
                     language,
                     files: count,
+                    header_files: headers,
+                    damaged_files: damaged,
+                    unrecorded_files: unrecorded,
                     ..LanguageRefCounts::default()
                 },
             );
@@ -3482,6 +3999,126 @@ impl GraphStore for SqliteGraphStore {
             snapshot.commit()?;
         }
         Ok(rows.into_values().collect())
+    }
+
+    fn reference_population(&self) -> Result<ReferencePopulation> {
+        let (doc, symbol) = (
+            i64::from(EdgeKind::DocReference.as_i32()),
+            i64::from(RefForm::Symbol.as_i32()),
+        );
+        // One snapshot for every read, for `resolution_by_language`'s reason: a
+        // sync committing between two autocommit reads would take the ledger
+        // and the names from two generations.
+        let snapshot = if self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
+        let mut population = ReferencePopulation::default();
+        // The files first: each one's path and namespace for the universe, and
+        // its language, interned once so the ledger scan below keys a row by an
+        // index rather than joining `files` per row.
+        let mut languages: Vec<Option<String>> = vec![None];
+        let mut language_of: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        let mut files = self
+            .conn
+            .prepare_cached("SELECT id, path, namespace, language FROM files")?;
+        for file in files.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })? {
+            let (id, path, namespace, language) = file.context("reading the indexed files")?;
+            language_of.insert(id, intern(&mut languages, language));
+            population.names.files.push((path, namespace));
+        }
+        // The whole reported ledger in ONE plain scan — no join and no
+        // `GROUP BY`, whose sort cost ten times the scan on a 22,000-row
+        // ledger: the halves' counts (every row), the unbound code targets
+        // (a target repeats across call sites — `clone`, `map` — so each is
+        // classified once per language and kind, and allocated once), and the
+        // aliases with their targets. A capture-before-delete row
+        // (`RefForm::Symbol`) is no reference of this readout (S-598).
+        let mut ledger = self.conn.prepare_cached(
+            "SELECT file_id, kind, resolved, target, alias, payload, source_symbol \
+             FROM unresolved_refs WHERE form <> ?1",
+        )?;
+        let mut invocations: std::collections::BTreeMap<(String, String), u64> =
+            std::collections::BTreeMap::new();
+        let mut unbound: std::collections::HashMap<(usize, i64), std::collections::HashMap<String, u64>> =
+            std::collections::HashMap::new();
+        let mut aliases: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
+        let mut rows = ledger.query([symbol])?;
+        while let Some(row) = rows.next()? {
+            let language = row
+                .get::<_, Option<i64>>(0)?
+                .and_then(|id| language_of.get(&id).copied())
+                .unwrap_or(0);
+            let kind: i64 = row.get(1)?;
+            let resolved: bool = row.get(2)?;
+            // Read lossily, as the alias below is: a target the ledger holds
+            // as bytes that are not UTF-8 must not fail the whole `status`
+            // this readout rides on — every other read of it would succeed.
+            let target = String::from_utf8_lossy(row.get_ref(3)?.as_bytes()?);
+            let target: &str = &target;
+            let (references, bound) = if kind == doc {
+                (&mut population.doc_references, &mut population.doc_resolved)
+            } else {
+                (&mut population.code_references, &mut population.code_resolved)
+            };
+            *references += 1;
+            // A call the binder proved goes through a local value (S-594)
+            // binds nothing by design and names no declaration, so no name
+            // test can call it external: it stays an internal candidate, never
+            // judged by whether its local's name is declared elsewhere.
+            let local_value = row.get_ref(4)?.as_str().ok() == Some(crate::resolve::LOCAL_VALUE_ALIAS);
+            if resolved {
+                *bound += 1;
+            } else if kind != doc && !local_value {
+                tally(unbound.entry((language, kind)).or_default(), target);
+                tally_invocation(&mut invocations, row, target)?;
+            }
+            if let rusqlite::types::ValueRef::Text(alias) = row.get_ref(4)? {
+                aliases.insert((String::from_utf8_lossy(alias).into_owned(), target.to_string()));
+            }
+        }
+        // Sorted in Rust, so the order is identical on every platform
+        // ([NFR-RA-06]).
+        population.unbound_code = unbound
+            .into_iter()
+            .flat_map(|((language, kind), targets)| {
+                let language = &languages[language];
+                targets.into_iter().map(move |(target, rows)| UnboundCodeTarget {
+                    language: language.clone(),
+                    kind,
+                    target,
+                    rows,
+                })
+            })
+            .collect();
+        population.unbound_code.sort_by(|a, b| {
+            (&a.language, a.kind, &a.target).cmp(&(&b.language, b.kind, &b.target))
+        });
+        population.unbound_invocations = invocations
+            .into_iter()
+            .map(|((source_symbol, target), rows)| UnboundInvocation { source_symbol, target, rows })
+            .collect();
+        population.names.aliases = aliases.into_iter().collect();
+        // Every node name, repeats included: the universe is a set, so a
+        // `DISTINCT` would only add a sort.
+        let mut names = self.conn.prepare_cached("SELECT name FROM nodes")?;
+        population.names.names = names
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("reading the declared names")?;
+        if let Some(snapshot) = snapshot {
+            snapshot.commit()?;
+        }
+        Ok(population)
     }
 
     fn suggest(&self, text: &str, limit: i64) -> Result<Vec<String>> {
@@ -3645,6 +4282,97 @@ impl GraphStore for SqliteGraphStore {
         Ok(ids)
     }
 
+    fn unexported_functions(&self) -> Result<Option<Vec<NodeId>>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id FROM nodes WHERE kind = ?1 AND exported = 0 ORDER BY id")?;
+        let ids = stmt
+            .query_map([NodeKind::Function.as_i32()], |row| Ok(NodeId(row.get(0)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting unexported functions for the binder")?;
+        Ok(Some(ids))
+    }
+
+    fn type_arities(&self) -> Result<Vec<(NodeId, u32)>> {
+        // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, type_arity FROM nodes WHERE type_arity IS NOT NULL ORDER BY id")?;
+        let raws = stmt
+            .query_map([], |row| Ok((NodeId(row.get(0)?), row.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting type arities for the binder")?;
+        raws.into_iter()
+            .map(|(id, arity)| {
+                let arity = u32::try_from(arity)
+                    .map_err(|e| anyhow!("corrupt type arity {arity} for node {}: {e}; rebuild advised (NFR-RA-08)", id.0))?;
+                Ok((id, arity))
+            })
+            .collect()
+    }
+
+    fn partial_type_links(&self) -> Result<Vec<(NodeId, NodeId)>> {
+        // ORDER BY source keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT source, target FROM edges WHERE kind = ?1 AND payload = ?2 ORDER BY source, target")?;
+        let links = stmt
+            .query_map(
+                rusqlite::params![EdgeKind::Extends.as_i32(), crate::resolve::PARTIAL_TYPE_ALIAS],
+                |row| Ok((NodeId(row.get(0)?), NodeId(row.get(1)?))),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting partial type links for the metrics")?;
+        Ok(links)
+    }
+
+    fn dispatch_links(&self) -> Result<Vec<(NodeId, NodeId, String)>> {
+        // ORDER BY source keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT source, target, payload FROM edges WHERE kind = ?1 AND payload GLOB ?2 ORDER BY source, target",
+        )?;
+        let links = stmt
+            .query_map(
+                rusqlite::params![EdgeKind::Calls.as_i32(), crate::model::dispatch::DISPATCH_GLOB],
+                |row| Ok((NodeId(row.get(0)?), NodeId(row.get(1)?), row.get::<_, String>(2)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting dispatch links")?;
+        Ok(links
+            .into_iter()
+            .filter_map(|(source, target, payload)| {
+                crate::model::dispatch::dispatched_method(&payload).map(|m| (source, target, m.to_string()))
+            })
+            .collect())
+    }
+
+    fn dispatched_via(&self, pairs: &[(NodeId, NodeId)]) -> Result<HashMap<(NodeId, NodeId), String>> {
+        // One indexed point read per pair: `UNIQUE(source, target, kind)`.
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT payload FROM edges WHERE source = ?1 AND target = ?2 AND kind = ?3 AND payload GLOB ?4")?;
+        let mut via = HashMap::new();
+        for &(source, target) in pairs {
+            let payload: Option<String> = stmt
+                .query_row(
+                    rusqlite::params![
+                        source.get(),
+                        target.get(),
+                        EdgeKind::Calls.as_i32(),
+                        crate::model::dispatch::DISPATCH_GLOB
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .context("reading a dispatch marker")?;
+            if let Some(method) = payload.as_deref().and_then(crate::model::dispatch::dispatched_method) {
+                via.insert((source, target), method.to_string());
+            }
+        }
+        Ok(via)
+    }
+
     fn impl_blocks(&self) -> Result<Vec<ImplBlockRow>> {
         // ORDER BY path, line keeps the read deterministic ([NFR-RA-06]).
         let mut stmt = self.conn.prepare_cached(
@@ -3683,6 +4411,60 @@ impl GraphStore for SqliteGraphStore {
                 })
             })
             .collect()
+    }
+
+    fn local_bindings(&self) -> Result<Vec<LocalBindingRow>> {
+        // ORDER BY path, position keeps the read deterministic ([NFR-RA-06]).
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT f.path, b.name, b.kind, b.line, b.col, b.scope_start_line, b.scope_start_col, \
+                    b.scope_end_line, b.scope_end_col, b.hoisted \
+             FROM local_bindings b JOIN files f ON f.id = b.file_id \
+             ORDER BY f.path, b.line, b.col, b.name, b.kind, b.id",
+        )?;
+        local_binding_rows(&mut stmt, [])
+    }
+
+    fn local_bindings_with_extensions(&self, extensions: &[String]) -> Result<Vec<LocalBindingRow>> {
+        if extensions.is_empty() {
+            return Ok(Vec::new());
+        }
+        // The extensions are bound parameters, never spliced into the text;
+        // ORDER BY path, position keeps the read deterministic ([NFR-RA-06]).
+        let matches = vec!["lower(f.path) LIKE ?"; extensions.len()].join(" OR ");
+        let sql = format!(
+            "SELECT f.path, b.name, b.kind, b.line, b.col, b.scope_start_line, b.scope_start_col, \
+                    b.scope_end_line, b.scope_end_col, b.hoisted \
+             FROM local_bindings b JOIN files f ON f.id = b.file_id \
+             WHERE {matches} \
+             ORDER BY f.path, b.line, b.col, b.name, b.kind, b.id"
+        );
+        let patterns: Vec<String> = extensions.iter().map(|ext| format!("%.{ext}")).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+        local_binding_rows(&mut stmt, rusqlite::params_from_iter(patterns))
+    }
+
+    fn files_binding_parameters(&self, names: &[String]) -> Result<Vec<(i64, String)>> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        // ORDER BY keeps the read deterministic ([NFR-RA-06]); the names are
+        // bound parameters, never spliced into the text.
+        let placeholders = vec!["?"; names.len()].join(", ");
+        let sql = format!(
+            "SELECT DISTINCT file_id, name FROM local_bindings \
+             WHERE kind = ? AND name IN ({placeholders}) ORDER BY file_id, name"
+        );
+        let parameter = i64::from(LocalBindingKind::Parameter.as_i32());
+        let params = std::iter::once(rusqlite::types::Value::Integer(parameter))
+            .chain(names.iter().map(|n| rusqlite::types::Value::Text(n.clone())));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(params), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting framework receiver-parameter bindings")?;
+        Ok(rows)
     }
 
     fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
@@ -3727,20 +4509,23 @@ impl GraphStore for SqliteGraphStore {
 
     fn all_edges(&self) -> Result<Vec<EdgeRow>> {
         // Deterministic order for reproducible hydration (NFR-RA-06).
+        // `IS 1` folds a NULL payload's NULL match to false.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT source, target, kind FROM edges ORDER BY source, target, kind",
+            "SELECT source, target, kind, (payload GLOB ?1) IS 1 FROM edges \
+             ORDER BY source, target, kind",
         )?;
         let raws = stmt
-            .query_map([], |row| {
+            .query_map([crate::model::dispatch::DISPATCH_GLOB], |row| {
                 let source: i64 = row.get(0)?;
                 let target: i64 = row.get(1)?;
                 let kind: i32 = row.get(2)?;
-                Ok((source, target, kind))
+                let dispatch: bool = row.get(3)?;
+                Ok((source, target, kind, dispatch))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting all edges for hydration")?;
         raws.into_iter()
-            .map(|(source, target, kind)| {
+            .map(|(source, target, kind, dispatch)| {
                 let kind = EdgeKind::try_from(kind).map_err(|e| {
                     anyhow!("corrupt edge kind {kind} for edge {source}->{target}: {e}; rebuild advised (NFR-RA-08)")
                 })?;
@@ -3748,6 +4533,7 @@ impl GraphStore for SqliteGraphStore {
                     source: NodeId(source),
                     target: NodeId(target),
                     kind,
+                    dispatch,
                 })
             })
             .collect()
@@ -4144,7 +4930,11 @@ impl GraphStore for SqliteGraphStore {
         Ok(rows)
     }
 
-    fn has_framework_footprint(&self, detector_prefixes: &[String]) -> Result<bool> {
+    fn has_framework_footprint(
+        &self,
+        detectors: &[DetectorPrefix],
+        receivers: &ReceiverParameters,
+    ) -> Result<bool> {
         // 1) A promoted route/component node already in the graph? Its presence
         //    alone forces the full reconcile (a demotion may be due).
         let route = crate::model::NodeKind::Route.as_i32();
@@ -4158,11 +4948,46 @@ impl GraphStore for SqliteGraphStore {
             )
             .context("checking for promoted framework nodes")?
             != 0;
-        if has_promoted || detector_prefixes.is_empty() {
-            return Ok(has_promoted);
+        if has_promoted {
+            return Ok(true);
         }
 
-        // 2) Any **unresolved** ledger ref naming a detector? `target = prefix` or
+        // 2) A parameter binding a language names as a framework receiver (an
+        //    Express router module's `app`, S-541), in a file of a declaring
+        //    language? The pass's other candidacy rule, read from the same
+        //    recorded bindings it reads, as an EXISTS that stops at the first hit.
+        if !receivers.names.is_empty() && !receivers.extensions.is_empty() {
+            let names = vec!["?"; receivers.names.len()].join(", ");
+            let paths = vec!["f.path GLOB ?"; receivers.extensions.len()].join(" OR ");
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM local_bindings b JOIN files f ON f.id = b.file_id \
+                 WHERE b.kind = ? AND b.name IN ({names}) AND ({paths}))"
+            );
+            let parameter = i64::from(LocalBindingKind::Parameter.as_i32());
+            let params = std::iter::once(rusqlite::types::Value::Integer(parameter))
+                .chain(receivers.names.iter().map(|n| rusqlite::types::Value::Text(n.clone())))
+                .chain(
+                    receivers
+                        .extensions
+                        .iter()
+                        .map(|e| rusqlite::types::Value::Text(format!("*.{e}"))),
+                );
+            let has_receiver: bool = self
+                .conn
+                .query_row(&sql, rusqlite::params_from_iter(params), |row| {
+                    row.get::<_, i64>(0)
+                })
+                .context("checking for framework receiver-parameter bindings")?
+                != 0;
+            if has_receiver {
+                return Ok(true);
+            }
+        }
+        if detectors.is_empty() {
+            return Ok(false);
+        }
+
+        // 3) Any **unresolved** ledger ref naming a detector? `target = prefix` or
         //    it extends the prefix by whole `::` segments — the `matches_detector`
         //    rule in SQL. Canonical detector strings carry no GLOB metacharacters
         //    (`* ? [`), so `prefix::*` matches exactly the "extends by a segment"
@@ -4174,12 +4999,19 @@ impl GraphStore for SqliteGraphStore {
         //    *is* the framework fingerprint). The cheap integer `resolved = 0`
         //    filter restricts the per-row GLOB work to the small unresolved tail
         //    instead of the whole ledger. EXISTS returns on the first hit; a
-        //    framework-free graph answers `false` after one scan.
-        let mut clauses: Vec<&str> = Vec::with_capacity(detector_prefixes.len());
-        let mut params: Vec<rusqlite::types::Value> =
-            Vec::with_capacity(detector_prefixes.len() * 2);
-        for prefix in detector_prefixes {
-            clauses.push("target = ? OR target GLOB ?");
+        //    framework-free graph answers `false` after one scan. An import-only
+        //    detector (S-541) is matched by an `Imports` row alone, as the pass
+        //    matches it.
+        let imports = crate::model::EdgeKind::Imports.as_i32();
+        let mut clauses: Vec<&str> = Vec::with_capacity(detectors.len());
+        let mut params: Vec<rusqlite::types::Value> = Vec::with_capacity(detectors.len() * 3);
+        for DetectorPrefix { prefix, import_only } in detectors {
+            if *import_only {
+                clauses.push("(kind = ? AND (target = ? OR target GLOB ?))");
+                params.push(rusqlite::types::Value::Integer(i64::from(imports)));
+            } else {
+                clauses.push("(target = ? OR target GLOB ?)");
+            }
             params.push(rusqlite::types::Value::Text(prefix.clone()));
             params.push(rusqlite::types::Value::Text(format!("{prefix}::*")));
         }
@@ -4292,6 +5124,7 @@ impl GraphStore for SqliteGraphStore {
                     kind: EdgeKind::try_from(kind).with_context(|| {
                         format!("corrupt edge kind {kind} stored; rebuild advised (NFR-RA-08)")
                     })?,
+                    dispatch: false, // a broker edge is never a calls edge
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -4324,7 +5157,7 @@ impl GraphStore for SqliteGraphStore {
              FROM nodes WHERE kind IN (?1, ?2) AND derived = 0 \
              ORDER BY id",
         )?;
-        let rows = stmt
+        let mut rows = stmt
             .query_map(
                 [NodeKind::Function.as_i32(), NodeKind::Method.as_i32()],
                 |row| {
@@ -4337,11 +5170,40 @@ impl GraphStore for SqliteGraphStore {
                         max_nesting_depth: row.get(5)?,
                         clone_group: row.get::<_, Option<i64>>(6)?.map(NodeId),
                         has_body: row.get::<_, Option<i64>>(7)?.map(|v| v != 0),
+                        unbound_accesses: Vec::new(),
                     })
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting function rows for the metrics engine")?;
+        // CR-252: each callable's unbound own-receiver accesses, joined back to
+        // the node through its symbol; ordered so each list is sorted.
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT DISTINCT n.id, r.target \
+             FROM unresolved_refs r \
+             JOIN symbols s ON s.symbol = r.source_symbol \
+             JOIN nodes n ON n.symbol_id = s.id \
+             WHERE r.kind = ?1 AND r.resolved = 0 \
+               AND n.kind IN (?2, ?3) AND n.derived = 0 \
+             ORDER BY n.id, r.target",
+        )?;
+        let unbound = stmt
+            .query_map(
+                [
+                    EdgeKind::Accesses.as_i32(),
+                    NodeKind::Function.as_i32(),
+                    NodeKind::Method.as_i32(),
+                ],
+                |row| Ok((NodeId(row.get(0)?), row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("collecting unbound member accesses for the metrics engine")?;
+        // Both reads are id-ordered, so a binary search finds each row.
+        for (id, name) in unbound {
+            if let Ok(i) = rows.binary_search_by_key(&id, |r| r.id) {
+                rows[i].unbound_accesses.push(name);
+            }
+        }
         Ok(rows)
     }
 
@@ -4907,7 +5769,7 @@ fn read_snapshot_offenders(
     into: &mut WorstOffenders,
 ) -> Result<()> {
     let mut stmt = conn.prepare_cached(&format!(
-        "SELECT dimension, name, file, line, detail, node_id, measure, value, threshold \
+        "SELECT dimension, name, file, line, detail, node_id, measure, value, threshold, partial_parse \
          FROM {table} WHERE snapshot_id = ?1 ORDER BY dimension, rank"
     ))?;
     let rows = stmt.query_map([snapshot_id], |row| {
@@ -4923,6 +5785,7 @@ fn read_snapshot_offenders(
                 measure: measure.and_then(|m| pinned(&Offender::MEASURES, &m)),
                 value: row.get(7)?,
                 threshold: row.get(8)?,
+                partial_parse: row.get::<_, Option<bool>>(9)?.unwrap_or(false),
             },
         ))
     })?;
@@ -4976,7 +5839,7 @@ fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereTo
     }
 
     let mut stmt = conn.prepare_cached(
-        "SELECT kind, node_id, name, file, line, dimensions, points, detail, outliers \
+        "SELECT kind, node_id, name, file, line, dimensions, points, detail, outliers, partial_parse \
          FROM metric_snapshot_fix_units WHERE snapshot_id = ?1 ORDER BY rank",
     )?;
     let rows = stmt.query_map([snapshot_id], |row| {
@@ -4990,10 +5853,11 @@ fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereTo
             row.get::<_, i64>(6)?,
             row.get::<_, String>(7)?,
             row.get::<_, String>(8)?,
+            row.get::<_, Option<bool>>(9)?.unwrap_or(false),
         ))
     })?;
     for row in rows {
-        let (kind, node_id, name, file, line, dimensions, points, detail, outliers) =
+        let (kind, node_id, name, file, line, dimensions, points, detail, outliers, partial_parse) =
             row.context("reading a snapshot fix-unit row")?;
         let (Some(kind), Some(dimensions), Some(outliers)) = (
             FixUnitKind::parse(&kind),
@@ -5012,6 +5876,7 @@ fn read_snapshot_insight(conn: &Connection, snapshot_id: i64, into: &mut WhereTo
             points,
             detail,
             outliers,
+            partial_parse,
         });
     }
 
@@ -5226,8 +6091,17 @@ impl BatchWriter<'_> {
             .context("looking up file id by path")
     }
 
-    /// Update an existing file row's `language`/`content_hash` in place, keeping
-    /// its id stable so the row's identity survives a re-extract.
+    /// Write an existing file row in place, keeping its id stable so the
+    /// row's identity survives a re-extract: its `language` and `content_hash`,
+    /// and what the extraction read about the file itself — the namespace it
+    /// declares (S-518, [FR-RS-13]; `None` for a file keyed by its path) and
+    /// whether its parse held an ERROR or MISSING node (S-571, [FR-IX-14]).
+    /// Written on every persist, so a file that stops declaring a namespace
+    /// has its old one cleared, and a file whose damage is repaired reads
+    /// clean again.
+    ///
+    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
     ///
     /// # Errors
     /// Returns an error on I/O failure.
@@ -5236,13 +6110,20 @@ impl BatchWriter<'_> {
         file_id: i64,
         language: Option<&str>,
         content_hash: Option<&str>,
+        namespace: Option<&str>,
+        parse_damaged: bool,
     ) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE files SET language = ?2, content_hash = ?3 WHERE id = ?1",
-                rusqlite::params![file_id, language, content_hash],
-            )
-            .context("updating file row")?;
+        self.write_one(
+            "UPDATE files SET language = ?2, content_hash = ?3, namespace = ?4, parse_damaged = ?5 WHERE id = ?1",
+            rusqlite::params![file_id, language, content_hash, namespace, parse_damaged],
+            "updating file row",
+        )
+    }
+
+    /// Run one write statement, naming what it does in its error — the body
+    /// the one-statement writers share.
+    fn write_one(&self, sql: &str, params: impl rusqlite::Params, what: &'static str) -> Result<()> {
+        self.conn.execute(sql, params).context(what)?;
         Ok(())
     }
 
@@ -5261,24 +6142,6 @@ impl BatchWriter<'_> {
             .context("reading the file's declared namespace")
     }
 
-    /// Record the namespace the file `file_id` declares (S-518, [FR-RS-13]) —
-    /// `None` for a file keyed by its path. Written on every persist, so a file
-    /// that stops declaring one has its old namespace cleared.
-    ///
-    /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
-    ///
-    /// # Errors
-    /// Returns an error on I/O failure.
-    pub fn set_file_namespace(&self, file_id: i64, namespace: Option<&str>) -> Result<()> {
-        self.conn
-            .execute(
-                "UPDATE files SET namespace = ?2 WHERE id = ?1",
-                rusqlite::params![file_id, namespace],
-            )
-            .context("recording the file's declared namespace")?;
-        Ok(())
-    }
-
     /// Upsert a durable `project_metadata` key/value pair (CR-004, [ADR-20], the
     /// migration-15 kv table).
     ///
@@ -5293,14 +6156,12 @@ impl BatchWriter<'_> {
     /// # Errors
     /// Returns an error on I/O failure.
     pub fn set_project_metadata(&self, key: &str, value: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO project_metadata (key, value) VALUES (?1, ?2) \
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                rusqlite::params![key, value],
-            )
-            .context("recording project_metadata value")?;
-        Ok(())
+        self.write_one(
+            "INSERT INTO project_metadata (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+            "recording project_metadata value",
+        )
     }
 
     /// Remove a durable `project_metadata` key, if present ([CR-130]).
@@ -5842,6 +6703,45 @@ impl BatchWriter<'_> {
         Ok(())
     }
 
+    /// Replace the local bindings a source file records (S-593, [FR-EX-33]):
+    /// delete the file's previous bindings, then record `bindings` — the
+    /// [`replace_file_impl_blocks`](Self::replace_file_impl_blocks) per-file
+    /// contract, so a re-extract moves only that file's bindings, and a file
+    /// recording none writes none. Removing the file cascades its bindings away
+    /// (migration 41's FK).
+    ///
+    /// # Errors
+    /// Returns an error if a constraint fires (an empty name, a scope ending
+    /// before it starts) or I/O fails.
+    ///
+    /// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
+    pub fn replace_file_local_bindings(&self, file_id: i64, bindings: &[NewLocalBinding<'_>]) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM local_bindings WHERE file_id = ?1", [file_id])
+            .context("deleting the previous local bindings of a file")?;
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO local_bindings (file_id, name, kind, line, col, scope_start_line, scope_start_col, \
+                                         scope_end_line, scope_end_col, hoisted) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )?;
+        for b in bindings {
+            stmt.execute(rusqlite::params![
+                file_id,
+                b.name,
+                b.kind.as_i32(),
+                b.line,
+                b.column,
+                b.scope_start_line,
+                b.scope_start_column,
+                b.scope_end_line,
+                b.scope_end_column,
+                i64::from(b.hoisted),
+            ])
+            .with_context(|| format!("inserting the local binding {} at line {}", b.name, b.line))?;
+        }
+        Ok(())
+    }
+
     /// Record one Avro schema and its types, replacing whatever was recorded
     /// under its path (S-472): the schema row is deleted — cascading its types
     /// away — and re-inserted. Every other schema's facts are untouched, so a
@@ -6002,8 +6902,23 @@ impl BatchWriter<'_> {
     /// statement-level, so the enclosing transaction carries on and the caller
     /// leaves the reference for the next pass to re-bind (ADR-02).
     ///
+    /// **A dispatch marker yields** (S-712, [CR-226] BR-76): when the edge is
+    /// already present marked `dispatch:` ([`crate::model::dispatch`]), an
+    /// unmarked write clears the marker — a direct call to an implementation
+    /// is a dependency, even where the same caller also reaches it by dispatch
+    /// — and of two markers the smaller stays. So the committed payload is the
+    /// same whichever of the edge's rows is written first ([NFR-RA-06]). Any
+    /// other payload is kept as the first write left it. The upgrade is no
+    /// insertion: `Some(false)`. It decides between this run's writes and
+    /// what is stored; an edge out of a source the run re-bound whole is
+    /// then set to the run's own verdict
+    /// ([`set_dispatch_marker`](Self::set_dispatch_marker)).
+    ///
     /// # Errors
     /// Returns an error on any other failure.
+    ///
+    /// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
     pub fn insert_edge_with_payload_if_live(
         &self,
         source: NodeId,
@@ -6016,7 +6931,11 @@ impl BatchWriter<'_> {
              ON CONFLICT(source, target, kind) DO NOTHING",
             rusqlite::params![source.get(), target.get(), kind.as_i32(), payload],
         ) {
-            Ok(inserted) => Ok(Some(inserted > 0)),
+            Ok(0) => {
+                self.yield_dispatch_marker(source, target, kind, payload)?;
+                Ok(Some(false))
+            }
+            Ok(_) => Ok(Some(true)),
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY =>
             {
@@ -6024,6 +6943,53 @@ impl BatchWriter<'_> {
             }
             Err(e) => Err(e).context("inserting edge with payload if live"),
         }
+    }
+
+    /// Set the dispatch marker of the `Calls` edge `source → target` to
+    /// `marker` — `None` unmarks it — where the edge is unmarked or marked
+    /// dispatch (S-712): what a resolution run decided for an edge out of a
+    /// source whose every row it re-bound, overriding whatever an earlier run
+    /// left on it. A no-op for an absent edge, and for one carrying any other
+    /// payload.
+    ///
+    /// # Errors
+    /// Returns an error on I/O failure.
+    pub fn set_dispatch_marker(&self, source: NodeId, target: NodeId, marker: Option<&str>) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE edges SET payload = ?3 \
+                 WHERE source = ?1 AND target = ?2 AND kind = ?4 \
+                   AND (payload IS NULL OR payload GLOB ?5) AND payload IS NOT ?3",
+                rusqlite::params![
+                    source.get(),
+                    target.get(),
+                    marker,
+                    EdgeKind::Calls.as_i32(),
+                    crate::model::dispatch::DISPATCH_GLOB
+                ],
+            )
+            .context("setting a dispatch marker")?;
+        Ok(())
+    }
+
+    /// The upgrade half of
+    /// [`insert_edge_with_payload_if_live`](Self::insert_edge_with_payload_if_live):
+    /// the present edge's dispatch marker gives way to an unmarked `payload`,
+    /// or to a smaller marker. A no-op for every other payload, on either side.
+    fn yield_dispatch_marker(&self, source: NodeId, target: NodeId, kind: EdgeKind, payload: Option<&str>) -> Result<()> {
+        use crate::model::dispatch::{dispatched_method, DISPATCH_GLOB};
+        if payload.is_some_and(|p| dispatched_method(p).is_none()) {
+            return Ok(());
+        }
+        self.conn
+            .execute(
+                "UPDATE edges SET payload = ?4 \
+                 WHERE source = ?1 AND target = ?2 AND kind = ?3 \
+                   AND payload GLOB ?5 AND (?4 IS NULL OR ?4 < payload)",
+                rusqlite::params![source.get(), target.get(), kind.as_i32(), payload, DISPATCH_GLOB],
+            )
+            .context("yielding a dispatch marker to a direct bind")?;
+        Ok(())
     }
 
     // ── Annotation primitives (S-014, [FR-AN-01..04]) ────────────────────────
@@ -6346,8 +7312,8 @@ impl BatchWriter<'_> {
     fn insert_snapshot_offenders(&self, table: &'static str, id: i64, offenders: &WorstOffenders) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(&format!(
             "INSERT INTO {table} \
-             (snapshot_id, dimension, rank, name, file, line, detail, node_id, measure, value, threshold) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
+             (snapshot_id, dimension, rank, name, file, line, detail, node_id, measure, value, threshold, partial_parse) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
         ))?;
         for (dimension, list) in offenders.lists() {
             for (rank, o) in (1_i64..).zip(list) {
@@ -6363,6 +7329,7 @@ impl BatchWriter<'_> {
                     o.measure,
                     o.value,
                     o.threshold,
+                    o.partial_parse,
                 ])
                 .context("inserting a snapshot offender row")?;
             }
@@ -6379,8 +7346,8 @@ impl BatchWriter<'_> {
     fn insert_snapshot_insight(&self, id: i64, insight: &WhereToStart) -> Result<()> {
         let mut units = self.conn.prepare_cached(
             "INSERT INTO metric_snapshot_fix_units \
-             (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             (snapshot_id, rank, kind, node_id, name, file, line, dimensions, points, detail, outliers, partial_parse) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         )?;
         for (rank, u) in (1_i64..).zip(&insight.units) {
             units
@@ -6396,6 +7363,7 @@ impl BatchWriter<'_> {
                     u.points,
                     u.detail,
                     u.outliers.join(","),
+                    u.partial_parse,
                 ])
                 .context("inserting a snapshot fix-unit row")?;
         }
@@ -6659,8 +7627,8 @@ macro_rules! node_insert_sql {
                                 derived, exported, cyclomatic_complexity, line_count, fingerprint, \
                                 test_evidence, body, max_nesting_depth, has_body, body_tokens, \
                                 self_type, param_min, param_max, takes_self, receiver_mode, variants, signature, \
-                                uninherited) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24) ",
+                                uninherited, type_arity) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25) ",
             $on_conflict
         )
     };
@@ -6696,6 +7664,7 @@ fn execute_node_insert(conn: &Connection, node: &NewNode<'_>, sql: &str) -> rusq
             node.variants,
             node.signature.then_some(1i64),
             node.uninherited.then_some(1i64),
+            node.type_arity,
         ],
     )
 }
@@ -6766,7 +7735,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              receiver_mode = excluded.receiver_mode, \
              variants = excluded.variants, \
              signature = excluded.signature, \
-             uninherited = excluded.uninherited"
+             uninherited = excluded.uninherited, \
+             type_arity = excluded.type_arity"
         ),
     )
     .context("upserting node")?;

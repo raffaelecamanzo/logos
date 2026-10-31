@@ -1284,6 +1284,7 @@ fn measure(runtime: &Runtime, contract: &Contract) -> Result<(Measured, u32)> {
             &view,
             &facts.nodes,
             &facts.edges,
+            &facts.links,
             &facts.function_metrics,
             &test_ids,
             contract.thresholds,
@@ -1313,6 +1314,7 @@ fn measure(runtime: &Runtime, contract: &Contract) -> Result<(Measured, u32)> {
         &view,
         &facts.nodes,
         &facts.edges,
+        &facts.links,
         &facts.function_metrics,
         &test_ids,
         contract.thresholds,
@@ -2039,18 +2041,31 @@ fn security_section(
     delta
 }
 
-/// Every key `f` is known by: its fingerprint and the ones it had before a
-/// re-key (history.db migrations 7, 10 and 11), so a finding re-keyed on one side
-/// of the merge-base is the same finding on the other ([FR-SC-18]).
+/// Whether `keys` — one side's [`SecurityFinding::keys`] — knows `f` by any
+/// of its own: its fingerprint, the ones it had before a re-key (history.db
+/// migrations 7, 10, 11 and 13), so a finding re-keyed on one side of the
+/// merge-base is the same finding on the other ([FR-SC-18]), and a merged
+/// finding's every reporter's ([FR-SC-29]).
 ///
 /// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
-fn finding_keys(f: &SecurityFinding) -> impl Iterator<Item = &str> {
-    std::iter::once(f.fingerprint.as_str()).chain(f.legacy_fingerprints.iter().map(String::as_str))
+/// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+fn known(keys: &HashSet<&str>, f: &SecurityFinding) -> bool {
+    f.keys().any(|key| keys.contains(key))
 }
 
-/// Whether `keys` — one side's [`finding_keys`] — knows `f` by any of its own.
-fn known(keys: &HashSet<&str>, f: &SecurityFinding) -> bool {
-    finding_keys(f).any(|key| keys.contains(key))
+/// The drivers that reported `f`, each once, its own first: a merged finding's
+/// every reporter ([FR-SC-29]), so it is compared under each scanner that
+/// holds it on either side of the merge-base.
+///
+/// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+fn scanners_of(f: &SecurityFinding) -> Vec<&str> {
+    let mut scanners: Vec<&str> = Vec::new();
+    for (scanner, _) in f.reported_by() {
+        if !scanners.contains(&scanner) {
+            scanners.push(scanner);
+        }
+    }
+    scanners
 }
 
 /// A file's last modification, in whole Unix seconds; `None` when it is gone
@@ -2084,7 +2099,12 @@ fn security_delta(
         .filter(|s| !s.scope.is_empty())
         .map(|s| s.scanner_name.as_str())
         .collect();
-    let recorded = |f: &SecurityFinding| !rewritten.contains(f.scanner_name.as_str());
+    // A merged finding is a before-state through each reporter whose report
+    // is one (FR-SC-29).
+    fn recorded_by<'f>(f: &'f SecurityFinding, rewritten: &HashSet<&str>) -> Vec<&'f str> {
+        scanners_of(f).into_iter().filter(|s| !rewritten.contains(s)).collect()
+    }
+    let recorded = |f: &SecurityFinding| !recorded_by(f, &rewritten).is_empty();
     // A scanner is compared by fingerprint exactly when its report was
     // recorded at the merge-base.
     let mut before: HashMap<&str, HashSet<&str>> = evidence
@@ -2094,21 +2114,24 @@ fn security_delta(
         .filter(|s| s.scope.is_empty())
         .map(|s| (s.scanner_name.as_str(), HashSet::new()))
         .collect();
-    for f in evidence.base.findings.iter().filter(|f| recorded(f)) {
-        before.entry(f.scanner_name.as_str()).or_default().extend(finding_keys(f));
+    for f in &evidence.base.findings {
+        for scanner in recorded_by(f, &rewritten) {
+            before.entry(scanner).or_default().extend(f.keys());
+        }
     }
-    let method = |scanner: &str| {
-        if before.contains_key(scanner) {
+    let method = |scanners: &[&str]| {
+        if scanners.iter().any(|s| before.contains_key(s)) {
             SecurityDelta::METHOD_FINGERPRINT
         } else {
             SecurityDelta::METHOD_HUNK
         }
     };
     // The entry that suppresses a finding, current or resolved: the first
-    // unexpired one naming it, as the labeller picks.
-    let unexpired = current.suppressions.iter().filter(|e| !e.expired).map(|e| &e.entry);
+    // unexpired one naming it whose evidence still holds, as the labeller picks.
+    let unexpired = current.suppressions.iter().filter(|e| !e.expired && e.out_of_date.is_empty()).map(|e| &e.entry);
     let matcher = crate::history::security::EntryMatcher::new(unexpired, root);
-    let suppressing = |f: &SecurityFinding| matcher.naming(f).next().map(|(_, entry)| entry);
+    // A merged finding is suppressed only when every reporter is (FR-SC-29).
+    let suppressing = |f: &SecurityFinding| matcher.suppressing(f);
 
     let mut delta = SecurityDelta {
         measured: true,
@@ -2117,7 +2140,7 @@ fn security_delta(
             .iter()
             .map(|r| SecurityDeltaScanner {
                 scanner: r.driver.clone(),
-                method: method(&r.driver),
+                method: method(&[r.driver.as_str()]),
                 latest_head: r.head_sha.clone(),
             })
             .collect(),
@@ -2128,11 +2151,14 @@ fn security_delta(
     let mut now: HashMap<&str, HashSet<&str>> = HashMap::new();
     let mut freshness_now: HashMap<(&str, &str), &str> = HashMap::new();
     for f in current.findings.iter().map(|listed| &listed.finding) {
-        now.entry(f.scanner_name.as_str()).or_default().extend(finding_keys(f));
-        if let Some(path) = f.path.as_deref() {
-            freshness_now.insert((f.scanner_name.as_str(), path), f.freshness);
+        for scanner in scanners_of(f) {
+            now.entry(scanner).or_default().extend(f.keys());
+            if let Some(path) = f.path.as_deref() {
+                freshness_now.insert((scanner, path), f.freshness);
+            }
         }
     }
+    let known_now = |f: &SecurityFinding| scanners_of(f).iter().any(|s| now.get(s).is_some_and(|fps| known(fps, f)));
     // A report with no stable fingerprint keys a finding by its region, so a
     // line added above it moves its fingerprint. The merge-base findings the
     // latest report no longer carries, by scanner, rule and file, in store
@@ -2141,7 +2167,7 @@ fn security_delta(
     // introduced and another resolved.
     let mut vanished: HashMap<(&str, &str, Option<&str>), std::collections::VecDeque<&str>> = HashMap::new();
     for f in evidence.base.findings.iter().filter(|f| recorded(f)) {
-        if !now.get(f.scanner_name.as_str()).is_some_and(|fps| known(fps, f)) {
+        if !known_now(f) {
             vanished
                 .entry((f.scanner_name.as_str(), f.rule_id.as_str(), f.path.as_deref()))
                 .or_default()
@@ -2151,15 +2177,19 @@ fn security_delta(
     let mut moved: HashSet<(&str, &str)> = HashSet::new();
     for listed in &current.findings {
         let f = &listed.finding;
-        let method = method(&f.scanner_name);
+        let scanners = scanners_of(f);
+        let method = method(&scanners);
         let changed = in_hunk(hunks, f);
         // A file the branch deleted is a whole-file hunk, and deleting a file
         // introduces nothing.
         let gone = f.location().is_some_and(|p| modified(&p).is_none());
-        let status = match before.get(f.scanner_name.as_str()) {
-            Some(fingerprints) if !known(fingerprints, f) => SecurityDeltaStatus::Introduced,
-            Some(_) if changed => SecurityDeltaStatus::Touched,
-            None if changed && !gone => SecurityDeltaStatus::Introduced,
+        // Compared by fingerprint under every reporter whose report was
+        // recorded at the merge-base: known to any of them, it was there.
+        let compared: Vec<&HashSet<&str>> = scanners.iter().filter_map(|s| before.get(s)).collect();
+        let status = match compared.is_empty() {
+            false if !compared.iter().any(|fingerprints| known(fingerprints, f)) => SecurityDeltaStatus::Introduced,
+            false if changed => SecurityDeltaStatus::Touched,
+            true if changed && !gone => SecurityDeltaStatus::Introduced,
             _ => SecurityDeltaStatus::PreExisting,
         };
         let status = match status {
@@ -2195,10 +2225,7 @@ fn security_delta(
         .zip(&evidence.base_contexts)
     {
         let scanner = f.scanner_name.as_str();
-        if !recorded(f)
-            || now.get(scanner).is_some_and(|fps| known(fps, f))
-            || moved.contains(&(scanner, f.fingerprint.as_str()))
-        {
+        if !recorded(f) || known_now(f) || moved.contains(&(scanner, f.fingerprint.as_str())) {
             continue;
         }
         let freshness = match f.path.as_deref() {
@@ -2337,6 +2364,11 @@ fn delta_entry(
         freshness: freshness.to_string(),
         reachability: wire(&context.reachability.verdict),
         confidence: wire(&context.reachability.confidence),
+        reporters: if f.reporters.is_empty() {
+            Vec::new()
+        } else {
+            scanners_of(f).into_iter().map(str::to_string).collect()
+        },
     }
 }
 
@@ -2663,6 +2695,7 @@ mod tests {
             fingerprint: fingerprint.to_string(),
             rule_id: format!("rule-{fingerprint}"),
             severity: crate::model::Severity::High,
+            confidence: crate::history::ScannerConfidence::Unstated,
             cwes: Vec::new(),
             message: "m".to_string(),
             redacted: false,
@@ -2677,6 +2710,7 @@ mod tests {
             legacy_fingerprints: Vec::new(),
             anchor: None,
             freshness: FRESHNESS_FRESH,
+            reporters: Vec::new(),
         }
     }
 
@@ -2709,6 +2743,7 @@ mod tests {
                 unclassified: None,
                 suppression: None,
                 scope: crate::security::ScopeLabel::default(),
+                needs_review: false,
             })
             .collect::<Vec<_>>();
         let n = base.len();
@@ -2727,6 +2762,8 @@ mod tests {
                 total: listed.len(),
                 scope: crate::security::ScopeFilter::All,
                 hidden_by_scope: 0,
+                hidden_needs_review: 0,
+                hidden_dev: 0,
                 findings: listed,
                 categories: Vec::new(),
                 suppressions: Vec::new(),
@@ -2778,6 +2815,45 @@ mod tests {
         assert_eq!(reverse.get("old"), Some(&SecurityDeltaStatus::PreExisting), "the merge-base side may hold it: {reverse:?}");
         assert_eq!(reverse.get("added"), Some(&SecurityDeltaStatus::Introduced));
         assert!(!reverse.contains_key("rekeyed"), "never resolved: {reverse:?}");
+    }
+
+    /// S-817 (BR-101): the branch delta treats a finding its scanner marks
+    /// low-confidence as any other — introduced when the merge-base lacks it,
+    /// pre-existing when it has it — though every list leaves it out.
+    #[test]
+    fn a_needs_review_finding_is_introduced_or_pre_existing_like_any_other() {
+        let low = |fingerprint: &str| SecurityFinding {
+            confidence: crate::history::ScannerConfidence::Low,
+            ..finding("s", fingerprint, Some("a.py"), (Some(2), None))
+        };
+        let delta = security_delta(
+            &evidence(vec![low("new"), low("old")], vec![low("old")]),
+            Path::new("/repo"),
+            &FileRanges::default(),
+            |_| Some(1),
+        );
+        let got: BTreeMap<&str, SecurityDeltaStatus> = delta.findings.iter().map(|e| (e.fingerprint.as_str(), e.status)).collect();
+        assert_eq!(got.get("new"), Some(&SecurityDeltaStatus::Introduced), "{got:?}");
+        assert_eq!(got.get("old"), Some(&SecurityDeltaStatus::PreExisting), "{got:?}");
+    }
+
+    /// S-810 (BR-100): the branch delta treats a finding on a dev-only dependency
+    /// as any other — introduced when the merge-base lacks it, pre-existing when
+    /// it has it — though every list leaves it out.
+    #[test]
+    fn a_dev_only_dependency_finding_is_introduced_or_pre_existing_like_any_other() {
+        let on_dev = |fingerprint: &str| finding("s", fingerprint, Some("web/package-lock.json"), (Some(2), None));
+        let mut evidence = evidence(vec![on_dev("new"), on_dev("old")], vec![on_dev("old")]);
+        for listed in &mut evidence.current.findings {
+            listed.scope = crate::security::ScopeLabel {
+                code_scope: crate::history::security::CodeScope::Dev,
+                code_scope_reason: Some(crate::security::ScopeReason::DevDependency),
+            };
+        }
+        let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::default(), |_| Some(1));
+        let got: BTreeMap<&str, SecurityDeltaStatus> = delta.findings.iter().map(|e| (e.fingerprint.as_str(), e.status)).collect();
+        assert_eq!(got.get("new"), Some(&SecurityDeltaStatus::Introduced), "{got:?}");
+        assert_eq!(got.get("old"), Some(&SecurityDeltaStatus::PreExisting), "{got:?}");
     }
 
     #[test]
@@ -2937,6 +3013,53 @@ mod tests {
         );
     }
 
+    /// S-809 (FR-SC-29): one advisory scanners `a` and `b` report is one
+    /// finding in the branch delta, listed once naming both, and judged under
+    /// each reporter's scanner: known at the merge-base to `b` alone it is
+    /// pre-existing, not introduced by `a`'s now reporting it; still reported
+    /// by `b` alone it is not resolved. A fingerprint entry naming either
+    /// reporter suppresses it; a rule-wide entry naming one scanner does not.
+    #[test]
+    fn a_merged_advisory_is_one_delta_entry_judged_under_every_reporter() {
+        let reporter = |f: &SecurityFinding| crate::history::Reporter {
+            scanner_name: f.scanner_name.clone(),
+            scanner_version: f.scanner_version.clone(),
+            fingerprint: f.fingerprint.clone(),
+            rule_id: f.rule_id.clone(),
+            severity: f.severity,
+            legacy_fingerprints: Vec::new(),
+            freshness: f.freshness,
+        };
+        let (a, b) = (finding("a", "ax", Some("go.mod"), (None, None)), finding("b", "bx", Some("go.mod"), (None, None)));
+        let merged = SecurityFinding { reporters: vec![reporter(&a), reporter(&b)], ..a.clone() };
+        let entries = |delta: &SecurityDelta| -> Vec<(String, SecurityDeltaStatus, Vec<String>)> {
+            delta.findings.iter().map(|e| (e.fingerprint.clone(), e.status, e.reporters.clone())).collect()
+        };
+        let both = vec!["a".to_string(), "b".to_string()];
+
+        let delta = security_delta(&two_scanners(vec![merged.clone()], vec![b.clone()]), Path::new("/repo"), &FileRanges::new(), |_| Some(1));
+        assert_eq!(entries(&delta), vec![("ax".to_string(), SecurityDeltaStatus::PreExisting, both.clone())]);
+
+        let delta = security_delta(&two_scanners(vec![b.clone()], vec![merged.clone()]), Path::new("/repo"), &FileRanges::new(), |_| Some(1));
+        assert_eq!(entries(&delta), vec![("bx".to_string(), SecurityDeltaStatus::PreExisting, Vec::new())], "not resolved");
+
+        let entry = |selector: crate::history::security::Selector| crate::history::security::EntryStatus {
+            entry: crate::history::security::IgnoreEntry { selector, reason: "upstream".to_string(), expires: None, evidence: Vec::new() },
+            expired: false,
+            orphaned: false,
+            suppressed: 1,
+            should_name: None,
+            out_of_date: Vec::new(),
+        };
+        let mut evidence = two_scanners(vec![merged.clone()], vec![merged.clone()]);
+        evidence.current.suppressions = vec![entry(crate::history::security::Selector::Rule { rule: "rule-bx".to_string(), scanner: "b".to_string() })];
+        let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::new(), |_| Some(1));
+        assert_eq!((delta.findings.len(), delta.suppressed.len()), (1, 0), "one reporter suppressed is not the finding");
+        evidence.current.suppressions = vec![entry("bx".into())];
+        let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::new(), |_| Some(1));
+        assert_eq!((delta.findings.len(), delta.suppressed.len()), (0, 1), "either reporter's key suppresses it");
+    }
+
     #[test]
     fn a_section_that_cannot_be_read_says_why_and_classifies_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -2990,11 +3113,13 @@ mod tests {
                 selector: fingerprint.into(),
                 reason: format!("reason {fingerprint}"),
                 expires: chrono::NaiveDate::from_ymd_opt(2026, 1, 1),
+                evidence: Vec::new(),
             },
             expired,
             orphaned: false,
             suppressed: 1,
             should_name: None,
+            out_of_date: Vec::new(),
         };
         evidence.current.suppressions = vec![entry("live", false), entry("lapsed", true)];
         let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::new(), |_| None);
@@ -3003,6 +3128,44 @@ mod tests {
             vec![("live", "reason live", Some("2026-01-01"))]
         );
         assert_eq!(delta.findings.iter().map(|e| e.fingerprint.as_str()).collect::<Vec<_>>(), vec!["lapsed"]);
+        assert_eq!(delta.counts.suppressed, 1);
+    }
+
+    /// S-818: an entry whose evidence no longer holds suppresses nothing in the
+    /// branch delta either — its finding is listed as the branch's own, not held
+    /// out with the entry's reason (BR-102).
+    #[test]
+    fn an_entry_whose_evidence_changed_does_not_suppress() {
+        let mut evidence = evidence(
+            vec![finding("s", "holds", Some("a.py"), (Some(1), None)), finding("s", "changed", Some("a.py"), (Some(2), None))],
+            Vec::new(),
+        );
+        let entry = |fingerprint: &str, changed: bool| crate::history::security::EntryStatus {
+            entry: crate::history::security::IgnoreEntry {
+                selector: fingerprint.into(),
+                reason: format!("reason {fingerprint}"),
+                expires: None,
+                evidence: vec![crate::history::security::Evidence { symbol: "pkg/`a.py`/f().".into(), hash: "a".repeat(64) }],
+            },
+            expired: false,
+            orphaned: false,
+            suppressed: 1,
+            should_name: None,
+            out_of_date: if changed {
+                vec![crate::history::security::EvidenceChange {
+                    symbol: "pkg/`a.py`/f().".into(),
+                    name: "f".into(),
+                    change: crate::history::security::ChangeKind::Changed,
+                    detail: None,
+                }]
+            } else {
+                Vec::new()
+            },
+        };
+        evidence.current.suppressions = vec![entry("holds", false), entry("changed", true)];
+        let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::new(), |_| None);
+        assert_eq!(delta.suppressed.iter().map(|s| s.entry.fingerprint.as_str()).collect::<Vec<_>>(), vec!["holds"]);
+        assert_eq!(delta.findings.iter().map(|e| e.fingerprint.as_str()).collect::<Vec<_>>(), vec!["changed"]);
         assert_eq!(delta.counts.suppressed, 1);
     }
 
@@ -3028,11 +3191,13 @@ mod tests {
                 selector: crate::history::security::Selector::Path { path: "fixtures".into(), rule: None, scanner: None },
                 reason: "fixtures".to_string(),
                 expires: None,
+                evidence: Vec::new(),
             },
             expired: false,
             orphaned: false,
             suppressed: 1,
             should_name: None,
+            out_of_date: Vec::new(),
         }];
         let delta = security_delta(&evidence, Path::new("/repo"), &FileRanges::new(), |_| Some(1));
         let held: BTreeSet<&str> = delta.suppressed.iter().map(|s| s.entry.fingerprint.as_str()).collect();

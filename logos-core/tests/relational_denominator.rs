@@ -140,9 +140,11 @@ fn indexed(tmp: &TempDir) -> Engine {
 }
 
 /// The row `status` reports for `language` — the one each answer must carry —
-/// less its `call_residue`. That is a status-only extension (the package-shaped
-/// rows', and Rust's since S-589): the relational answers attach their rows
-/// from the aggregate reads alone and never carry it (S-442).
+/// less its `call_residue`, each class's `provably_external` and its
+/// `parse_damage`. Those are status-only extensions (the package-shaped rows',
+/// and Rust's since S-589; every row's since S-635 and S-571): the relational
+/// answers attach their rows from the aggregate reads alone and never carry
+/// them (S-442).
 fn status_row(engine: &Engine, language: &str) -> LanguageResolution {
     let mut row = engine
         .status()
@@ -151,6 +153,9 @@ fn status_row(engine: &Engine, language: &str) -> LanguageResolution {
         .find(|row| row.language == language)
         .unwrap_or_else(|| panic!("status reports a {language} row"));
     row.call_residue = None;
+    row.calls.provably_external = None;
+    row.imports.provably_external = None;
+    row.parse_damage = None;
     row
 }
 
@@ -500,6 +505,8 @@ fn measured_selects_the_anchor_rows_or_names_why_there_are_none() {
         calls: RelationResolution::measured(2, 1, 1, 0),
         imports: RelationResolution::measured(0, 0, 0, 0),
         call_residue: None,
+        header_ownership: None,
+        parse_damage: None,
     };
     let rows = || vec![row("go"), row("rust"), row("tsx")];
     let some = |l: &str| Some(l.to_string());

@@ -102,7 +102,7 @@ async fn each_member_starts_follows_and_cancels_only_its_own_scan() {
 
         let (status, started) = send(&router, Method::POST, "/api/v1/security/scan?repo=web", &intent, r#"{"consent":["semgrep"]}"#).await;
         assert_eq!(status, StatusCode::OK, "{started}");
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(30));
         while !std::fs::read_to_string(rec.join("pids")).is_ok_and(|s| s.ends_with('\n')) {
             assert!(Instant::now() < deadline, "the web member's scan never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -116,7 +116,7 @@ async fn each_member_starts_follows_and_cancels_only_its_own_scan() {
 
         let (status, cancelling) = send(&router, Method::POST, "/api/v1/security/scan/cancel?repo=web", &intent, "").await;
         assert_eq!((status, cancelling["job"]["id"].clone()), (StatusCode::OK, started["job"]["id"].clone()), "{cancelling}");
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(30));
         loop {
             let (_, job) = send(&router, Method::GET, "/api/v1/security/scan?repo=web", &intent, "").await;
             if job["job"]["state"] != "running" {

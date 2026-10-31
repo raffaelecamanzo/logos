@@ -12,6 +12,10 @@
 # The plan files (sprint-N.md, journal.md) are fixtures handed over with --plan,
 # so the suite needs no private documents.
 #
+# --push also needs passing tier `ci` gate evidence (S-807, NFR-MA-11) for local
+# main's tree. The cases write that evidence by hand under the clone's
+# .git/gate-evidence, in the shape gate.sh ci records, for a tree of their choosing.
+#
 # As in test-check-public-terms.sh, the real term list is never used: the cases
 # plant a made-up word and hand the script a term list hashed from it at run time.
 #
@@ -193,6 +197,30 @@ commit() {
 commits() { (cd "$CLONE" && git cat-file --batch-all-objects --batch-check='%(objecttype)' | grep -c '^commit$'); }
 refs() { git -C "$1" for-each-ref --format='%(refname) %(objectname)'; }
 
+# ci_evidence <tree> [<failed tests of ci-test>]: the three gates `gate.sh ci` records
+# (ci-ui-build, ci-script-suites, ci-test), all tier "ci", measuring <tree>, in the
+# clone's evidence directory. Replaces any evidence there.
+ci_evidence() {
+    local tree="$1" failed="${2:-0}" dir g units
+    dir="$(git -C "$CLONE" rev-parse --path-format=absolute --git-path gate-evidence)"
+    rm -rf "$dir"
+    mkdir -p "$dir"
+    for g in ci-ui-build ci-script-suites ci-test; do
+        case "$g" in
+            ci-script-suites) units='[{"unit":"test-alpha","expected":1,"floor":1,"started":1,"finished":1,"passed":4,"failed":0,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]' ;;
+            ci-test) units='[{"unit":"workspace","expected":10,"floor":9,"started":10,"finished":10,"passed":100,"failed":'"$failed"',"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]' ;;
+            *) units='[]' ;;
+        esac
+        printf '{"schema":1,"gate":"%s","tier":"ci","tree_id":"%s","head":"x","worktree":"x","argv":"synthetic","exit_code":0,"verdict":"pass","truncation":"none","units":%s,"log":"/dev/null","runner":"synthetic"}\n' \
+            "$g" "$tree" "$units" >"$dir/$g.json"
+    done
+}
+main_tree() { git -C "$CLONE" rev-parse 'main^{tree}'; }
+# What the script prints about the evidence, and what its refusal names.
+EVIDENCE_PRESENT="gate evidence: present"
+EVIDENCE_ABSENT="gate evidence: absent"
+GATE_CI="bash scripts/gate.sh ci"
+
 snapshot() {
     BEFORE_CLONE="$(refs "$CLONE")"
     BEFORE_ORIGIN="$(refs "$ORIGIN")"
@@ -247,6 +275,18 @@ expect() {
     ok "$name"
 }
 
+# The refusal of --push without evidence: exit 2, the commit built (one object), and the
+# die line itself — not the `gate evidence: absent` line every run prints — naming the gate.
+REFUSAL="publish-sprint.sh: no passing tier ci evidence"
+expect_gate_refusal() {
+    expect "$1" 2 1 "$REFUSAL"
+    [ "$RC" -eq 2 ] || return 0
+    if printf '%s\n' "$OUT" | grep -F "$REFUSAL" | grep -qF "$GATE_CI"; then
+        ok "...and the refusal itself names $GATE_CI"
+    else
+        fail "the refusal does not name $GATE_CI"
+    fi
+}
 squash_of() { printf '%s\n' "$OUT" | sed -n 's/^  squash   \([0-9a-f]*\)$/\1/p'; }
 message_of() { git -C "$CLONE" log -1 --format=%B "$1"; }
 # The pull request command as the script prints it: titled with the commit's
@@ -574,6 +614,7 @@ expect "an option without its value is a usage error" 2 0 "Usage:"
 # --- --push -----------------------------------------------------------------------
 
 fixture
+ci_evidence "$(main_tree)"
 run --sprint 7
 S="$(squash_of)"
 run --sprint 7 --push
@@ -607,6 +648,7 @@ else
 fi
 
 fixture
+ci_evidence "$(main_tree)"
 (
     other="$WORK/other$N"
     g clone -q "$ORIGIN" "$other" 2>/dev/null && cd "$other" && git config user.email o@example.com && git config user.name o &&
@@ -622,6 +664,7 @@ else
 fi
 
 fixture
+ci_evidence "$(main_tree)"
 (
     other="$WORK/other$N"
     g clone -q "$ORIGIN" "$other" 2>/dev/null && cd "$other" && git config user.email o@example.com && git config user.name o &&
@@ -636,6 +679,7 @@ else
 fi
 
 fixture
+ci_evidence "$(main_tree)"
 mkdir -p "$ORIGIN/hooks"
 printf '#!/bin/sh\nexit 1\n' >"$ORIGIN/hooks/pre-receive"
 chmod +x "$ORIGIN/hooks/pre-receive"
@@ -647,6 +691,7 @@ else
 fi
 
 fixture
+ci_evidence "$(main_tree)"
 GH_FAIL=1 run --sprint 7 --push
 if [ "$RC" -eq 5 ] && [ -n "$(git -C "$ORIGIN" for-each-ref refs/heads/sprint/7)" ] && printf '%s\n' "$OUT" | grep -q "re-run to retry"; then
     ok "a failed pull request exits 5 with the branch pushed"
@@ -658,6 +703,7 @@ fixture
 if PATH=/usr/bin:/bin command -v gh >/dev/null 2>&1 || ! PATH=/usr/bin:/bin command -v git >/dev/null 2>&1; then
     ok "skipped: gh or no git on the minimal PATH of this machine"
 else
+    ci_evidence "$(main_tree)"
     RUN_PATH=/usr/bin:/bin run --sprint 7 --push
     if [ "$RC" -eq 2 ] && [ -z "$(git -C "$ORIGIN" for-each-ref refs/heads/sprint)" ] && printf '%s\n' "$OUT" | grep -q "gh is not on PATH"; then
         ok "--push without gh on PATH refuses before pushing anything"
@@ -681,6 +727,137 @@ if [ "$RC" -eq 1 ] && [ -z "$(git -C "$ORIGIN" for-each-ref refs/heads/sprint)" 
     ok "--push with a planted term pushes nothing"
 else
     fail "--push with a planted term: exit $RC"
+fi
+
+# --- --push needs tier ci evidence for main's tree (S-807) ---------------------------
+
+# A dry run says whether the evidence is there and builds the commit all the same.
+fixture
+run --sprint 7
+expect "a dry run with no evidence says it is absent, names gate.sh ci, and still builds the commit" 0 1 "$EVIDENCE_ABSENT"
+if printf '%s\n' "$OUT" | grep -qF "$GATE_CI" && [ -n "$(squash_of)" ] && printf '%s\n' "$OUT" | grep -q '^push: '; then
+    ok "...and still prints the commit and the push it would run"
+else
+    fail "the dry run without evidence did not print the commit, the push, or the gate command"
+fi
+
+if printf '%s\n' "$OUT" | grep -qF "Run $GATE_CI, then re-run with --push" && printf '%s\n' "$OUT" | grep -qF "refuses without that evidence"; then
+    ok "...and its closing hint sends the owner to gate.sh ci first"
+else
+    fail "the dry run without evidence does not say to run $GATE_CI before --push"
+fi
+
+if printf '%s\n' "$OUT" | grep -qF "ci-test: no evidence file" && [ ! -e "$CLONE/.git/gate-evidence" ]; then
+    ok "...says why, and creates no evidence directory"
+else
+    fail "the dry run without evidence did not say which gate is missing, or created .git/gate-evidence"
+fi
+
+fixture
+ci_evidence "0000000000000000000000000000000000000000"
+run --sprint 7
+expect "a dry run with evidence for another tree says it is absent" 0 1 "$EVIDENCE_ABSENT"
+if printf '%s\n' "$OUT" | grep -qF "stale evidence"; then
+    ok "...and that the evidence is stale"
+else
+    fail "the dry run did not call the other tree's evidence stale"
+fi
+
+fixture
+ci_evidence "$(main_tree)" 2
+run --sprint 7
+expect "a dry run with a failing ci-test gate says it is absent" 0 1 "$EVIDENCE_ABSENT"
+
+fixture
+ci_evidence "$(main_tree)"
+run --sprint 7
+expect "a dry run with evidence for main's tree says it is present and still builds the commit" 0 1 "$EVIDENCE_PRESENT"
+if [ -n "$(squash_of)" ] && ! printf '%s\n' "$OUT" | grep -qF "$EVIDENCE_ABSENT"; then
+    ok "...and does not call it absent"
+    if printf '%s\n' "$OUT" | grep -qF "Re-run with --push to push it" && ! printf '%s\n' "$OUT" | grep -qF "refuses without that evidence"; then
+        ok "...and its closing hint is the plain re-run with --push"
+    else
+        fail "the dry run with evidence still warns that --push refuses"
+    fi
+else
+    fail "the dry run with evidence did not print the commit, or called the evidence absent"
+fi
+
+# --push without it: exit 2, naming the gate, and no ref, no remote, no pull request.
+fixture
+run --sprint 7 --push
+expect_gate_refusal "--push with no evidence is refused, naming bash scripts/gate.sh ci"
+if [ -z "$(git -C "$ORIGIN" for-each-ref refs/heads/sprint)" ]; then
+    ok "...and origin has no sprint branch"
+else
+    fail "--push without evidence pushed a branch"
+fi
+
+fixture
+ci_evidence "0000000000000000000000000000000000000000"
+run --sprint 7 --push
+expect_gate_refusal "--push with evidence for another tree is refused"
+
+fixture
+ci_evidence "$(main_tree)" 2
+run --sprint 7 --push
+expect_gate_refusal "--push with a failing ci-test gate is refused"
+
+fixture
+ci_evidence "$(main_tree)"
+rm -f "$(git -C "$CLONE" rev-parse --path-format=absolute --git-path gate-evidence)/ci-test.json"
+run --sprint 7 --push
+expect_gate_refusal "--push with a ci gate that never ran is refused"
+
+# Evidence is for MAIN's tree, not for whatever is checked out where the owner stands.
+fixture
+(cd "$CLONE" && g checkout -q --detach HEAD~1)
+ci_evidence "$(git -C "$CLONE" rev-parse 'HEAD^{tree}')"
+run --sprint 7 --push
+expect_gate_refusal "--push with evidence for the checked-out tree, not main's, is refused"
+
+fixture
+(cd "$CLONE" && g checkout -q --detach HEAD~1)
+ci_evidence "$(main_tree)"
+run --sprint 7 --push
+if [ "$RC" -eq 0 ] && [ -n "$(git -C "$ORIGIN" for-each-ref refs/heads/sprint/7)" ] && [ -s "$GH_LOG" ]; then
+    ok "--push with evidence for main's tree pushes though another tree is checked out"
+else
+    fail "--push from a detached HEAD with evidence for main's tree: exit $RC"
+fi
+
+fixture
+ci_evidence "$(main_tree)"
+printf 'scratch\n' >"$CLONE/untracked.txt"
+run --sprint 7
+if [ "$RC" -eq 0 ] && printf '%s\n' "$OUT" | grep -qF "$EVIDENCE_PRESENT"; then
+    ok "an untracked file in the working directory does not make main's evidence absent"
+else
+    fail "a dirty working directory hid evidence for main's tree: exit $RC"
+fi
+
+# Ancestry and the term gate hold with the evidence in place, as before.
+fixture
+(cd "$CLONE" && g checkout -q -b other origin/main 2>/dev/null && printf 'x\n' >extra.txt && g add -A && g commit -qm 'public change' &&
+    g push -q origin other:main 2>/dev/null && g fetch -q origin && g checkout -q main)
+ci_evidence "$(main_tree)"
+run --sprint 7 --push
+expect "--push with evidence still refuses an origin/main that is not an ancestor" 2 0 "is not an ancestor of"
+
+fixture
+sprint_file "A $WORD story" >"$PLAN/sprints/sprint-7.md"
+ci_evidence "$(main_tree)"
+run --sprint 7 --push
+expect "--push with evidence still stops at a planted term" 1 0 "the message carries a listed term"
+
+fixture
+ci_evidence "$(main_tree)"
+run --sprint 7 --push
+S="$(squash_of)"
+if [ "$RC" -eq 0 ] && [ "$(git -C "$ORIGIN" rev-parse refs/heads/sprint/7)" = "$S" ] && printf '%s\n' "$OUT" | grep -qF "$EVIDENCE_PRESENT"; then
+    ok "--push with evidence for main's tree pushes to the fixture remote and says the evidence is present"
+else
+    fail "--push with evidence for main's tree: exit $RC"
 fi
 
 echo

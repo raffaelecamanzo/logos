@@ -52,7 +52,7 @@ extract() { # function-name -> its definition, from `name() {` to the first `^}`
     ' "$GATE"
 }
 FUNCS=""
-for f in suite_counts gate_base scripts_changed reset_units add_unit write_evidence gate_script_suites; do
+for f in suite_counts gate_base scripts_changed reset_units add_unit write_evidence record_suite_unit gate_script_suites; do
     def="$(extract "$f")"
     if [ -z "$def" ]; then
         echo "FAIL  could not extract $f from $GATE"
@@ -422,7 +422,7 @@ tiers() { # tier -> the gates the block ran, space-separated, then any "not run"
         TIER="$t" ROOT="$REPO" EVID="$WORK" GATES_RUN="" GATES_FAILED="" TREE_ID=t
         export GATE_BASE="${GB:-base}"
         for g in gate_clippy gate_tests gate_agents_marker gate_deny gate_arch gate_public_terms \
-            gate_ui gate_ui_e2e gate_script_suites; do
+            gate_timing_assertions gate_offline_cargo gate_ui gate_ui_e2e gate_script_suites gate_ci; do
             eval "$g() { echo $g >>\"$calls\"; }"
         done
         touched_packages() { :; }
@@ -430,6 +430,7 @@ tiers() { # tier -> the gates the block ran, space-separated, then any "not run"
         write_evidence() { :; }
         record() { :; }
         compute_tree_id() { echo t; }
+        check_tree_stable() { echo check_tree_stable >>"$calls"; }
         pkg_names() { echo p; }
         eval "$BLOCK"
     ) >"$WORK/tier-notes" 2>&1
@@ -456,11 +457,33 @@ case "$(cat "$WORK/tier-notes")" in
     *) bad "[tiers] fast skipped the leg silently: $(cat "$WORK/tier-notes")" ;;
 esac
 expect "[tiers] fast still runs its other legs when it skips the suites" \
-    "$(tiers fast | tr ' ' '\n' | grep -c -E '^(gate_clippy|gate_arch|gate_public_terms)$')" "3"
+    "$(tiers fast | tr ' ' '\n' | grep -c -E '^(gate_clippy|gate_arch|gate_public_terms|gate_timing_assertions|gate_offline_cargo)$')" "5"
+# S-804: the timing-assertion check reads the whole tree, so neither tier scopes
+# it to what the change touched: it runs with scripts/ unchanged, and in full.
+expect "[tiers] fast runs the timing-assertion check with scripts/ unchanged" \
+    "$(tiers fast | tr ' ' '\n' | grep -c '^gate_timing_assertions$')" "1"
+expect "[tiers] full runs the timing-assertion check" \
+    "$(tiers full | tr ' ' '\n' | grep -c '^gate_timing_assertions$')" "1"
+# S-805: the offline-cargo check reads the whole tree too.
+expect "[tiers] fast runs the offline-cargo check with scripts/ unchanged" \
+    "$(tiers fast | tr ' ' '\n' | grep -c '^gate_offline_cargo$')" "1"
+expect "[tiers] full runs the offline-cargo check" \
+    "$(tiers full | tr ' ' '\n' | grep -c '^gate_offline_cargo$')" "1"
 reset_repo
 commit_new plugins/logos/hooks/session-start.sh
 expect "[tiers] fast runs the leg when only the plugin tree changed" \
     "$(tiers fast | tr ' ' '\n' | grep -c '^gate_script_suites$')" "1"
+# S-806: the ci tier is the container run and nothing else — none of the legs the
+# other tiers run, which would run them on the host and call it Linux — and neither
+# of those tiers runs the container, which costs a cold download.
+expect "[tiers] ci runs the container leg, then the tree-stability check" "$(tiers ci)" "gate_ci check_tree_stable "
+expect "[tiers] full checks the tree stayed put" \
+    "$(tiers full | tr ' ' '\n' | grep -c '^check_tree_stable$')" "1"
+expect "[tiers] fast does not" "$(tiers fast | tr ' ' '\n' | grep -c '^check_tree_stable$')" "0"
+expect "[tiers] full does not run the container leg" \
+    "$(tiers full | tr ' ' '\n' | grep -c '^gate_ci$')" "0"
+expect "[tiers] fast does not run the container leg" \
+    "$(tiers fast | tr ' ' '\n' | grep -c '^gate_ci$')" "0"
 
 echo
 echo "$PASS passed, $FAIL failed (of $((PASS + FAIL)))"

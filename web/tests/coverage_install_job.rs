@@ -301,7 +301,7 @@ impl Fixture {
 
     /// Wait until stub `name` has started.
     async fn started(&self, name: &str) {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while self.runs(name).is_empty() {
             assert!(Instant::now() < deadline, "{name} never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -356,7 +356,7 @@ impl Fixture {
 
     /// The member's coverage job, once it is no longer running.
     async fn ended(&self) -> Value {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (status, body) = self.get(RUN).await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -588,7 +588,7 @@ async fn cancel_during_the_addition_leaves_no_half_applied_dependency_change() {
         let (status, started) = f.post(DEPENDENCY, &answer).await;
         assert_eq!(status, StatusCode::OK, "{started}");
         f.started("pnpm").await;
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while !f.repo.join("node_modules/@vitest/coverage-v8/package.json").exists() || f.file("package.json") == before.0 {
             assert!(Instant::now() < deadline, "pnpm never changed the project");
             tokio::time::sleep(Duration::from_millis(10)).await;

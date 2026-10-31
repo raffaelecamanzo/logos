@@ -1,0 +1,7 @@
+// A string escape is the character it stands for: `\n` ends a command, it is not an `n`.
+fn escaped() {
+    sh("cargo tree --offline --target all\n");
+    sh("#!/bin/sh\ncargo metadata --offline\n");
+    sh("cargo metadata \
+        --offline --filter-platform x");
+}

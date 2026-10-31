@@ -13,6 +13,7 @@
  */
 
 import type {
+  InternalResolution,
   OverviewSecurity,
   SecurityFindingTally,
   SecurityGateBand,
@@ -22,6 +23,7 @@ import type {
 } from "../../api/types.ts";
 import type { ScoreBarTone } from "../../components/index.ts";
 import { plural } from "../../copy/types.ts";
+import { DASHBOARD_TEXT } from "../../copy/workspaceDashboard.copy.ts";
 
 // ── BR-34 advisory quality bands (frontend-design §4.1) ──────────────────────
 
@@ -119,20 +121,89 @@ export function humanizeAge(now: number, then: number): string {
 }
 
 /**
- * A member's reference-resolution coverage, **never bare**: the percentage with
- * the denominator it was computed over, e.g. `"80.0% (80 of 100 refs)"`.
+ * A member's own reference resolution, **never bare**: the lower bound with its
+ * numerator, its denominator and the population it was taken over, or why there
+ * is none (NFR-CC-04, FR-RS-49).
  *
- * One spelling, three call sites — the per-member Dashboard's Graph card, and
- * the two app-level workspace views' member tables (S-428). It was inlined in
- * the Graph card alone until the S-428 review found the two new tables printing
- * the same field as a bare `"40.0%"`: two members with identical coverage over
- * wildly different reference populations rendered identically, which is the
- * denominator-disclosure duty [CR-111] made general.
+ * One spelling, two call sites — the two app-level workspace views' member
+ * tables (S-428). The S-428 review found the two tables printing the same field
+ * as a bare `"40.0%"`: two members with identical coverage over wildly different
+ * reference populations rendered identically, which is the denominator-disclosure
+ * duty [CR-111] made general. Since S-635 the figure is `internal_resolution`,
+ * never the deprecated whole-ledger ratio: both tables carry the
+ * `referenceResolution` gloss, which states that lower bound.
  *
  * [CR-111]: ../../../../docs/requests/CR-111-bound-ratio-carries-its-denominator.md
  */
-export function resolutionStatement(status: StatusInfo): string {
-  return `${(status.resolution_coverage * 100).toFixed(1)}% (${fmtInt(status.refs_resolved)} of ${fmtInt(status.refs_total)} refs)`;
+export function memberResolution(figure: InternalResolution): string {
+  return figure.lower_bound === null
+    ? DASHBOARD_TEXT.resolutionAbsent(figure)
+    : DASHBOARD_TEXT.ownResolution(`${(figure.lower_bound * 100).toFixed(1)}%`, figure);
+}
+
+// ── The Graph widget's reference resolution (S-636, FR-RS-49) ────────────────
+
+/** What the Graph widget's headline states, decided from `status` alone. */
+export type ResolutionHeadline =
+  /** The share of internal candidates resolved — a lower bound, one-decimal percent. */
+  | { kind: "share"; share: string }
+  /** The graph records no code reference: there is no population to take a share of. */
+  | { kind: "no_references" }
+  /** Every code reference is provably external: none could resolve here. */
+  | { kind: "all_external"; provablyExternal: number }
+  /** No share can be read: the server sent no `internal_resolution` (one older
+   *  than S-635), or a null share whose counts name no absence this build has a
+   *  sentence for. Stated as such, never filled from the deprecated whole-ledger
+   *  ratio. */
+  | { kind: "unreported" };
+
+/**
+ * The headline the Graph widget leads with: `internal_resolution.lower_bound`
+ * (resolved code references ÷ internal candidates, FR-RS-49). A zero denominator
+ * arrives as `lower_bound: null` with its `absence`, and reads absent here —
+ * never 100% or 0% ([NFR-CC-04]). `resolution_coverage` is deprecated: its
+ * denominator holds doc references and external code, so it is never read.
+ *
+ * The absence carries a `cause` tag from the server's closed lexicon
+ * (`absence::SENTINELS`), whose spellings the absence census pins to the sites
+ * that own them. This view does not re-spell them: it reads the population each
+ * stands for — no code reference at all, or code references that are all
+ * provably external — from the counts the server sent beside it. A null share
+ * whose counts fit neither reads unreported.
+ *
+ * [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+ */
+export function resolutionHeadline(status: StatusInfo): ResolutionHeadline {
+  const r = status.internal_resolution;
+  if (r === undefined) return { kind: "unreported" };
+  if (r.lower_bound !== null) return { kind: "share", share: pctBp(r.lower_bound * 10_000) };
+  if (r.absence === null) return { kind: "unreported" };
+  if (r.code_references === 0) return { kind: "no_references" };
+  if (r.internal_candidates === 0) return { kind: "all_external", provablyExternal: r.provably_external };
+  return { kind: "unreported" };
+}
+
+/** The population the headline was taken over — *x internal candidates of y code
+ *  references, z provably external* — beside how many of the candidates resolved.
+ *  `null` when the headline is absent: there is then no population to state. */
+export function internalPopulationStatement(status: StatusInfo): string | null {
+  const r = status.internal_resolution;
+  if (r === undefined || r.lower_bound === null) return null;
+  const candidates = `${fmtInt(r.internal_candidates)} internal ${plural(r.internal_candidates, "candidate", "candidates")}`;
+  return (
+    `${fmtInt(r.resolved)} of ${candidates} resolved — ${candidates} of ` +
+    `${fmtInt(r.code_references)} code ${plural(r.code_references, "reference", "references")}, ` +
+    `${fmtInt(r.provably_external)} provably external`
+  );
+}
+
+/** The doc references' own figure, stated apart from the code headline they
+ *  would otherwise prop up; `null` when the server did not report it. */
+export function docResolutionStatement(status: StatusInfo): string | null {
+  const d = status.doc_resolution;
+  if (d === undefined) return null;
+  if (d.ratio === null) return "No documentation references recorded.";
+  return `Documentation references: ${pctBp(d.ratio * 10_000)} resolved (${fmtInt(d.resolved)} of ${fmtInt(d.references)})`;
 }
 
 /**
@@ -204,6 +275,21 @@ export function gateStatement(gate: SecurityGateBand | null): string | null {
     ...(missing > 0 ? [`${missing} required ${plural(missing, "scan", "scans")} missing`] : []),
   ];
   return reasons.length > 0 ? `fails: ${reasons.join(", ")}` : "fails";
+}
+
+/** How many more findings are on a dev-only dependency — their lockfile marks
+ *  the package dev — which the counts leave out (FR-SC-30, S-810); `null` when
+ *  none are. */
+export function devOnlyStatement(tally: SecurityFindingTally): string | null {
+  const n = tally.excluded.dev;
+  return n > 0 ? `${fmtInt(n)} more in dev-only dependencies` : null;
+}
+
+/** How many more findings need review — their scanner marks them low-confidence
+ *  — which the counts leave out (FR-SC-31, S-817); `null` when none do. */
+export function needsReviewStatement(tally: SecurityFindingTally): string | null {
+  const n = tally.excluded.needs_review;
+  return n > 0 ? `${fmtInt(n)} more ${plural(n, "needs", "need")} review` : null;
 }
 
 /** How many more findings lie in test code, which the counts leave out

@@ -293,6 +293,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
                 }
                 SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
                 SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
+                SecurityCommands::Reconfirm { fingerprint, evidence } => {
+                    out.try_query(root, |e| e.security_reconfirm_with_evidence(&fingerprint, &evidence))
+                }
                 SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
                 SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, scope, member } => {
                     let tokens = [severity, scanner, category, path, suppression, edition, scope];

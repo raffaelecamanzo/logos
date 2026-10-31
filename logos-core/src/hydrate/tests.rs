@@ -40,6 +40,7 @@ fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 
@@ -1244,4 +1245,69 @@ fn a_regressed_stamp_does_not_evict_the_newer_generation() {
         before_hits + 1,
         "generation 1 survived the regressed-stamp request and still hits"
     );
+}
+
+/// A dispatch `calls` edge ([FR-QM-20]) is `edge` marked as the store reads one.
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+fn dispatch_edge(source: i64, target: i64) -> EdgeRow {
+    EdgeRow {
+        dispatch: true,
+        ..edge(source, target, EdgeKind::Calls)
+    }
+}
+
+/// `by_dyn` in `a.rs` reaches `B::m` in `b.rs` only through a trait, and
+/// `C::m` in `c.rs` through a trait too, beside a direct call to `c.rs`'s
+/// `helper`.
+fn dispatch_fixture() -> (Vec<NodeRow>, Vec<EdgeRow>) {
+    let nodes = vec![
+        node(1, "by_dyn", NodeKind::Function, Some("src/a.rs")),
+        node(2, "m", NodeKind::Method, Some("src/b.rs")),
+        node(3, "m", NodeKind::Method, Some("src/c.rs")),
+        node(4, "helper", NodeKind::Function, Some("src/c.rs")),
+    ];
+    let edges = vec![dispatch_edge(1, 2), dispatch_edge(1, 3), edge(1, 4, EdgeKind::Calls)];
+    (nodes, edges)
+}
+
+/// The dispatch flag of the one `from → to` edge of `view`, with its weight.
+fn flagged(view: &super::GraphView, from: &str, to: &str) -> (bool, u32) {
+    let (Some(a), Some(b)) = (view.index_of(from), view.index_of(to)) else {
+        panic!("{from} or {to} is no vertex");
+    };
+    let mut edges = view.graph().edges_connecting(a, b);
+    let data = edges.next().expect("one edge").weight();
+    assert!(edges.next().is_none(), "one edge per rollup pair");
+    (data.is_dispatch(), data.weight)
+}
+
+/// Every view keeps a dispatch edge, flagged, so its runtime readers keep
+/// reaching through it; a rollup pair with a direct edge is a dependency
+/// weighted by its dependency edges alone ([FR-QM-20]).
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+#[test]
+fn views_keep_dispatch_edges_flagged_and_a_rollup_pair_with_a_direct_edge_is_a_dependency() {
+    let (nodes, edges) = dispatch_fixture();
+
+    let symbols = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    assert_eq!(flagged(&symbols, "local 1", "local 2"), (true, 1));
+    assert_eq!(flagged(&symbols, "local 1", "local 4"), (false, 1));
+
+    for (granularity, prefix) in [(Granularity::File, ""), (Granularity::Module, "file:")] {
+        let view = build_view(granularity, &nodes, &edges);
+        let key = |file: &str| format!("{prefix}src/{file}.rs");
+        assert_eq!(view.edge_count(), 2, "{granularity:?}: one edge per pair");
+        assert_eq!(
+            flagged(&view, &key("a"), &key("b")),
+            (true, 1),
+            "{granularity:?}: a pair reached only by dispatch stays, flagged"
+        );
+        assert_eq!(
+            flagged(&view, &key("a"), &key("c")),
+            (false, 1),
+            "{granularity:?}: the direct call makes the pair a dependency of weight 1"
+        );
+    }
 }

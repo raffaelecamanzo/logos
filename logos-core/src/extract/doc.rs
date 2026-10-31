@@ -91,6 +91,7 @@ pub(super) fn extract_one_doc(
         path: input.path.clone(),
         language: plugin.name().to_string(),
         partial: false,
+        parse_damaged: false,
         nodes: Vec::new(),
         edges: Vec::new(),
         refs: Vec::new(),
@@ -100,6 +101,7 @@ pub(super) fn extract_one_doc(
         declared_types: Vec::new(),
         namespace: None,
         impl_blocks: Vec::new(),
+        local_bindings: Vec::new(),
     };
 
     if parser.set_language(plugin.language()).is_err() {
@@ -120,6 +122,7 @@ pub(super) fn extract_one_doc(
     // the block grammar reports an error (same posture as the code path).
     if tree.root_node().has_error() {
         facts.partial = true;
+        facts.parse_damaged = true;
         facts
             .warnings
             .push("syntax error(s) present; partial extraction".to_string());
@@ -163,6 +166,8 @@ pub(super) fn extract_one_doc(
         variants: None,
         signature: false,
         uninherited: false,
+        alias: false,
+        type_arity: None,
     });
 
     // A parser bound to the markdown *inline* grammar, for the per-`inline`-block
@@ -312,6 +317,8 @@ fn walk_sections(
             variants: None,
             signature: false,
             uninherited: false,
+            alias: false,
+            type_arity: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),

@@ -9,19 +9,20 @@
 //!   not a Focus god container ([FR-QM-11], [FR-QM-12]).
 //! - A container with 25 bodied methods is still god ([FR-QM-12]'s 25-method
 //!   AC, held for bodied methods). On Java this holds end to end. On Rust and
-//!   Go it holds at the metric level (`metrics/tests.rs`, `Struct` rows) but
-//!   **not** end to end: extraction makes the crate/package module, not the
-//!   struct, the `Contains` parent of an `impl` method or a receiver method, so
-//!   a Rust/Go container never has a method count and is god by span alone.
-//!   That gap predates CR-163; the two Rust/Go tests below carry the AC's
-//!   expectation and stay `#[ignore]`d, naming the gap, until extraction
-//!   attaches those methods to their type.
-//! - A C++ class whose members are all defined out of line has only bodyless
-//!   in-class prototypes (out-of-line definitions are not captured): it is
+//!   Go extraction makes the crate/package module, not the struct, the
+//!   `Contains` parent of an `impl` method or a receiver method, so Focus
+//!   counts those methods toward their struct by attribution instead (S-510,
+//!   [CR-166], metric semantics v9) — the two Rust/Go tests below drive the
+//!   AC end to end, and `tests/focus_method_attribution.rs` pins the
+//!   attribution's edges.
+//! - A C++ class whose members are all defined out of line in its `.cpp` has
+//!   only bodyless in-class prototypes (each definition is a method of its own
+//!   in the `.cpp`, not merged into a class another file declares): it is
 //!   unscoreable for Cohesion and Focus counts it god only by span — the S-502
 //!   "score what remains" decision.
 //!
 //! [CR-163]: ../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+//! [CR-166]: ../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
 //! [FR-EX-11]: ../../docs/specs/requirements/FR-EX-11.md
 //! [FR-QM-11]: ../../docs/specs/requirements/FR-QM-11.md
 //! [FR-QM-12]: ../../docs/specs/requirements/FR-QM-12.md
@@ -42,13 +43,18 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 /// Index `root` and record one snapshot under the default thresholds.
 fn scan(root: &Path) -> RecordedSnapshot {
+    scan_with(root, metrics::Thresholds::default())
+}
+
+/// Index `root` and record one snapshot under `thresholds`.
+fn scan_with(root: &Path, thresholds: metrics::Thresholds) -> RecordedSnapshot {
     let engine = Engine::start(root).expect("engine starts");
     engine.index();
     let view = engine
         .hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
-    metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("snapshot runs")
+    metrics::snapshot(rt, &view, None, thresholds, &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("snapshot runs")
 }
 
 /// The names the Focus offender list reports (the god containers).
@@ -206,7 +212,8 @@ fn a_null_has_body_in_the_store_reads_as_bodied() {
 /// The template-method shape on real Java extraction (review fix): `run` and
 /// `other` both call the `abstract` hook `step()`. The declaration is not
 /// counted but still links its callers, so `Base` scores LCOM4 1 — as v6 did —
-/// and is no Cohesion offender.
+/// and is no Cohesion offender. One class is below the default
+/// `cohesion_min_classes` (v9), so the dimension is read under a minimum of 1.
 #[test]
 fn java_template_method_hook_links_its_callers() {
     let tmp = TempDir::new().unwrap();
@@ -229,7 +236,13 @@ public abstract class Base {
 }
 ",
     );
-    let s = scan(tmp.path());
+    let s = scan_with(
+        tmp.path(),
+        metrics::Thresholds {
+            cohesion_min_classes: 1,
+            ..metrics::Thresholds::default()
+        },
+    );
     assert!(
         s.worst_offenders.cohesion.iter().all(|o| o.name != "Base"),
         "the hook links run and other: {:?}",
@@ -241,14 +254,12 @@ public abstract class Base {
 /// [FR-QM-12]'s 25-method AC on Rust: a struct whose impl carries 25 bodied
 /// methods is god and a 5-method struct is not. Rust declares `block` as its
 /// body kind (S-606), which every `impl` `function_item` carries, so each is
-/// bodied ([FR-EX-11]) and the v7 narrowing moves nothing.
-/// Ignored: the `impl` methods are not `Contains`-ed by the struct (module
-/// docs).
+/// bodied ([FR-EX-11]) and the v7 narrowing moves nothing. The methods count
+/// toward their struct by attribution (S-510, module docs).
 ///
 /// [FR-QM-12]: ../../docs/specs/requirements/FR-QM-12.md
 /// [FR-EX-11]: ../../docs/specs/requirements/FR-EX-11.md
 #[test]
-#[ignore = "pre-existing extraction gap (S-502 finding): Rust impl / Go receiver methods are Contains-ed by the module, not the struct, so a Rust/Go container has no method count"]
 fn rust_struct_with_25_bodied_methods_is_god() {
     let mut src = String::new();
     for (name, n) in [("Big", 25), ("Small", 5)] {
@@ -269,13 +280,11 @@ fn rust_struct_with_25_bodied_methods_is_god() {
 }
 
 /// [FR-QM-12]'s 25-method AC on Go: a type whose method set has 25 bodied
-/// methods is god and a 5-method type is not (Go declares no body kind).
-/// Ignored: the receiver methods are not `Contains`-ed by the type (module
-/// docs).
+/// methods is god and a 5-method type is not (Go declares no body kind). The
+/// receiver methods count toward their type by attribution (S-510, module docs).
 ///
 /// [FR-QM-12]: ../../docs/specs/requirements/FR-QM-12.md
 #[test]
-#[ignore = "pre-existing extraction gap (S-502 finding): Rust impl / Go receiver methods are Contains-ed by the module, not the struct, so a Rust/Go container has no method count"]
 fn go_type_with_25_bodied_methods_is_god() {
     let mut src = String::from("package svc\n\n");
     for (name, n) in [("Big", 25), ("Small", 5)] {
@@ -296,13 +305,16 @@ fn go_type_with_25_bodied_methods_is_god() {
 
 /// The S-502 decision for header/source-split C++ (coordinator note 3): every
 /// member of `Widget` is declared in the header and defined out of line in the
-/// `.cpp`, so extraction records 25 bodyless in-class prototypes and captures
-/// no out-of-line definition. Bodied LCOM4/Focus **score what remains** —
+/// `.cpp`, so extraction records 25 bodyless in-class prototypes, and each
+/// definition is a method of its own in the `.cpp` — `widget.cpp/Widget#m0().`,
+/// contained by the file, not by a class the file does not declare (S-577).
+/// Bodied LCOM4/Focus **score what remains** —
 /// nothing: `Widget` is unscoreable for Cohesion (n/a here, it is the only
 /// class) and, at 29 lines, not god by count. Since metric-semantics v8
-/// ([CR-171]) C++ declares no `member_access` capability, so a class keeping
-/// its bodies in-class (`Inline`) is not scored for Cohesion either — its
-/// LCOM4 would rest on `this->` accesses alone — while Focus still counts it.
+/// ([CR-171]) a language scores Cohesion only with `member_access`, which C++
+/// has declared since S-580; a class keeping its bodies in-class (`Inline`) is
+/// the only class here, so Cohesion is n/a for want of `cohesion_min_classes`
+/// (5) scoreable classes, while Focus still counts it.
 /// The bodied-LCOM4 rule itself stays pinned on Java in this file.
 ///
 /// [CR-171]: ../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
@@ -354,7 +366,7 @@ public:
     let inline = scan(tmp.path());
     assert!(
         inline.metrics.cohesion.is_none(),
-        "C++ declares no member_access: its bodied class is not scored for Cohesion (CR-171)"
+        "one C++ class is below cohesion_min_classes: Cohesion is n/a, though C++ declares member_access"
     );
     assert!(inline.metrics.focus.is_some(), "Focus still counts the C++ class");
 }

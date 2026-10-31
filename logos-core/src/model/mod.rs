@@ -14,9 +14,13 @@
 //!   method-form ledger row carries (S-514);
 //! - [`ReceiverMode`] (5) — the frozen discriminants of how a Rust callable
 //!   writes its `self` parameter (S-606);
+//! - [`LocalBindingKind`] (3) — the frozen discriminants of what a callable's
+//!   body binds locally (S-593);
 //! - [`ParamRange`] — the argument counts a callable admits (S-591);
 //! - [`ArtifactRelation`] — the cross-artifact edge **payload** vocabulary and
 //!   its deterministic external-target classifier (CR-011, [FR-CG-07]);
+//! - the [`dispatch`] marker a trait fan-out stamps on its implementor edges
+//!   (S-712, CR-226);
 //! - [`Annotations`] — free-form node metadata;
 //! - [`Severity`] — a security finding's normalised severity (S-668);
 //!
@@ -42,6 +46,7 @@ mod convert;
 mod annotations;
 mod arity;
 mod artifact;
+pub mod dispatch;
 mod kinds;
 mod severity;
 mod symbol;
@@ -51,6 +56,6 @@ pub use arity::ParamRange;
 pub use artifact::{
     ArtifactRelation, BridgeNamespace, BridgeRole, MatchDiscipline, TargetClass,
 };
-pub use kinds::{EdgeKind, NodeKind, ReceiverMode, ReceiverShape, RefForm, UnknownKind};
+pub use kinds::{EdgeKind, LocalBindingKind, NodeKind, ReceiverMode, ReceiverShape, RefForm, UnknownKind};
 pub use severity::Severity;
 pub use symbol::{LogosSymbol, NodeId};

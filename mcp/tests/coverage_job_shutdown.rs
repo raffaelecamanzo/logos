@@ -42,7 +42,7 @@ fn process_table() -> Vec<u32> {
 fn wait_for(what: &str, deadline: Duration, mut done: impl FnMut() -> bool) {
     let started = Instant::now();
     while !done() {
-        assert!(started.elapsed() < deadline, "{what}");
+        assert!(started.elapsed() < logos_core::perf::scaled(deadline), "{what}");
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -108,7 +108,10 @@ fn a_host_disconnect_during_a_coverage_run_leaves_no_orphan() {
         if message["id"] == 2 {
             break message;
         }
-        assert!(started.elapsed() < Duration::from_secs(60), "no answer to coverage_run");
+        assert!(
+            started.elapsed() < logos_core::perf::scaled(Duration::from_secs(60)),
+            "no answer to coverage_run"
+        );
     };
     let text = answer["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{answer}"));
     let started: serde_json::Value = serde_json::from_str(text).unwrap();

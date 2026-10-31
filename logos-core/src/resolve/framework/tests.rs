@@ -513,6 +513,8 @@ fn scope(start: usize, end: usize, literals: &[(&str, usize, usize)], opaque: &[
             })
             .collect(),
         opaque: opaque.to_vec(),
+        nested: false,
+        absorbs: false,
     }
 }
 
@@ -871,20 +873,30 @@ fn names_every_capture(query: &str, label: &str, captures: &[&str]) {
 
 /// Assert every registration pattern in `query` carries `@fw.route.anchor`.
 ///
-/// Expressed as an **equality against the handler count** rather than a floor:
+/// Expressed as an **equality against the method count** rather than a floor:
 /// a floor equal to today's pattern count cannot notice a fourth registration
 /// pattern added without an anchor, and per S-328 a path with no anchor
 /// competes with nothing in [`drop_outranked_paths`] and always survives — so
 /// the omission silently promotes two routes for one registration. Every
-/// registration pattern in both JVM queries captures a handler, which makes the
-/// handler count the surface this invariant has to scale with.
+/// registration pattern in both JVM queries names its method
+/// (`@fw.route.method`) — the annotation or the DSL call — which makes the
+/// method count the surface this invariant has to scale with. (It was the
+/// handler count until S-561: a functional registration written as a lambda
+/// names no handler.)
 #[cfg(test)]
 fn every_registration_pattern_anchors(query: &str, label: &str) {
-    let handlers = capture_occurrences(query, "fw.route.handler");
-    assert!(handlers > 0, "{label}: no registration pattern found");
+    // A predicate line (`(#match? @fw.route.method …)`) names the capture
+    // without capturing it, so it is not a registration pattern.
+    let captured: String = query
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("(#"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let methods = capture_occurrences(&captured, "fw.route.method");
+    assert!(methods > 0, "{label}: no registration pattern found");
     assert_eq!(
-        capture_occurrences(query, "fw.route.anchor"),
-        handlers,
+        capture_occurrences(&captured, "fw.route.anchor"),
+        methods,
         "{label}: every registration pattern must anchor"
     );
 }
@@ -1167,12 +1179,18 @@ fn no_frameworks_query_constrains_the_path_shape_itself() {
     assert!(checked > 0, "no frameworks.scm was checked");
 }
 
-/// One guard, four capture dialects: a bare-token path promotes nothing
-/// whether it arrived through Rust's legacy structural anchor, Java's
-/// declarative annotation contract, Go's selector-call pattern, or TypeScript's
-/// Express call pattern. Four unrelated queries, one outcome — which is what
-/// "the rule lives in the pass" means in practice, and the closest a test can
-/// get to CR-110 AC5's "in **every** plugin shipping `frameworks`".
+/// One guard, three capture dialects: a bare-token path promotes nothing
+/// whether it arrived through Rust's legacy structural anchor, Go's
+/// selector-call pattern, or TypeScript's Express call pattern. Unrelated
+/// queries, one outcome — which is what "the rule lives in the pass" means in
+/// practice, and the closest a test can get to CR-110 AC5's "in **every**
+/// plugin shipping `frameworks`".
+///
+/// Java stopped being a fourth when S-561 declared Spring's rooting: Spring
+/// serves `@GetMapping("users")` from `/users`, so the Java dialect states the
+/// slash it left out (`@fw.route.slashed`) and the path is no bare token by the
+/// time the guard reads it. The guard itself is untouched — the assertion below
+/// pins the rooted route, and the Rust, Go and TypeScript halves pin the rule.
 ///
 /// Go is here by name because AC8 names it: `hermodr-mirror`'s 23 Go routes are
 /// the workspace's control group, so the dialect that must be *unaffected* is
@@ -1183,7 +1201,7 @@ fn no_frameworks_query_constrains_the_path_shape_itself() {
     feature = "lang-go",
     feature = "lang-typescript"
 ))]
-fn a_bare_token_path_promotes_nothing_in_any_capture_dialect() {
+fn a_bare_token_path_promotes_nothing_in_any_capture_dialect_but_springs_rooted_one() {
     let rust = scan("fn f() { let _ = r.route(\"users\", get(h)); }");
     assert!(rust.routes.is_empty(), "rust: {:?}", rust.routes);
 
@@ -1191,7 +1209,8 @@ fn a_bare_token_path_promotes_nothing_in_any_capture_dialect() {
         "java",
         "@RestController\npublic class C {\n    @GetMapping(value = \"users\")\n    public String listUsers() { return \"\"; }\n}\n",
     );
-    assert!(java.routes.is_empty(), "java: {:?}", java.routes);
+    let java_paths: Vec<&str> = java.routes.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(java_paths, ["/users"], "java: Spring roots what it was written without");
     assert!(java.refusals.is_empty(), "java: {:?}", java.refusals);
 
     let go = scan_lang("go", "func main() { r.GET(\"users\", listUsers) }\n");
@@ -1279,8 +1298,9 @@ fn a_slash_free_placeholder_path_still_promotes_verbatim() {
 // ── CR-110: Express receiver scoping (TypeScript / TSX) ──────────────────────
 
 /// Both TS grammars ship the *same* framework query and must stay in step —
-/// `.tsx`/`.jsx` files parse with the sibling plugin, so a rule landed in one
-/// and not the other leaves half the TypeScript surface unfixed.
+/// `.tsx` files (and JavaScript's, which runs the `tsx` copy, S-538) parse with
+/// the sibling plugin, so a rule landed in one and not the other leaves half the
+/// TypeScript surface unfixed.
 #[cfg(feature = "lang-typescript")]
 const TS_EXTENSIONS: [&str; 2] = ["ts", "tsx"];
 
@@ -1374,6 +1394,136 @@ fn an_express_registration_with_a_handler_still_promotes_a_route() {
                 Some("listUsers".to_string())
             )],
             "{ext}"
+        );
+    }
+}
+
+/// The incremental gate's detector list (S-541): a prefix is import-only only
+/// when every loaded language declaring it says so, and the receiver
+/// parameters are the union of every language's — so the footprint probe is
+/// never narrower than any language's candidacy.
+#[test]
+#[cfg(all(feature = "lang-typescript", feature = "lang-rust"))]
+fn the_gate_detectors_are_import_only_only_where_every_declaring_language_agrees() {
+    let import_only = |reg: &LanguageRegistry, prefix: &str| {
+        footprint_keys(reg)
+            .0
+            .into_iter()
+            .find(|d| d.prefix == prefix)
+            .map(|d| d.import_only)
+    };
+    let shipped = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    // JavaScript matches `next` on imports alone; TypeScript on every kind.
+    assert_eq!(import_only(&shipped, "next"), Some(false));
+    assert_eq!(import_only(&shipped, "axum"), Some(false));
+    let receivers = footprint_keys(&shipped).1;
+    assert_eq!(receivers.names, ["app", "router"]);
+    assert_eq!(receivers.extensions, ["cjs", "js", "jsx", "mjs"], "JavaScript's alone");
+
+    let toy = |name: &'static str, toml: &'static str| crate::plugin::grammars::GrammarEntry {
+        manifest_label: name,
+        manifest_toml: toml,
+        language: tree_sitter_rust::LANGUAGE,
+        embedded_queries: &[],
+    };
+    let load = |entries: &[crate::plugin::grammars::GrammarEntry]| {
+        LanguageRegistry::load_from(entries, crate::plugin::AbiRange::runtime(), None, &mut |_| {})
+            .expect("a data-only grammar loads")
+    };
+    let mut entries = crate::plugin::grammars::compiled();
+    entries.push(toy(
+        "toyone/plugin.toml",
+        r#"
+            name = "toyone"
+            extensions = ["toyone"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+            framework_detectors = ["toyweb"]
+            [framework_candidacy]
+            detectors_import_only = true
+            receiver_parameters = ["server"]
+        "#,
+    ));
+    let alone = load(&entries);
+    assert_eq!(import_only(&alone, "toyweb"), Some(true), "its only declarer agrees");
+    let receivers = footprint_keys(&alone).1;
+    assert_eq!(receivers.names, ["app", "router", "server"]);
+    assert_eq!(receivers.extensions, ["cjs", "js", "jsx", "mjs", "toyone"]);
+
+    // One more language naming `toyweb` on any reference kind widens it.
+    entries.push(toy(
+        "toytwo/plugin.toml",
+        r#"
+            name = "toytwo"
+            extensions = ["toytwo"]
+            module_separator = "."
+            abi_version = 15
+            capabilities = []
+            framework_detectors = ["toyweb"]
+        "#,
+    ));
+    assert_eq!(import_only(&load(&entries), "toyweb"), Some(false));
+}
+
+/// A JavaScript template-literal path is read verbatim and put to the shared
+/// path rule like any other (S-541, [FR-FW-03]): a template whose static tail
+/// starts with `/` is a route, its leading interpolation kept as a prefix this
+/// pass does not resolve; a template opening with a reference is kept as a
+/// Spring `${api.base}` placeholder is; one that is neither is no path.
+///
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_javascript_template_path_is_read_verbatim_under_the_shared_path_rule() {
+    let route = |path: &str| ("GET".to_string(), path.to_string());
+    for (written, expected) in [
+        ("`${relativePath}/ping`", Some(route("${relativePath}/ping"))),
+        ("`/api/${name}/config`", Some(route("/api/${name}/config"))),
+        ("`${a}/x/${b}/y`", Some(route("${a}/x/${b}/y"))),
+        ("`/users`", Some(route("/users"))),
+        ("`/api${name}`", Some(route("/api${name}"))),
+        // The separators may live inside the reference (`is_a_url_path`).
+        ("`${base}`", Some(route("${base}"))),
+        // Neither a `/` nor an opening reference: a property key, not a path.
+        ("`users`", None),
+        ("`user${id}`", None),
+    ] {
+        for source in [
+            format!("app.get({written}, handler);"),
+            format!("router.get({written}, (req, res) => res.send(1));"),
+        ] {
+            let got: Vec<(String, String)> = scan_lang("js", &source)
+                .routes
+                .into_iter()
+                .map(|r| (r.method, r.path))
+                .collect();
+            assert_eq!(got, expected.clone().into_iter().collect::<Vec<_>>(), "{source}");
+        }
+    }
+}
+
+/// The template patterns keep the shared Express patterns' rules — a
+/// router-named receiver, never a capitalised method — and apply the receiver
+/// rule to the handler-bearing form too: a template is how a client call spells
+/// an interpolated URL, and its callback is no route handler. And they are
+/// JavaScript's own layer, so a TypeScript file reads a template path as before.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn a_javascript_template_path_keeps_the_express_receiver_and_method_rules() {
+    for source in [
+        "cache.get(`${base}/key`);",
+        "app.Get(`${base}/users`, handler);",
+        "axios.get(`/api/items/${item.id}`, config);",
+        "axios.post(`${API_URL}/items`, item);",
+        "https.get(`${base}/health`, onResponse);",
+    ] {
+        assert!(scan_lang("js", source).routes.is_empty(), "{source}");
+    }
+    for ext in TS_EXTENSIONS {
+        assert!(
+            scan_lang(ext, "app.get(`${base}/ping`, handler);").routes.is_empty(),
+            "{ext}: the template layer is JavaScript's alone"
         );
     }
 }
@@ -3440,9 +3590,10 @@ class UserController : UserApi {
     /// the ordinary `@RestController @RequestMapping(…) class C { … }` plus a
     /// DTO or a service interface. The declaration is not a `class_declaration`
     /// at all (its modifiers are reparsed as a file-level expression) and
-    /// `has_error()` stays **false**, so neither a query pattern nor a
+    /// `has_error()` stays **false**, so neither a declaration pattern nor a
     /// parse-error gate can see it. Review's suggested `has_error()` gate was
-    /// measured and does not close it.
+    /// measured and does not close it; the file's partial-extraction warning
+    /// names the expression instead (S-559, `kotlin_declarations.rs`).
     ///
     /// This is **not** introduced by composition: the pre-S-330 query loses the
     /// same route and the same stereotype component on the same input. What
@@ -4281,27 +4432,45 @@ mod jvm_parity {
         let java = registry.for_extension("java").expect("java plugin");
         let kotlin = registry.for_extension("kt").expect("kotlin plugin");
 
-        assert_eq!(
-            java.semantics().framework_detectors,
-            kotlin.semantics().framework_detectors,
-            "the ledger candidacy gate is one fingerprint for both languages"
-        );
+        // Kotlin's gate is Java's plus Ktor's own package (S-561): the Spring
+        // fingerprint is shared, and the one addition is the DSL's.
         assert_eq!(
             java.semantics().framework_detectors,
             ["org::springframework"],
-            "…and it is Spring's package prefix"
+            "the shared fingerprint is Spring's package prefix"
         );
         assert_eq!(
-            java.semantics().framework_methods,
-            kotlin.semantics().framework_methods,
+            kotlin.semantics().framework_detectors,
+            ["org::springframework", "io::ktor"],
+            "Kotlin adds Ktor's package to the shared Spring fingerprint"
+        );
+        // The annotation→verb mapping is one table for both languages; Kotlin's
+        // extra rows are the functional DSLs' call names (S-561), which carry no
+        // annotation.
+        let annotation_rows = |table: &std::collections::BTreeMap<String, String>| {
+            table
+                .iter()
+                .filter(|(name, _)| name.ends_with("Mapping"))
+                .map(|(name, verb)| (name.clone(), verb.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            annotation_rows(&java.semantics().framework_methods),
+            annotation_rows(&kotlin.semantics().framework_methods),
             "the annotation→verb table is one mapping for both languages"
         );
+        assert_eq!(
+            java.semantics().framework_methods.len(),
+            6,
+            "Java's table is the six annotation rows"
+        );
 
-        // Byte-identical, not just equal once parsed: the rows as written.
-        // Blank lines and comments are dropped first — `[framework_methods]` is
-        // the last section in both descriptors, so the slice runs to EOF and a
-        // benign explanatory comment or trailing newline under one file's last
-        // row would otherwise fail with a misleading "not byte-identical".
+        // Byte-identical, not just equal once parsed: the annotation rows as
+        // written. Blank lines and comments are dropped first —
+        // `[framework_methods]` is the last section in both descriptors, so the
+        // slice runs to EOF and a benign explanatory comment or trailing newline
+        // under one file's last row would otherwise fail with a misleading "not
+        // byte-identical".
         let rows = |descriptor: &str| -> Vec<String> {
             descriptor
                 .lines()
@@ -4322,10 +4491,16 @@ mod jvm_parity {
             "the table's shape is pinned too, so a dropped row cannot pass by \
              being dropped from both: {java_rows:?}"
         );
+        let kotlin_rows = rows(include_str!("../../../plugins/kotlin/plugin.toml"));
         assert_eq!(
-            java_rows,
-            rows(include_str!("../../../plugins/kotlin/plugin.toml")),
-            "the [framework_methods] rows must be byte-identical"
+            kotlin_rows[..java_rows.len()],
+            java_rows[..],
+            "the annotation rows must be byte-identical, and lead Kotlin's table"
+        );
+        assert_eq!(
+            kotlin_rows.len(),
+            java_rows.len() + 14,
+            "Kotlin's table adds the seven upper-case and seven lower-case DSL rows: {kotlin_rows:?}"
         );
     }
 
@@ -4366,7 +4541,8 @@ mod jvm_parity {
                     continue;
                 }
                 assert!(
-                    RESOLVER_KIND_ALLOWLIST.contains(&literal.as_str()),
+                    RESOLVER_KIND_ALLOWLIST.contains(&literal.as_str())
+                        || FILE_KIND_ALLOWLIST.contains(&(file.as_str(), literal.as_str())),
                     "{file} names the JVM node kind {literal:?}; the shared \
                      interpreter must stay language-neutral. If this is a Rust \
                      (or other) grammar kind that merely collides with a JVM \
@@ -4504,6 +4680,12 @@ mod jvm_parity {
         "type_arguments",
         "type_identifier",
     ];
+
+    /// Literals that spell a JVM node kind in one file only, and are no node kind
+    /// there — exempt in that file alone, so the same literal elsewhere in the
+    /// resolver is still caught. `ts_config` reads JSON and walks no tree:
+    /// `import` is a `package.json` `exports` condition (S-531).
+    const FILE_KIND_ALLOWLIST: &[(&str, &str)] = &[("ts_config.rs", "import"), ("ts_config_tests.rs", "import")];
 
     /// The same Spring annotation written in each language's syntax. Kotlin
     /// arrays are `[…]` where Java's are `{…}`, Kotlin's implementation
@@ -4823,4 +5005,1456 @@ fn a_member_file_is_read_only_by_a_relative_path() {
     let absolute = absolute.to_str().expect("utf-8 path");
     assert!(read_member_file(&registry, root.path(), "x.rs").is_some());
     assert!(read_member_file(&registry, root.path(), absolute).is_none());
+}
+
+// ── PHP: Laravel route groups and Symfony `#[Route]` attributes (S-549) ───────
+
+/// Laravel and Symfony routes through the PHP query ([FR-FW-03], [FR-FW-05],
+/// S-549): Laravel paths are rooted and take their groups' prefixes, nested
+/// groups accumulate, and Symfony's attribute routes compose their class prefix
+/// and name their method as the handler.
+///
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+#[cfg(feature = "lang-php")]
+mod php_routes {
+    use super::*;
+
+    /// The sorted `(METHOD path, handler)` set of a PHP snippet's routes.
+    fn php_routes(source: &str) -> Vec<(String, Option<String>)> {
+        let mut got: Vec<(String, Option<String>)> = scan_lang("php", source)
+            .routes
+            .into_iter()
+            .map(|r| (format!("{} {}", r.method, r.path), r.handler))
+            .collect();
+        got.sort();
+        got
+    }
+
+    /// The sorted route names alone.
+    fn names(source: &str) -> Vec<String> {
+        php_routes(source).into_iter().map(|(name, _)| name).collect()
+    }
+
+    fn owned(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    /// Laravel serves `Route::get('me')` at `/me`: the path is rooted, so it
+    /// can match an OpenAPI `/me`, and a single segment is a path rather than
+    /// the property key the shared path rule drops.
+    #[test]
+    fn laravel_paths_are_rooted_and_single_segments_are_kept() {
+        let got = names(
+            "<?php\nRoute::get('ping', fn () => null);\nRoute::post('me', X::class);\n\
+             Route::get('/users', [U::class, 'index']);\nRoute::get('/', $show);\n",
+        );
+        assert_eq!(got, owned(&["GET /", "GET /ping", "GET /users", "POST /me"]));
+    }
+
+    /// `prefix()` before `group()`, directly or with other registrar calls in
+    /// between, on either side; and the `['prefix' => …]` array form.
+    #[test]
+    fn a_prefix_group_prefixes_the_routes_in_its_closure() {
+        let got = names(
+            "<?php
+Route::prefix('a')->group(function () { Route::get('one', X::class); });
+Route::prefix('b')->middleware('api')->group(static function (): void { Route::get('two', X::class); });
+Route::middleware('os.auth')->prefix('os/s3')->group(function () { Route::post('song', X::class); });
+Route::prefix('d')->middleware('x')->name('d.')->group(function () { Route::get('three', X::class); });
+Route::prefix('e')->middleware('x')->name('e.')->where([])->group(function () { Route::get('four', X::class); });
+Route::group(['middleware' => 'x', 'prefix' => 'radio'], function () { Route::get('stations', X::class); });
+Route::prefix('arrow')->group(fn () => Route::get('five', X::class));
+Route::get('outside', X::class);
+",
+        );
+        assert_eq!(
+            got,
+            owned(&[
+                "GET /a/one",
+                "GET /arrow/five",
+                "GET /b/two",
+                "GET /d/three",
+                "GET /e/four",
+                "GET /outside",
+                "GET /radio/stations",
+                "POST /os/s3/song",
+            ])
+        );
+    }
+
+    /// koel's shape: groups nest, a prefixed group inside a prefixed group
+    /// appends to it, and a group with no prefix passes the outer one through —
+    /// to the routes after an inner group closes as well as to those inside it.
+    #[test]
+    fn nested_groups_accumulate_and_a_prefixless_group_passes_through() {
+        let got = names(
+            "<?php
+Route::prefix('api')->middleware('api')->group(static function (): void {
+    Route::get('ping', fn () => null);
+    Route::middleware('auth')->group(static function (): void {
+        Route::get('me', [P::class, 'show']);
+        Route::group(['prefix' => 'radio'], static function (): void {
+            Route::get('stations/{s}/now-playing', N::class);
+        });
+        Route::get('data', D::class);
+    });
+    Route::middleware('os.auth')->prefix('os/s3')->group(static function (): void {
+        Route::post('song', [S::class, 'put']);
+        Route::prefix('/deep/')->group(fn () => Route::delete('/x', S::class));
+    });
+});
+",
+        );
+        assert_eq!(
+            got,
+            owned(&[
+                "DELETE /api/os/s3/deep/x",
+                "GET /api/data",
+                "GET /api/me",
+                "GET /api/ping",
+                "GET /api/radio/stations/{s}/now-playing",
+                "POST /api/os/s3/song",
+            ])
+        );
+    }
+
+    /// A prefix the source does not state as a literal refuses every route
+    /// under it — including those of a group nested inside it — rather than
+    /// promoting them at a partial address ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    #[test]
+    fn an_opaque_prefix_refuses_its_routes_and_those_nested_under_it() {
+        let m = scan_lang(
+            "php",
+            "<?php
+Route::prefix($base)->group(function () {
+    Route::get('a', X::class);
+    Route::prefix('inner')->group(function () { Route::get('b', X::class); });
+});
+Route::group(['prefix' => config('app.prefix')], function () { Route::get('c', X::class); });
+Route::prefix(\"v{$n}\")->group(function () { Route::get('d', X::class); });
+Route::get('kept', X::class);
+",
+        );
+        let got: Vec<String> = m.routes.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        assert_eq!(got, ["GET /kept"]);
+        assert_eq!(m.refusals, vec![RouteRefusal::PathNotComposed; 4]);
+    }
+
+    /// Resource routes are not expanded (CR-176 §3.3), and near misses of the
+    /// facade and of the `prefix` key promote or prefix nothing.
+    #[test]
+    fn resource_routes_and_near_misses_promote_nothing() {
+        let got = names(
+            "<?php
+Route::apiResource('albums', AlbumController::class);
+Route::resource('photos', PhotoController::class)->except('show');
+Router::get('not-the-facade', X::class);
+Route::prefixes('p')->group(function () { Route::get('a', X::class); });
+Route::group(['prefix_' => 'q', 'as' => 'r'], function () { Route::get('b', X::class); });
+Route::prefix('s')->groups(function () { Route::get('c', X::class); });
+",
+        );
+        assert_eq!(got, owned(&["GET /a", "GET /b", "GET /c"]));
+    }
+
+    /// `Route::match('get', '/x', …)` takes its verb as the first argument, so
+    /// the pattern that reads the first string as the path would read `get` —
+    /// rooted, a route at `/get` the application never serves. `match` maps to
+    /// no verb, so the registration promotes nothing.
+    #[test]
+    fn a_string_verb_match_is_not_read_as_a_path() {
+        assert_eq!(
+            names("<?php\nRoute::match('get', '/x', X::class);\nRoute::match(['get', 'post'], '/y', X::class);\n"),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A double-quoted PHP string is its own node kind (`encapsed_string`), so
+    /// every literal position reads it too: a `"prefix"` key, a prefix, a path,
+    /// a verb. One that interpolates (`"users/$id"`) is not a literal — a prefix
+    /// refuses its routes, a Symfony path is refused and counted, a Laravel path
+    /// promotes nothing.
+    #[test]
+    fn double_quoted_literals_read_like_single_quoted_ones() {
+        let laravel = scan_lang(
+            "php",
+            "<?php
+Route::group([\"prefix\" => \"dq\"], function () { Route::get(\"a\", X::class); });
+Route::prefix(\"api\")->group(function () { Route::get('b', X::class); });
+Route::get(\"users/$id\", X::class);
+Route::get(\"users/{$id}/x\", X::class);
+",
+        );
+        let got: Vec<String> = laravel.routes.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        assert_eq!(got, ["GET /dq/a", "GET /api/b"]);
+        assert!(laravel.refusals.is_empty(), "{:?}", laravel.refusals);
+
+        let symfony = scan_lang(
+            "php",
+            "<?php
+#[Route(\"/blog\")]
+class A {
+    #[Route(\"/x\", methods: [\"GET\"])] public function x() {}
+    #[Route(path: \"/y\", methods: \"PUT\")] public function y() {}
+    #[Route(\"/z/$id\")] public function z() {}
+}
+",
+        );
+        let mut got: Vec<String> = symfony.routes.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        got.sort();
+        assert_eq!(got, ["GET /blog/x", "PUT /blog/y"]);
+        assert_eq!(symfony.refusals, [RouteRefusal::PathNotFolded]);
+    }
+
+    /// Symfony's own verb constants (`Request::METHOD_GET`) are verbs, alone or
+    /// in a list, and an empty `methods:` list answers every verb as Symfony
+    /// reads it. A constant of another class, or a variable, names no verb this
+    /// pass can prove, and promotes nothing.
+    #[test]
+    fn symfony_verb_constants_and_an_empty_methods_list() {
+        assert_eq!(
+            names(
+                "<?php
+class A {
+    #[Route('/c1', methods: Request::METHOD_GET)] public function c1() {}
+    #[Route('/c2', methods: [Request::METHOD_POST, Request::METHOD_PUT])] public function c2() {}
+    #[Route(path: '/c3', methods: [Request::METHOD_DELETE])] public function c3() {}
+    #[Route(methods: [Request::METHOD_PATCH], path: '/c4')] public function c4() {}
+    #[Route('/e', methods: [])] public function e() {}
+    #[Route(path: '/e2', methods : [ ])] public function e2() {}
+    #[Route('/o', methods: [Other::METHOD_GET])] public function o() {}
+    #[Route('/v', methods: $verbs)] public function v() {}
+}
+"
+            ),
+            [
+                "ANY /e",
+                "ANY /e2",
+                "DELETE /c3",
+                "GET /c1",
+                "PATCH /c4",
+                "POST /c2",
+                "PUT /c2",
+            ]
+        );
+    }
+
+    /// A registration is refused once per path element it could not read, not
+    /// once per verb it lists: `methods: ['GET', 'POST']` is one match per verb
+    /// over the same opaque path, and the count is of addresses. A refused
+    /// prefix over a multi-verb registration likewise counts the registration
+    /// once (its `@fw.route.anchor` is the site).
+    #[test]
+    fn a_multi_verb_registration_is_refused_once() {
+        let m = scan_lang(
+            "php",
+            "<?php\nclass A { #[Route(self::P, methods: ['GET', 'POST'])] public function a() {} }\n\
+             #[Route(self::BASE)]\nclass C { #[Route('/c', methods: ['GET', 'POST'])] public function c() {} }\n",
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert_eq!(m.refusals, [RouteRefusal::PathNotFolded, RouteRefusal::PathNotComposed]);
+    }
+
+    /// A query alternative is written once per pattern, so each copy needs its
+    /// own fixture: the arrow closure and the mid-chain `prefix()` at every
+    /// depth, the array form's arrow closure, and the single-string verb in each
+    /// Symfony pattern that reads `methods:`.
+    #[test]
+    fn every_copy_of_an_alternative_is_read() {
+        assert_eq!(
+            names(
+                "<?php
+Route::prefix('a')->middleware('x')->group(fn () => Route::get('one', X::class));
+Route::group(['prefix' => 'b'], fn () => Route::get('two', X::class));
+Route::middleware('x')->prefix('c')->name('c.')->group(function () { Route::get('three', X::class); });
+Route::middleware('x')->prefix('d')->name('d.')->where([])->group(function () { Route::get('four', X::class); });
+Route::middleware('x')->prefix('e')->as('e.')->name('e.')->where([])->group(function () { Route::get('five', X::class); });
+Route::prefix('f')->middleware('x')->name('f.')->group(fn () => Route::get('six', X::class));
+Route::prefix('g')->middleware('x')->name('g.')->where([])->group(fn () => Route::get('seven', X::class));
+class A {
+    #[Route('/one', methods: 'PUT')] public function one() {}
+    #[Route(methods: 'PATCH', path: '/two')] public function two() {}
+}
+"
+            ),
+            [
+                "GET /a/one",
+                "GET /b/two",
+                "GET /c/three",
+                "GET /d/four",
+                "GET /e/five",
+                "GET /f/six",
+                "GET /g/seven",
+                "PATCH /two",
+                "PUT /one",
+            ]
+        );
+    }
+
+    /// Each pattern's own predicates, probed one name away: the array form's
+    /// facade and `group` names, `prefix` at the deepest chain position, and
+    /// `group` after a mid-chain `prefix()`. None of them is a prefix group, so
+    /// the routes inside keep their written address.
+    #[test]
+    fn near_misses_of_each_patterns_predicates_prefix_nothing() {
+        assert_eq!(
+            names(
+                "<?php
+Router::group(['prefix' => 'n1'], function () { Route::get('one', X::class); });
+Route::when(['prefix' => 'n2'], function () { Route::get('two', X::class); });
+Route::middleware('n3')->name('x.')->where([])->domain('d')->group(function () { Route::get('three', X::class); });
+Route::prefix('n4')->middleware('x')->groups(function () { Route::get('four', X::class); });
+"
+            ),
+            ["GET /four", "GET /one", "GET /three", "GET /two"]
+        );
+    }
+
+    /// Symfony roots a prefix and a path written without the leading slash, in
+    /// the patterns that read `methods:` as in those that do not; whitespace
+    /// before the `:` of `methods :` does not reopen the every-verb route; and
+    /// every verb row — lower- and upper-case, and each `Request::METHOD_*` —
+    /// maps.
+    #[test]
+    fn symfony_rooting_spacing_and_every_verb_row() {
+        assert_eq!(
+            names(
+                "<?php
+#[Route('api')]
+class A {
+    #[Route('x')] public function x() {}
+}
+class B {
+    #[Route('health', methods: ['GET'])] public function health() {}
+    #[Route('/ws', methods : ['GET'])] public function ws() {}
+    #[Route('/s', methods: ['head'])] public function s() {}
+    #[Route('/m', methods: ['PUT', 'PATCH', 'OPTIONS', 'DELETE', 'POST'])] public function m() {}
+    #[Route('/c', methods: [Request::METHOD_OPTIONS, Request::METHOD_HEAD])] public function c() {}
+}
+"
+            ),
+            [
+                "ANY /api/x",
+                "DELETE /m",
+                "GET /health",
+                "GET /ws",
+                "HEAD /c",
+                "HEAD /s",
+                "OPTIONS /c",
+                "OPTIONS /m",
+                "PATCH /m",
+                "POST /m",
+                "PUT /m",
+            ]
+        );
+    }
+
+    const SYMFONY: &str = "<?php
+namespace App\\Controller;
+
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+#[Route('/blog', name: 'blog_')]
+class BlogController extends AbstractController
+{
+    #[Route('/', name: 'index')]
+    public function index(): Response {}
+
+    #[Route('/{slug}', name: 'show', methods: ['GET', 'HEAD'])]
+    public function show(string $slug): Response {}
+
+    #[Route(path: '/{slug}/edit', methods: 'POST')]
+    #[IsGranted('ROLE_ADMIN')]
+    public function edit(string $slug): Response {}
+
+    #[Route(methods: ['DELETE'], name: 'delete', path: 'remove/{id}')]
+    public function remove(int $id): Response {}
+
+    #[IsGranted('ROLE_USER')]
+    #[Route(path: '/feed')]
+    public function feed(): Response {}
+
+    #[Cache(maxage: 60)]
+    public function notARoute(): Response {}
+}
+";
+
+    /// The class prefix composes onto every method path, the `methods:` list
+    /// fans out (one route per verb, a missing list is ANY), the path may be
+    /// positional or named and come before or after `methods:`, and the
+    /// handler is the method the attribute decorates.
+    #[test]
+    fn symfony_attribute_routes_compose_their_class_prefix() {
+        let h = |name: &str| Some(name.to_string());
+        assert_eq!(
+            php_routes(SYMFONY),
+            vec![
+                ("ANY /blog/".to_string(), h("index")),
+                ("ANY /blog/feed".to_string(), h("feed")),
+                ("DELETE /blog/remove/{id}".to_string(), h("remove")),
+                ("GET /blog/{slug}".to_string(), h("show")),
+                ("HEAD /blog/{slug}".to_string(), h("show")),
+                ("POST /blog/{slug}/edit".to_string(), h("edit")),
+            ]
+        );
+        // Every path above is a written literal, so nothing is refused — a
+        // named argument's `path` name is never read as an opaque path.
+        let refusals = scan_lang("php", SYMFONY).refusals;
+        assert!(refusals.is_empty(), "{refusals:?}");
+    }
+
+    /// Without a class `#[Route]` the method paths stand alone (rooted); a named
+    /// `path:` prefix composes like a positional one; a non-literal prefix
+    /// refuses its routes; a non-literal method path is refused and counted.
+    #[test]
+    fn symfony_prefix_forms_and_opaque_paths() {
+        assert_eq!(
+            names(
+                "<?php\nclass A { #[Route('health')] public function h() {} }\n\
+                 #[Route(name: 'x_', path: '/api')]\nclass B { #[Route('/b', methods: ['get'])] public function b() {} }\n"
+            ),
+            owned(&["ANY /health", "GET /api/b"])
+        );
+
+        let m = scan_lang(
+            "php",
+            "<?php\n#[Route(self::BASE)]\nclass C { #[Route('/c')] public function c() {} }\n\
+             class D { #[Route(self::PATH)] public function d() {} #[Route('/e')] public function e() {} }\n",
+        );
+        let got: Vec<String> = m.routes.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        assert_eq!(got, ["ANY /e"]);
+        assert_eq!(m.refusals, [RouteRefusal::PathNotFolded, RouteRefusal::PathNotComposed]);
+    }
+
+    /// An attribute that is not `Route` — a near miss by one letter included —
+    /// is no route, and a `name:` string is never read as the path.
+    #[test]
+    fn symfony_near_miss_attributes_are_not_routes() {
+        assert_eq!(
+            names(
+                "<?php\nclass A {\n#[Routes('/a')] public function a() {}\n\
+                 #[Router('/b', methods: ['GET'])] public function b() {}\n\
+                 #[Route(name: 'only_a_name')] public function c() {}\n}\n"
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    /// The nesting rule at the interpreter grain: a nested scope accumulates
+    /// across every enclosing level, inherits an enclosing prefix when it states
+    /// none, and becomes unreadable under an unreadable parent; a scope that
+    /// does not opt in keeps Spring's innermost-only rule.
+    #[test]
+    fn nest_scopes_accumulates_only_for_scopes_that_opt_in() {
+        let nested = |mut s: PrefixScope| {
+            s.nested = true;
+            s
+        };
+        let mut scopes = merge_scopes(&[
+            scope(0, 100, &[("/api", 1, 2)], &[]),
+            nested(scope(10, 90, &[("/v1", 11, 12)], &[])),
+            nested(scope(20, 80, &[("/radio", 21, 22)], &[])),
+            nested(scope(30, 40, &[], &[])),
+            scope(50, 60, &[("/own", 51, 52)], &[]),
+            scope(200, 300, &[], &[(201, 202)]),
+            nested(scope(210, 290, &[("/x", 211, 212)], &[])),
+        ]);
+        nest_scopes(&mut scopes);
+        let at = |byte: usize| innermost_prefix(&scopes, byte).map(|s| (s.paths.clone(), s.opaque));
+        assert_eq!(at(15), Some((vec!["/api/v1".to_string()], false)));
+        assert_eq!(at(25), Some((vec!["/api/v1/radio".to_string()], false)));
+        assert_eq!(at(35), Some((vec!["/api/v1/radio".to_string()], false)));
+        assert_eq!(at(55), Some((vec!["/own".to_string()], false)));
+        assert_eq!(at(215), Some((Vec::new(), true)));
+    }
+}
+
+// ── Functional routing, Ktor and rooted paths (S-561, CR-178) ────────────────
+
+/// Spring's functional DSL and Ktor's `routing { }` on Kotlin's call tree: a
+/// registration is a route only inside a router block, every `nest` / `route`
+/// around it adds its prefix, and a handler reference written on a typed
+/// property reads that property's declared type ([FR-FW-03], [NFR-RA-05]).
+///
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-kotlin")]
+mod kotlin_dsl {
+    use super::*;
+
+    fn scanned(source: &str) -> FileMatches {
+        scan_lang("kt", source)
+    }
+
+    /// The sorted `(method path)` names of a scan — the handler column is
+    /// asserted where a test is about it.
+    fn names(m: &FileMatches) -> Vec<String> {
+        let mut got: Vec<String> = m.routes.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+        got.sort();
+        got
+    }
+
+    fn owned(rows: &[&str]) -> Vec<String> {
+        rows.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn a_co_router_registration_is_a_route_linked_to_its_typed_handler() {
+        let m = scanned(
+            r#"
+class Routes(private val talkHandler: TalkHandler, val blog: BlogHandler) {
+    @Bean
+    fun router() = coRouter {
+        GET("/talk", talkHandler::findAll)
+        POST("/blog/{id}", blog::save)
+    }
+}
+"#,
+        );
+        assert_eq!(
+            sorted_triples(&m),
+            [
+                ("/blog/{id}".to_string(), "POST".to_string(), Some("BlogHandler::save".to_string())),
+                ("/talk".to_string(), "GET".to_string(), Some("TalkHandler::findAll".to_string())),
+            ]
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn the_handler_forms_a_registration_can_carry() {
+        let m = scanned(
+            r#"
+class Routes(private val h: H, plain: P) {
+    fun router() = router {
+        GET("/ref", h::m)
+        GET("/top", ::topLevel)
+        GET("/typed", Foo::bar)
+        GET("/lambda") { ok().build() }
+        GET("/param", plain::m)
+        GET("/read", h.m)
+    }
+}
+"#,
+        );
+        let handler = |path: &str| {
+            m.routes
+                .iter()
+                .find(|r| r.path == path)
+                .unwrap_or_else(|| panic!("{path} is promoted"))
+                .handler
+                .clone()
+        };
+        assert_eq!(handler("/ref").as_deref(), Some("H::m"), "a property's declared type");
+        assert_eq!(handler("/top").as_deref(), Some("topLevel"), "a bare function reference");
+        assert_eq!(handler("/typed").as_deref(), Some("Foo::bar"), "a type's member is written as one");
+        assert_eq!(handler("/lambda"), None, "a lambda names no handler");
+        // Near misses: a plain constructor parameter is no property, and `h.m`
+        // is a property READ — neither is a callable reference.
+        assert_eq!(handler("/param").as_deref(), Some("plain::m"), "no declared property: the written head");
+        assert_eq!(handler("/read"), None, "`.` is not `::`");
+    }
+
+    #[test]
+    fn nests_compose_outermost_first_and_a_path_free_predicate_adds_nothing() {
+        let m = scanned(
+            r#"
+class Routes(private val h: H) {
+    fun api() = coRouter {
+        (accept(APPLICATION_JSON) and "/api").nest {
+            "/admin".nest {
+                GET("/{year}/talk", h::byYear)
+            }
+            GET("/faq", h::faq)
+            accept(TEXT_HTML).nest { GET("/html") }
+        }
+        ("/legacy" and accept(APPLICATION_JSON)).nest { GET("/old") }
+        accept(TEXT_HTML).nest { GET("/page") }
+        GET("/") { ok().build() }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            names(&m),
+            owned(&[
+                "GET /",
+                "GET /api/admin/{year}/talk",
+                "GET /api/faq",
+                "GET /api/html",
+                "GET /legacy/old",
+                "GET /page",
+            ])
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_prefix_written_without_a_slash_is_rooted() {
+        let m = scanned(
+            r#"
+fun routes() = router {
+    "admin".nest { GET("users") { ok().build() } }
+    GET("plain") { ok().build() }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /admin/users", "GET /plain"]));
+    }
+
+    #[test]
+    fn an_unreadable_nest_prefix_refuses_its_registrations_and_counts_them() {
+        let m = scanned(
+            r#"
+fun routes() = router {
+    BASE.nest { GET("/a") { ok().build() } }
+    (accept(APPLICATION_JSON) and BASE).nest { GET("/b") { ok().build() } }
+    path("/p").nest { GET("/c") { ok().build() } }
+    (accept(JSON).and(path("/q"))).nest { GET("/d") { ok().build() } }
+    "/${base}".nest { GET("/e") { ok().build() } }
+    GET("/ok") { ok().build() }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /ok"]), "only the readable registration is promoted");
+        assert_eq!(m.refusals, [RouteRefusal::PathNotComposed; 5], "each refused registration is counted");
+    }
+
+    #[test]
+    fn a_registration_outside_a_router_block_is_not_a_route() {
+        let m = scanned(
+            r#"
+class T(private val mockMvc: MockMvc) {
+    fun test() {
+        mockMvc.get("/vets") { accept = APPLICATION_JSON }
+        get("/loose") { 1 }
+        GET("/also-loose") { 2 }
+        post("/x/y")
+        get(url) { 3 }
+        GET(base + "/x") { 4 }
+        cache.get("/cache/key")
+    }
+}
+"#,
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "nothing outside a router block is counted: {:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_call_inside_a_handler_body_is_not_a_registration() {
+        let m = scanned(
+            r#"
+fun Application.module() {
+    routing {
+        get("/h") { call.respond(buildJsonObject { put("status", "ok") }) }
+        get("/home") { call.respondHtml { head { title("x") } } }
+        route("/p") {
+            get("/x") { val v = with(call.parameters) { get("id") }; put(KEY) { 1 } }
+            get { put("k") { 2 } }
+            delete { }
+        }
+    }
+}
+fun spring() = router {
+    GET("/s") { ok().body(JSONObject().apply { put("status", 1) }) }
+    (GET("/a") or GET("/b")) { put("k") { 3 } }
+}
+"#,
+        );
+        assert_eq!(
+            names(&m),
+            owned(&["DELETE /p", "GET /a", "GET /b", "GET /h", "GET /home", "GET /p", "GET /p/x", "GET /s"]),
+            "the registrations are promoted; the calls in their handler bodies are not"
+        );
+        assert!(m.refusals.is_empty(), "a handler's own call is not a refused path: {:?}", m.refusals);
+    }
+
+    #[test]
+    fn every_dsl_verb_maps_to_its_own_method() {
+        let m = scanned(
+            r#"
+fun spring() = router {
+    GET("/g") { 1 }
+    POST("/po") { 1 }
+    PUT("/pu") { 1 }
+    DELETE("/d") { 1 }
+    PATCH("/pa") { 1 }
+    HEAD("/h") { 1 }
+    OPTIONS("/o") { 1 }
+}
+fun Application.ktor() = routing {
+    get("/kg") { 1 }
+    post("/kpo") { 1 }
+    put("/kpu") { 1 }
+    delete("/kd") { 1 }
+    patch("/kpa") { 1 }
+    head("/kh") { 1 }
+    options("/ko") { 1 }
+}
+"#,
+        );
+        assert_eq!(
+            names(&m),
+            owned(&[
+                "DELETE /d", "DELETE /kd", "GET /g", "GET /kg", "HEAD /h", "HEAD /kh", "OPTIONS /ko",
+                "OPTIONS /o", "PATCH /kpa", "PATCH /pa", "POST /kpo", "POST /po", "PUT /kpu", "PUT /pu",
+            ])
+        );
+    }
+
+    #[test]
+    fn every_path_free_predicate_adds_no_segment_and_a_literal_beside_one_is_the_prefix() {
+        let m = scanned(
+            r#"
+fun routes() = router {
+    (contentType(X) and "/a").nest { GET("/1") { 1 } }
+    ("/b" and headers(X)).nest { GET("/2") { 1 } }
+    (method(X) and "/c").nest { GET("/3") { 1 } }
+    method(X).nest { GET("/4") { 1 } }
+    headers(X).nest { GET("/5") { 1 } }
+    contentType(X).nest { GET("/6") { 1 } }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /4", "GET /5", "GET /6", "GET /a/1", "GET /b/2", "GET /c/3"]));
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_handler_head_reads_the_property_the_enclosing_class_declares() {
+        let m = scanned(
+            r#"
+class Outer(private val h: A, private val g: Foo<Bar>, val q: a.B, val n: N?) {
+    private val member: M = M()
+    fun r() = router {
+        GET("/own", h::m)
+        GET("/member", member::m)
+        GET("/generic", g::m)
+        GET("/qualified", q::m)
+        GET("/nullable", n::m)
+    }
+
+    inner class Inner(val h: B) {
+        fun r() = router { GET("/inner", h::m) }
+    }
+}
+
+class Other(val h: C) {
+    fun r() = router { GET("/other", h::m) }
+}
+"#,
+        );
+        let handler = |path: &str| m.routes.iter().find(|r| r.path == path).and_then(|r| r.handler.clone());
+        assert_eq!(handler("/own").as_deref(), Some("A::m"));
+        assert_eq!(handler("/member").as_deref(), Some("M::m"), "a member property that states its type");
+        // A type that is not one bare name is not read: the written head stays,
+        // and binds nothing.
+        assert_eq!(handler("/generic").as_deref(), Some("g::m"));
+        assert_eq!(handler("/qualified").as_deref(), Some("q::m"));
+        assert_eq!(handler("/nullable").as_deref(), Some("n::m"));
+        // The innermost declaration of a name wins, and a class sees only its own.
+        assert_eq!(handler("/inner").as_deref(), Some("B::m"));
+        assert_eq!(handler("/other").as_deref(), Some("C::m"));
+    }
+
+    #[test]
+    fn an_unreadable_nest_refuses_each_registration_once_however_many_patterns_read_it() {
+        let m = scanned(
+            r#"
+class R(private val h: H) {
+    fun r() = router {
+        BASE.nest {
+            GET("/x", h::m)
+            GET("/y", ::top)
+            GET("/z") { 1 }
+        }
+    }
+}
+"#,
+        );
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert_eq!(m.refusals, [RouteRefusal::PathNotComposed; 3]);
+    }
+
+    #[test]
+    fn a_verb_named_annotation_is_not_a_mapping_annotation() {
+        // Retrofit's `@GET("users")` shares its name with the DSL verb the table
+        // now maps, but only a `…Mapping` annotation is a Spring registration.
+        let m = scanned(
+            r#"
+@RequestMapping("/v1")
+interface Api {
+    @GET("users") fun list(): Call
+    @GET fun bare(): Call
+    @get:JsonProperty("x") fun other(): Call
+    @GetMapping("ok") fun real(): String
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /v1/ok"]));
+    }
+
+    #[test]
+    fn a_path_that_is_not_a_literal_is_counted_never_guessed() {
+        let m = scanned(
+            r#"
+fun routes() = router {
+    GET(PATH) { ok().build() }
+    (2012..2024).forEach { year -> GET("/$year/") { ok().build() } }
+    GET("/${a}/b") { ok().build() }
+    GET("/price$") { ok().build() }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /price$"]), "a lone trailing dollar is a literal");
+        assert_eq!(m.refusals, [RouteRefusal::PathNotFolded; 3]);
+    }
+
+    #[test]
+    fn ktor_routes_carry_their_route_prefixes() {
+        let m = scanned(
+            r#"
+import io.ktor.server.routing.*
+
+fun Application.module() {
+    routing {
+        get { call.respondText("index") }
+        get("/health") { call.respondText("ok") }
+        route("/p") {
+            get("/x") { call.respondText("x") }
+            get { call.respondText("root") }
+            route("/q", HttpMethod.Post) {
+                post("/y") { }
+                authenticate("auth") { delete("/z") { } }
+            }
+        }
+        route("api") { put("v1/items") { } }
+    }
+}
+"#,
+        );
+        assert_eq!(
+            names(&m),
+            owned(&[
+                "DELETE /p/q/z",
+                "GET /",
+                "GET /health",
+                "GET /p",
+                "GET /p/x",
+                "POST /p/q/y",
+                "PUT /api/v1/items",
+            ])
+        );
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn a_ktor_route_prefix_that_is_not_a_literal_refuses_what_is_under_it() {
+        let m = scanned(
+            r#"
+fun Application.module() {
+    routing {
+        route(BASE) { get("/x") { } }
+        route("/ok") { get("/y") { } }
+    }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /ok/y"]));
+        assert_eq!(m.refusals, [RouteRefusal::PathNotComposed]);
+    }
+
+    #[test]
+    fn a_ktor_routing_extension_is_mounted_where_this_file_cannot_see() {
+        let m = scanned(
+            r#"
+fun Route.userRoutes() {
+    get("/users") { }
+    route("/admin") { get("/stats") { } }
+}
+private fun Routing.other(): Unit { post("/o") { } }
+fun Application.module() { routing { userRoutes() } }
+fun plain(): Route { return r }
+"#,
+        );
+        assert!(m.routes.is_empty(), "no route is promoted at a bare path: {:?}", m.routes);
+        assert_eq!(m.refusals.len(), 3, "each registration is counted: {:?}", m.refusals);
+    }
+
+    #[test]
+    fn spring_and_ktor_dsls_do_not_read_each_others_call_names() {
+        // `GET` is Spring's, `get` Ktor's: a near miss in case is no verb.
+        let m = scanned("fun r() = router { Get(\"/x\") { 1 }\n gets(\"/y\") { 2 }\n GET_(\"/z\") { 3 } }\n");
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+        assert!(m.refusals.is_empty(), "{:?}", m.refusals);
+    }
+
+    #[test]
+    fn the_annotation_forms_are_unchanged_beside_the_dsl() {
+        let m = scanned(
+            r#"
+@RestController
+class C {
+    @GetMapping("/users")
+    fun list(): String { return "" }
+}
+"#,
+        );
+        assert_eq!(names(&m), owned(&["GET /users"]));
+    }
+}
+
+/// Spring serves a mapping written without a leading slash from the root
+/// (S-561, CR-178): `@GetMapping("vets.xml")` is `/vets.xml`, in Java and in
+/// Kotlin alike — and every path that is not Spring's is left as written.
+#[cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
+mod slash_less_mappings {
+    use super::*;
+
+    fn paths(ext: &str, source: &str) -> Vec<String> {
+        let mut got: Vec<String> = scan_lang(ext, source).routes.into_iter().map(|r| r.path).collect();
+        got.sort();
+        got
+    }
+
+    /// A controller class `C` carrying `prefix` (a class-level annotation, or
+    /// nothing) around `members` — the same text in either language.
+    fn controller(members: &str, prefix: &str) -> String {
+        format!("{prefix}\n@RestController\nclass C {{\n{members}\n}}\n")
+    }
+
+    #[test]
+    fn a_method_path_without_a_slash_is_rooted_in_both_languages() {
+        for (members, expected) in [
+            (r#"@GetMapping("vets.xml") public String vets() { return ""; }"#, "/vets.xml"),
+            (r#"@GetMapping(value = "owners") public String owners() { return ""; }"#, "/owners"),
+            (r#"@GetMapping(path = {"a", "/b"}) public String ab() { return ""; }"#, "/a"),
+        ] {
+            let got = paths("java", &controller(members, ""));
+            assert!(got.contains(&expected.to_string()), "java {members}: {got:?}");
+        }
+        let got = paths("kt", &controller(r#"@GetMapping("vets.xml") fun vets(): String { return "" }"#, ""));
+        assert_eq!(got, ["/vets.xml"]);
+        let got = paths("kt", &controller(r#"@GetMapping(value = ["a", "/b"]) fun ab(): String { return "" }"#, ""));
+        assert_eq!(got, ["/a", "/b"]);
+    }
+
+    #[test]
+    fn a_prefix_without_a_slash_is_rooted_and_joined_with_one_separator() {
+        let in_java = paths("java", &controller(r#"@GetMapping("users") public String u() { return ""; }"#, r#"@RequestMapping("v1")"#));
+        assert_eq!(in_java, ["/v1/users"]);
+        let in_kotlin = paths("kt", &controller(r#"@GetMapping("users") fun u(): String { return "" }"#, r#"@RequestMapping("v1")"#));
+        assert_eq!(in_kotlin, ["/v1/users"]);
+    }
+
+    #[test]
+    fn every_prefix_form_without_a_slash_is_rooted() {
+        for (prefix, expected) in [
+            (r#"@RequestMapping(value = "v1")"#, "/v1/u"),
+            (r#"@RequestMapping(path = C.BASE)"#, "/b/u"),
+            (r#"@RequestMapping({"v1", "/v2"})"#, "/v1/u"),
+        ] {
+            let members = r#"@GetMapping("u") public String u() { return ""; }
+    static final String BASE = "b";"#;
+            let got = paths("java", &controller(members, prefix));
+            assert!(got.contains(&expected.to_string()), "java {prefix}: {got:?}");
+        }
+        let members = r#"@GetMapping("u") fun u(): String { return "" }"#;
+        assert_eq!(paths("kt", &controller(members, r#"@RequestMapping(value = "v1")"#)), ["/v1/u"]);
+        assert_eq!(
+            paths("kt", &controller(members, r#"@RequestMapping(["v1", "/v2"])"#)),
+            ["/v1/u", "/v2/u"]
+        );
+    }
+
+    #[test]
+    fn a_folded_path_or_prefix_without_a_slash_is_rooted_too() {
+        // Folded from constants, the path is judged as a written one is: Spring
+        // serves `"api" + "/" + "users"` from `/api/users`, folded or written.
+        let written = controller(
+            r#"@GetMapping(value = ROOT + "/users") public String u() { return ""; }
+    static final String ROOT = "api";"#,
+            "",
+        );
+        assert_eq!(paths("java", &written), ["/api/users"]);
+        let prefixed = controller(
+            r#"@GetMapping("users") public String u() { return ""; }
+    static final String BASE = "v";"#,
+            r#"@RequestMapping(C.BASE + "2")"#,
+        );
+        assert_eq!(paths("java", &prefixed), ["/v2/users"]);
+    }
+
+    #[test]
+    fn a_path_that_is_already_rooted_or_names_a_placeholder_is_left_as_written() {
+        assert_eq!(
+            paths("java", &controller(r#"@GetMapping("/users") public String u() { return ""; }"#, "")),
+            ["/users"]
+        );
+        // The property may supply the slash: no leading one is guessed.
+        assert_eq!(
+            paths("java", &controller(r#"@GetMapping("${api.base}/x") public String u() { return ""; }"#, "")),
+            ["${api.base}/x"]
+        );
+        assert_eq!(
+            paths("kt", &controller(r#"@GetMapping("${api.base}/x") fun u(): String { return "" }"#, "")),
+            ["${api.base}/x"]
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn a_non_spring_relative_path_is_not_rooted() {
+        // Django's URLconf is relative by design: the root URLconf's `include()`
+        // supplies the prefix, so nothing here may give it a slash.
+        let m = scan_lang("py", "from django.urls import path\nurlpatterns = [path(\"users/\", index)]\n");
+        let got: Vec<&str> = m.routes.iter().map(|r| r.path.as_str()).collect();
+        assert_eq!(got, ["users/"]);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-python")]
+    fn a_single_word_that_is_not_a_slash_less_path_in_any_other_position_stays_unpromoted() {
+        // The CR-110 rule is untouched: a bare token the dialect does not root
+        // is a property key, not a route.
+        let m = scan_lang("py", "from fastapi import FastAPI\napp = FastAPI()\nx = state.get(\"active\")\n");
+        assert!(m.routes.is_empty(), "{:?}", m.routes);
+    }
+}
+
+// ── Rails routes: `draw`-scoped, `=>`/`to:` forms, prefixes, actions (S-567) ──
+
+/// The sorted `(path, method, handler)` projection of a scanned Ruby file.
+#[cfg(feature = "lang-ruby")]
+fn rails_routes(source: &str) -> (Vec<(String, String, Option<String>)>, usize) {
+    let m = scan_lang("rb", source);
+    let mut got = route_triples_of(&m);
+    got.sort();
+    (got, m.refusals.len())
+}
+
+#[cfg(feature = "lang-ruby")]
+fn route_triples_of(m: &FileMatches) -> Vec<(String, String, Option<String>)> {
+    m.routes
+        .iter()
+        .map(|r| (r.path.clone(), r.method.clone(), r.handler.clone()))
+        .collect()
+}
+
+#[cfg(feature = "lang-ruby")]
+fn triple(path: &str, method: &str, handler: Option<&str>) -> (String, String, Option<String>) {
+    (path.to_string(), method.to_string(), handler.map(str::to_string))
+}
+
+/// rack's three false routes were a test client's `get("/cgi/test", …)` calls:
+/// a verb call is a route only inside a `routes.draw` block (S-567).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_verb_call_outside_a_draw_block_is_no_route() {
+    let (got, refused) = rails_routes(
+        r#"class FilesTest < Minitest::Test
+  def test_cgi
+    get("/cgi/test", 'HTTP_IF_MODIFIED_SINCE' => "x")
+    post "/", to: "home#index"
+  end
+end
+"#,
+    );
+    assert_eq!(got, vec![], "a test client's request is no route");
+    assert_eq!(refused, 0, "and no refused one either");
+}
+
+/// lobsters' dominant shape is `get "/x" => "c#a"` (122 of its ~178 lines); the
+/// `to:` and `:to =>` forms name the handler the same way, and a `redirect(…)`
+/// handler is a route with no action (S-567).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn rails_hash_rocket_and_to_forms_are_routes_naming_their_action() {
+    let (got, refused) = rails_routes(
+        r#"Rails.application.routes.draw do
+  get "/rss" => "home#index", :format => "rss"
+  post "/login" => "login#login"
+  get "/page/:page", to: "home#index"
+  get "/hottest", :to => "home#hottest"
+  get("/c/:id", to: "comments#redirect_from_short_id", as: "c")
+  patch "/x", as: "x", to: "story_urls#latest"
+  get "/upvoted", to: redirect("/upvoted/stories")
+  delete "/plain"
+end
+"#,
+    );
+    assert_eq!(
+        got,
+        vec![
+            triple("/c/:id", "GET", Some("CommentsController::redirect_from_short_id")),
+            triple("/hottest", "GET", Some("HomeController::hottest")),
+            triple("/login", "POST", Some("LoginController::login")),
+            triple("/page/:page", "GET", Some("HomeController::index")),
+            triple("/plain", "DELETE", None),
+            triple("/rss", "GET", Some("HomeController::index")),
+            triple("/upvoted", "GET", None),
+            triple("/x", "PATCH", Some("StoryUrlsController::latest")),
+        ]
+    );
+    assert_eq!(refused, 0);
+}
+
+/// `root` is `GET` at the path the blocks around it give it — `/` directly
+/// under `draw`, the namespace's path inside one — and its handler is written
+/// as `to:` or positionally; the positional `"c#a"` is never a path (S-567).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn rails_root_is_get_at_the_enclosing_path() {
+    let (got, _) = rails_routes(
+        r#"Rails.application.routes.draw do
+  root to: "home#index", as: "root"
+  namespace :admin do
+    root "dashboard#show"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        got,
+        vec![
+            triple("/", "GET", Some("HomeController::index")),
+            triple("/admin", "GET", Some("Admin::DashboardController::show")),
+        ]
+    );
+}
+
+/// `namespace` prefixes both the path and the controller's module; `scope`
+/// prefixes the path alone, and its `module:` the controller alone; a
+/// controller written `a/b#c` names its own module (S-567).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn rails_namespace_and_scope_prefix_paths_and_qualify_controllers() {
+    let (got, refused) = rails_routes(
+        r#"Rails.application.routes.draw do
+  namespace :mod do
+    get "flagged_stories/:period" => "flagged#flagged_stories"
+    get "/" => "activities#index"
+    get "admins" => "/admin/users#index"
+    namespace "reports" do
+      get "weekly" => "summaries#weekly"
+    end
+  end
+  scope "/api", module: :v1 do
+    post "items" => "items#create"
+  end
+  scope path: "/p" do
+    get "q" => "admin/users#index"
+  end
+  scope module: "legacy" do
+    get "/old" => "pages#show"
+  end
+  constraints id: /x/ do
+    get "/domains/:id" => "home#for_domain"
+  end
+  namespace :staff_area, module: "staff" do
+    get "shifts" => "rotas#index"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        got,
+        vec![
+            triple("/api/items", "POST", Some("V1::ItemsController::create")),
+            triple("/domains/:id", "GET", Some("HomeController::for_domain")),
+            triple("/mod", "GET", Some("Mod::ActivitiesController::index")),
+            triple("/mod/admins", "GET", Some("Admin::UsersController::index")),
+            triple("/mod/flagged_stories/:period", "GET", Some("Mod::FlaggedController::flagged_stories")),
+            triple("/mod/reports/weekly", "GET", Some("Mod::Reports::SummariesController::weekly")),
+            triple("/old", "GET", Some("Legacy::PagesController::show")),
+            triple("/p/q", "GET", Some("Admin::UsersController::index")),
+            triple("/staff_area/shifts", "GET", Some("Staff::RotasController::index")),
+        ]
+    );
+    assert_eq!(refused, 0);
+}
+
+/// `resources` stays unexpanded: the macro promotes nothing, and a
+/// registration inside its block sits under the resource's unexpanded path, so
+/// it is refused and counted rather than promoted at a guessed address (S-567,
+/// NFR-RA-05).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn rails_resources_stay_unexpanded_and_their_member_routes_are_refused() {
+    let (got, refused) = rails_routes(
+        r#"Rails.application.routes.draw do
+  resources :stories, except: [:index] do
+    post "upvote"
+    get "/stories/:short_id", to: redirect("/s/%{short_id}")
+  end
+  resources :comments do
+    member do
+      get "/comments/:id" => "comments#redirect_from_short_id"
+    end
+  end
+  resource :session
+  get "/about" => "about#about"
+end
+"#,
+    );
+    assert_eq!(got, vec![triple("/about", "GET", Some("AboutController::about"))]);
+    assert_eq!(refused, 3, "one per registration under an unexpanded resource");
+}
+
+/// A handler string that is not `controller#action` names no action — the
+/// route keeps its node and no handler is guessed (S-567, NFR-RA-05).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_handler_that_is_not_controller_hash_action_names_nothing() {
+    let (got, _) = rails_routes(
+        r##"Rails.application.routes.draw do
+  get "/a" => "home"
+  get "/b" => "home#"
+  get "/c" => "#index"
+  get "/d" => "home#in dex"
+  get "/e" => "home#index#x"
+end
+"##,
+    );
+    assert!(got.iter().all(|(_, _, handler)| handler.is_none()), "{got:?}");
+    assert_eq!(got.len(), 5, "every route keeps its node: {got:?}");
+}
+
+/// A `namespace`, `scope` or `resources` block is a router prefix only inside
+/// `routes.draw`: outside it — a routes file another one `draw`s, a Grape API,
+/// a test — it establishes no route, refused or otherwise, and never promotes a
+/// path missing its root (S-567).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_prefix_block_outside_a_draw_block_establishes_no_route() {
+    let (got, refused) = rails_routes(
+        r#"namespace :admin do
+  get "stats" => "stats#index"
+end
+class FilesTest < Minitest::Test
+  def test_cgi
+    scope "/x" do
+      get "/cgi" => "users#show"
+    end
+    resources :stories do
+      post "upvote"
+    end
+  end
+end
+"#,
+    );
+    assert_eq!(got, vec![], "no `draw` encloses any of them");
+    assert_eq!(refused, 0, "and nothing is refused either");
+}
+
+/// A `namespace` or `scope` whose first argument this file cannot read — a
+/// quoted symbol, an `ENV` fallback, an element reference — is an opaque
+/// prefix: its registrations are refused and counted, never promoted under the
+/// enclosing path, and a namespace's handlers are never read without its module
+/// (S-567, FR-FW-05, NFR-RA-05). An option first (`path:`, `module:`) is no
+/// such argument.
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_prefix_this_file_cannot_read_refuses_its_routes() {
+    let (got, refused) = rails_routes(
+        r#"Rails.application.routes.draw do
+  namespace :"api/v1" do
+    get "x" => "users#index"
+  end
+  scope ENV["RAILS_RELATIVE_URL_ROOT"] || "/" do
+    get "y" => "users#index"
+  end
+  scope ENV["P"] do
+    get "z" => "users#index"
+  end
+  namespace :admin, path: "secret" do
+    get "a" => "users#index"
+  end
+  scope path: "/p", module: :v1 do
+    get "b" => "users#index"
+  end
+  namespace :"ops/v2", path: "ops" do
+    get "c" => "users#index"
+  end
+end
+"#,
+    );
+    assert_eq!(
+        got,
+        vec![
+            triple("/ops/c", "GET", None),
+            triple("/p/b", "GET", Some("V1::UsersController::index")),
+            triple("/secret/a", "GET", Some("Admin::UsersController::index")),
+        ]
+    );
+    assert_eq!(refused, 3, "one per registration under an unreadable prefix");
+}
+
+/// A `path:` or `module:` option written as a value rather than a literal is
+/// unreadable: the path refuses its registrations, and the module leaves every
+/// handler under it naming nothing rather than a top-level controller (S-567,
+/// FR-FW-05, NFR-RA-05).
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_path_or_module_option_written_as_a_value_is_unreadable() {
+    let (got, refused) = rails_routes(
+        r#"Rails.application.routes.draw do
+  scope Foo do
+    get "a" => "users#index"
+  end
+  scope path: some_var do
+    get "b" => "users#index"
+  end
+  scope module: mod_name do
+    get "/c" => "users#index"
+  end
+end
+"#,
+    );
+    assert_eq!(got, vec![triple("/c", "GET", None)]);
+    assert_eq!(refused, 2, "the constant prefix and the `path:` value");
+}
+
+// ── A path of exactly `/` under a prefix (sprint-109 review) ──────────────────
+
+/// The sorted `METHOD path` names of a snippet's routes, scanned through the
+/// plugin registered for `ext`.
+fn route_names_of(ext: &str, source: &str) -> Vec<String> {
+    let mut got: Vec<String> = scan_lang(ext, source)
+        .routes
+        .into_iter()
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    got.sort();
+    got
+}
+
+/// Laravel trims both sides of a group join, so `Route::get('/')` in a
+/// `users` group is served at `/users` — the key an OpenAPI operation or an
+/// HTTP-client call on `/users` joins — whichever way the prefix was written
+/// and however deep the group nests (`@fw.route.prefix.absorbs`).
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_laravel_root_route_in_a_group_is_the_group_prefix() {
+    let got = route_names_of(
+        "php",
+        "<?php
+Route::prefix('users')->group(function () {
+    Route::get('/', [UserController::class, 'index']);
+    Route::get('{id}', [UserController::class, 'show']);
+});
+Route::prefix('/admin/')->group(function () {
+    Route::get('/', [AdminController::class, 'index']);
+    Route::prefix('audit')->group(fn () => Route::get('/', [AuditController::class, 'index']));
+});
+Route::group(['prefix' => 'teams'], function () {
+    Route::post('/', [TeamController::class, 'store']);
+});
+",
+    );
+    assert_eq!(got, ["GET /admin", "GET /admin/audit", "GET /users", "GET /users/{id}", "POST /teams"]);
+}
+
+/// The control in the same language: Symfony does not trim, so a method
+/// `#[Route('/')]` under a class `#[Route('/blog')]` keeps the `/blog/` Symfony
+/// serves — the PHP opt-in is Laravel's groups, not the language's.
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_symfony_root_route_under_a_class_prefix_keeps_its_trailing_slash() {
+    let got = route_names_of(
+        "php",
+        "<?php
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+#[Route('/blog')]
+class BlogController extends AbstractController
+{
+    #[Route('/', methods: ['GET'])]
+    public function index(): Response {}
+}
+",
+    );
+    assert_eq!(got, ["GET /blog/"]);
+}
+
+/// NestJS strips the end slash of every non-root path, so `@Get('/')` and a
+/// bare `@Get()` under `@Controller('users')` are one endpoint and one key —
+/// also under a prefix written `'teams/'` — in both TypeScript grammars and in
+/// JavaScript (which runs the `tsx` query). Each form is scanned in a file of its
+/// own: one file promotes one route per key.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_nestjs_root_route_and_a_pathless_one_name_the_same_endpoint() {
+    let controller = |prefix: &str, decorator: &str| {
+        format!(
+            "import {{ Controller, Get }} from '@nestjs/common';
+@Controller({prefix})
+export class UsersController {{
+  {decorator}
+  list() {{}}
+}}
+"
+        )
+    };
+    for ext in ["ts", "tsx", "js"] {
+        for (prefix, want) in [("'users'", "GET /users"), ("'teams/'", "GET /teams"), ("", "GET /")] {
+            for decorator in ["@Get('/')", "@Get()"] {
+                assert_eq!(
+                    route_names_of(ext, &controller(prefix, decorator)),
+                    [want],
+                    "{ext}: @Controller({prefix}) {decorator}"
+                );
+            }
+        }
+    }
+}
+
+/// Rails' `normalize_path` drops a trailing slash, so `get '/'` inside a
+/// `scope` or a `namespace` is served at the block's own path.
+#[cfg(feature = "lang-ruby")]
+#[test]
+fn a_rails_root_route_in_a_scope_or_namespace_is_the_block_path() {
+    let got = route_names_of(
+        "rb",
+        r#"Rails.application.routes.draw do
+  get "/" => "home#index"
+  scope '/admin' do
+    get '/', to: 'dash#index'
+    namespace :reports do
+      get "/" => "reports#index"
+    end
+  end
+  namespace :mod do
+    get "/" => "activities#index"
+    get "x" => "activities#x"
+  end
+end
+"#,
+    );
+    assert_eq!(got, ["GET /", "GET /admin", "GET /admin/reports", "GET /mod", "GET /mod/x"]);
+}
+
+/// The control: Spring serves `@GetMapping("/")` under `@RequestMapping("/v1")`
+/// at `/v1/`, a different endpoint from the bare `@GetMapping`'s `/v1`, so the
+/// Java query states no absorption and both keys stay.
+#[cfg(feature = "lang-java")]
+#[test]
+fn a_spring_root_route_under_a_class_prefix_keeps_its_trailing_slash() {
+    let got = route_names_of(
+        "java",
+        r#"@RestController
+@RequestMapping("/v1")
+class V1Controller {
+    @GetMapping("/")
+    String slash() { return ""; }
+    @GetMapping
+    String bare() { return ""; }
+}
+"#,
+    );
+    assert_eq!(got, ["GET /v1", "GET /v1/"]);
 }

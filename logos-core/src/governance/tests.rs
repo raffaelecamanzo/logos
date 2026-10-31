@@ -42,6 +42,7 @@ fn edge(source: i64, target: i64) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind: EdgeKind::Calls,
+        dispatch: false,
     }
 }
 
@@ -91,6 +92,7 @@ fn kind_edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 
@@ -133,6 +135,7 @@ fn run_eval<'a>(
         compiled,
         nodes,
         edges,
+        links: &ContainerLinks::default(),
         functions,
         function_metrics: &[],
         annotations: &[],
@@ -150,6 +153,7 @@ fn dep_edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 
@@ -165,6 +169,7 @@ fn metric_row(id: i64, is_dead: bool, is_duplicate: bool) -> FunctionMetricRow {
         max_nesting_depth: None,
         clone_group: None,
         has_body: None,
+        unbound_accesses: Vec::new(),
     }
 }
 
@@ -182,6 +187,7 @@ fn run_eval_coupling(
         compiled,
         nodes,
         edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: &[],
         annotations: &[],
@@ -212,6 +218,7 @@ fn run_eval_redundancy_scoped(
         compiled,
         nodes: &[],
         edges: &[],
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics,
         annotations: &[],
@@ -562,6 +569,64 @@ fn coupling_counts_distinct_neighbouring_modules_not_symbols() {
     );
 }
 
+/// A `calls` edge the store reads as dispatch: a trait call's fan-out to one of
+/// the trait method's implementations ([FR-QM-20]).
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+fn dispatch_edge(source: i64, target: i64) -> EdgeRow {
+    EdgeRow {
+        dispatch: true,
+        ..edge(source, target)
+    }
+}
+
+/// A call from the domain reaching an infra implementation only through a
+/// trait crosses no layer and no boundary ([FR-QM-20], [FR-GV-02]); the same
+/// edge as a direct call is both an upward dependency and a boundary crossing.
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+/// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
+#[test]
+fn a_dispatch_edge_violates_no_layer_or_boundary_and_a_direct_call_does() {
+    let compiled = layered_rules();
+    let nodes = [
+        node(1, "by_dyn", Some("domain/core.rs")),
+        node(2, "write", Some("infra/store.rs")),
+    ];
+    let (violations, checked) = run_eval(&compiled, &nodes, &[dispatch_edge(1, 2)], &[], 0);
+    assert_eq!(checked, 2, "the ordering rule and the boundary are evaluated");
+    assert!(violations.is_empty(), "a dispatch is no dependency: {violations:?}");
+
+    let (violations, _) = run_eval(&compiled, &nodes, &[edge(1, 2)], &[], 0);
+    let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+    assert_eq!(rules, ["layer-ordering", "boundary:domain->infra"]);
+}
+
+/// A dispatch edge counts toward neither coupling budget ([FR-QM-20],
+/// [FR-GV-11]); the same edge as a direct call counts toward both.
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+/// [FR-GV-11]: ../../../docs/specs/requirements/FR-GV-11.md
+#[test]
+fn a_dispatch_edge_counts_toward_no_coupling_budget_and_a_direct_call_does() {
+    let compiled = constraints_only(Constraints {
+        max_fan_in: Some(Budget::Absolute(0)),
+        max_fan_out: Some(Budget::Absolute(0)),
+        ..Constraints::default()
+    });
+    let nodes = [
+        node(1, "by_dyn", Some("src/caller.rs")),
+        node(2, "m", Some("src/implementor.rs")),
+    ];
+    let (violations, checked) = run_eval(&compiled, &nodes, &[dispatch_edge(1, 2)], &[], 0);
+    assert_eq!(checked, 2, "both coupling budgets are active");
+    assert!(violations.is_empty(), "a dispatch is no coupling: {violations:?}");
+
+    let (violations, _) = run_eval(&compiled, &nodes, &[edge(1, 2)], &[], 0);
+    let rules: Vec<&str> = violations.iter().map(|v| v.rule.as_str()).collect();
+    assert_eq!(rules, ["max_fan_in", "max_fan_out"]);
+}
+
 /// [CR-065] AC: `is_test` nodes and their incident edges are excluded BEFORE
 /// the rollup — a test-only module is never reported, and neither a
 /// test→production nor a production→test edge contributes to either side's
@@ -890,6 +955,7 @@ fn coupling_and_redundancy_omitted_enforce_nothing() {
         compiled: &compiled,
         nodes: &nodes,
         edges: &edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: &metrics,
         annotations: &[],
@@ -1593,6 +1659,7 @@ fn run_eval_require_tested(
         compiled,
         nodes: &[],
         edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: &[],
         annotations,
@@ -1964,6 +2031,7 @@ fn run_eval_require_documented(
         compiled,
         nodes,
         edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: &[],
         annotations,
@@ -2306,6 +2374,7 @@ fn struct_row(
         max_nesting_depth: nest,
         clone_group: clone.map(NodeId),
         has_body: None,
+        unbound_accesses: Vec::new(),
     }
 }
 
@@ -2322,6 +2391,7 @@ fn run_eval_budgets(
         compiled,
         nodes,
         edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics,
         annotations: &[],
@@ -2793,6 +2863,7 @@ fn evaluate_concatenates_sections_in_canonical_order() {
             max_nesting_depth: Some(1), // > max_nesting_depth 0 → structural
             clone_group: None,
             has_body: None,
+            unbound_accesses: Vec::new(),
         },
     ];
     let annotations = [annot(5, "exported_api", NodeKind::Function, true, Some("lib/api.rs"))];
@@ -2801,6 +2872,7 @@ fn evaluate_concatenates_sections_in_canonical_order() {
         compiled: &compiled,
         nodes: &nodes,
         edges: &edges,
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: &function_metrics,
         annotations: &annotations,
@@ -3214,6 +3286,7 @@ fn eval_set_classified(
         compiled,
         nodes: &nodes,
         edges: &[],
+        links: &ContainerLinks::default(),
         functions: &[],
         function_metrics: metrics,
         annotations: &[],
@@ -3362,6 +3435,7 @@ fn max_clone_ratio_count_delta_form_passes_at_baseline_and_fails_above() {
             compiled: &compiled,
             nodes: &[],
             edges: &[],
+            links: &ContainerLinks::default(),
             functions: &[],
             function_metrics: metrics,
             annotations: &[],
@@ -3417,6 +3491,7 @@ fn every_per_symbol_ratchet_budget_marks_its_offenders() {
         compiled: &compiled,
         nodes: &nodes,
         edges: &[edge(2, 1)],
+        links: &ContainerLinks::default(),
         functions: &functions,
         function_metrics: &metrics,
         annotations: &[],
@@ -3561,6 +3636,7 @@ mod security_gate {
             short_commit: None,
             owasp: owasp.iter().map(|c| (*c).to_string()).collect(),
             suppressed: false,
+            reporters: Vec::new(),
         }
     }
 
@@ -3945,11 +4021,92 @@ mod security_gate {
         assert!(!message.contains("gate --save"), "{message}");
     }
 
+    /// [FR-SC-29] (S-809): one advisory Trivy and OSV-Scanner both report is
+    /// one finding to the gate. A cap names it once with both scanners; the
+    /// ratchet knows it by either reporter's key, so a baseline written before
+    /// the merge — which recorded each — still holds it; it is evaluated while
+    /// either reporter's scan is fresh; and `gate --save` and the checked-in
+    /// baseline record every reporter's key, so a reporter that drops out
+    /// later leaves it known.
+    ///
+    /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+    #[test]
+    fn a_merged_advisory_is_one_finding_to_every_rule_and_known_by_every_reporters_key() {
+        use super::security::SummaryReporter;
+        let reporter = |scanner: &str, fingerprint: &str| SummaryReporter {
+            scanner: scanner.to_string(),
+            fingerprint: fingerprint.to_string(),
+            legacy_fingerprints: vec![format!("{fingerprint}-old")],
+            rule_id: "CVE-1".to_string(),
+        };
+        let mut merged = finding("t", "CVE-1", Severity::High, &[]);
+        merged.scanner = "Trivy".to_string();
+        merged.path = Some("go.mod".to_string());
+        merged.reporters = vec![reporter("Trivy", "t"), reporter("osv-scanner", "o")];
+        let summary = |trivy: ScanFreshness, baseline: Option<&[&str]>| SecuritySummary {
+            scanners: vec![
+                row("trivy", "Trivy", trivy, true),
+                row("osv-scanner", "osv-scanner", ScanFreshness::Fresh, true),
+            ],
+            findings: vec![merged.clone()],
+            baseline: baseline.map(|b| b.iter().map(|f| (*f).to_string()).collect::<BTreeSet<_>>()),
+            ..SecuritySummary::default()
+        };
+        let cap = SecurityRules { ratchet_min_severity: Severity::Critical, max_severity: Some(Severity::High), ..SecurityRules::default() };
+
+        let verdict = check_security(&cap, &summary(ScanFreshness::Stale("HEAD moved".into()), Some(&[])));
+        assert_eq!(rules_of(&verdict), [RULE_MAX_SEVERITY], "one finding, one cap violation, though Trivy's scan is stale");
+        assert!(verdict.violations[0].message.contains("(Trivy, osv-scanner)"), "{}", verdict.violations[0].message);
+
+        let ratchet = SecurityRules { ratchet_min_severity: Severity::High, ..SecurityRules::default() };
+        for known in ["t", "o", "o-old"] {
+            let verdict = check_security(&ratchet, &summary(ScanFreshness::Fresh, Some(&[known])));
+            assert!(verdict.violations.is_empty(), "a baseline holding `{known}` holds it: {:?}", verdict.violations);
+        }
+        let verdict = check_security(&ratchet, &summary(ScanFreshness::Fresh, Some(&["x"])));
+        assert_eq!(rules_of(&verdict), [RULE_RATCHET], "and one new to the baseline is new once");
+
+        let recorded = summary(ScanFreshness::Fresh, None);
+        assert_eq!(
+            baseline_fingerprints(&recorded),
+            [("Trivy".to_string(), "t".to_string()), ("osv-scanner".to_string(), "o".to_string())]
+        );
+        let entries = baseline_entries(&recorded, under_checkout);
+        let got: Vec<(&str, &str)> = entries.iter().map(|e| (e.fingerprint.as_str(), e.rule_id.as_str())).collect();
+        assert_eq!(got, [("o", "CVE-1"), ("t", "CVE-1")]);
+    }
+
+    /// S-809 review: a checked-in baseline blessed before history.db migration
+    /// 10 knows an unbound lockfile finding by rule id and project path; a
+    /// merged one is known by any reporter's rule id there — here OSV-Scanner's
+    /// GHSA, the later reporter's.
+    #[test]
+    fn the_baseline_stopgap_knows_a_merged_finding_by_any_reporters_rule() {
+        use super::security::SummaryReporter;
+        let reporter = |scanner: &str, fingerprint: &str, rule_id: &str| SummaryReporter {
+            scanner: scanner.to_string(),
+            fingerprint: fingerprint.to_string(),
+            legacy_fingerprints: Vec::new(),
+            rule_id: rule_id.to_string(),
+        };
+        let mut merged = finding("t", "CVE-1", Severity::High, &[]);
+        merged.scanner = "Trivy".to_string();
+        merged.unbound_location = Some("go.mod".to_string());
+        merged.reporters = vec![reporter("Trivy", "t", "CVE-1"), reporter("osv-scanner", "o", "GHSA-1")];
+        let mut summary = summary(vec![merged], Some(&[]));
+        summary.scanners = vec![row("trivy", "Trivy", ScanFreshness::Fresh, true)];
+        summary.baseline_source = BaselineSource::CheckedIn;
+        summary.baseline_locations = [("GHSA-1".to_string(), "go.mod".to_string())].into_iter().collect();
+        let ratchet = SecurityRules { ratchet_min_severity: Severity::High, ..SecurityRules::default() };
+        let verdict = check_security(&ratchet, &summary);
+        assert!(verdict.violations.is_empty(), "{:?}", verdict.violations);
+    }
+
     /// [FR-SC-10] acceptance / [ADR-79] §8: the security gate is not a metric
     /// dimension, so it moves no metric semantics and resets no baseline. The
-    /// version is v8 since S-523's graph-dimension applicability, not since it.
+    /// version is v9 since S-816's Cohesion changes, not since it.
     #[test]
     fn the_security_gate_leaves_the_metric_semantics_version_unchanged() {
-        assert_eq!(crate::metrics::METRIC_SEMANTICS_VERSION, 8);
+        assert_eq!(crate::metrics::METRIC_SEMANTICS_VERSION, 9);
     }
 }

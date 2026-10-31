@@ -40,6 +40,7 @@
           "unbound": 0,
           "reasons": {
             "external-type": 0,
+            "local-binding": 0,
             "name-not-in-scope": 0,
             "no-applicable-overload": 0,
             "no-receiver-evidence": 0,
@@ -178,6 +179,7 @@
           "fingerprint": "7634d84d3aa840445f09ea53bca57159d2d6feed57100c847068db6708f65870",
           "rule_id": "rust.lang.security.formatted-sql",
           "severity": "high",
+          "confidence": "unstated",
           "cwes": [
             "CWE-89"
           ],
@@ -199,6 +201,7 @@
           "suppression": null,
           "code_scope": "production",
           "code_scope_reason": null,
+          "needs_review": false,
           "context": {
             "line": 3,
             "enclosing": {
@@ -246,6 +249,7 @@
           "fingerprint": "1d45b1ffbb864367204c682351813a0d751fd69067d95962dc4c8dc0470571d1",
           "rule_id": "generic.secrets.hardcoded-key",
           "severity": "high",
+          "confidence": "unstated",
           "cwes": [
             "CWE-798"
           ],
@@ -267,6 +271,7 @@
           "suppression": null,
           "code_scope": "production",
           "code_scope_reason": null,
+          "needs_review": false,
           "context": {
             "line": 6,
             "enclosing": {
@@ -326,7 +331,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A02:2025",
@@ -346,7 +353,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A03:2025",
@@ -380,7 +389,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A05:2025",
@@ -398,7 +409,9 @@
             "state": "covered",
             "findings": 1
           },
-          "production_findings": 1
+          "production_findings": 1,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A06:2025",
@@ -414,7 +427,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A07:2025",
@@ -434,7 +449,9 @@
             "state": "covered",
             "findings": 1
           },
-          "production_findings": 1
+          "production_findings": 1,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A08:2025",
@@ -451,7 +468,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A09:2025",
@@ -468,7 +487,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         },
         {
           "id": "A10:2025",
@@ -485,7 +506,9 @@
             "state": "covered",
             "findings": 0
           },
-          "production_findings": 0
+          "production_findings": 0,
+          "needs_review_findings": 0,
+          "dev_findings": 0
         }
       ],
       "suppressions": []
@@ -503,7 +526,9 @@
       "excluded": {
         "not_fresh": 0,
         "suppressed": 0,
-        "test": 0
+        "test": 0,
+        "dev": 0,
+        "needs_review": 0
       }
     },
     "editions": [
@@ -527,7 +552,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A02:2025",
@@ -547,7 +574,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A03:2025",
@@ -581,7 +610,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A05:2025",
@@ -599,7 +630,9 @@
               "state": "covered",
               "findings": 1
             },
-            "production_findings": 1
+            "production_findings": 1,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A06:2025",
@@ -615,7 +648,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A07:2025",
@@ -635,7 +670,9 @@
               "state": "covered",
               "findings": 1
             },
-            "production_findings": 1
+            "production_findings": 1,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A08:2025",
@@ -652,7 +689,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A09:2025",
@@ -669,7 +708,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A10:2025",
@@ -686,7 +727,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           }
         ],
         "findings": [
@@ -728,7 +771,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A02:2021",
@@ -748,7 +793,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A03:2021",
@@ -766,7 +813,9 @@
               "state": "covered",
               "findings": 1
             },
-            "production_findings": 1
+            "production_findings": 1,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A04:2021",
@@ -782,7 +831,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A05:2021",
@@ -802,7 +853,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A06:2021",
@@ -835,7 +888,9 @@
               "state": "covered",
               "findings": 1
             },
-            "production_findings": 1
+            "production_findings": 1,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A08:2021",
@@ -852,7 +907,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A09:2021",
@@ -869,7 +926,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           },
           {
             "id": "A10:2021",
@@ -887,7 +946,9 @@
               "state": "covered",
               "findings": 0
             },
-            "production_findings": 0
+            "production_findings": 0,
+            "needs_review_findings": 0,
+            "dev_findings": 0
           }
         ],
         "findings": [
@@ -912,7 +973,7 @@
     ],
     "gate": null
   },
-  "_comment": "GET /api/v1/security over web/tests/api_v1.rs's security fixture (S-670): a Semgrep report with a CWE-89 finding and a redacted secret-class one, Bandit installed but never run. The stub's temporary path is replaced by /stub/bin. `gate_band` is the same fixture's band under required_scanners = [\"bandit\"]. S-796: each finding carries the code_scope and code_scope_reason S-795 added, and the counts' excluded.test, as web/tests/api_v1.rs serves them.",
+  "_comment": "GET /api/v1/security over web/tests/api_v1.rs's security fixture (S-670): a Semgrep report with a CWE-89 finding and a redacted secret-class one, Bandit installed but never run. The stub's temporary path is replaced by /stub/bin. `gate_band` is the same fixture's band under required_scanners = [\"bandit\"]. S-796: each finding carries the code_scope and code_scope_reason S-795 added, and the counts' excluded.test, as web/tests/api_v1.rs serves them. S-817: each finding carries its confidence and needs_review, each covered category its needs_review_findings, and the counts' excluded.needs_review.",
   "gate_band": {
     "passed": false,
     "checked_rules": 1,

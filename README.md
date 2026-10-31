@@ -5,14 +5,14 @@
 <h1 align="center">Logos</h1>
 
 <p align="center">
-  <strong>Guidance on governance, security and test coverage for agents and humans</strong>
+  <strong>Guidance on quality, security and test coverage for agents and humans</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/raffaelecamanzo/logos/releases/latest"><img src="https://img.shields.io/github/v/release/raffaelecamanzo/logos?color=da291c&label=release" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3d3935" alt="Apache-2.0 license"></a>
   <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux-3d3935" alt="macOS and Linux">
-  <img src="https://img.shields.io/badge/MCP-34%20tools-3d3935" alt="34 MCP tools">
+  <img src="https://img.shields.io/badge/MCP-35%20tools-3d3935" alt="35 MCP tools">
   <img src="https://img.shields.io/badge/built%20with-Rust-3d3935" alt="Built with Rust">
 </p>
 
@@ -26,14 +26,14 @@
 
 ---
 
-Logos's primary value is guidance in three areas: compliance and governance,
-security, and test coverage. It gives AI agents and the people working with them
+Logos's primary value is guidance in three areas: quality, security, and test
+coverage. It gives AI agents and the people working with them
 concrete insight into where an application stands, so that its quality,
 robustness and security improve over time.
 
-- **Governance and compliance.** Architecture rules in `.logos/rules.toml` are
+- **Quality.** Architecture rules in `.logos/rules.toml` are
   checked with `logos check`. The quality gate fails a change that regresses a
-  saved baseline, and the Health signal scores the codebase on ten structural
+  saved baseline, and the Quality signal scores the codebase on ten structural
   dimensions.
 - **Security.** Logos manages the security scanners (installed and run only on
   your command, with your consent), shows each finding in its code context (the
@@ -42,7 +42,7 @@ robustness and security improve over time.
   chosen severity fails the gate, while known ones do not.
 - **Coverage.** Logos ingests LCOV and Cobertura reports and binds them to the
   code graph by matching each report path to an indexed file, so coverage sits
-  beside complexity and churn in the Health and Files & Risk views instead of
+  beside complexity and churn in the Quality and Files & Risk views instead of
   staying a single percentage.
 
 All of this rests on one foundation: Logos turns your repository into a
@@ -68,7 +68,7 @@ of the search.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/dashboard-dark.png">
-    <img src="assets/readme/dashboard-light.png" alt="The Logos web dashboard showing the quality index, language mix, graph size and activity for an indexed project" width="900">
+    <img src="assets/readme/dashboard-light.png" alt="The Logos web dashboard showing the quality index, security findings and code coverage for an indexed project, with the Quality, Security and Coverage pages in the sidebar" width="900">
   </picture>
 </p>
 
@@ -181,8 +181,8 @@ And while you edit: `search`, `node`, `callers`, `callees` and `explore` navigat
 structure instead of by string. Every CLI command has an MCP twin that returns the
 same payload, and every one takes `--json`.
 
-**Twelve languages** out of the box: Rust, Python, TypeScript/JavaScript (incl.
-TSX/JSX), Go, Java, C, C++, C#, Kotlin, Scala, Ruby and PHP. Markdown docs and ten
+**Thirteen languages** out of the box: Rust, Python, TypeScript (incl. TSX),
+JavaScript (incl. JSX), Go, Java, C, C++, C#, Kotlin, Scala, Ruby and PHP. Markdown docs and ten
 config formats (YAML, JSON, TOML, Dockerfile, Makefile, Shell, Protobuf, GraphQL,
 Terraform, SQL, plus OpenAPI) are indexed too, so you can ask which code implements
 a requirement, or which docs a change will make stale.
@@ -193,8 +193,7 @@ checks the declaration (`logos languages` prints it):
 
 <!-- reach:begin (generated from plugins/*/plugin.toml — see logos-core/tests/reach_docs.rs) -->
 - **`resolved`** — calls, imports and type relations bind across files: Java, Rust
-- **`partial`** — some relations bind across files, not all: C#, Go, Kotlin, PHP, Python, Scala, TSX (incl. JSX), TypeScript (incl. JavaScript)
-- **`same-file`** — references bind only inside the file that wrote them: C, C++, Ruby
+- **`partial`** — some relations bind across files, not all: C, C#, C++, Go, JavaScript (incl. JSX), Kotlin, PHP, Python, Ruby, Scala, TSX, TypeScript
 <!-- reach:end -->
 
 Per-repository figures are in `logos status --json` (`resolution_by_language`).
@@ -218,7 +217,7 @@ logos gate           # ...and fail CI when a change regresses it
 
 `logos serve --ui` opens a local web app over the same graph:
 
-- **Dashboard** and **Health** — the quality signal, language mix, test coverage
+- **Dashboard** and **Quality** — the quality signal, language mix, test coverage
   and rule findings at a glance.
 - **Graph** — an interactive, filterable view of symbols, docs and config.
 - **Files & Risk** — churn × complexity hotspots, joined with coverage.

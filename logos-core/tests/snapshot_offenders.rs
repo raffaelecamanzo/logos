@@ -941,8 +941,8 @@ fn after_scan_every_entry_carries_its_node_id_value_and_threshold() {
 /// [FR-QM-19] AC 2: `offenders --path 'src/a/**' --dimension nesting` returns
 /// all 14 deep functions under `src/a` — past the display cap — and none
 /// outside the glob, `src/ab` included; each is the full entry the capped list
-/// carries, in its order. Without filters every offender of every dimension is
-/// listed, the capped lists being the head of each.
+/// carries, in its order. Without filters every offender of every dimension
+/// but Equality is listed, the capped lists being the head of each.
 #[test]
 fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
     let tmp = fourteen_under_src_a();
@@ -985,7 +985,63 @@ fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
     let mut canonical = dimensions.clone();
     canonical.sort_by_key(|d| WorstOffenders::DIMENSIONS.iter().position(|x| x == d));
     assert_eq!(dimensions, canonical, "dimension order, then each list's own");
-    assert!(everything.len() > all_nesting.len(), "every dimension is listed");
+    let nesting_in_everything = everything.iter().filter(|o| o.dimension == "nesting").count();
+    assert_eq!(nesting_in_everything, all_nesting.len(), "every nesting entry is in the unfiltered list");
+}
+
+/// [CR-252] H1 (S-815): Equality's entries — the functions above the mean
+/// complexity — are in no unfiltered or path-filtered listing and in no total
+/// of one; `--dimension equality` lists every one, as the snapshot persisted
+/// them. The capped Equality list Health shows is still the head of that list,
+/// and reading changes no score, signal or thresholds hash.
+///
+/// [CR-252]: ../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+#[test]
+fn equality_entries_are_listed_only_when_equality_is_named() {
+    let tmp = fourteen_under_src_a();
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.index().warnings.is_empty());
+    let scan = engine.scan(true).expect("scan runs");
+    let health_before = engine.latest_health().unwrap();
+
+    let everything = engine.offenders(&OffendersFilter::default()).unwrap().offenders;
+    let by_path = engine.offenders(&OffendersFilter::parse(Some("**"), None).unwrap()).unwrap().offenders;
+    for (what, listed) in [("unfiltered", &everything), ("--path **", &by_path)] {
+        assert!(listed.iter().all(|o| o.dimension != "equality"), "{what} lists no equality entry");
+    }
+
+    let equality = engine
+        .offenders(&OffendersFilter::parse(None, Some("equality")).unwrap())
+        .unwrap()
+        .offenders;
+    assert!(
+        equality.len() > scan.worst_offenders.equality.len(),
+        "the fixture has more above-mean functions than the cap: {}",
+        equality.len()
+    );
+    assert!(equality.iter().all(|o| o.dimension == "equality" && o.offender.threshold.is_none()));
+    let head: Vec<_> = equality.iter().take(scan.worst_offenders.equality.len()).map(|o| &o.offender).collect();
+    assert_eq!(head, scan.worst_offenders.equality.iter().collect::<Vec<_>>(), "Health's capped list is the head");
+
+    // The total falls by exactly the equality count: every other dimension,
+    // named one at a time, adds up to the unfiltered listing.
+    let named: usize = WorstOffenders::DIMENSIONS
+        .iter()
+        .filter(|d| **d != "equality")
+        .map(|d| engine.offenders(&OffendersFilter::parse(None, Some(d)).unwrap()).unwrap().offenders.len())
+        .sum();
+    assert_eq!(everything.len(), named, "the unfiltered total is every dimension's but equality's");
+
+    let health_after = engine.latest_health().unwrap();
+    let scores = |h: &logos_core::models::quality::LatestHealth| {
+        (h.scan.signal, serde_json::to_string(&h.scan.metrics).unwrap())
+    };
+    assert_eq!(scores(&health_after), scores(&health_before), "scores and signal unchanged");
+    assert_eq!(metric_snapshot_count(tmp.path()), 1, "listing writes nothing");
+    let hash: Option<String> = read_only(tmp.path())
+        .query_row("SELECT thresholds_hash FROM metric_snapshots", [], |r| r.get(0))
+        .unwrap();
+    assert!(hash.is_some_and(|h| !h.is_empty()), "the snapshot keeps its thresholds hash");
 }
 
 /// [FR-QM-19] AC 3 / [NFR-RA-06]: the listing is byte-stable — twice-read on
@@ -1080,8 +1136,8 @@ fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
 /// [BR-61]: ../../docs/specs/software-spec.md#311-quality-metrics
 #[test]
 fn offender_values_and_the_uncapped_list_move_no_signal_gate_or_semantics_version() {
-    // S-676 did not move the semantics; S-523 moved them to v8 (FR-QM-18).
-    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 8, "S-676 does not move the semantics");
+    // S-676 did not move the semantics; S-816 moved them to v9 (FR-QM-11).
+    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 9, "S-676 does not move the semantics");
     let tampers: [(&str, &str); 3] = [
         ("emptied", "DELETE FROM metric_snapshot_offenders_uncapped;"),
         (

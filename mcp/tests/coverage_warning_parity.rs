@@ -52,14 +52,15 @@ fn coverage(payload: &Value) -> Vec<String> {
         .collect()
 }
 
-/// A C project — C binds within a file only — scanned through the MCP `scan`
+/// A C project binding within a file only — its one cross-file callee is
+/// `static`, its own file's alone (S-584) — scanned through the MCP `scan`
 /// tool carries exactly the one coverage warning the shared helper computes,
 /// naming `c` and its share.
 #[tokio::test]
 async fn the_mcp_scan_carries_the_helpers_one_coverage_warning() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
-    write(root, "src/core/core.c", "int helper(int x) { return x + 1; }\nint step(int x) { return helper(x); }\n");
+    write(root, "src/core/core.c", "int helper(int x) { return x + 1; }\nstatic int step(int x) { return helper(x); }\n");
     write(root, "src/net/net.c", "int step(int x);\nint send(int x) { return step(x); }\n");
     let expected = {
         let engine = Engine::start(root).expect("engine starts");

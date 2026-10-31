@@ -941,6 +941,9 @@ fn the_workspace_status_payload_has_exactly_one_member_table() {
             "coverage",
             "degraded_rollup",
             "members",
+            // S-637: a workspace-level figure that names members it could not
+            // read — a section, never a second per-member array.
+            "reference_resolution",
             "topics",
             "warm_rollup",
             "workspace"

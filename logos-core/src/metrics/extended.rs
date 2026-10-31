@@ -11,7 +11,8 @@
 //! - **Conciseness** ([FR-QM-10]) — `1 − brain-method ratio`, floored. A *brain
 //!   method* meets all three of CC ≥ `T_cc` ∧ LOC ≥ `T_loc` ∧ nesting ≥ `T_bn`.
 //! - **Cohesion** ([FR-QM-11]) — mean of `1/LCOM4` over production classes,
-//!   floored; **n/a drop-out** when no class construct exists.
+//!   floored; **n/a drop-out** when no class construct exists, or fewer than
+//!   `cohesion_min_classes` of them (v9).
 //! - **Focus** ([FR-QM-12]) — `1 − god-container ratio` over class-like
 //!   containers, floored; **n/a drop-out** when no class-like container exists.
 //!
@@ -47,6 +48,11 @@
 //! `Struct`), and Focus scopes to `Class ∪ Struct` (the class-like containers of
 //! [FR-QM-12]). No core change per language and no separate manifest field is
 //! needed — the kind a construct extracts to *is* its declared applicability.
+//! One kind is a container only where its language says so (S-575): a
+//! [`NodeKind::Trait`] with a bodied method, in a language whose plugin declares
+//! `bodied_traits_are_containers` (Scala,
+//! [`bodied_trait_container_extensions`](crate::plugin::registry::bodied_trait_container_extensions)),
+//! is scoped as a `Class` is; a Rust trait never is.
 //!
 //! Cohesion has one more gate (metric-semantics v8, [CR-171]): a `Class` counts
 //! only when its language's plugin declares the **`member_access`** capability
@@ -56,6 +62,13 @@
 //! not cohesion, so it is not scoreable; a repository with no scoreable class
 //! drops Cohesion out exactly as a class-less one does. Focus is not gated: it
 //! counts methods and spans, which every language records.
+//!
+//! And a count (metric-semantics v9, [CR-252]): Cohesion applies only over at
+//! least `[metric_thresholds] cohesion_min_classes` scoreable classes (default
+//! 5). Below that one class's `1/LCOM4` is most of the mean, so the dimension
+//! takes the same drop-out, and says why ([`CohesionNotApplicable`]).
+//!
+//! [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 //!
 //! [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 //! [`LanguageRegistry::member_access_extensions`]: crate::plugin::LanguageRegistry::member_access_extensions
@@ -86,7 +99,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::graph_store::{EdgeRow, FunctionMetricRow, NodeRow};
 use crate::model::{EdgeKind, NodeId, NodeKind};
-use crate::models::quality::MetricValue;
+use crate::models::quality::{CohesionNotApplicable, MethodAttribution, MetricValue};
+
+use super::attribution::ContainerLinks;
 
 /// The floor each new dimension normalizes into `[FLOOR, 1]` ([FR-QM-14],
 /// [ADR-21]): a ratio of 1 maps to 0.01, so the dimension drags but never alone
@@ -162,10 +177,18 @@ pub struct Thresholds {
     ///
     /// [FR-AN-02]: ../../../docs/specs/requirements/FR-AN-02.md
     pub duplicate_min_tokens: i64,
+    /// The fewest scoreable classes Cohesion needs to apply ([FR-QM-11],
+    /// [CR-252]); default 5, a positive integer. Below it Cohesion is n/a
+    /// ("too few classes") and leaves the aggregate and "where to start".
+    ///
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub cohesion_min_classes: i64,
 }
 
 impl Default for Thresholds {
-    /// The documented [CR-005] §5.1 / [CR-013] defaults ([FR-QM-09]..[FR-QM-13]).
+    /// The documented [CR-005] §5.1 / [CR-013] / [CR-252] defaults
+    /// ([FR-QM-09]..[FR-QM-13]).
     fn default() -> Self {
         Self {
             nest: 4,
@@ -177,6 +200,7 @@ impl Default for Thresholds {
             clone_similarity: 0.85,
             clone_min_tokens: 50,
             duplicate_min_tokens: 50,
+            cohesion_min_classes: 5,
         }
     }
 }
@@ -192,11 +216,19 @@ impl Thresholds {
     ///
     /// The two near-clone parameters ([CR-013]) and the exact-duplicate floor
     /// (S-501) are appended **only when they differ from their documented
-    /// defaults**. This keeps the default-set hash byte-identical to the
-    /// pre-CR-013 build — an untuned repo never spuriously re-baselines on
-    /// upgrade — while any tuning of any of them still moves the hash (the
-    /// structural, `clone_`, and `duplicate_` keys use disjoint name prefixes,
-    /// so no tuning of one can ever forge another's canonical segment).
+    /// defaults**. At their defaults they add nothing to the canonical form, so
+    /// introducing them re-baselined no untuned repo, while any tuning of any
+    /// of them still moves the hash (the
+    /// structural, `clone_`, `duplicate_` and `cohesion_` keys use disjoint
+    /// name prefixes, so no tuning of one can ever forge another's canonical
+    /// segment).
+    ///
+    /// `cohesion_min_classes` ([CR-252]) is the exception: it is always
+    /// hashed, default included, because the CR changes the hash with the
+    /// key. The one re-baseline that costs is the one metric semantics v9
+    /// forces anyway, so a baseline taken before resets once.
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
     ///
     /// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
     /// [BR-25]: ../../../docs/specs/software-spec.md#311-quality-metrics
@@ -214,10 +246,13 @@ impl Thresholds {
             self.god_methods,
             self.god_span,
         );
+        // CR-252: always present, so the v9 default set hashes apart from v8's.
+        canonical.push_str(&format!(";cohesion_min_classes={}", self.cohesion_min_classes));
         // CR-013: fold the near-clone parameters into the hashed effective set.
-        // Append-on-divergence preserves the pre-CR default-set hash exactly
-        // (FR-QM-14 byte-identity), so existing baselines stay valid; comparing
-        // the similarity by bit pattern is exact and dodges `clippy::float_cmp`.
+        // Append-on-divergence: at their defaults these keys add nothing to the
+        // canonical form (FR-QM-14), so introducing them moved no baseline;
+        // comparing the similarity by bit pattern is exact and dodges
+        // `clippy::float_cmp`.
         let d = Thresholds::default();
         if self.clone_similarity.to_bits() != d.clone_similarity.to_bits() {
             canonical.push_str(&format!(";clone_similarity={}", self.clone_similarity));
@@ -327,9 +362,13 @@ pub(super) fn uniqueness(production: &[&FunctionMetricRow]) -> MetricValue {
 /// The class-like container scaffolding the Cohesion and Focus dimensions read,
 /// built once from the production node/edge snapshot ([FR-QM-11], [FR-QM-12]).
 ///
-/// Containers are non-test [`NodeKind::Class`]/[`NodeKind::Struct`] nodes; each
-/// carries its **production, bodied** member methods (via [`EdgeKind::Contains`]),
-/// so `is_test` methods are excluded from both dimensions — adding test methods
+/// Containers are non-test [`NodeKind::Class`]/[`NodeKind::Struct`] nodes, and
+/// the non-test [`NodeKind::Trait`]s with a bodied method of a language that
+/// declares `bodied_traits_are_containers` (S-575, Scala); each
+/// carries its **production, bodied** member methods (via [`EdgeKind::Contains`],
+/// and, for a Rust `impl` or Go receiver method whose `Contains` parent is its
+/// module, via the attribution to its struct, S-510), so `is_test` methods are
+/// excluded from both dimensions — adding test methods
 /// to a class leaves Cohesion and Focus byte-identical ([FR-QM-08], [UAT-QM-07])
 /// — and so are bodyless declarations (metric-semantics v7, [CR-163]).
 /// `Accesses` (method→field) and intra-class `Calls` edges feed LCOM4
@@ -338,9 +377,19 @@ pub(super) fn uniqueness(production: &[&FunctionMetricRow]) -> MetricValue {
 /// template-method shape) stay one component, exactly as under v6 — dropping
 /// the declaration must never make a class look more fragmented than it did.
 ///
+/// Since metric-semantics v9 ([CR-252]) an **inherited member** links too:
+/// methods that access one name through their own receiver (`this.state`)
+/// where the class declares no member of that name share a component, as if
+/// it were a declared field. Such an access binds to no `Field`, so it is read
+/// from the method's unbound accesses
+/// ([`FunctionMetricRow::unbound_accesses`]); a name the class declares never
+/// links this way, so declared-field links are exactly the `Accesses` edges.
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+///
 /// A container that declares methods but none with a body (a pure `abstract`
-/// class; a C++ class whose members are all defined out of line, which
-/// extraction records as bodyless prototypes) keeps its place: it is
+/// class; a C++ class whose members are all defined out of line in another
+/// file, which extraction records as bodyless prototypes) keeps its place: it is
 /// unscoreable for Cohesion exactly like a method-less class, and Focus still
 /// counts it, god only by span. The god predicate keeps its shape over the
 /// bodied count ([CR-163] §3.2 D) rather than inventing a per-container
@@ -358,6 +407,15 @@ pub(super) struct ContainerIndex {
     /// Method → methods it calls ([`EdgeKind::Calls`]); filtered to intra-class
     /// pairs when LCOM4 consumes it.
     method_calls: HashMap<NodeId, BTreeSet<NodeId>>,
+    /// Method → the member names it accesses through its own receiver that
+    /// bound to no field ([`FunctionMetricRow::unbound_accesses`]); an LCOM4
+    /// input for the names its class does not declare ([CR-252]).
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    method_unbound: HashMap<NodeId, Vec<String>>,
+    /// How many production methods recording a self type reached a container,
+    /// and how many did not ([`MethodAttribution`], S-510).
+    attribution: MethodAttribution,
 }
 
 /// One class-like container with its production members and span.
@@ -365,8 +423,8 @@ struct Container {
     /// The container node's storage id (worst-offender / god-container reporting,
     /// [FR-QM-12], [UAT-GV-08]); reported in id order for determinism.
     id: NodeId,
-    /// The container node kind (`Class` is cohesion-applicable; `Class`/`Struct`
-    /// are both focus-applicable).
+    /// The container node kind (`Class` and a container `Trait` are
+    /// cohesion-applicable; all three are focus-applicable).
     kind: NodeKind,
     /// Production **bodied** member methods in id order ([CR-163]); bodyless
     /// declarations never enter.
@@ -377,6 +435,12 @@ struct Container {
     /// vertices only — a call into one links its callers, but it is never a
     /// component of its own and never counts toward Focus.
     declarations: Vec<NodeId>,
+    /// The names of every member the container declares (its `Contains`
+    /// children of any kind) — what makes an unbound access an *inherited*
+    /// member's ([CR-252]) rather than an own one.
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    members: HashSet<String>,
     /// 1-based line span `end − start + 1`, or 0 when either line is unrecorded.
     span: i64,
     /// The defining file — what decides whether its language declares the
@@ -384,6 +448,56 @@ struct Container {
     ///
     /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
     file: Option<String>,
+}
+
+impl Container {
+    /// The container a node is, if it is one: a `Class` or `Struct` outside
+    /// test scope (a test-scope container is excluded wholesale, [FR-QM-08]),
+    /// with no members yet — or a `Trait` of a language in `trait_containers`
+    /// (S-575, [FR-QM-11]: Scala), which [`ContainerIndex::build`] keeps only
+    /// when it has a bodied method.
+    ///
+    /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    fn of(n: &NodeRow, test_ids: &HashSet<NodeId>, trait_containers: &HashSet<String>) -> Option<Self> {
+        let trait_container = n.kind == NodeKind::Trait
+            && crate::plugin::registry::declares_by_extension(n.file_path.as_deref(), trait_containers);
+        if !(matches!(n.kind, NodeKind::Class | NodeKind::Struct) || trait_container) || test_ids.contains(&n.id) {
+            return None;
+        }
+        let span = match (n.start_line, n.end_line) {
+            (Some(s), Some(e)) if e >= s => e - s + 1,
+            _ => 0,
+        };
+        Some(Container {
+            id: n.id,
+            kind: n.kind,
+            methods: Vec::new(),
+            declarations: Vec::new(),
+            members: HashSet::new(),
+            span,
+            file: n.file_path.clone(),
+        })
+    }
+
+    /// Record one `Contains` child. Its name is a declared member whatever its
+    /// kind or scope — a name the class declares is never an inherited one
+    /// ([CR-252]). A production method joins the bodied methods, or, when
+    /// bodyless, the connector declarations ([CR-163]).
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
+    fn attach(&mut self, member: &NodeRow, is_test: bool, bodyless: bool) {
+        self.members.insert(member.name.clone());
+        if member.kind != NodeKind::Method || is_test {
+            return;
+        }
+        if bodyless {
+            self.declarations.push(member.id);
+        } else {
+            self.methods.push(member.id);
+        }
+    }
 }
 
 /// A class-like container flagged as a **god container** ([FR-QM-12]): its
@@ -416,8 +530,9 @@ pub(super) struct ContainerFacts {
     pub(super) methods: u64,
     /// 1-based line span, 0 when either line is unrecorded.
     pub(super) span: i64,
-    /// LCOM4 when the container is a Cohesion-scoreable class (a `Class` with
-    /// at least one bodied method, in a `member_access` language); `None`
+    /// LCOM4 when the container is a Cohesion-scoreable class (a `Class` or a
+    /// container `Trait` with at least one bodied method, in a `member_access`
+    /// language); `None`
     /// otherwise.
     pub(super) lcom4: Option<u64>,
 }
@@ -476,14 +591,31 @@ impl ContainerIndex {
     /// ([NFR-CC-04]), so such a store scores exactly as under v6 until its
     /// re-extraction records the fact.
     ///
+    /// `links.partial_types` are the `(part, first part)` links of the partial
+    /// types ([`GraphStore::partial_type_links`], S-557, [FR-RS-29]): the parts
+    /// of one type are one container, the first-declared part's — its members
+    /// are every part's, and its span is the sum of the parts' spans
+    /// (metric-semantics v9). A part outside the production scope stays out,
+    /// and is no part of the container.
+    ///
+    /// `links.typed_methods` attribute each Rust impl method and Go receiver
+    /// method to the one same-crate/same-package `Struct` its recorded self type
+    /// names (S-510, [`attribute`](super::attribution::attribute)): the method
+    /// joins that struct's methods exactly as a `Contains` child would, though
+    /// its `Contains` parent stays its module. A production method that reached
+    /// no struct is counted in [`attribution`](Self::attribution).
+    ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    /// [`GraphStore::partial_type_links`]: crate::graph_store::GraphStore::partial_type_links
     pub(super) fn build(
         nodes: &[NodeRow],
         edges: &[EdgeRow],
+        links: &ContainerLinks,
         functions: &[FunctionMetricRow],
         test_ids: &HashSet<NodeId>,
     ) -> Self {
-        let kind_of: HashMap<NodeId, NodeKind> = nodes.iter().map(|n| (n.id, n.kind)).collect();
+        let node_of: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
         // CR-163: the declarations recorded as bodyless never enter a method set.
         let bodyless: HashSet<NodeId> = functions
             .iter()
@@ -496,25 +628,27 @@ impl ContainerIndex {
         // counted by Focus. `nodes` is id-ordered (all_nodes ORDER BY id), so the
         // container order is deterministic (NFR-RA-06, ADR-08). A container in
         // test scope is excluded wholesale (FR-QM-08).
-        let mut by_id: HashMap<NodeId, usize> = HashMap::new();
-        let mut containers: Vec<Container> = Vec::new();
-        for n in nodes {
-            if matches!(n.kind, NodeKind::Class | NodeKind::Struct) && !test_ids.contains(&n.id) {
-                let span = match (n.start_line, n.end_line) {
-                    (Some(s), Some(e)) if e >= s => e - s + 1,
-                    _ => 0,
-                };
-                by_id.insert(n.id, containers.len());
-                containers.push(Container {
-                    id: n.id,
-                    kind: n.kind,
-                    methods: Vec::new(),
-                    declarations: Vec::new(),
-                    span,
-                    file: n.file_path.clone(),
-                });
+        let trait_containers = crate::plugin::registry::bodied_trait_container_extensions();
+        let mut containers: Vec<Container> =
+            nodes.iter().filter_map(|n| Container::of(n, test_ids, trait_containers)).collect();
+
+        // S-557: a later part of a partial type joins its first-declared part's
+        // container, adding its span; its members attach there below.
+        let spans: HashMap<NodeId, i64> = containers.iter().map(|c| (c.id, c.span)).collect();
+        let joins: HashMap<NodeId, NodeId> = links
+            .partial_types
+            .iter()
+            .copied()
+            .filter(|(part, first)| spans.contains_key(part) && spans.contains_key(first))
+            .collect();
+        containers.retain(|c| !joins.contains_key(&c.id));
+        let by_id: HashMap<NodeId, usize> = containers.iter().enumerate().map(|(i, c)| (c.id, i)).collect();
+        for (part, first) in &joins {
+            if let Some(&ci) = by_id.get(first) {
+                containers[ci].span += spans[part];
             }
         }
+        let owner = |id: NodeId| joins.get(&id).copied().unwrap_or(id);
 
         // Method → the fields it accesses (Accesses is class-scoped, FR-EX-08);
         // method → methods it calls. Both feed LCOM4 connectivity (FR-QM-11).
@@ -526,17 +660,8 @@ impl ContainerIndex {
                 // Attach production member methods to their container: bodied
                 // ones are counted, bodyless ones only connect (CR-163).
                 EdgeKind::Contains => {
-                    if let Some(&ci) = by_id.get(&e.source) {
-                        if matches!(kind_of.get(&e.target), Some(NodeKind::Method))
-                            && !test_ids.contains(&e.target)
-                        {
-                            let c = &mut containers[ci];
-                            if bodyless.contains(&e.target) {
-                                c.declarations.push(e.target);
-                            } else {
-                                c.methods.push(e.target);
-                            }
-                        }
+                    if let (Some(&ci), Some(member)) = (by_id.get(&owner(e.source)), node_of.get(&e.target)) {
+                        containers[ci].attach(member, test_ids.contains(&member.id), bodyless.contains(&member.id));
                     }
                 }
                 EdgeKind::Accesses => {
@@ -549,17 +674,51 @@ impl ContainerIndex {
             }
         }
 
+        // S-510: a Rust impl / Go receiver method belongs to the struct its
+        // self type names, though its `Contains` parent is a module.
+        let mut attribution = MethodAttribution::default();
+        for &(method, target) in &links.typed_methods {
+            let Some(member) = node_of.get(&method).filter(|_| !test_ids.contains(&method)) else {
+                continue;
+            };
+            attribution.denominator += 1;
+            match target.and_then(|t| by_id.get(&owner(t))) {
+                Some(&ci) => containers[ci].attach(member, false, bodyless.contains(&method)),
+                None => attribution.unattributed += 1,
+            }
+        }
+
         // Deterministic LCOM4 union order within each container (NFR-RA-06).
         for c in &mut containers {
             c.methods.sort_unstable();
             c.declarations.sort_unstable();
         }
+        // S-575: a trait is a container only with a bodied method (FR-QM-11);
+        // one of abstract declarations is a contract, not a god or a class.
+        containers.retain(|c| c.kind != NodeKind::Trait || !c.methods.is_empty());
+
+        // CR-252: each callable's unbound own-receiver accesses, the inherited
+        // members LCOM4 links by name.
+        let method_unbound: HashMap<NodeId, Vec<String>> = functions
+            .iter()
+            .filter(|f| !f.unbound_accesses.is_empty())
+            .map(|f| (f.id, f.unbound_accesses.clone()))
+            .collect();
 
         ContainerIndex {
             containers,
             method_fields,
             method_calls,
+            method_unbound,
+            attribution,
         }
+    }
+
+    /// The production methods that record a self type and how many of them
+    /// reached no struct ([`MethodAttribution`], S-510); `None` when no method
+    /// records one, so a repository without Rust or Go methods reports nothing.
+    pub(super) fn attribution(&self) -> Option<MethodAttribution> {
+        (self.attribution.denominator > 0).then_some(self.attribution)
     }
 
     /// Cohesion ([FR-QM-11]) — mean of `1/LCOM4` over production **classes**,
@@ -571,24 +730,39 @@ impl ContainerIndex {
     /// with no bodied production method is not scoreable (LCOM4 undefined), nor
     /// is one whose language is not in `member_access` (metric-semantics v8,
     /// [CR-171]); both are excluded, and a repo with zero scoreable classes
-    /// drops Cohesion out of the aggregate denominator ([ADR-21]).
+    /// drops Cohesion out of the aggregate denominator ([ADR-21]). So does a
+    /// repo with fewer than `t.cohesion_min_classes` of them (metric-semantics
+    /// v9, [CR-252]): the second value then names why. The LCOM4 offender list
+    /// ([`low_cohesion_classes`](Self::low_cohesion_classes)) is not gated by
+    /// the minimum.
     ///
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
     /// [ADR-21]: ../../../docs/specs/architecture/decisions/ADR-21.md
     /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
-    pub(super) fn cohesion(&self, member_access: &HashSet<String>) -> Option<MetricValue> {
-        // Cohesion applies to Class only (Rust/Go aggregates are Struct —
-        // LCOM4's field-sharing premise is contested there, FR-QM-11).
-        cohesion_of(
-            self.containers
-                .iter()
-                .filter(|c| Self::cohesion_scoreable(c, member_access))
-                .map(|c| self.lcom4(c)),
-        )
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub(super) fn cohesion(
+        &self,
+        member_access: &HashSet<String>,
+        t: &Thresholds,
+    ) -> (Option<MetricValue>, Option<CohesionNotApplicable>) {
+        // Cohesion applies to Class and a container Trait only (Rust/Go
+        // aggregates are Struct — LCOM4's field-sharing premise is contested
+        // there, FR-QM-11).
+        let lcom4s: Vec<u64> = self
+            .containers
+            .iter()
+            .filter(|c| Self::cohesion_scoreable(c, member_access))
+            .map(|c| self.lcom4(c))
+            .collect();
+        let min_classes = u64::try_from(t.cohesion_min_classes).unwrap_or(0);
+        match CohesionNotApplicable::for_classes(lcom4s.len() as u64, min_classes) {
+            Some(too_few) => (None, Some(too_few)),
+            None => (cohesion_of(lcom4s), None),
+        }
     }
 
-    /// Whether Cohesion scores a container: a `Class` with at least one bodied
-    /// production method (LCOM4 is undefined otherwise, [FR-QM-11]), defined in
+    /// Whether Cohesion scores a container: a `Class`, or a container `Trait`
+    /// (S-575), with at least one bodied production method (LCOM4 is undefined otherwise, [FR-QM-11]), defined in
     /// a language whose plugin declares `member_access` ([CR-171]) — the one
     /// predicate the dimension, its offender list and the "where to start"
     /// facts share.
@@ -596,7 +770,7 @@ impl ContainerIndex {
     /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
     /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
     fn cohesion_scoreable(c: &Container, member_access: &HashSet<String>) -> bool {
-        c.kind == NodeKind::Class
+        matches!(c.kind, NodeKind::Class | NodeKind::Trait)
             && !c.methods.is_empty()
             && crate::plugin::registry::declares_by_extension(c.file.as_deref(), member_access)
     }
@@ -622,10 +796,14 @@ impl ContainerIndex {
     /// A container is **god** when its production **bodied** method count ≥ `T_m`
     /// **or** its line span ≥ `T_span` ([FR-QM-12], metric-semantics v7).
     /// Class-like containers are `Class` and `Struct` (Java/Python/TS class, Rust
-    /// struct, Go type). Extraction makes the module, not the struct, the
-    /// `Contains` parent of a Rust `impl` method or a Go receiver method, so a
-    /// Rust or Go container has no method count today and is god by span alone
-    /// (an S-502 finding, pre-dating CR-163).
+    /// struct, Go type), and a Scala trait with a bodied method (S-575). Extraction makes the module, not the struct, the
+    /// `Contains` parent of a Rust `impl` method or a Go receiver method, so
+    /// those count toward their struct by attribution instead (metric-semantics
+    /// v9, [CR-166], S-510): every method of an `impl` of the struct in its
+    /// crate, every receiver method of the type in its package. A method
+    /// naming no one struct counts toward none ([`attribution`](Self::attribution)).
+    ///
+    /// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
     ///
     /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
     pub(super) fn focus(&self, t: &Thresholds) -> Option<MetricValue> {
@@ -688,7 +866,10 @@ impl ContainerIndex {
     }
 
     /// LCOM4 of one class: the number of connected components of its methods
-    /// linked by shared field access or intra-class calls ([FR-QM-11]).
+    /// linked by shared field access, a shared inherited member (v9, [CR-252])
+    /// or intra-class calls ([FR-QM-11]).
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
     ///
     /// Union-find over the class's methods in id order keeps the component count
     /// a pure function of the graph, order-independent and reproducible
@@ -724,14 +905,21 @@ impl ContainerIndex {
                 }
             }
         }
-        for members in field_members.values_mut() {
-            members.sort_unstable();
-            if let Some((&first, rest)) = members.split_first() {
-                for &other in rest {
-                    uf.union(first, other);
+        uf.union_groups(field_members.values_mut());
+
+        // Inherited members (CR-252): methods accessing one name through their
+        // own receiver, where the class declares no member of that name, are one
+        // component — grouped by name in a BTreeMap and unioned in ascending
+        // method-index order, exactly as the field groups above.
+        let mut inherited_members: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+        for (&method, names) in &self.method_unbound {
+            if let Some(&mi) = index_of.get(&method) {
+                for name in names.iter().filter(|n| !c.members.contains(n.as_str())) {
+                    inherited_members.entry(name).or_default().push(mi);
                 }
             }
         }
+        uf.union_groups(inherited_members.values_mut());
 
         // Intra-class calls: a call between two methods of this class links them.
         for (&src, dsts) in &self.method_calls {
@@ -784,6 +972,22 @@ impl UnionFind {
         };
         self.parent[small] = big;
         self.size[big] += self.size[small];
+    }
+
+    /// Union each group into one component, members in ascending order so the
+    /// union sequence is deterministic, not merely count-invariant
+    /// ([NFR-RA-06]).
+    ///
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn union_groups<'a>(&mut self, groups: impl IntoIterator<Item = &'a mut Vec<usize>>) {
+        for members in groups {
+            members.sort_unstable();
+            if let Some((&first, rest)) = members.split_first() {
+                for &other in rest {
+                    self.union(first, other);
+                }
+            }
+        }
     }
 
     /// The number of distinct components holding at least one of the elements

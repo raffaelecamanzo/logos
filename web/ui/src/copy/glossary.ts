@@ -165,7 +165,7 @@ export const GLOSSARY = {
   referenceResolution: {
     label: "Reference resolution",
     definition:
-      "The share of this service's references — calls, imports, type uses — that link to the code they point at. The lower it is, the more links every other figure misses.",
+      "The share of this service's references — calls, imports, type uses — that link to the code they point at, stated as a lower bound on the true share, since method calls on values of unknown type stay unresolved. The lower it is, the more links every other figure misses.",
     pattern: /\breference resolution\b/i,
   },
   entryPointsFromOtherServices: {

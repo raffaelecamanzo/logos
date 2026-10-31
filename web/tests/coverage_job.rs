@@ -127,7 +127,7 @@ impl Fixture {
 
     /// The member's coverage job, once it is no longer running.
     async fn ended(&self) -> Value {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (status, body) = self.get(RUN).await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -142,7 +142,7 @@ impl Fixture {
     /// The pids a stub wrote to `rec/<name>`, once the line is there.
     async fn pids(&self, name: &str) -> Vec<u32> {
         let path = self.rec.join(name);
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             if let Some(line) = std::fs::read_to_string(&path).ok().filter(|s| s.ends_with('\n')) {
                 return line.split_whitespace().map(|p| p.parse().unwrap()).collect();
@@ -310,7 +310,7 @@ async fn a_start_right_after_cancel_starts_a_new_run() {
         go_stub(&f, &held(&f));
         f.consent(&["go"]);
         let (_, first) = f.post(RUN, "").await;
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while f.runs("go").is_empty() {
             assert!(Instant::now() < deadline, "go never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -354,7 +354,7 @@ async fn a_security_scan_and_a_coverage_run_run_at_the_same_time() {
         assert_eq!(status, StatusCode::OK, "a scan starts beside the coverage run: {scan}");
         assert_eq!(scan["joined"], false, "{scan}");
         assert_ne!(scan["job"]["id"], coverage["job"]["id"], "two jobs");
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while f.runs("go").is_empty() || f.runs("bandit").is_empty() {
             assert!(Instant::now() < deadline, "both tools never ran at once");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -364,7 +364,7 @@ async fn a_security_scan_and_a_coverage_run_run_at_the_same_time() {
 
         f.release();
         assert_eq!(f.ended().await["state"], "completed");
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (_, scan) = f.get("/api/v1/security/scan").await;
             if scan["job"]["state"] != "running" {
@@ -589,7 +589,7 @@ async fn the_event_stream_replays_then_follows_the_run_to_its_end() {
         assert_eq!(sse_events(&body), [("end".to_string(), json!({ "job": null }))], "{body}");
 
         f.post(RUN, "").await;
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while f.runs("go").is_empty() {
             assert!(Instant::now() < deadline, "go never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -628,7 +628,7 @@ async fn the_event_stream_ends_when_the_run_it_follows_is_cancelled() {
         go_stub(&f, &held(&f));
         f.consent(&["go"]);
         f.post(RUN, "").await;
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while f.runs("go").is_empty() {
             assert!(Instant::now() < deadline, "go never started");
             tokio::time::sleep(Duration::from_millis(10)).await;

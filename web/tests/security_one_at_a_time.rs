@@ -118,7 +118,7 @@ impl Fixture {
 
     /// Wait until the stub has started `n` runs.
     async fn running(&self, n: usize) {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while self.runs() < n {
             assert!(Instant::now() < deadline, "semgrep never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -169,7 +169,7 @@ impl Fixture {
 
     /// The web scan job, once it is no longer running.
     async fn ended(&self) -> Value {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (status, body) = self.get("/api/v1/security/scan").await;
             assert_eq!(status, StatusCode::OK, "{body}");

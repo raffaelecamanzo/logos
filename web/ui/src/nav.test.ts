@@ -108,7 +108,7 @@ describe("navItemsFor (S-250, FR-UI-29 AC4)", () => {
     expect(NAV_ITEMS.map((i) => [i.id, i.label, i.path, i.scope]).sort()).toEqual(
       [
         ["overview", "Dashboard", "/", "member"],
-        ["health", "Health", "/health", "member"],
+        ["health", "Quality", "/health", "member"],
         ["security", "Security", "/security", "member"],
         ["coverage", "Coverage", "/coverage", "member"],
         ["graph", "Graph", "/graph", "member"],
@@ -315,7 +315,7 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
       "workspace-config",
     ];
     const appLabels = WORKSPACE_NAV_ITEMS.filter((i) => twinned.includes(i.id)).map((i) => i.label);
-    expect(appLabels).toEqual(["Dashboard", "Health", "Security", "Coverage", "Statistics", "Config"]);
+    expect(appLabels).toEqual(["Dashboard", "Quality", "Security", "Coverage", "Statistics", "Config"]);
     for (const label of appLabels) {
       expect(NAV_ITEMS.map((i) => i.label)).toContain(label);
     }
@@ -363,9 +363,9 @@ describe("the scope field is required, not defaulted (ADR-66 §2)", () => {
     expect(ids.indexOf("workspace-config")).toBeGreaterThan(ids.indexOf("workspace-statistics"));
   });
 
-  it("files the app-scoped Security and Coverage tabs in group B, after Health (S-674, S-788, FR-UI-55)", () => {
+  it("files the app-scoped Security and Coverage tabs in group B, after Quality (S-674, S-788, FR-UI-55)", () => {
     // frontend-design §3 (CR-217, CR-244): the Workspace section reads Dashboard,
-    // Workspace, Health | Security, Coverage | Statistics, Config. Unlike Statistics
+    // Workspace, Quality | Security, Coverage | Statistics, Config. Unlike Statistics
     // and Config these two are NOT filed with their member twins (group A): FR-UI-55
     // files them in the Workspace section's group B, so the group is pinned literally.
     const group = (id: string) => WORKSPACE_NAV_ITEMS.find((i) => i.id === id)?.group;

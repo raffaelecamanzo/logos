@@ -21,13 +21,30 @@
 //!   S-795).
 //!
 //! # Test code ([FR-SC-28])
-//! Every finding is `test` or `production`, classified when it is read
+//! Every finding is `test`, `dev` or `production`, classified when it is read
 //! ([`super::scope`]). A list keeps production code unless its scope says
 //! otherwise and states how many findings the scope hid
 //! ([`SecurityFindings::hidden_by_scope`]); `status` counts a report's fresh,
 //! unsuppressed, production findings by [`counts`](crate::history::security::counts)
 //! and states the rest by why ([`ScanState::Fresh`]). The gate reads each
 //! scanner's state alone, never these counts ([BR-98]).
+//!
+//! # Needs review ([FR-SC-31])
+//! A finding its scanner marks low-confidence ([`ScannerConfidence`](crate::history::security::ScannerConfidence)) is left
+//! out of the same lists and counts, in the tier after test code: the default
+//! scope leaves it out of a list and states how many
+//! ([`SecurityFindings::hidden_needs_review`]), and `status` states the rest by
+//! why as [`ScanState::Fresh`]'s `needs_review`. `--scope all` lists it, labelled
+//! ([`ListedFinding::needs_review`]). The gate reads it as any other finding
+//! ([BR-101]).
+//!
+//! # Dev-only dependencies ([FR-SC-30])
+//! A finding on a package its lockfile marks dev-only reads code scope `dev`
+//! ([`ScopeReason::DevDependency`](super::ScopeReason)) and is left out of the
+//! same lists and counts, after test code: the default scope states how many
+//! ([`SecurityFindings::hidden_dev`]), `status` as [`ScanState::Fresh`]'s `dev`
+//! ("N more in dev-only dependencies"), and `--scope all` lists it, labelled.
+//! The gate reads it as any other finding ([BR-100]).
 //!
 //! # Consent ([FR-SC-07])
 //! Every installed, enabled scanner may reach the network to refresh its rules
@@ -91,8 +108,12 @@
 //! [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
 //! [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
 //! [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+//! [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+//! [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
 //! [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
+//! [BR-100]: ../../../docs/specs/software-spec.md#328-security-findings
+//! [BR-101]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
 //! [CR-217]: ../../../docs/requests/CR-217-security-findings-in-graph-context.md
 //! [S-664]: ../../../docs/planning/journal.md#s-664-findings-are-classified-by-owasp-top-10-2025-and-2021
@@ -776,6 +797,9 @@ pub enum ScanState {
         suppressed: usize,
         not_fresh: usize,
         test: usize,
+        dev: usize,
+        needs_review: usize,
+        merged: usize,
     },
     /// A report is stored at this HEAD over unchanged files.
     Fresh {
@@ -790,11 +814,28 @@ pub enum ScanState {
         /// the scan.
         not_fresh: usize,
         /// Fresh, unsuppressed findings left out because they sit in test code
-        /// ([FR-SC-28]): "N more in test code". With the three above, every
-        /// finding of the report, each once.
+        /// ([FR-SC-28]): "N more in test code".
         ///
         /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
         test: usize,
+        /// Fresh, unsuppressed findings left out because they are on a dev-only
+        /// dependency ([FR-SC-30]): "N more in dev-only dependencies".
+        ///
+        /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+        dev: usize,
+        /// Fresh, unsuppressed production-code findings its scanner marks
+        /// low-confidence ([FR-SC-31]): "N more need review".
+        ///
+        /// [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
+        needs_review: usize,
+        /// Findings of this report merged into one advisory another report —
+        /// or this one, under another id — also holds, and counted or left out
+        /// on its first reporter's row ([FR-SC-29]): "N merged into another
+        /// scanner's". With the six above, every finding of the report, each
+        /// once.
+        ///
+        /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+        merged: usize,
     },
 }
 
@@ -805,6 +846,9 @@ pub enum ScanState {
 struct ReportTally {
     counted: usize,
     excluded: Excluded,
+    /// Its findings merged into one counted on another row ([`ScanState::Fresh`]'s
+    /// `merged`).
+    merged: usize,
     /// Whether a file it anchors moved since the scan, suppressed or not.
     moved: bool,
 }
@@ -900,11 +944,20 @@ pub fn status(
     for (item, scope) in labelled.findings.iter().zip(&scoped) {
         let t = tally.entry(item.finding.scanner_name.as_str()).or_default();
         t.add(&item.finding, item.suppression.as_ref(), scope.code_scope);
+        // A merged finding is counted, or left out, once: on its first
+        // reporter's row. Each other reporter's row states it as merged, so
+        // every row still accounts for each finding of its report, and a file
+        // moved under any reporter's scan is that report's (FR-SC-29).
+        for (at, reporter) in item.finding.reporters.iter().enumerate() {
+            let t = tally.entry(reporter.scanner_name.as_str()).or_default();
+            t.moved |= reporter.freshness == FRESHNESS_STALE;
+            t.merged += usize::from(at > 0);
+        }
     }
     let state_of = |driver: &str| {
         view.snapshots.iter().find(|s| s.scanner_name == driver).map(|snap| {
-            let ReportTally { counted: findings, excluded, moved } = tally.get(driver).copied().unwrap_or_default();
-            let Excluded { suppressed, not_fresh, test } = excluded;
+            let ReportTally { counted: findings, excluded, merged, moved } = tally.get(driver).copied().unwrap_or_default();
+            let Excluded { suppressed, not_fresh, test, dev, needs_review } = excluded;
             // A scoped run carries rows a full scan wrote, at its own HEAD or an
             // earlier one: freshness is that full scan's (S-685).
             let because = match snap.full_head_sha.as_deref() {
@@ -915,10 +968,21 @@ pub fn status(
             let snapshot_head = snap.full_head_sha.clone().unwrap_or_else(|| snap.head_sha.clone());
             let version = snap.scanner_version.clone();
             match because {
-                Some(because) => {
-                    ScanState::Stale { because, snapshot_head, version, findings, suppressed, not_fresh, test }
+                Some(because) => ScanState::Stale {
+                    because,
+                    snapshot_head,
+                    version,
+                    findings,
+                    suppressed,
+                    not_fresh,
+                    test,
+                    dev,
+                    needs_review,
+                    merged,
+                },
+                None => {
+                    ScanState::Fresh { snapshot_head, version, findings, suppressed, not_fresh, test, dev, needs_review, merged }
                 }
-                None => ScanState::Fresh { snapshot_head, version, findings, suppressed, not_fresh, test },
             }
         })
     };
@@ -1073,7 +1137,7 @@ pub struct FindingsFilter {
     /// itself lists the unrated findings alone.
     pub severity: Option<Severity>,
     /// A registry name (`semgrep`) or a driver name (`Semgrep OSS`), either
-    /// case.
+    /// case. A merged finding is listed under each of its reporters.
     pub scanner: Option<String>,
     /// An OWASP category of the edition: its full id (`A05:2025`) or its
     /// number (`A05`).
@@ -1167,13 +1231,30 @@ pub struct SecurityFindings {
     pub never_run: Vec<&'static str>,
     /// Said when nothing was ever scanned or ingested.
     pub notice: Option<&'static str>,
-    /// Stored findings before filtering.
+    /// Stored findings before filtering, one advisory several scanners report
+    /// counted once ([FR-SC-29]); each report's own count is in `scanned`.
+    ///
+    /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
     pub total: usize,
     /// The code scope listed: `production` unless the caller named one.
     pub scope: ScopeFilter,
     /// Findings every other filter kept and the scope left out: what the
     /// listing states it hid, so a hidden finding is never silent.
     pub hidden_by_scope: usize,
+    /// Production-code findings every other filter and the scope kept and the
+    /// default scope left out because their scanner marks them low-confidence
+    /// ([FR-SC-31]): "N more need review". `--scope all` lists them, `0`
+    /// there and under `--scope test`.
+    ///
+    /// [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
+    pub hidden_needs_review: usize,
+    /// Findings every other filter kept and the default scope left out because
+    /// they are on a dev-only dependency ([FR-SC-30]): "N more in dev-only
+    /// dependencies". `--scope all` lists them, `0` there and under `--scope
+    /// test` (which counts them in `hidden_by_scope`).
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+    pub hidden_dev: usize,
     /// The findings the filters kept, in store order.
     pub findings: Vec<ListedFinding>,
     /// Every category of the edition over all stored findings: covered with a
@@ -1182,7 +1263,10 @@ pub struct SecurityFindings {
     /// finding above; it never reads as a count. A covered category's
     /// `state.findings` counts every code scope; its `production_findings`
     /// counts the production-code findings alone (suppressed ones in both),
-    /// the figure the Security page states under its default scope.
+    /// the figure the Security page states under its default scope, and its
+    /// `needs_review_findings` the production ones their scanner marks
+    /// low-confidence, and its `dev_findings` the ones on a dev-only dependency
+    /// (FR-SC-30), both of which `production_findings` leaves out.
     pub categories: Vec<CategoryCoverage>,
     /// Every suppression entry, expired and orphaned flagged.
     pub suppressions: Vec<EntryStatus>,
@@ -1213,12 +1297,18 @@ pub struct ListedFinding {
     pub unclassified: Option<Unclassified>,
     /// Its suppression, current or expired; `None` when no entry names it.
     pub suppression: Option<Suppression>,
-    /// Its `code_scope`, `test` or `production`, and the reason it reads
-    /// `test` ([FR-SC-28]).
+    /// Its `code_scope`, `test`, `dev` or `production`, and the reason it reads
+    /// `test` or `dev` ([FR-SC-28], [FR-SC-30]).
     ///
     /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
     #[serde(flatten)]
     pub scope: ScopeLabel,
+    /// Its scanner marks it low-confidence ([FR-SC-31]): it reads "needs
+    /// review"; its stored `confidence` says which word the scanner used.
+    ///
+    /// [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
+    pub needs_review: bool,
     /// Its enclosing symbol, route reachability and blast radius, each with a
     /// confidence label ([FR-SC-13]).
     ///
@@ -1291,11 +1381,20 @@ pub fn findings(
     // Each category's production count, over every stored finding: the scope
     // classifier's own verdict, suppression ignored, as the page's OWASP list
     // reads it.
-    let production: Vec<bool> = scoped.iter().map(|s| ScopeFilter::Production.keeps(s.code_scope)).collect();
-    count_production(&mut owasp.categories, &owasp.findings, &production);
+    // A production finding the scanner marks low-confidence is a figure of its
+    // own: production, dev-only, needs review and test code partition one count.
+    let in_production: Vec<bool> = scoped.iter().map(|s| ScopeFilter::Production.keeps(s.code_scope)).collect();
+    let review = |f: &SecurityFinding| f.confidence.needs_review();
+    let production: Vec<bool> = in_production.iter().zip(&view.findings).map(|(&p, f)| p && !review(f)).collect();
+    let needs_review: Vec<bool> = in_production.iter().zip(&view.findings).map(|(&p, f)| p && review(f)).collect();
+    // A dev-only dependency's finding is a fourth, apart from the other three (FR-SC-30).
+    let dev: Vec<bool> = scoped.iter().map(|s| s.code_scope == CodeScope::Dev).collect();
+    count_production(&mut owasp.categories, &owasp.findings, &production, &needs_review, &dev);
 
     let total = labelled.findings.len();
     let mut hidden_by_scope = 0;
+    let mut hidden_needs_review = 0;
+    let mut hidden_dev = 0;
     let kept: Vec<_> = labelled
         .findings
         .into_iter()
@@ -1303,10 +1402,23 @@ pub fn findings(
         .zip(scoped)
         .filter(|((item, class), _)| keeps(filter, &item.finding, &class.categories, item.suppression.as_ref()))
         // Every other filter first, so the hidden count is of what they kept.
+        // A dev-only dependency's finding the default scope leaves out is
+        // stated on its own, "N more in dev-only dependencies" (FR-SC-30).
         .filter(|(_, scope)| {
+            if scope.code_scope == CodeScope::Dev && filter.scope.hides_dev() {
+                hidden_dev += 1;
+                return false;
+            }
             let kept = filter.scope.keeps(scope.code_scope);
             hidden_by_scope += usize::from(!kept);
             kept
+        })
+        // Then what the default scope leaves out of production code: the
+        // scanner's low-confidence findings, "N more need review" (FR-SC-31).
+        .filter(|((item, _), _)| {
+            let hidden = filter.scope.hides_needs_review() && item.finding.confidence.needs_review();
+            hidden_needs_review += usize::from(hidden);
+            !hidden
         })
         .collect();
     // The graph is asked only about what is listed.
@@ -1322,6 +1434,7 @@ pub fn findings(
         .zip(contexts)
         .map(|(((item, class), scope), context)| ListedFinding {
             severity_reason: item.finding.severity.reason(),
+            needs_review: item.finding.confidence.needs_review(),
             finding: item.finding,
             owasp: class.categories,
             unclassified: class.unclassified,
@@ -1356,6 +1469,8 @@ pub fn findings(
         total,
         scope: filter.scope,
         hidden_by_scope,
+        hidden_needs_review,
+        hidden_dev,
         findings,
         categories: owasp.categories,
         suppressions: labelled.entries,
@@ -1374,9 +1489,10 @@ fn keeps(
         Severity::Unrated => finding.severity == Severity::Unrated,
         rated => finding.severity.gated_as() >= rated,
     });
+    // A merged finding is any of its reporters' (FR-SC-29).
     let scanner = filter.scanner.as_deref().is_none_or(|want| {
-        finding.scanner_name.eq_ignore_ascii_case(want)
-            || super::scanner(&want.to_ascii_lowercase()).is_some_and(|s| s.driver == finding.scanner_name)
+        finding.reported_by_scanner(want)
+            || super::scanner(&want.to_ascii_lowercase()).is_some_and(|s| finding.reported_by_scanner(s.driver))
     });
     let category = filter.category.as_deref().is_none_or(|want| {
         owasp.iter().any(|id| {

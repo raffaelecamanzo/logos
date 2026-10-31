@@ -68,6 +68,7 @@
 pub use crate::history::security::mask;
 pub mod context;
 mod gate;
+mod lockfile;
 mod page;
 mod probes;
 pub mod registry;
@@ -1064,6 +1065,14 @@ impl Orchestrator {
         PrivateFile::create(&out_dir.join(NVD_KEY_FILE), key.properties().as_bytes()).map(Some)
     }
 
+    /// Whether Gitleaks is enabled and has a copy to run — the one condition
+    /// under which Checkov leaves secrets to it ([`registry::Arg::SkipSecrets`],
+    /// S-813). Independent of which scanners this call selects: Gitleaks'
+    /// findings from its own scan stand when Checkov is run alone.
+    fn gitleaks_runs(&self) -> bool {
+        registry::scanner("gitleaks").is_some_and(|g| self.switches.is_enabled(g.name) && self.has_copy(g))
+    }
+
     /// Run a scanner that writes one report. Scoped, a path-capable scanner
     /// makes the runs its [slot](registry::PathSlot::runs) needs, in
     /// [`SCOPED_DIR`], and several runs' reports are merged into one. A
@@ -1107,6 +1116,7 @@ impl Orchestrator {
             Ok(file) => file,
             Err(e) => return failed_io("could not write the NVD API key file", &out_dir.join(NVD_KEY_FILE), &e),
         };
+        let gitleaks_runs = self.gitleaks_runs();
         let mut reports = Vec::with_capacity(runs.len());
         let mut code = 0;
         for (i, run) in runs.iter().enumerate() {
@@ -1142,6 +1152,7 @@ impl Orchestrator {
                 targets: &ignores.targets,
                 root,
                 nvd_key_file: key_file.as_ref().map(PrivateFile::path),
+                gitleaks_runs,
             };
             code = match self.step(s, binary, s.run, &fill, started) {
                 Ok(code) => code,
@@ -1221,6 +1232,7 @@ impl Orchestrator {
                 targets: &Targets::Root,
                 root: None,
                 nvd_key_file: None,
+                gitleaks_runs: false,
             };
             // The creation template has no extra-flags position: extras go to
             // the analysis only.

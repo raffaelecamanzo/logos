@@ -12,6 +12,18 @@ import { BINDING_KIND_LABEL, SERVICE_MAP_TEXT } from "./serviceMap.copy.ts";
 import { HEALTH_TEXT } from "./workspaceHealth.copy.ts";
 import { WORKSPACE_COVERAGE_TEXT } from "./workspaceCoverage.copy.ts";
 
+/** Reference-resolution figures for the S-637 sentences: one with a ratio, one
+ *  with no code reference, one all provably external, one with one of each. */
+const figure = (code_references: number, provably_external: number, resolved: number) => ({
+  resolved,
+  internal_candidates: code_references - provably_external,
+  provably_external,
+  code_references,
+  lower_bound: code_references > provably_external ? resolved / (code_references - provably_external) : null,
+  absence: null,
+});
+const FIGURES = [[figure(1_000, 200, 600)], [figure(0, 0, 0)], [figure(4, 4, 0)], [figure(2, 1, 1)]];
+
 /** The arguments each sentence function is sampled with: every branch its body
  *  takes — zero, one and many; both booleans; a one- and a two-element list. A
  *  function with no entry here fails the guard test below, so a new sentence
@@ -43,6 +55,13 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     securityFresh: [[0, 1], [1, 1], [1, 3]],
     securityUnread: [[1], [2]],
     securityScan: [["fresh"], ["stale"], ["never_run"]],
+    resolutionAbsent: FIGURES,
+    ownResolution: [["75.0%", figure(1_000, 200, 600)], ["100.0%", figure(2, 1, 1)]],
+    workspaceResolutionAbsent: FIGURES,
+    workspacePopulation: FIGURES,
+    workspaceCrossMember: [[0, 0, 0], [1, 1, 1], [12, 3, 4]],
+    workspacePooled: [[1, 1], [2, 3]],
+    workspaceUnread: [[1], [2]],
   },
   HEALTH_TEXT: {
     rulesChecked: [[1, 1, 1], [2, 9, 0]],

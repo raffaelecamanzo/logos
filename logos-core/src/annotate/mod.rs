@@ -17,8 +17,11 @@
 //!    from the live root set: every *exported* declaration (exported-is-live),
 //!    every framework `route` node, every `[semantics].entry_points` name, and
 //!    every `is_test = true` node (a test is a live root by construction, so an
-//!    unreferenced test helper is never `is_dead`, [FR-AN-01]/[CR-001]), and
-//!    every bodyless callable (a Rust trait's required signature, S-606).
+//!    unreferenced test helper is never `is_dead`, [FR-AN-01]/[CR-001]),
+//!    every bodyless callable (a Rust trait's required signature, S-606), every
+//!    function a language's runtime calls by name (Go's `main` and `init`,
+//!    S-530), and every unexported method of a method-set language (Go) whose
+//!    name an interface some type `Implements` declares in its package (S-530).
 //!    A `function`/`method` outside the live set is `is_dead = true` — **but
 //!    only for a language that declares the reachability capability** ([CR-043],
 //!    [ADR-39]). A callable whose language does not declare it (its binder
@@ -120,6 +123,8 @@ use crate::extract::SymbolContext;
 use crate::graph_store::{AnnotationNodeRow, EdgeRow, FileRecord, NewNode};
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::models::pipeline::AnnotationStats;
+use crate::plugin::registry::declares_by_extension;
+use crate::plugin::LanguageRegistry;
 use crate::runtime::Runtime;
 
 /// The consistent graph state one annotation run computes over.
@@ -161,6 +166,53 @@ struct PolicyNode {
     name: String,
 }
 
+/// What the loaded languages declare about dead-code reachability ([CR-043],
+/// [ADR-39], S-530) — the one input the dead-code verdict takes from the
+/// registry, read fresh from it on every run ([`Reachability::of`]).
+///
+/// [CR-043]: ../../../docs/requests/CR-043-dead-code-detector-precision.md
+/// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
+#[derive(Debug, Clone, Default)]
+pub struct Reachability {
+    /// The extensions whose language declares the reachability capability
+    /// ([`LanguageRegistry::reachability_extensions`]): only their callables
+    /// earn a verdict; every other callable renders `is_dead = NULL`.
+    ///
+    /// [`LanguageRegistry::reachability_extensions`]: crate::plugin::LanguageRegistry::reachability_extensions
+    pub capable: HashSet<String>,
+    /// Each function name a language's runtime calls by itself, mapped to the
+    /// extensions of the languages that declare it
+    /// ([`LanguageRegistry::entry_point_names`], inverted): Go's `main` and
+    /// `init` root only a `.go` function.
+    ///
+    /// [`LanguageRegistry::entry_point_names`]: crate::plugin::LanguageRegistry::entry_point_names
+    pub entry_points: HashMap<String, HashSet<String>>,
+    /// The extensions of the languages whose types implement an interface by
+    /// method set ([`LanguageRegistry::method_set_extensions`]): a method there
+    /// whose name an implemented interface declares is a live root.
+    ///
+    /// [`LanguageRegistry::method_set_extensions`]: crate::plugin::LanguageRegistry::method_set_extensions
+    pub method_sets: HashSet<String>,
+}
+
+impl Reachability {
+    /// The reachability the loaded `registry`'s languages declare.
+    #[must_use]
+    pub fn of(registry: &LanguageRegistry) -> Self {
+        let mut entry_points: HashMap<String, HashSet<String>> = HashMap::new();
+        for (ext, names) in registry.entry_point_names() {
+            for name in names {
+                entry_points.entry(name).or_default().insert(ext.clone());
+            }
+        }
+        Self {
+            capable: registry.reachability_extensions(),
+            entry_points,
+            method_sets: registry.method_set_extensions(),
+        }
+    }
+}
+
 /// Run the annotation pass: snapshot, compute, and commit atomically.
 ///
 /// `entry_points` is `[semantics].entry_points` (matched against node names);
@@ -169,19 +221,19 @@ struct PolicyNode {
 /// (defaulted when the file is absent — no layers means no policy nodes and
 /// `NULL` layer membership everywhere).
 ///
-/// `reachable_exts` is the set of file extensions (normalised lower-case, no
-/// dot) whose language declares the *reachability capability* ([CR-043],
-/// [ADR-39], built by [`LanguageRegistry::reachability_extensions`]). A callable
-/// whose file extension is **not** in the set emits `is_dead = NULL` ("not
-/// computed", [NFR-CC-04]) instead of a fabricated verdict — the dead-code pass
-/// is honest only for languages whose binder coverage is proven ([FR-AN-01]).
-/// The reachability walk itself is unchanged: it still runs over every bound
-/// edge, so a capable language's verdict is byte-identical to before the gate
-/// ([NFR-RA-06]); the gate only decides which callables earn a `Some` verdict.
+/// `reach` is what the loaded languages declare ([`Reachability::of`]). Its
+/// `capable` set holds the file extensions (normalised lower-case, no dot)
+/// whose language declares the *reachability capability* ([CR-043], [ADR-39]).
+/// A callable whose file extension is **not** in the set emits `is_dead = NULL`
+/// ("not computed", [NFR-CC-04]) instead of a fabricated verdict — the
+/// dead-code pass is honest only for languages whose binder coverage is proven
+/// ([FR-AN-01]). The reachability walk itself is unchanged: it still runs over
+/// every bound edge, so a capable language's verdict is byte-identical to
+/// before the gate ([NFR-RA-06]); the gate only decides which callables earn a
+/// `Some` verdict. Its language-scoped roots are [`live_set`]'s.
 ///
 /// [CR-043]: ../../../docs/requests/CR-043-dead-code-detector-precision.md
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
-/// [`LanguageRegistry::reachability_extensions`]: ../plugin/struct.LanguageRegistry.html#method.reachability_extensions
 ///
 /// # Incremental commit (S-024-HF)
 ///
@@ -213,7 +265,7 @@ pub fn run(
     rules: &Rules,
     entry_points: &[String],
     test_markers: &[String],
-    reachable_exts: &HashSet<String>,
+    reach: &Reachability,
     ctx: &SymbolContext,
     incremental: bool,
 ) -> Result<AnnotationStats> {
@@ -262,7 +314,7 @@ pub fn run(
         .filter(|n| is_test_marked(n, test_markers))
         .map(|n| n.id)
         .collect();
-    let live = live_set(&nodes, &edges, entry_points, &test_ids);
+    let live = live_set(&nodes, &edges, entry_points, &test_ids, reach);
     // The effective `[metric_thresholds]` set — the SAME hashed set the gate
     // scores under — feeds both detectors, so tuning any of its keys re-baselines
     // the gate exactly like a structural threshold (CR-013, S-501).
@@ -314,7 +366,7 @@ pub fn run(
                 // computed") rather than a fabricated `true`, so the binding gap
                 // never masquerades as dead code (FR-AN-01).
                 let is_dead = (callable
-                    && reachability_capable(node.file_path.as_deref(), reachable_exts))
+                    && reachability_capable(node.file_path.as_deref(), &reach.capable))
                 .then(|| !live.contains(&node.id));
                 let is_duplicate = node
                     .fingerprint
@@ -448,6 +500,19 @@ pub fn run(
 /// live-but-uncallable method out of the dead set without fabricating a call
 /// edge, preserving the false-live bias ([NFR-RA-05], [AR-05]).
 ///
+/// Two roots are scoped to the language that declares them (S-530): a
+/// `function` whose name its language's runtime calls by itself (Go's `main`
+/// and `init`, [`Reachability::entry_points`]), and a `method` of a method-set
+/// language (Go) whose name an interface declares that some type `Implements`
+/// — reached through the interface, never through a call edge to the method.
+/// Only an unexported name needs the root (an exported method is live by
+/// exported-is-live), and it matches only an interface declared in the method's
+/// own directory (its Go package), as [`crate::resolve::method_set`] matches it.
+/// The rule reads the interface's declared names, not the implementing type,
+/// so a method an embedded field promotes into the implementer is rooted too;
+/// a same-named method of a type that implements nothing is the accepted
+/// false-live cost ([AR-05]).
+///
 /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
 /// [CR-001]: ../../../docs/requests/CR-001-test-aware-quality-metrics.md
 /// [FR-EX-11]: ../../../docs/specs/requirements/FR-EX-11.md
@@ -460,6 +525,7 @@ fn live_set(
     edges: &[&EdgeRow],
     entry_points: &[String],
     test_ids: &HashSet<NodeId>,
+    reach: &Reachability,
 ) -> HashSet<NodeId> {
     let entry_names: HashSet<&str> = entry_points.iter().map(String::as_str).collect();
     let mut adjacency: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
@@ -467,6 +533,7 @@ fn live_set(
     // shape no genuine framework route ever produces, so it unambiguously marks
     // a framework-dispatched entry point ([`crate::resolve::dispatch`], CR-043).
     let mut dispatch_roots: HashSet<NodeId> = HashSet::new();
+    let mut implemented: HashSet<NodeId> = HashSet::new();
     for edge in edges {
         if matches!(edge.kind, EdgeKind::Calls | EdgeKind::RoutesTo) {
             adjacency.entry(edge.source).or_default().push(edge.target);
@@ -474,7 +541,11 @@ fn live_set(
         if edge.kind == EdgeKind::RoutesTo && edge.source == edge.target {
             dispatch_roots.insert(edge.source);
         }
+        if edge.kind == EdgeKind::Implements {
+            implemented.insert(edge.target);
+        }
     }
+    let satisfied = unexported_specs(nodes, edges, &implemented, &reach.method_sets);
 
     let mut live: HashSet<NodeId> = HashSet::new();
     let mut queue: VecDeque<NodeId> = VecDeque::new();
@@ -484,7 +555,9 @@ fn live_set(
             || entry_names.contains(node.name.as_str())
             || test_ids.contains(&node.id)
             || node.has_body == Some(false)
-            || dispatch_roots.contains(&node.id);
+            || dispatch_roots.contains(&node.id)
+            || runtime_entry_point(node, &reach.entry_points)
+            || satisfies_unexported_spec(node, &satisfied, &reach.method_sets);
         if is_root && live.insert(node.id) {
             queue.push_back(node.id);
         }
@@ -499,6 +572,67 @@ fn live_set(
         }
     }
     live
+}
+
+/// Whether `node` is a function its language's runtime calls by name (S-530):
+/// its name is one of [`Reachability::entry_points`] and its file is of a
+/// language that declares that name.
+fn runtime_entry_point(node: &AnnotationNodeRow, entry_points: &HashMap<String, HashSet<String>>) -> bool {
+    node.kind == NodeKind::Function
+        && entry_points
+            .get(&node.name)
+            .is_some_and(|exts| declares_by_extension(node.file_path.as_deref(), exts))
+}
+
+/// Whether `node` is a method of a method-set language whose name is one of
+/// the `specs` declared in its own directory (S-530; see [`unexported_specs`]).
+fn satisfies_unexported_spec(
+    node: &AnnotationNodeRow,
+    specs: &HashSet<(&str, &str)>,
+    method_sets: &HashSet<String>,
+) -> bool {
+    let Some(path) = node.file_path.as_deref() else {
+        return false;
+    };
+    node.kind == NodeKind::Method
+        && declares_by_extension(Some(path), method_sets)
+        && specs.contains(&(node.name.as_str(), crate::resolve::dir_of(path)))
+}
+
+/// The unexported method specs the `implemented` interfaces of a method-set
+/// language declare, each with the directory (Go package) declaring it: each
+/// interface's `Contains` members of kind `method`, the shape
+/// [`crate::resolve::method_set`] reads an interface's method set from. An
+/// exported spec is skipped — the extractor's export convention already makes
+/// every method of that name a root.
+fn unexported_specs<'a>(
+    nodes: &[&'a AnnotationNodeRow],
+    edges: &[&EdgeRow],
+    implemented: &HashSet<NodeId>,
+    method_sets: &HashSet<String>,
+) -> HashSet<(&'a str, &'a str)> {
+    let mut specs = HashSet::new();
+    if implemented.is_empty() || method_sets.is_empty() {
+        return specs;
+    }
+    let by_id: HashMap<NodeId, &'a AnnotationNodeRow> = nodes.iter().map(|n| (n.id, *n)).collect();
+    let interface = |id: &NodeId| {
+        by_id.get(id).is_some_and(|n| {
+            n.kind == NodeKind::Interface && declares_by_extension(n.file_path.as_deref(), method_sets)
+        })
+    };
+    for edge in edges.iter().filter(|e| e.kind == EdgeKind::Contains) {
+        if !implemented.contains(&edge.source) || !interface(&edge.source) {
+            continue;
+        }
+        let Some(spec) = by_id.get(&edge.target).filter(|n| n.kind == NodeKind::Method && !n.exported) else {
+            continue;
+        };
+        if let Some(path) = spec.file_path.as_deref() {
+            specs.insert((spec.name.as_str(), crate::resolve::dir_of(path)));
+        }
+    }
+    specs
 }
 
 /// Whether `file_path`'s language declares the reachability capability ([CR-043],
@@ -516,7 +650,7 @@ fn live_set(
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 fn reachability_capable(file_path: Option<&str>, reachable_exts: &HashSet<String>) -> bool {
-    crate::plugin::registry::declares_by_extension(file_path, reachable_exts)
+    declares_by_extension(file_path, reachable_exts)
 }
 
 /// Whether a node is test code under the unified [FR-AN-05] definition — the
@@ -689,10 +823,12 @@ fn boundary_policy_nodes(ctx: &SymbolContext, rules: &Rules) -> Result<Vec<Polic
 }
 
 /// The dependency edges that cross a forbidden boundary ([FR-AN-03]): every
-/// non-`contains` extracted edge whose source file sits in a boundary's
-/// `from` layer and whose target file sits in its `to` layer.
+/// extracted edge but `contains` and dispatch ([FR-QM-20]) whose source file
+/// sits in a boundary's `from` layer and whose target file sits in its `to`
+/// layer.
 ///
 /// [FR-AN-03]: ../../../docs/specs/requirements/FR-AN-03.md
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
 fn forbidden_pairs(
     rules: &Rules,
     nodes: &[&AnnotationNodeRow],
@@ -714,8 +850,9 @@ fn forbidden_pairs(
     let mut seen: HashSet<(NodeId, NodeId)> = HashSet::new();
     let mut pairs = Vec::new();
     for edge in edges {
-        // Lexical containment is not a dependency (FR-DB-06 posture).
-        if edge.kind == EdgeKind::Contains {
+        // Lexical containment is not a dependency (FR-DB-06 posture), and
+        // neither is a reach through a trait to its implementation (FR-QM-20).
+        if edge.kind == EdgeKind::Contains || edge.is_dispatch() {
             continue;
         }
         let (Some(&from), Some(&to)) = (node_layer.get(&edge.source), node_layer.get(&edge.target))

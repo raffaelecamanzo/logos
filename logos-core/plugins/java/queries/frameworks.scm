@@ -16,6 +16,14 @@
 ; (`RouterFunctions.route(GET("/p"), handler)`), whose builder chain names no
 ; annotated handler method to link.
 ;
+; Spring serves every mapping from the root, whether or not it was written with a
+; leading slash: `@GetMapping("vets.xml")` is `/vets.xml`, and `@RequestMapping("v1")`
+; with `@GetMapping("users")` is `/v1/users` (S-561). The route-method and
+; prefix-name captures therefore also carry `@fw.route.slashed`, which makes the
+; shared interpreter give a written path or prefix the slash it left out — a
+; declaration, not a guess at a servlet context. The captures are Spring's alone:
+; the same interpreter leaves a Django `path("users/", …)` as written.
+;
 ; Captured, but NOT interpreted: a property placeholder (`value =
 ; "${api.base}/x"`) is a written literal, so a method path holding one is
 ; promoted verbatim; resolving it against the property sources is out of scope
@@ -50,7 +58,7 @@
 (method_declaration
   (modifiers
     (annotation
-      name: (identifier) @fw.route.method
+      name: (identifier) @fw.route.method @fw.route.slashed
       arguments: (annotation_argument_list
         [
           (string_literal) @fw.route.path
@@ -84,7 +92,7 @@
 ((method_declaration
   (modifiers
     (annotation
-      name: (identifier) @fw.route.method
+      name: (identifier) @fw.route.method @fw.route.slashed
       arguments: (annotation_argument_list
         (element_value_pair
           key: (identifier) @fw.route.key
@@ -107,7 +115,7 @@
 (method_declaration
   (modifiers
     (annotation
-      name: (identifier) @fw.route.method
+      name: (identifier) @fw.route.method @fw.route.slashed
       arguments: (annotation_argument_list
         [
           (expression) @fw.route.path.opaque
@@ -118,7 +126,7 @@
 ((method_declaration
   (modifiers
     (annotation
-      name: (identifier) @fw.route.method
+      name: (identifier) @fw.route.method @fw.route.slashed
       arguments: (annotation_argument_list
         (element_value_pair
           key: (identifier) @fw.route.key
@@ -219,7 +227,7 @@
 ; `@RequestMapping(BASE)`, `@RequestMapping(BASE + "/v1")`.
 ((_ (modifiers
       (annotation
-        name: (identifier) @fw.route.prefix.name
+        name: (identifier) @fw.route.prefix.name @fw.route.slashed
         arguments: (annotation_argument_list
           [
             (string_literal) @fw.route.prefix
@@ -230,7 +238,7 @@
 
 ((_ (modifiers
       (annotation
-        name: (identifier) @fw.route.prefix.name
+        name: (identifier) @fw.route.prefix.name @fw.route.slashed
         arguments: (annotation_argument_list
           [
             (expression) @fw.route.prefix.opaque
@@ -245,7 +253,7 @@
 ; from being read as a prefix.
 ((_ (modifiers
       (annotation
-        name: (identifier) @fw.route.prefix.name
+        name: (identifier) @fw.route.prefix.name @fw.route.slashed
         arguments: (annotation_argument_list
           (element_value_pair
             key: (identifier) @fw.route.prefix.key
@@ -259,7 +267,7 @@
 
 ((_ (modifiers
       (annotation
-        name: (identifier) @fw.route.prefix.name
+        name: (identifier) @fw.route.prefix.name @fw.route.slashed
         arguments: (annotation_argument_list
           (element_value_pair
             key: (identifier) @fw.route.prefix.key

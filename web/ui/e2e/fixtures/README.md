@@ -34,6 +34,21 @@ Its fourth result is in `tests/fixtures/payments.rs`, a path the security path r
 reads as test code, so `security.project.spec.ts` (S-796) can show the page lists
 production code by default and the test-code finding under the code scope control.
 
+Its fifth result is in `src/main.rs` under a rule tagged `LOW CONFIDENCE` beside
+`precision: very-high`, so `security.project.spec.ts` (S-817) can show the page leave a
+finding its scanner marks low-confidence out of the default list and state it as
+"N more need review", and list it, tagged, under All.
+
+`single.dev.security.sarif` is an OSV-Scanner report over `single/web/package-lock.json`,
+whose one package is `"dev": true`: `serve-fixture.sh` ingests it after the Semgrep
+report, so `security.project.spec.ts` (S-810) can show the page leave that finding out of
+the default list, state it as "N more in dev-only dependencies", and list it, tagged DEV,
+under All. The lockfile is not indexed, so no other view's figures move. The same report
+also holds an advisory on the lockfile's production package `left-pad`, which its Trivy
+run reports too under the CVE OSV-Scanner lists as an alias, so `security.project.spec.ts`
+(S-809) can show one row naming both scanners. Both runs are in one report because a
+second OSV-Scanner report would replace the first's snapshot.
+
 `workspace.security.sarif` is a Semgrep report over the `workspace` copy's
 `api/src/main.rs`: `serve-fixture.sh` ingests it into `api` alone, so Workspace
 security (S-674) renders a scanned member beside a never-scanned one (`web`).

@@ -39,11 +39,12 @@ export const COVERAGE_VIEW_ABSENCE = {
 // ── The Coverage tools widget and Run coverage (S-739, FR-CV-15) ─────────────
 
 export const coverageTools: CopyEntry = {
-  what: "Each coverage tool that applies to this project: its version, its state — not installed, disabled, never run, ran, ran with failing tests, failed, timed out or cancelled — when it last ran and at which commit, and how many files of its last report here matched an indexed file. Run coverage and Cancel sit on the title row.",
+  what: "Each coverage tool that applies to this project: its version, its state — not installed, disabled, never run, ran, ran with failing tests, failed, timed out or cancelled; while a run goes, queued, running, installing or adding dependency — how long its last run took (counting up while it runs), when it last ran and at which commit, and how many files of its last report here matched an indexed file. Below the table, each tool that failed, timed out or had failing tests, with its cause and where its whole output is. Run coverage and Cancel sit on the title row.",
   why: "A tool that is not installed has measured nothing, and a failing suite measured a broken build, so neither reads as 0 %.",
 };
 
-/** A tool's state in words, in the table and in the run's progress list. */
+/** A tool's state in words, in the table: the stored one, and the live one while
+ *  a run goes. */
 export const COVERAGE_TOOL_STATE_TEXT = {
   not_applicable: "not applicable",
   disabled: "disabled",
@@ -51,6 +52,10 @@ export const COVERAGE_TOOL_STATE_TEXT = {
   never_run: "never run",
   queued: "queued",
   running: "running",
+  /** While the tool is installed, or its `llvm-tools-preview` step goes (S-750). */
+  installing: "installing",
+  /** While its coverage dev dependency is added (S-750). */
+  adding_dependency: "adding dependency",
   ran: "ran",
   tests_failed: "ran — tests failed",
   failed: "failed",
@@ -108,9 +113,17 @@ export const COVERAGE_RUN_TEXT = {
   failed: (error: string) => `The coverage run failed: ${error}`,
   requestFailed: (detail: string) => `The coverage request failed: ${detail}`,
   lost: "The run's progress stream broke; reading the run again.",
-  /** A running tool's elapsed time, in whole seconds. */
-  elapsed: (secs: number) => `${secs} s`,
-  stderr: "Error output",
+  /** The Elapsed cell: a tool's time in whole seconds — under a second as such,
+   *  from a minute on in minutes and seconds. */
+  elapsed: (ms: number) => {
+    const secs = Math.floor(ms / 1000);
+    if (secs < 1) return "<1 s";
+    return secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min ${secs % 60} s`;
+  },
+  /** The message area under the table: its name, and a failed run whose record
+   *  holds no cause (one written before it was kept). */
+  messages: "Coverage tool messages",
+  noCause: "No cause was recorded for this run.",
   /** The empty state's offer beside the ingest command. */
   emptyRun: "Or run the project's coverage tools from here:",
   /** The empty state with no tool installed: what would apply, and whether the

@@ -15,6 +15,10 @@
 //! The store is synced by one engine and then served by another, so the tool
 //! answers over what a restarted server finds on disk.
 //!
+//! The figures include the internal-candidate headline and the doc figure
+//! (S-635, FR-RS-49): the planted capture row names nothing the module
+//! declares, so counting it would read as one more provably external reference.
+//!
 //! [CR-195]: ../../docs/requests/CR-195-status-resolution-figures-exclude-capture-before-delete-rows.md
 //! [FR-RS-09]: ../../docs/specs/requirements/FR-RS-09.md
 //! [FR-RS-04]: ../../docs/specs/requirements/FR-RS-04.md
@@ -58,6 +62,8 @@ fn module(touch: &str) -> TempDir {
 fn figures(status: &Value) -> Value {
     let mut out = serde_json::Map::new();
     for key in [
+        "internal_resolution",
+        "doc_resolution",
         "refs_total",
         "refs_resolved",
         "refs_unresolved",

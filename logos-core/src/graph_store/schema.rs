@@ -73,6 +73,10 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (38, MIGRATION_38),
     (39, MIGRATION_39),
     (40, MIGRATION_40),
+    (41, MIGRATION_41),
+    (42, MIGRATION_42),
+    (43, MIGRATION_43),
+    (44, MIGRATION_44),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2571,7 +2575,10 @@ UPDATE files SET content_hash = NULL;
 /// construction**: the column names no language; a language fills it by
 /// declaring the model and capturing `@module.namespace`. The binder keys such a
 /// file by it ([`crate::resolve::package_key`]); symbols are unchanged
-/// ([ADR-07]).
+/// ([ADR-07]). Since S-528 a language declaring `directory_packages` (Go)
+/// records its file's `package` clause here too, which places the file among
+/// its directory's files and keys nothing — an extraction-only change, filled
+/// by the re-extraction the sprint's migrations trigger.
 ///
 /// `NULL` on every row until its file is re-extracted, and **re-extraction is
 /// triggered here** as migrations 25, 28 and 29 do it: every
@@ -2728,8 +2735,10 @@ UPDATE files SET content_hash = NULL;
 ///   (a variadic parameter). The `CHECK`s refuse a maximum without a minimum or
 ///   below it.
 /// - **`nodes.takes_self`** — `1` when a Rust `impl` function's first parameter
-///   is a receiver, `0` for an associated function (`fn new() -> Self`); `NULL`
-///   on every other node.
+///   is a receiver, `0` for a callable with no instance receiver: a Rust
+///   associated function (`fn new() -> Self`), and since S-565 a Ruby `def
+///   self.x`, `class << self` method or `module_function`; `NULL` on every
+///   other node.
 /// - **`unresolved_refs.arg_count`** — how many arguments a `Calls` row's call
 ///   passes; `NULL` when it cannot be counted (a spread argument, a token tree
 ///   whose tokens may hide a comma) and on every non-call row.
@@ -3249,15 +3258,199 @@ INSERT INTO metric_snapshot_outlier_labels
 DROP TABLE metric_snapshot_outlier_labels_v39;
 ";
 
+/// Migration 41 — the names a callable's body binds locally (S-593, [CR-191],
+/// [FR-EX-33]).
+///
+/// One new table, **`local_bindings`**: one row per name a callable body of a
+/// file binds — a parameter, a local variable or a local import (`kind`, the
+/// [`LocalBindingKind`](crate::model::LocalBindingKind) discriminants) — with
+/// the name's position (`line`, 1-based; `col`, the 0-based byte column), the
+/// span of the scope it binds in (`scope_start_*` / `scope_end_*`, the end
+/// column exclusive) and whether it is in force throughout that scope
+/// (`hoisted`). Keyed by the file, whose re-extraction or removal takes the
+/// file's rows with it (the migration-34 `impl_blocks` cascade). No graph row
+/// reads it: the facts change no node, symbol or edge.
+///
+/// **Plugin-agnostic by construction**: no column names a language; a plugin
+/// fills the table by declaring the `locals` capability (`extract::locals`),
+/// and one that declares none records nothing.
+///
+/// Empty until a file is re-extracted, and **re-extraction is triggered here**
+/// as migrations 25 and 28–35 do it: every `files.content_hash` is cleared, so
+/// the next scan, index or full-walk sync re-extracts each file like a
+/// modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_41_adds_the_local_binding_table` in [`super::migrate`].
+///
+/// [CR-191]: ../../../../docs/requests/CR-191-a-local-binding-shadows-the-receiver-and-the-callee.md
+/// [FR-EX-33]: ../../../../docs/specs/requirements/FR-EX-33.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_41: &str = "\
+-- FR-EX-33 (CR-191): every name a callable body binds locally. kind 1 parameter,
+-- 2 variable, 3 import. line is 1-based, col a 0-based byte column, and the
+-- scope's end column is exclusive. hoisted 1 = in force throughout the scope.
+-- A file's rows go with the file.
+CREATE TABLE local_bindings (
+    id               INTEGER PRIMARY KEY,
+    file_id          INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL CHECK (name <> ''),
+    kind             INTEGER NOT NULL CHECK (kind IN (1,2,3)),
+    line             INTEGER NOT NULL CHECK (line >= 1),
+    col              INTEGER NOT NULL CHECK (col >= 0),
+    scope_start_line INTEGER NOT NULL CHECK (scope_start_line >= 1),
+    scope_start_col  INTEGER NOT NULL CHECK (scope_start_col >= 0),
+    scope_end_line   INTEGER NOT NULL CHECK (scope_end_line >= scope_start_line),
+    scope_end_col    INTEGER NOT NULL CHECK (scope_end_col >= 0),
+    hoisted          INTEGER NOT NULL CHECK (hoisted IN (0,1))
+) STRICT;
+
+-- The cascade's lookup: re-extracting a file deletes its rows through it.
+CREATE INDEX idx_local_bindings_file ON local_bindings(file_id);
+
+-- Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the table.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 42 — a type's **generic arity** (S-602, [CR-199], [FR-RS-13],
+/// [FR-RS-45]), the [migration-35](MIGRATION_35) shape:
+///
+/// - **`nodes.type_arity`** — a type declaration's type-parameter count, for a
+///   language whose types are told apart by it (`[module_model] type_arity`,
+///   C#'s): `Result<T>` records 1, `Result` 0. `NULL` on every other node and
+///   for every other language. The binder's own-namespace, enclosing-namespace
+///   and namespace-wildcard rungs admit only a type whose arity equals the
+///   written one, which a base type's or a `new`'s ledger row records in its
+///   existing `arg_count` column (migration 33); a node or a row with none
+///   recorded admits any.
+///
+/// **Plugin-agnostic by construction**: no column names a language; a plugin
+/// fills it by declaring the key and the `@item.type_parameters` capture
+/// (`extract::assoc`), and one that declares neither records nothing.
+///
+/// `NULL` until a file is re-extracted, and **re-extraction is triggered
+/// here** as migrations 25 and 28–35 do it: every `files.content_hash` is
+/// cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one — which also records the written arity on the ledger's
+/// rows. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_42_adds_the_type_arity_column` in [`super::migrate`].
+///
+/// [CR-199]: ../../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+/// [FR-RS-13]: ../../../../docs/specs/requirements/FR-RS-13.md
+/// [FR-RS-45]: ../../../../docs/specs/requirements/FR-RS-45.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_42: &str = "\
+-- 1. A type's generic arity (CR-199): its type-parameter count, for a language
+-- that tells types apart by it. NULL elsewhere, and on rows indexed before this
+-- migration.
+ALTER TABLE nodes ADD COLUMN type_arity INTEGER CHECK (type_arity >= 0);
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column and the written arity of
+-- each ledger row.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 43 — trait fan-out edges are **re-bound with their dispatch
+/// marker** (S-712, [CR-226] BR-76, [FR-RS-08]).
+///
+/// A trait-typed call's fan-out now stamps `dispatch:<trait method symbol>` on
+/// each edge to an implementation (`crate::model::dispatch`); the edge to the
+/// trait's own method stays unmarked. A store bound before this holds every
+/// such edge unmarked, and an incremental sync re-binds a row only when its
+/// change-set can move it — so without this step an untouched fan-out would
+/// stay unmarked for good. No schema change: the marker rides the existing
+/// `edges.payload` column.
+///
+/// **Re-binding is triggered here** as migrations 25 and 28–42 trigger
+/// re-extraction: every `files.content_hash` is cleared, so the next scan,
+/// index or full-walk sync re-extracts each file like a modified one, which
+/// re-binds every ledger row. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_43_clears_every_hash_so_fan_outs_rebind_marked` in
+/// [`super::migrate`].
+///
+/// [CR-226]: ../../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+/// [FR-RS-08]: ../../../../docs/specs/requirements/FR-RS-08.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_43: &str = "\
+-- FR-RS-08 (CR-226): a trait fan-out's implementor edges carry a dispatch
+-- marker. Trigger re-extraction, so the next scan re-binds every fan-out row
+-- with it.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 44 — a file's **parse damage** and the snapshot entries it flags
+/// (S-571, [CR-181], [FR-IX-14]), the [migration-30](MIGRATION_30) and
+/// [migration-37](MIGRATION_37) shapes:
+///
+/// - **`files.parse_damaged`** — `1` when the file's parse tree contained an
+///   ERROR or MISSING node (tree-sitter's `has_error`), `0` when it parsed
+///   clean. `status` counts it per language (`parse_damage`), `scan` warns on a
+///   language whose damaged share reaches 10% and which holds 10% of the
+///   production callables, and a worst-offender or "where to start" entry in
+///   such a file reads `partial_parse: true`. `NULL` on a
+///   row indexed before this migration: "not recorded", counted as neither
+///   ([NFR-CC-04]).
+/// - **`partial_parse`** on `metric_snapshot_offenders`,
+///   `metric_snapshot_offenders_uncapped` and `metric_snapshot_fix_units` —
+///   the entry's flag as its snapshot computed it, so a read-back states what
+///   the snapshot recorded and never today's parse ([FR-QM-15]: offender rows
+///   are never mutated). `NULL` on a row written before this migration, read
+///   as unflagged.
+///
+/// **Plugin-agnostic by construction**: no column names a language; every
+/// grammar's parse records it.
+///
+/// `files.parse_damaged` is `NULL` until a file is re-extracted, and **re-extraction is triggered
+/// here** as migrations 25 and 28–43 do it: every `files.content_hash` is
+/// cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_44_adds_the_parse_damage_columns` in [`super::migrate`].
+///
+/// [CR-181]: ../../../../docs/requests/CR-181-cpp-is-declared-as-limited-support-and-parse-damage-is-reported.md
+/// [FR-IX-14]: ../../../../docs/specs/requirements/FR-IX-14.md
+/// [FR-QM-15]: ../../../../docs/specs/requirements/FR-QM-15.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_44: &str = "\
+-- 1. A file's parse damage (FR-IX-14, CR-181): 1 when its parse tree held an
+-- ERROR or MISSING node, 0 when it parsed clean. NULL on rows indexed before
+-- this migration.
+ALTER TABLE files ADD COLUMN parse_damaged INTEGER CHECK (parse_damaged IN (0,1));
+
+-- 2. Whether a snapshot's worst-offender or where-to-start entry lay in such a
+-- file when the snapshot was computed: 1 flagged, 0 not. Recorded with the
+-- entry, never re-derived. NULL on rows written before this migration.
+ALTER TABLE metric_snapshot_offenders ADD COLUMN partial_parse INTEGER CHECK (partial_parse IN (0,1));
+ALTER TABLE metric_snapshot_offenders_uncapped ADD COLUMN partial_parse INTEGER CHECK (partial_parse IN (0,1));
+ALTER TABLE metric_snapshot_fix_units ADD COLUMN partial_parse INTEGER CHECK (partial_parse IN (0,1));
+
+-- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
+";
+
 #[cfg(test)]
 mod tests {
     use super::{
         MIGRATION_1, MIGRATION_10, MIGRATION_11, MIGRATION_12, MIGRATION_13, MIGRATION_14,
         MIGRATION_15, MIGRATION_16, MIGRATION_17, MIGRATION_18, MIGRATION_19, MIGRATION_2,
         MIGRATION_20, MIGRATION_21, MIGRATION_22, MIGRATION_25, MIGRATION_29, MIGRATION_3,
-        MIGRATION_31, MIGRATION_32, MIGRATION_33, MIGRATION_34, MIGRATION_4, MIGRATION_8,
+        MIGRATION_31, MIGRATION_32, MIGRATION_33, MIGRATION_34, MIGRATION_4, MIGRATION_40, MIGRATION_41,
+        MIGRATION_8,
     };
-    use crate::model::{EdgeKind, NodeKind, ReceiverMode, ReceiverShape, RefForm};
+    use crate::model::{EdgeKind, LocalBindingKind, NodeKind, ReceiverMode, ReceiverShape, RefForm};
 
     /// Extract the `<column> IN (…)` discriminant list at the `nth` occurrence
     /// of the marker in the given migration SQL.
@@ -4635,6 +4828,55 @@ mod tests {
         assert!(
             !MIGRATION_33.contains("impl_blocks") && !MIGRATION_33.contains("receiver_mode"),
             "the associated-item facts arrive in migration 34, never by editing migration 33"
+        );
+    }
+
+    /// Migration 41 (S-593) creates the local-binding table, its cascade index
+    /// and triggers re-extraction — nothing else: no graph table is touched,
+    /// and it is its own migration, not an edit of 40. The kind CHECK is the
+    /// model's.
+    #[test]
+    fn migration_41_adds_the_local_binding_table_only() {
+        let statements: Vec<String> = MIGRATION_41
+            .split(';')
+            .map(|stmt| {
+                stmt.lines()
+                    .filter(|l| !l.trim_start().starts_with("--"))
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .map(|stmt| stmt.trim().to_string())
+            .filter(|stmt| !stmt.is_empty())
+            .collect();
+        assert_eq!(
+            statements,
+            [
+                "CREATE TABLE local_bindings ( id               INTEGER PRIMARY KEY, \
+                 file_id          INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE, \
+                 name             TEXT NOT NULL CHECK (name <> ''), \
+                 kind             INTEGER NOT NULL CHECK (kind IN (1,2,3)), \
+                 line             INTEGER NOT NULL CHECK (line >= 1), \
+                 col              INTEGER NOT NULL CHECK (col >= 0), \
+                 scope_start_line INTEGER NOT NULL CHECK (scope_start_line >= 1), \
+                 scope_start_col  INTEGER NOT NULL CHECK (scope_start_col >= 0), \
+                 scope_end_line   INTEGER NOT NULL CHECK (scope_end_line >= scope_start_line), \
+                 scope_end_col    INTEGER NOT NULL CHECK (scope_end_col >= 0), \
+                 hoisted          INTEGER NOT NULL CHECK (hoisted IN (0,1)) ) STRICT",
+                "CREATE INDEX idx_local_bindings_file ON local_bindings(file_id)",
+                "UPDATE files SET content_hash = NULL",
+            ],
+            "exactly the local-binding table, its index and the re-extraction trigger"
+        );
+        let kinds: Vec<i32> = LocalBindingKind::ALL.iter().map(|k| k.as_i32()).collect();
+        assert_eq!(
+            check_discriminants(MIGRATION_41, "kind IN (", 0),
+            kinds,
+            "local_bindings.kind CHECK must equal LocalBindingKind::ALL discriminants"
+        );
+        assert!(
+            !MIGRATION_40.contains("local_bindings"),
+            "the local bindings arrive in migration 41, never by editing migration 40"
         );
     }
 }

@@ -28,7 +28,12 @@ overloaded_calls = true
 # (`queries/symbols.scm`).
 inherits_interface_bodies = true
 
-capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties"]
+# A bare call never names a local value (S-594, FR-RS-44): methods and
+# variables are separate namespaces, so `String name = …; name()` calls the
+# method. A local binding shadows no call here.
+separate_call_namespace = true
+
+capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "properties", "locals"]
 
 # The optional member-access capability (S-523, CR-171, ADR-39): Cohesion
 # scores a class only in a language that declares it, so a class of a language
@@ -142,6 +147,9 @@ invocations = "queries/invocations.scm"
 # declares. Anchors only — which annotation binds, and how a use site spells a
 # read, are the `[properties]` table below.
 properties = "queries/properties.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-015).
 # `@RequestMapping` declares no single verb.
 [framework_methods]

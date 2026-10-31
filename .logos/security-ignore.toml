@@ -41,3 +41,21 @@ path = "Cargo.lock"
 rule = "GHSA-c9xm-49cp-xcr9"
 reason = "rmcp 1.7.0 advisory GHSA-c9xm-49cp-xcr9 is in rmcp's Streamable-HTTP transport or OAuth client (features `transport-streamable-http-*` and `auth`), which Logos does not compile: it enables only `server`, `transport-io` and `macros` (stdio), plus `client` in the mcp crate's dev tests. Verified with `cargo tree -e features`; revisit at expiry or on any rmcp feature change."
 expires = 2027-04-19
+
+[[ignore]]
+path = "logos-core/src/history/security/mask.rs"
+rule = "aws-access-key-id"
+scanner = "trivy"
+reason = "Redaction-test input, not a credential: AKIAQWERTYUIOPASDFGH (the keyboard row) in mask.rs's #[cfg(test)] module, the string the masker must redact. mask.rs's production code holds no literal key; a real one elsewhere, or from another scanner, is still reported. Owner, 2026-10-31, with the [security] table."
+
+[[ignore]]
+path = "logos-core/src/history/security/mask.rs"
+rule = "github-pat"
+scanner = "trivy"
+reason = "Redaction-test input, not a credential: a made-up ghp_ token in mask.rs's #[cfg(test)] module, the string the masker must redact. mask.rs's production code holds no literal token; a real one elsewhere, or from another scanner, is still reported. Owner, 2026-10-31, with the [security] table."
+
+[[ignore]]
+path = "scripts/verify-scanner-exclusions.sh"
+rule = "generic-api-key"
+scanner = "gitleaks"
+reason = "A planted fixture, not a credential: the script writes this Password into a throwaway Go file so gosec has a G101 finding whose exclusion it verifies (CR-265, S-845)."

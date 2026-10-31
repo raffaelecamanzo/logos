@@ -1,0 +1,535 @@
+{
+  "version": 1,
+  "findings": [
+    {
+      "fingerprint": "9de4af2049e40989c231ac43498d9577f6950a7e5360c80fdbd52e9f5e8dd762",
+      "rule_id": "aws-access-token",
+      "path": ".logos/security-ignore.toml"
+    },
+    {
+      "fingerprint": "a93ffadc2f5cd191a147c363192289d0263f1b209aa64d47d71e61f70c5426dc",
+      "rule_id": "generic-api-key",
+      "path": "cli/tests/security_surface.rs"
+    },
+    {
+      "fingerprint": "dd40ee1ca3f83fb8eec1c424ba0b5e91c4cb7dd525318b59b906fef25f047e29",
+      "rule_id": "generic-api-key",
+      "path": "cli/tests/security_surface.rs"
+    },
+    {
+      "fingerprint": "a8199585284f195bc4b805d806117f07760df42696a875603fd6d2af4b19f1cb",
+      "rule_id": "private-key",
+      "path": "logos-core/src/coverage/run_tests.rs"
+    },
+    {
+      "fingerprint": "d49d0c70b624e495989ab108e1663ff6b43e47483374f9635a3ce50f0ab7edcb",
+      "rule_id": "private-key",
+      "path": "logos-core/src/coverage/run_tests.rs"
+    },
+    {
+      "fingerprint": "51faa59c7e7b0ee866626366ac257bf33dc154ddea202c3dbde559d4a65086bb",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "bec51c88928faf69f7c53403dea926b80ea3c266d098a8f7af60fde9d48e0bd5",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "a71e9abed5906311ddc83bed7d24b612c87722b71fe59f853503ea06327141fb",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "ce4325ec4b3342c6a1a9e66e65c597687ddaf48882ee7ed5a074acca10cbe5df",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "55da8eac15995eaaccae9b80a58ababec885dd67ab7978b1021e0cb92a298717",
+      "rule_id": "generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "b4b56990a9930f3bf72afbcab4f86df5624b755efcbe43700603ad5a23301901",
+      "rule_id": "generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "4e95c9d134914b3b7c79ab878f076ece482f653ed3e8046d0917ef1a4b7cfbbd",
+      "rule_id": "generic.secrets.security.detected-pgp-private-key-block.detected-pgp-private-key-block",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "17b078d1a045529bcf9041f25d25e1c3cf1e8cf90cbe9cb3d7bf882aba208290",
+      "rule_id": "generic.secrets.security.detected-slack-webhook.detected-slack-webhook",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "d97bc90948368b0d6c5527159a8eaa9d2223048ca8e45b4c3ef09b77aaa3102a",
+      "rule_id": "github-pat",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "da367103cf55c38275a96382e9043871ceed0a1f96093ec01924671d80aa3d6a",
+      "rule_id": "private-key",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "5e248a8721c473e8a9d36425b2a834fc4707ae0799a840fedcccf4ce244ef768",
+      "rule_id": "slack-web-hook",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "469e4db3dcf42b4e79f94109b170679c8e9975ad2911ed50d68b0acdcb932594",
+      "rule_id": "slack-webhook-url",
+      "path": "logos-core/src/history/security/mask.rs"
+    },
+    {
+      "fingerprint": "2051b1edf6a13e9f878563cf582854990d74f1573caa7c2dba02eb5b09e66348",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/parse.rs"
+    },
+    {
+      "fingerprint": "c2a4aa4002eecc5022f10c439eb773358ccd4549172a9e43b9aa34ff44b0e389",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/parse.rs"
+    },
+    {
+      "fingerprint": "f804ecebad04a62fbf4493b4549c4cbf7eec90b5216bf9277bb432581bbe5c3e",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/parse.rs"
+    },
+    {
+      "fingerprint": "7c02037c2f76c929e74705aa152ef773aac2c9a71eddf71256e4e19dbef4c0ff",
+      "rule_id": "generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+      "path": "logos-core/src/history/security/parse.rs"
+    },
+    {
+      "fingerprint": "95b4db1b83bb8c451e7a069a7c43cf0062bd536faa0d218f01eb360f04e8e96c",
+      "rule_id": "generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+      "path": "logos-core/src/history/security/parse.rs"
+    },
+    {
+      "fingerprint": "928e1edef6fde7f236896eadb611b720a91c72759cd9f3c6311dc76a2824c23b",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/src/history/security/secret.rs"
+    },
+    {
+      "fingerprint": "d6d1747cba244f772685e3118e4d033810782419edca2450aedc99e873c65dd8",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/src/history/security/secret.rs"
+    },
+    {
+      "fingerprint": "76a61b89898558cef056bfa06a663d5e3d94b28963f8da4d0061acfc394e7ef0",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/tests.rs"
+    },
+    {
+      "fingerprint": "aa6db71edb1d73e23afe3ad783e177c475572667bedc5dd67670eb6211b5ee32",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/history/security/tests.rs"
+    },
+    {
+      "fingerprint": "dce0cab26143a3d613dcbd41097f5ede06e3b2078f1814be5f11bcf861d445bc",
+      "rule_id": "generic.secrets.security.detected-aws-access-key-id-value.detected-aws-access-key-id-value",
+      "path": "logos-core/src/history/security/tests.rs"
+    },
+    {
+      "fingerprint": "fddbcc371e56b924ad799b8f415777be98455ee3cd08b434645b84020156725b",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/src/security/mask.rs"
+    },
+    {
+      "fingerprint": "1de06ff2eec09111ea50b3c9068790ac68cc8c96a93615a2a4580bc8f7060a65",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/src/security/mask.rs"
+    },
+    {
+      "fingerprint": "88277c2e18b0c2412e69f4c612653fcc9f16c7e6e2686d811b0e4c00f1212b4e",
+      "rule_id": "private-key",
+      "path": "logos-core/src/security/mask.rs"
+    },
+    {
+      "fingerprint": "d6beff97c29d70d5cb1be5ea79329a4774cae9421e564c2f5f8c88e7dbf08957",
+      "rule_id": "private-key",
+      "path": "logos-core/src/security/mask.rs"
+    },
+    {
+      "fingerprint": "0eed790a061c1951d7cace598492b36b996dbe601cf258e5ff1e127cc60f98ca",
+      "rule_id": "B404",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "03bb1834e349243c8b83c3b99df5b0a9c693575ca0b94e84ebf37a28ca02c630",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "069d0c1fee3502bbeb0cba17469e42536074c68653cf1fcade3f4155e2b95884",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "399b3f01a9b732d898ea78fd74cfbf496262b8ecea13f86caeca22110196479a",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "750fcb82643993a9c2f90e4b7f3d2b91be9485f3b0e5ee42776adc823637258f",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "eb282045220b30cb345ceb8a74d3806141234e11190c8b66d9cdbca8d1ca1171",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "ef30ab4545664a764cac57034d913b61b568f94c5f22f3b996db2c287cdb8e37",
+      "rule_id": "B603",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "5b5b2b3649351efad915aae851c7994d50718303086cedcb090baec94643d27d",
+      "rule_id": "B607",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "980647e43bd025bfc58683f86d0e12960c0559df86c0d8122a5b0fe71244b017",
+      "rule_id": "B607",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "b929cae3bec3b7387b39e1463ff32b69e3b7c1050cdb80a484b90ed711847cab",
+      "rule_id": "B607",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "e2aab10a2106ffc5c24ac7682f64b619fb725d7966b1c89881e43fb837645143",
+      "rule_id": "B607",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "11c34544b7439d90174d860d63e9d6d3b1192dfa2454137c52721effb9681e40",
+      "rule_id": "B608",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "38619021afbfc70e71a50e7c575c830db429c807637576ef75dc07297f0dba9b",
+      "rule_id": "B608",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "a2b67ceb1fc892ca4a5fa62407836bd0d8f7f198dd536f15eb31b41d24360071",
+      "rule_id": "B608",
+      "path": "logos-core/tests/bodied_container_metrics/measure_estate.py"
+    },
+    {
+      "fingerprint": "bd5521ec3534e8fb82681baf61665e419ac40c97b6389d27fd4dfcc74bee5aca",
+      "rule_id": "CVE-2025-71176",
+      "path": "logos-core/tests/fixtures/coverage/projects/deps/poetry/poetry.lock"
+    },
+    {
+      "fingerprint": "d10221f80c4175d22a6a5e8841173d3c8d4555be858661359e9c8abdd518dfc8",
+      "rule_id": "B101",
+      "path": "logos-core/tests/fixtures/coverage/projects/pytest-cov/tests/test_ops.py"
+    },
+    {
+      "fingerprint": "0157fc55506ffde68b71ec9891da76a5fb50e586b5215f6088fcc67719b99fd3",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "0351834b76cca089461fd8e134033d2b7d2cb833bd6af57d475eeb5cc61dcb32",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "2f2f3c8e54df049cc9e18d1c2eb7a4f74cbd826d940dcee1639bc403207eeb69",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "607bd7a9912d77f7e24ce051987d378047b8dcd1261b342b2cce0bb3cbdba802",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "a00b836b680f0884e80fb8d4e192b7ea167026a532dfd9378e87798533ec23f3",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "c83b2d2647570de70f691b40161a1e4af99ffd0f37b382578cb28973e55986bb",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "fd2a4ade3f33fad89150907bdd9be8e1cbb8058b9cd4e960369f2196e93b7787",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/bandit.sarif"
+    },
+    {
+      "fingerprint": "62360a2f85c4a4b5e8e453a50edd6deada85e6d2475c42731721a998d3e9dcdd",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record-neighbours.sh"
+    },
+    {
+      "fingerprint": "b0375bda36bd5aec4d783c55b968cef2d96143d0e371b2980b068f7bfee25804",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record-neighbours.sh"
+    },
+    {
+      "fingerprint": "c062c0a4f9191c1b2b73752a44c855aab5f4ef4cfa12f24b8909aac6ccc81bf2",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record-neighbours.sh"
+    },
+    {
+      "fingerprint": "ce236dfb991c20e1b367bac25b0eeb8534071e0167b007f7e337fde45afd0bcf",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record-neighbours.sh"
+    },
+    {
+      "fingerprint": "0143f31a8e5e16d8e55b287ef15285885f3c9512e755db001f14b796dfe93821",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record.sh"
+    },
+    {
+      "fingerprint": "47cc3fce0f882ef095ffa1e2b56bef275b9701cf722f040b30ff9a7254cbe4fc",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record.sh"
+    },
+    {
+      "fingerprint": "5014b16dda712db416b5cf2ad6d3defa3317a1fca871041f20de5651bd5b8c80",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record.sh"
+    },
+    {
+      "fingerprint": "8fdd2979af844df310afb5572c58054e3edff6da11273e47ece49ea63c16d022",
+      "rule_id": "generic-api-key",
+      "path": "logos-core/tests/fixtures/sarif/gitleaks-8.18.4/record.sh"
+    },
+    {
+      "fingerprint": "41ea0b20ac40c206b5cacd2e8d8ac953071899584bcd5caadae1aa0582a5406c",
+      "rule_id": "GHSA-f67m-9j94-qv9j",
+      "path": "logos-core/tests/fixtures/security-context/axum/Cargo.lock"
+    },
+    {
+      "fingerprint": "5e695fb14c7d86b00ba693a8518b88e1a3d041179bb4763eb592e24b5534d1b1",
+      "rule_id": "RUSTSEC-2022-0022",
+      "path": "logos-core/tests/fixtures/security-context/axum/Cargo.lock"
+    },
+    {
+      "fingerprint": "21500aa2cf5c70b80f45b843ebc87c366157e5e8502d8f68e893be42fef04199",
+      "rule_id": "CKV_DOCKER_2",
+      "path": "logos-core/tests/fixtures/security-context/axum/Dockerfile"
+    },
+    {
+      "fingerprint": "d0e4ce25e4409ea9e90a5c0869c4e7af3dd47c325aa9567a37300aa21e1e5229",
+      "rule_id": "CKV_DOCKER_8",
+      "path": "logos-core/tests/fixtures/security-context/axum/Dockerfile"
+    },
+    {
+      "fingerprint": "f64acb631f1e070551b43413caef95da66d0ddb6cc918a919017c43fa7f806ea",
+      "rule_id": "DS-0002",
+      "path": "logos-core/tests/fixtures/security-context/axum/Dockerfile"
+    },
+    {
+      "fingerprint": "ba43636b44d08ce0fb2b8de7967d5c06a9c7bbae8681e141204a026938afacd6",
+      "rule_id": "DS-0026",
+      "path": "logos-core/tests/fixtures/security-context/axum/Dockerfile"
+    },
+    {
+      "fingerprint": "95a5d15b32804430064a440aadd72816f4feac4de3b1a23bf184449b6d1bddf1",
+      "rule_id": "B404",
+      "path": "logos-core/tests/fixtures/security-context/scripts/report.py"
+    },
+    {
+      "fingerprint": "bbbd700f7a03a1332bd2d1f4a06c62dd4b8216fa26dcd64c400c3c1dffa526d9",
+      "rule_id": "B602",
+      "path": "logos-core/tests/fixtures/security-context/scripts/report.py"
+    },
+    {
+      "fingerprint": "233077b63b4dfa3710e2babe6da88f55cb0d7ab408aa2992dd57b1a55b65991d",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/tests/security_context.rs"
+    },
+    {
+      "fingerprint": "bf91d8f11d8756ed02db7e437f0d61165726494a162626a4cf2f9e5bcdd1e4a7",
+      "rule_id": "aws-access-token",
+      "path": "logos-core/tests/security_context.rs"
+    },
+    {
+      "fingerprint": "7bea12ee4c4de67b90134ca7ca55840e13d3b0f65f632953a8df3e61804add9a",
+      "rule_id": "B404",
+      "path": "plugins/logos/skills/logos-review/scripts/lib/delta.py"
+    },
+    {
+      "fingerprint": "108b088ce44916e99bdc507054af1bddd3f9962e6312af4bfdfd68cb170cc30a",
+      "rule_id": "B603",
+      "path": "plugins/logos/skills/logos-review/scripts/lib/delta.py"
+    },
+    {
+      "fingerprint": "96c111fffe61ad6b08c7e17eef1e309d07c27f13c4568f4d1d614ed49a1b7fc2",
+      "rule_id": "B603",
+      "path": "plugins/logos/skills/logos-review/scripts/lib/delta.py"
+    },
+    {
+      "fingerprint": "f2c59baede36b8eb7e3d5be2d3b8b74822514bb3ee8a31f4df3ec3915ce1e40f",
+      "rule_id": "B607",
+      "path": "plugins/logos/skills/logos-review/scripts/lib/delta.py"
+    },
+    {
+      "fingerprint": "5c8ec6a47709ea4ad880cf152d2c5d850b210f0904f7ef40c391a68c9a9e1e9a",
+      "rule_id": "B404",
+      "path": "scripts/gen-third-party-notices.py"
+    },
+    {
+      "fingerprint": "41b7538270a6277676bcfb2b194735227c5ab7fc973515ed5274b245e7e36e68",
+      "rule_id": "B603",
+      "path": "scripts/gen-third-party-notices.py"
+    },
+    {
+      "fingerprint": "3a591d758858263018ef0613262d39d8f2c70c8171e16ba4e8e795818832f56e",
+      "rule_id": "B404",
+      "path": "scripts/swe-build-smoke.py"
+    },
+    {
+      "fingerprint": "22c3d6fd3153f889b9d3a638ba80aa59feffc84d57bd625725d5de896cd88af6",
+      "rule_id": "B603",
+      "path": "scripts/swe-build-smoke.py"
+    },
+    {
+      "fingerprint": "c86c2a4fd3639462aa57903bd69737989d1730d0f8e941f8eb1cbcbeeefe54b8",
+      "rule_id": "B603",
+      "path": "scripts/swe-build-smoke.py"
+    },
+    {
+      "fingerprint": "f5a56edb0534f1f989e814d5000fd3b1db404208673425491abde8b7e9895c66",
+      "rule_id": "B603",
+      "path": "scripts/swe-build-smoke.py"
+    },
+    {
+      "fingerprint": "fe8fe83657c8a6ffb0216457f60c832c62eaca891e2563aa7107cfc4620a477e",
+      "rule_id": "B603",
+      "path": "scripts/swe-build-smoke.py"
+    },
+    {
+      "fingerprint": "0d287070b23ac4ba32eb26aae17e458ab190d70fe8c9ec79bee36a322a7ead94",
+      "rule_id": "aws-access-token",
+      "path": "scripts/tests/test-plugin-stop.sh"
+    },
+    {
+      "fingerprint": "965691028dfa1bb6df84fb667d237f54c7438945f3bad46202f1f7fa30fa6051",
+      "rule_id": "aws-access-token",
+      "path": "scripts/tests/test-plugin-stop.sh"
+    },
+    {
+      "fingerprint": "3520015cd0e244da39e20bef9b4f61e5700d0da254a7ed155163ec1f0b286367",
+      "rule_id": "generic-api-key",
+      "path": "web/tests/api_v1.rs"
+    },
+    {
+      "fingerprint": "8751762eb899eef09278d4672414398862ddf6e543c93eeef73655bd85870ad1",
+      "rule_id": "generic-api-key",
+      "path": "web/tests/uat_ui_07.rs"
+    },
+    {
+      "fingerprint": "763e256d7299b2c5f810410362767e937c148ab922504e7979777e8506ad4826",
+      "rule_id": "aws-access-token",
+      "path": "web/tests/workspace_api.rs"
+    },
+    {
+      "fingerprint": "e92db3f3c401ecb808a0422bdddea6292815eeee13cf66f6ec43381e68492e71",
+      "rule_id": "aws-access-token",
+      "path": "web/tests/workspace_api.rs"
+    },
+    {
+      "fingerprint": "25f7249890bc067f71a9c94b2c659fb628ef3842db30260a17990fe10224148b",
+      "rule_id": "generic-api-key",
+      "path": "web/ui/src/api/configClient.test.ts"
+    },
+    {
+      "fingerprint": "75a3569e4cbec5bade98fb93662ed8eed41cc2dc6af30a47bcb1d65a78c276f0",
+      "rule_id": "generic-api-key",
+      "path": "web/ui/src/api/configClient.test.ts"
+    },
+    {
+      "fingerprint": "26e5f8344666f25fdc31f4b1fafa60eee39d2ad71bbc41539da69466a131305b",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/nav.test.ts"
+    },
+    {
+      "fingerprint": "ce820425ee96274dbdf27df41fa53af937d7c2bc943184f0c583da06055f2ce2",
+      "rule_id": "generic.unicode.security.bidi.contains-bidirectional-characters",
+      "path": "web/ui/src/views/analytics/CoverageConsentDialog.test.tsx"
+    },
+    {
+      "fingerprint": "7f6dad5e3ab68e9650a0e2fd54483ba96774a9021d99661c26956c466cbc3121",
+      "rule_id": "generic.unicode.security.bidi.contains-bidirectional-characters",
+      "path": "web/ui/src/views/analytics/CoverageView.test.tsx"
+    },
+    {
+      "fingerprint": "2bef5848490959342547275e144946fdd3cb6dcca006f1adbab8cf2dfd5e7a84",
+      "rule_id": "generic.unicode.security.bidi.contains-bidirectional-characters",
+      "path": "web/ui/src/views/analytics/fixtures/coverageRun.ts"
+    },
+    {
+      "fingerprint": "176872dc472477e98d248eab77643fa037bcd7dfbb25a3dad2f117c36ecf358e",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/health/HealthView.test.tsx"
+    },
+    {
+      "fingerprint": "6e03db2dd0cd323469b0b51c00d098f0f7fe543ebdbc82f23167d8b7ca143940",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/health/HealthView.test.tsx"
+    },
+    {
+      "fingerprint": "0e4524d17f2dc82335d8a01aa798cf7d86a587d63436b58ba2ee26b2c558badf",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/security/SecurityView.test.tsx"
+    },
+    {
+      "fingerprint": "c030f113cc9a948f3d25df4d1e742e8476923b698739b53f86255ab9858d4429",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/security/SecurityView.test.tsx"
+    },
+    {
+      "fingerprint": "dc9b7683f3b06ea5601784fb88c6136e87a429335f709087adb692a397891664",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/security/SecurityView.test.tsx"
+    },
+    {
+      "fingerprint": "ccd09002864709d0696f3025a08ad4b7b2314f016ae0ac760f35afab1e0aa467",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/statistics/WorkspaceStatisticsView.test.tsx"
+    },
+    {
+      "fingerprint": "91b48d1759d97339803e2263d677f86e0c6475c7b87a0aae47ae564a9e3182f1",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/workspace/WorkspaceDashboardView.test.tsx"
+    },
+    {
+      "fingerprint": "9affc9f8e53aba3010205a559708cfcbd40306878587a9e91a3937a571ee23d4",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/workspace/WorkspaceDashboardView.test.tsx"
+    },
+    {
+      "fingerprint": "b3f0b6325b6df1a5e2beed98f00dc0c7603a09942c6d36825527666bae10a888",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/workspace/WorkspaceDashboardView.test.tsx"
+    },
+    {
+      "fingerprint": "ef7f61d3fa106f55aa3bbfa30413d19c45f88bb943dd9155e6a838d19d4bbee9",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/workspace/WorkspaceDashboardView.test.tsx"
+    },
+    {
+      "fingerprint": "90d93c619b1dcf94ac173ee531c5766a59f0b2da2ac9cabfa81c1ea10120e98f",
+      "rule_id": "javascript.lang.security.audit.detect-non-literal-regexp.detect-non-literal-regexp",
+      "path": "web/ui/src/views/workspace/WorkspaceHealthView.test.tsx"
+    }
+  ]
+}

@@ -937,7 +937,9 @@ impl Constraints {
 /// two god-container thresholds (`T_m`/`T_span`), and — since [CR-013] — the two
 /// near-clone parameters feeding Uniqueness ([FR-QM-13]): `clone_similarity`
 /// ([FR-AN-06]) and `clone_min_tokens` ([FR-EX-09]) — and, since S-501, the
-/// exact-duplicate token floor `duplicate_min_tokens` ([FR-AN-02]).
+/// exact-duplicate token floor `duplicate_min_tokens` ([FR-AN-02]) — and,
+/// since [CR-252], Cohesion's class minimum `cohesion_min_classes`
+/// ([FR-QM-11]).
 /// [`MetricThresholds::effective`] composes these onto the documented defaults
 /// to build the effective set whose hash gates the baseline.
 ///
@@ -955,6 +957,8 @@ impl Constraints {
 /// [UAT-QM-13]: ../../../../docs/specs/requirements/UAT-QM-13.md
 /// [CR-005]: ../../../../docs/requests/CR-005-extended-structural-metrics.md
 /// [CR-013]: ../../../../docs/requests/CR-013-tunable-near-clone-thresholds.md
+/// [CR-252]: ../../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+/// [FR-QM-11]: ../../../../docs/specs/requirements/FR-QM-11.md
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetricThresholds {
@@ -1004,6 +1008,15 @@ pub struct MetricThresholds {
     /// [S-501]: ../../../../docs/planning/journal.md#s-501-exact-duplicates-require-a-body-and-a-token-floor
     /// [CR-163]: ../../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
     pub duplicate_min_tokens: Option<i64>,
+    /// The fewest scoreable classes Cohesion needs to apply ([FR-QM-11],
+    /// [CR-252]); default 5, a positive integer. Below it Cohesion reads n/a
+    /// ("too few classes") and leaves the aggregate and "where to start"; the
+    /// LCOM4 offender list still lists its classes. A non-positive value fails
+    /// validation (exit 2).
+    ///
+    /// [FR-QM-11]: ../../../../docs/specs/requirements/FR-QM-11.md
+    /// [CR-252]: ../../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub cohesion_min_classes: Option<i64>,
 }
 
 impl MetricThresholds {
@@ -1042,6 +1055,9 @@ impl MetricThresholds {
             duplicate_min_tokens: self
                 .duplicate_min_tokens
                 .unwrap_or(d.duplicate_min_tokens),
+            cohesion_min_classes: self
+                .cohesion_min_classes
+                .unwrap_or(d.cohesion_min_classes),
         }
     }
 }
@@ -1449,6 +1465,8 @@ impl Rules {
             ("clone_min_tokens", mt.clone_min_tokens),
             // S-501: the exact-duplicate token floor, same exit-2 path.
             ("duplicate_min_tokens", mt.duplicate_min_tokens),
+            // CR-252: the Cohesion class minimum, same exit-2 path.
+            ("cohesion_min_classes", mt.cohesion_min_classes),
         ] {
             if let Some(v) = value {
                 if v <= 0 {
@@ -1889,6 +1907,49 @@ mod tests {
             t.clone_min_tokens, 50,
             "tuning the exact-duplicate floor leaves the near-clone floor alone"
         );
+    }
+
+    /// CR-252: `cohesion_min_classes` must be a positive integer, on the same
+    /// exit-2 path as the other integer thresholds.
+    #[test]
+    fn validate_rejects_non_positive_cohesion_min_classes() {
+        for bad in [0, -1, -5] {
+            let rules = Rules {
+                metric_thresholds: MetricThresholds {
+                    cohesion_min_classes: Some(bad),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = rules.validate().unwrap_err();
+            assert!(
+                matches!(&err, crate::config::ConfigError::InvalidValue { key, .. } if key == "metric_thresholds.cohesion_min_classes"),
+                "cohesion_min_classes = {bad} is rejected"
+            );
+            assert_eq!(err.exit_code(), 2);
+        }
+
+        let ok = Rules {
+            metric_thresholds: MetricThresholds {
+                cohesion_min_classes: Some(1),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(ok.validate().is_ok(), "cohesion_min_classes = 1 is positive");
+    }
+
+    /// CR-252: `effective` resolves `cohesion_min_classes` to its default of 5
+    /// when omitted and honours an override.
+    #[test]
+    fn effective_resolves_cohesion_min_classes_default_and_override() {
+        assert_eq!(MetricThresholds::default().effective().cohesion_min_classes, 5);
+        let t = MetricThresholds {
+            cohesion_min_classes: Some(2),
+            ..Default::default()
+        }
+        .effective();
+        assert_eq!(t.cohesion_min_classes, 2);
     }
 
     /// CR-013: `MetricThresholds::effective` resolves the documented defaults for

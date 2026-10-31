@@ -51,13 +51,15 @@ pub const GO: Fixture = &[
     ("go.mod", "module example.com/m\n\ngo 1.21\n"),
     (
         "util/util.go",
-        "package util\n\ntype Box struct {\n\tN int\n}\n\nfunc Run() {}\n",
+        "package util\n\ntype Box struct {\n\tN int\n}\n\ntype Runner interface {\n\tRun()\n}\n\nfunc Run() {}\n",
     ),
     (
         "main.go",
-        "package main\n\nimport \"example.com/m/util\"\n\nfunc main() {\n\tutil.Run()\n\tvar b util.Box\n\t_ = b.N\n\thelper()\n}\n",
+        "package main\n\nimport \"example.com/m/util\"\n\ntype job struct {\n\tn int\n}\n\nfunc main() {\n\tutil.Run()\n\tvar b util.Box\n\t_ = b.N\n\thelper()\n}\n",
     ),
-    ("helper.go", "package main\n\nfunc helper() {}\n"),
+    // S-529: `job` implements `util.Runner`, and `Run` reads `j.n` of the struct
+    // `main.go` declares.
+    ("helper.go", "package main\n\nfunc helper() {}\n\nfunc (j *job) Run() {\n\t_ = j.n\n}\n"),
 ];
 
 pub const TYPESCRIPT: Fixture = &[
@@ -82,6 +84,20 @@ pub const TSX: Fixture = &[
     ),
 ];
 
+// S-538: JavaScript in its own idiom — no annotations, so its type relations
+// are the `extends` and the `new`; a `.js` file, with JSX in it, as preact
+// writes them.
+pub const JAVASCRIPT: Fixture = &[
+    (
+        "web/base.js",
+        "export class Base {\n  run() {}\n}\n\nexport function helper() {\n  return 1;\n}\n\nexport function Badge() {\n  return <span />;\n}\n",
+    ),
+    (
+        "web/child.js",
+        "import { Base, helper, Badge } from \"./base\";\n\nexport class Child extends Base {\n  area() {\n    const other = new Base();\n    other.run();\n    return helper() + this.count;\n  }\n\n  render() {\n    return <Badge />;\n  }\n}\n",
+    ),
+];
+
 pub const PYTHON: Fixture = &[
     (
         "pkg/__init__.py",
@@ -100,7 +116,7 @@ pub const PYTHON: Fixture = &[
 pub const PHP: Fixture = &[
     (
         "src/Base.php",
-        "<?php\nnamespace App\\X;\n\nclass Base {\n    public int $count = 1;\n\n    public function run(): void {}\n}\n",
+        "<?php\nnamespace App\\X;\n\nclass Base {\n    public int $count = 1;\n\n    public function run(): void {}\n\n    public static function make(): int { return 1; }\n}\n",
     ),
     (
         "src/Shape.php",
@@ -108,14 +124,14 @@ pub const PHP: Fixture = &[
     ),
     (
         "src/Child.php",
-        "<?php\nnamespace App\\Y;\n\nuse App\\X\\Base;\nuse App\\X\\Shape;\n\nclass Child extends Base implements Shape {\n    public function area(): int {\n        $other = new Base();\n        $other->run();\n        return $other->count + $this->count;\n    }\n}\n",
+        "<?php\nnamespace App\\Y;\n\nuse App\\X\\Base;\nuse App\\X\\Shape;\n\nclass Child extends Base implements Shape {\n    public function area(): int {\n        $other = new Base();\n        $other->run();\n        return Base::make() + $other->count + $this->count;\n    }\n}\n",
     ),
 ];
 
 pub const C_SHARP: Fixture = &[
     (
         "X/Base.cs",
-        "namespace App.X\n{\n    public class Base\n    {\n        public int Count = 1;\n\n        public void Run() { }\n    }\n}\n",
+        "namespace App.X\n{\n    public class Base\n    {\n        public int Count = 1;\n\n        public void Run() { }\n\n        public static int Make() { return 1; }\n    }\n}\n",
     ),
     (
         "X/IShape.cs",
@@ -123,7 +139,7 @@ pub const C_SHARP: Fixture = &[
     ),
     (
         "Y/Child.cs",
-        "using App.X;\n\nnamespace App.Y\n{\n    public class Child : Base, IShape\n    {\n        public int Area()\n        {\n            Base other = new Base();\n            other.Run();\n            return other.Count + Count;\n        }\n    }\n}\n",
+        "using App.X;\n\nnamespace App.Y\n{\n    public class Child : Base, IShape\n    {\n        public int Area()\n        {\n            Base other = new Base();\n            other.Run();\n            return Base.Make() + other.Count + Count;\n        }\n    }\n}\n",
     ),
 ];
 
@@ -134,18 +150,18 @@ pub const KOTLIN: Fixture = &[
     ),
     (
         "src/main/kotlin/com/y/Child.kt",
-        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.helper\n\nclass Child : Base(), Shape {\n    override fun area(): Int {\n        val other = Base()\n        other.run()\n        return helper() + other.count + count\n    }\n}\n\nfun make() = Base()\n",
+        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.helper\n\nclass Child : Base(), Shape {\n    override fun area(): Int {\n        val other = Base()\n        other.run()\n        return helper() + other.count + count\n    }\n}\n\nfun make() = Base()\n\nfun ping(): Int = helper()\n",
     ),
 ];
 
 pub const RUBY: Fixture = &[
     (
         "lib/base.rb",
-        "class Base\n  attr_reader :count\n\n  def run\n  end\nend\n\ndef helper\n  1\nend\n",
+        "class Base\n  attr_reader :count\n\n  def self.build\n  end\n\n  def run\n  end\nend\n\ndef helper\n  1\nend\n",
     ),
     (
         "lib/child.rb",
-        "require_relative \"base\"\n\nclass Child < Base\n  def area\n    other = Base.new\n    other.run\n    helper + other.count + count\n  end\nend\n",
+        "require_relative \"base\"\n\nclass Child < Base\n  def area\n    other = Base.new\n    Base.build\n    other.run\n    helper + other.count + count\n  end\nend\n",
     ),
 ];
 
@@ -156,7 +172,7 @@ pub const SCALA: Fixture = &[
     ),
     (
         "src/main/scala/com/y/Child.scala",
-        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.Helper.helper\n\nclass Child extends Base with Shape {\n  def area(): Int = {\n    val other = new Base()\n    other.run()\n    helper() + other.count + count\n  }\n}\n\ndef make() = Base()\n",
+        "package com.y\n\nimport com.x.Base\nimport com.x.Shape\nimport com.x.Helper\nimport com.x.Helper.helper\n\nclass Child extends Base with Shape {\n  def area(): Int = {\n    val other = new Base()\n    other.run()\n    helper() + other.count + count\n  }\n}\n\ndef make() = Base()\n\ndef ping(): Int = Helper.helper()\n",
     ),
 ];
 
@@ -186,7 +202,7 @@ pub const CPP: Fixture = &[
     ),
     (
         "src/child.cpp",
-        "#include \"base.hpp\"\n\nstatic int twice(int x) {\n    return x + x;\n}\n\nclass Child : public Base, public Shape {\npublic:\n    int area() override {\n        Base other;\n        other.run();\n        return twice(helper()) + other.count + count;\n    }\n};\n",
+        "#include \"base.hpp\"\n\nstatic int twice(int x) {\n    return x + x;\n}\n\nclass Child : public Base, public Shape {\npublic:\n    int area() override {\n        Base other;\n        other.run();\n        return twice(helper()) + other.count + count;\n    }\n};\n\nint total() {\n    return twice(helper());\n}\n",
     ),
 ];
 
@@ -197,6 +213,7 @@ pub const ALL: &[(&str, Fixture)] = &[
     ("go", GO),
     ("typescript", TYPESCRIPT),
     ("tsx", TSX),
+    ("javascript", JAVASCRIPT),
     ("python", PYTHON),
     ("php", PHP),
     ("c-sharp", C_SHARP),

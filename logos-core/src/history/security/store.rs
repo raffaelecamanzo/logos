@@ -44,7 +44,11 @@
 //!   11 — keyed by the file its report path bound to by suffix — onto the one
 //!   its own project-relative path gives; a row stored before migration 11
 //!   whose old binding today's index no longer gives is matched by its place
-//!   instead ([`pre11_places`]). The committed
+//!   instead ([`pre11_places`]). An OSV-Scanner, Trivy or Dependency-Check
+//!   ingest — that scanner's first since migration 13 ([`recovers_pre13`]) —
+//!   maps the key each dependency result had before the migration — its
+//!   location or report key with its occurrence suffix — onto its package
+//!   key, so an exact repeat's rows merge into one. The committed
 //!   ignore file is never rewritten: an entry under an old key still applies,
 //!   and [`super::label`] names the fingerprint it should name.
 //! - **A history-mode row** records the commit whose place it is
@@ -62,8 +66,8 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension};
 
-use super::parse::{Region, SecurityFormat};
-use super::{in_scope, FindingBinding, IngestScope, Severity};
+use super::parse::{PackageCoordinate, Region, SecurityFormat};
+use super::{in_scope, FindingBinding, IngestScope, ScannerConfidence, Severity};
 
 /// One scanner's share of a report, ready to persist.
 pub(crate) struct ScannerBatch {
@@ -85,6 +89,8 @@ pub(crate) struct FindingRow {
     pub(crate) fingerprint: String,
     pub(crate) rule_id: String,
     pub(crate) severity: Severity,
+    /// What the scanner states of its confidence (migration 12).
+    pub(crate) confidence: ScannerConfidence,
     pub(crate) cwes: Vec<String>,
     pub(crate) message: String,
     pub(crate) redacted: bool,
@@ -102,13 +108,25 @@ pub(crate) struct FindingRow {
     /// The keys its results had before a re-key, sorted: the report keys of a
     /// secret-keyed row (migration 7) and, for a history-mode one, its secret
     /// key before migration 11 where it differs, or a report-keyed row's keys
-    /// before migrations 10 and 11 where they differ; empty for a row keyed as
-    /// it always was, as every row stored before migration 7 is.
+    /// before migrations 10, 11 and 13 where they differ — a dependency row's
+    /// before 13 one per result it merges; empty for a row keyed as it always
+    /// was, as every row stored before migration 7 is.
     pub(crate) legacy_fingerprints: Vec<String>,
+    /// A dependency row's keys before migrations 10 and 13, of every result
+    /// it merges, each with its occurrence suffix: legacy
+    /// fingerprints only on the scanner's first ingest since that migration
+    /// ([`recovers_pre13`]), and carried forward from it on their finding
+    /// ([`latest_legacy`]). Never stored apart.
+    pub(crate) pre13_legacy: Vec<String>,
     /// Every `(commit, region)` a history-mode finding's results report at its
     /// report path, which is how a row stored before migration 11 is matched
     /// to it ([`pre11_places`]); empty for any other row. Never stored.
     pub(crate) places: Vec<(String, Region)>,
+    /// The package a dependency row names, as its scanner states it (migration
+    /// 14): what merges one advisory across scanners when it is read
+    /// ([`super::merge`]). `None` for every other row, and for a row stored
+    /// before migration 14.
+    pub(crate) package: Option<PackageCoordinate>,
 }
 
 impl FindingRow {
@@ -213,6 +231,8 @@ pub(crate) fn persist_ingest(
         let carried = scope.map(|scope| carried_outside(&tx, &batch.name, scope)).transpose()?;
         let placed = pre11_places(&tx, &batch.name, &batch.findings)?;
         let known = latest_legacy(&tx, &batch.name)?;
+        let recovers = recovers_pre13(&tx, &batch.name)?;
+        let pre13 = |f: &FindingRow| if recovers { f.pre13_legacy.clone() } else { Vec::new() };
         let replaced = prior.is_some();
         if let Some((id, _)) = prior {
             // Same HEAD, same scanner: replace. The cascade drops its files and
@@ -260,7 +280,7 @@ pub(crate) fn persist_ingest(
         let mut renamed: std::collections::BTreeMap<String, String> = batch
             .findings
             .iter()
-            .flat_map(|f| f.legacy_fingerprints.iter().map(|old| (old.clone(), f.fingerprint.clone())))
+            .flat_map(|f| f.legacy_fingerprints.iter().cloned().chain(pre13(f)).map(|old| (old, f.fingerprint.clone())))
             .collect();
         renamed.extend(placed.iter().map(|(old, new)| (old.clone(), new.clone())));
         let anchored: Vec<&str> = batch.files.iter().map(|(path, _)| path.as_str()).collect();
@@ -286,13 +306,16 @@ pub(crate) fn persist_ingest(
                          snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted,
                          binding, report_path, path,
                          start_line, start_column, end_line, end_column, scoped,
-                         commits, legacy_fingerprints, anchor_commit
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                         commits, legacy_fingerprints, anchor_commit, confidence,
+                         package_name, package_version
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 )
                 .context("preparing the security finding insert")?;
             let keys: std::collections::HashSet<&str> = batch.findings.iter().map(|f| f.fingerprint.as_str()).collect();
             for f in fresh.into_iter().chain(carried_findings) {
+                let recovered = pre13(f);
                 let mut legacy: std::collections::BTreeSet<&str> = f.legacy_fingerprints.iter().map(String::as_str).collect();
+                legacy.extend(recovered.iter().map(String::as_str));
                 legacy.extend(placed.iter().filter(|(_, new)| **new == f.fingerprint).map(|(old, _)| old.as_str()));
                 legacy.extend(known.get(&f.fingerprint).into_iter().flatten().map(String::as_str).filter(|old| !keys.contains(old)));
                 finding_stmt
@@ -315,6 +338,9 @@ pub(crate) fn persist_ingest(
                         f.commits.join(","),
                         legacy.into_iter().collect::<Vec<_>>().join(","),
                         f.anchor_commit,
+                        f.confidence.as_str(),
+                        f.package.as_ref().map(|p| p.name.as_str()),
+                        f.package.as_ref().map(|p| p.version.as_str()),
                     ])
                     .with_context(|| format!("inserting finding {} ({})", f.fingerprint, f.rule_id))?;
             }
@@ -342,13 +368,14 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
         .prepare_cached(&format!(
             "SELECT fingerprint, rule_id, severity, cwes, message, redacted, binding,
                     report_path, path, start_line, start_column, end_line, end_column, scoped,
-                    commits, legacy_fingerprints, anchor_commit
+                    commits, legacy_fingerprints, anchor_commit, confidence,
+                    package_name, package_version
                FROM security_findings WHERE snapshot_id = ?1 ORDER BY {order}"
         ))
         .context("preparing the security finding read")?;
     // The tokens are decoded after the query: a token Logos never writes is
     // this read's error, not a column-type one.
-    let raw: Vec<(String, String, String, String, String, FindingRow)> = stmt
+    let raw: Vec<(String, String, String, String, String, String, FindingRow)> = stmt
         .query_map([snapshot_id], |row| {
             Ok((
                 row.get(2)?,
@@ -356,10 +383,12 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
                 row.get(6)?,
                 row.get(14)?,
                 row.get(15)?,
+                row.get(17)?,
                 FindingRow {
                     fingerprint: row.get(0)?,
                     rule_id: row.get(1)?,
                     severity: Severity::Info,
+                    confidence: ScannerConfidence::Unstated,
                     cwes: Vec::new(),
                     message: row.get(4)?,
                     redacted: row.get(5)?,
@@ -376,7 +405,12 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
                     anchor_commit: row.get(16)?,
                     commits: Vec::new(),
                     legacy_fingerprints: Vec::new(),
+                    pre13_legacy: Vec::new(),
                     places: Vec::new(),
+                    package: row
+                        .get::<_, Option<String>>(18)?
+                        .zip(row.get::<_, Option<String>>(19)?)
+                        .map(|(name, version)| PackageCoordinate { name, version }),
                 },
             ))
         })
@@ -384,9 +418,11 @@ pub(crate) fn finding_rows(conn: &Connection, snapshot_id: i64, order: &str) -> 
         .collect::<rusqlite::Result<_>>()
         .context("collecting security findings")?;
     raw.into_iter()
-        .map(|(severity, cwes, binding, commits, legacy, mut row)| {
+        .map(|(severity, cwes, binding, commits, legacy, confidence, mut row)| {
             row.severity = Severity::from_str_stored(&severity)
                 .ok_or_else(|| anyhow::anyhow!("stored severity {severity:?} is not one Logos writes"))?;
+            row.confidence = ScannerConfidence::from_str_stored(&confidence)
+                .ok_or_else(|| anyhow::anyhow!("stored confidence {confidence:?} is not one Logos writes"))?;
             row.cwes = split_list(&cwes);
             row.commits = split_list(&commits);
             row.legacy_fingerprints = split_list(&legacy);
@@ -407,9 +443,10 @@ fn split_list(stored: &str) -> Vec<String> {
 }
 
 /// Re-key every stored row of `scanner`, in every snapshot, and every baseline
-/// fingerprint, whose key is an old one `renamed` maps (migrations 7, 10 and 11). A row
+/// fingerprint, whose key is an old one `renamed` maps (migrations 7, 10, 11 and 13). A row
 /// re-keyed onto a key its snapshot already holds is merged into that row: the
-/// per-commit repeats of one secret stored before the migration become one.
+/// per-commit repeats of one secret stored before the migration become one, as
+/// do a dependency result's repeats stored before migration 13.
 /// Each re-keyed row records the key it had as a legacy fingerprint.
 ///
 /// # Errors
@@ -506,6 +543,30 @@ fn latest_legacy(
         .collect::<rusqlite::Result<_>>()
         .context("collecting the latest snapshot's old keys")?;
     Ok(rows)
+}
+
+/// Whether this ingest is `scanner`'s first since history.db migration 13:
+/// its latest snapshot carries the mark of a migration up to 13, or it has
+/// none — a fresh store, whose checked-in baseline and ignore file may still
+/// name keys from before the migration. Only then are a dependency row's
+/// [`FindingRow::pre13_legacy`] keys its legacy fingerprints: they were
+/// suffixed in report order, and a later report's order — a package added
+/// ahead of another — would hand one package's old key to another. Once
+/// recorded, an old key stays on its finding ([`latest_legacy`]).
+///
+/// # Errors
+/// A statement failure.
+fn recovers_pre13(tx: &rusqlite::Transaction<'_>, scanner: &str) -> Result<bool> {
+    let latest: Option<String> = tx
+        .query_row(
+            "SELECT report_hash FROM security_snapshots WHERE scanner_name = ?1 ORDER BY id DESC LIMIT 1",
+            [scanner],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("looking up the scanner's latest report hash")?;
+    let marked_by = |hash: &str| hash.strip_prefix("pre-")?.split_once(':')?.0.parse::<u32>().ok();
+    Ok(latest.is_none_or(|hash| marked_by(&hash).is_some_and(|migration| migration <= 13)))
 }
 
 /// The rows of `scanner`'s snapshots stored before history.db migration 11

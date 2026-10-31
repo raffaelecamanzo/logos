@@ -1237,7 +1237,7 @@ fn a_shutdown_mid_pip_install_kills_uv_and_leaves_no_staging() {
         Ok(Value::Null)
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(60));
     let pid = loop {
         if let Ok(pid) = fs::read_to_string(w.rec().join("uv.pid")) {
             break pid.trim().to_string();
@@ -1250,7 +1250,7 @@ fn a_shutdown_mid_pip_install_kills_uv_and_leaves_no_staging() {
 
     assert!(jobs.shutdown(Duration::from_secs(10)), "the install ended within the grace");
     let alive = || Command::new("/bin/kill").args(["-0", &pid]).stderr(Stdio::null()).status().unwrap().success();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(10));
     while alive() {
         assert!(Instant::now() < deadline, "uv {pid} outlived the shutdown");
         std::thread::sleep(Duration::from_millis(25));

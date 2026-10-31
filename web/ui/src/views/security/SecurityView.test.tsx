@@ -13,6 +13,7 @@ import {
   ANCHOR_TEXT,
   CONTEXT_TEXT,
   COPY_TEXT,
+  EVIDENCE_TEXT,
   FINDING_COUNT_TEXT,
   FINDINGS_CELL_TEXT,
   FINDINGS_TABLE_TEXT,
@@ -23,6 +24,7 @@ import {
   NVD_KEY_TEXT,
   OWASP_TEXT,
   REDACTED_TEXT,
+  REPORTERS_TEXT,
   SCAN_JOB_TEXT,
   SCOPE_TEXT,
   SECURITY_ABSENCE,
@@ -564,7 +566,8 @@ function stubTriage(pages: SecurityModel[], triage: { status: number; body: unkn
         intent: new Headers(init.headers).get("x-logos-intent"),
         body: typeof init.body === "string" ? init.body : null,
       });
-      const isTriage = url.startsWith("/api/v1/security/suppress") || url.startsWith("/api/v1/security/unsuppress");
+      const isTriage =
+        url.startsWith("/api/v1/security/suppress") || url.startsWith("/api/v1/security/unsuppress") || url.startsWith("/api/v1/security/reconfirm");
       const status = isTriage ? triage.status : 200;
       const body = isTriage ? triage.body : pages[Math.min(reads++, pages.length - 1)];
       return Promise.resolve({
@@ -688,6 +691,128 @@ describe("triage (S-672, FR-SC-12)", () => {
   });
 });
 
+describe("evidence (FR-SC-32, S-818)", () => {
+  const sqlLoc = "src/lib.rs:3";
+  const sql = finding("rust.lang.security.formatted-sql");
+  const by = { fingerprint: sql.fingerprint };
+  const changed = [{ symbol: "internal/`cookie.go`/DefaultCookieConfig().", name: "DefaultCookieConfig", change: "changed" as const }];
+  const outOfDate = { ...sql, suppression: { state: "out_of_date" as const, reason: "the cookie is Secure by default", expires: null, by, changed } };
+  const held = { ...sql, suppression: { state: "suppressed" as const, reason: "the cookie is Secure by default", expires: null, by, evidence: [{ symbol: "s", name: "DefaultCookieConfig" }] } };
+  const page = (f: SecurityFinding) => model({ findings: { ...REAL.security.findings, findings: [f] } });
+  const written = { file: ".logos/security-ignore.toml", entry: { fingerprint: sql.fingerprint, reason: "r", expires: null }, entries: 1 };
+
+  it("reads an out-of-date verdict as active, naming the changed symbol, with Re-confirm beside Unsuppress", async () => {
+    const { root } = await mount(page(outOfDate));
+    const table = within(widgetTitled(root, "Findings")).getByRole("table");
+    const row = within(table).getByRole("button", { name: `Re-confirm rust.lang.security.formatted-sql at ${sqlLoc}` }).closest("tr") as HTMLElement;
+    expect(within(row).getByText("out of date")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` })).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: /^Suppress / })).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    expect(detail.querySelector("[data-suppression-reason]")?.textContent).toBe("the cookie is Secure by default");
+    const evidence = detail.querySelector("[data-suppression-evidence]");
+    expect(evidence?.getAttribute("data-suppression-evidence")).toBe("out_of_date");
+    expect(evidence?.textContent).toBe(`${EVIDENCE_TEXT.outOfDate}. \`DefaultCookieConfig\` changed`);
+    // The wording and the changed symbol are said once in the detail, not twice.
+    const text = detail.textContent ?? "";
+    expect(text.split(EVIDENCE_TEXT.outOfDate).length - 1).toBe(1);
+    expect(text.split("`DefaultCookieConfig` changed").length - 1).toBe(1);
+  });
+
+  it("says what a suppression with no evidence rests on, and names the symbols one that has some rests on", async () => {
+    const bare = { ...sql, suppression: { state: "suppressed" as const, reason: "r", expires: null, by, evidence: [] } };
+    const { root } = await mount(page(bare));
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-suppression-evidence]")?.textContent).toBe(EVIDENCE_TEXT.none);
+    cleanup();
+    const view = await mount(page(held));
+    await userEvent.click(screen.getByRole("button", { name: /Show rust\.lang\.security\.formatted-sql/ }));
+    expect(widgetTitled(view.root, "Finding detail").querySelector("[data-suppression-evidence]")?.textContent).toBe(
+      EVIDENCE_TEXT.resting(["DefaultCookieConfig"]),
+    );
+  });
+
+  it("re-confirms with an intent-guarded POST of the finding's fingerprint, then reloads the suppressed verdict", async () => {
+    const sent = stubTriage([page(outOfDate), page(held)], { status: 200, body: written });
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Re-confirm rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    const back = await screen.findByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` });
+    expect(screen.queryByRole("button", { name: /^Re-confirm / })).toBeNull();
+    expect(within(back.closest("tr") as HTMLElement).getByText("suppressed")).toBeInTheDocument();
+    expect(sent.find((r) => r.method === "POST")).toEqual({
+      url: "/api/v1/security/reconfirm",
+      method: "POST",
+      intent: "test-intent-token",
+      body: JSON.stringify({ fingerprint: sql.fingerprint }),
+    });
+    expect(sent.filter((r) => r.url === "/api/v1/security").length).toBe(2);
+  });
+
+  it("states a refused re-confirm with the server's reason and keeps the row as it was", async () => {
+    const refusal = "evidence `DefaultCookieConfig` names no symbol in the index";
+    stubTriage([page(outOfDate)], { status: 422, body: { error: refusal } });
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Re-confirm rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    const alert = await within(widgetTitled(root, "Findings")).findByRole("alert");
+    expect(alert.textContent).toBe(EVIDENCE_TEXT.reconfirmFailed(refusal));
+    expect(screen.getByRole("button", { name: `Re-confirm rust.lang.security.formatted-sql at ${sqlLoc}` })).toBeEnabled();
+  });
+
+  it("lists an out-of-date entry with the symbol that changed, and re-confirms a fingerprint entry from there", async () => {
+    const entry: SecurityEntryStatus = { entry: { fingerprint: sql.fingerprint, reason: "r", expires: null }, expired: false, orphaned: false, suppressed: 0, should_name: null, out_of_date: changed };
+    const path: SecurityEntryStatus = { entry: { path: "src", reason: "r", expires: null }, expired: false, orphaned: false, suppressed: 0, should_name: null, out_of_date: changed };
+    const sent = stubTriage([model({ findings: { ...REAL.security.findings, findings: [outOfDate], suppressions: [entry, path] } })], { status: 200, body: written });
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    const widget = widgetTitled(root, SUPPRESSIONS_TEXT.title);
+    expect(within(widget).getAllByText("out of date").length).toBe(2);
+    expect(widget.textContent).toContain(EVIDENCE_TEXT.entryOutOfDate(changed));
+    // Only the fingerprint entry has a fingerprint to re-confirm by.
+    const buttons = within(widget).getAllByRole("button", { name: /^Re-confirm the entry/ });
+    expect(buttons.map((b) => b.getAttribute("aria-label"))).toEqual([SUPPRESSIONS_TEXT.reconfirm({ fingerprint: sql.fingerprint })]);
+    await userEvent.click(buttons[0]);
+    await vi.waitFor(() => expect(sent.some((r) => r.url === "/api/v1/security/reconfirm")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify({ fingerprint: sql.fingerprint }));
+  });
+
+  it("offers the enclosing symbol as evidence, off by default, and sends it only when ticked", async () => {
+    const after = page({ ...sql, suppression: held.suppression });
+    const sent = stubTriage([page(sql), after], { status: 200, body: written });
+    answerImpact();
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Suppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    const dialog = screen.getByRole("dialog", { name: SUPPRESS_TEXT.title });
+    const box = within(dialog).getByRole("checkbox", { name: new RegExp(EVIDENCE_TEXT.recordEvidence) });
+    expect(box).not.toBeChecked();
+    expect(dialog.textContent).toContain(EVIDENCE_TEXT.recordEvidenceHint("find"));
+    await userEvent.click(box);
+    await userEvent.type(within(dialog).getByRole("textbox", { name: SUPPRESS_TEXT.reason }), "constant query");
+    await userEvent.click(within(dialog).getByRole("button", { name: SUPPRESS_TEXT.confirm }));
+
+    await screen.findByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` });
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(
+      JSON.stringify({ fingerprint: sql.fingerprint, reason: "constant query", expires: null, evidence: ["logos . project . src/`lib.rs`/find()."] }),
+    );
+  });
+
+  it("offers no evidence for a finding that binds no symbol", async () => {
+    const unbound = { ...sql, context: { ...sql.context, enclosing: { ...sql.context.enclosing, symbol: null, unbound_because: "no_symbol" as const } } };
+    stubTriage([page(unbound)], { status: 200, body: written });
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+    await userEvent.click(screen.getByRole("button", { name: `Suppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    expect(within(screen.getByRole("dialog", { name: SUPPRESS_TEXT.title })).queryByRole("checkbox", { name: new RegExp(EVIDENCE_TEXT.recordEvidence) })).toBeNull();
+  });
+});
+
 describe("path suppressions (S-770)", () => {
   const sqlLoc = "src/lib.rs:3";
   const under = { path: "src" };
@@ -697,8 +822,8 @@ describe("path suppressions (S-770)", () => {
     const findings = [finding("rust.lang.security.formatted-sql"), finding("generic.secrets.hardcoded-key")].map((f) => ({ ...f, suppression: by }));
     return model({ findings: { ...REAL.security.findings, findings, suppressions: [...(entry ? [entry] : []), ...extra] } });
   }
-  const entry: SecurityEntryStatus = { entry: { path: "src", reason: "generated", expires: null }, expired: false, orphaned: false, suppressed: 2, should_name: null };
-  const orphan: SecurityEntryStatus = { entry: { path: "tests/fixtures", scanner: "gitleaks", reason: "planted", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: null };
+  const entry: SecurityEntryStatus = { entry: { path: "src", reason: "generated", expires: null }, expired: false, orphaned: false, suppressed: 2, should_name: null, out_of_date: [] };
+  const orphan: SecurityEntryStatus = { entry: { path: "tests/fixtures", scanner: "gitleaks", reason: "planted", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: null, out_of_date: [] };
 
   it("suppresses everything under a path from the dialog, and Unsuppress sends back the same selector", async () => {
     const written = { file: ".logos/security-ignore.toml", entry: entry.entry, entries: 1 };
@@ -757,8 +882,8 @@ describe("path suppressions (S-770)", () => {
   it("lists a fingerprint entry by its fingerprint, flags it expired with the one it should name, and removes it by fingerprint", async () => {
     const fp = "0123456789abcdef".repeat(4);
     const now = "fedcba9876543210".repeat(4);
-    const lapsed: SecurityEntryStatus = { entry: { fingerprint: fp, reason: "rotated", expires: "2026-01-31" }, expired: true, orphaned: false, suppressed: 0, should_name: null };
-    const renamed: SecurityEntryStatus = { entry: { fingerprint: now.replace("f", "e"), reason: "old key", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: now };
+    const lapsed: SecurityEntryStatus = { entry: { fingerprint: fp, reason: "rotated", expires: "2026-01-31" }, expired: true, orphaned: false, suppressed: 0, should_name: null, out_of_date: [] };
+    const renamed: SecurityEntryStatus = { entry: { fingerprint: now.replace("f", "e"), reason: "old key", expires: null }, expired: false, orphaned: true, suppressed: 0, should_name: now, out_of_date: [] };
     const sent = stubTriage([page(null, [lapsed, renamed])], { status: 200, body: { file: ".logos/security-ignore.toml", entry: lapsed.entry, entries: 1 } });
     const { container: root } = render(<SecurityView />);
     await screen.findByRole("heading", { name: "Scanners" });
@@ -787,6 +912,48 @@ describe("path suppressions (S-770)", () => {
     await userEvent.click(within(row).getByRole("button", { name: SUPPRESSIONS_TEXT.remove({ path: "tests/fixtures", scanner: "gitleaks" }) }));
     await vi.waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
     expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify({ path: "tests/fixtures", scanner: "gitleaks" }));
+  });
+});
+
+describe("rule-wide suppressions (S-814)", () => {
+  const sqlLoc = "src/lib.rs:3";
+  const wide = { rule: "rust.lang.security.formatted-sql", scanner: "semgrep" };
+  const entry: SecurityEntryStatus = { entry: { ...wide, reason: "deploy tool sets it", expires: "2027-01-01" }, expired: false, orphaned: false, suppressed: 1, should_name: null, out_of_date: [] };
+
+  /** The formatted-sql finding suppressed by the rule-wide entry; the other stays active. */
+  function page(): SecurityModel {
+    const held = { state: "suppressed" as const, reason: "deploy tool sets it", expires: "2027-01-01", by: wide };
+    const findings = [{ ...finding("rust.lang.security.formatted-sql"), suppression: held }, finding("generic.secrets.hardcoded-key")];
+    return model({ findings: { ...REAL.security.findings, findings, suppressions: [entry] } });
+  }
+
+  it("labels the finding the entry suppresses, lists the entry, and removes it by rule and scanner", async () => {
+    const sent = stubTriage([page()], { status: 200, body: { file: ".logos/security-ignore.toml", entry: entry.entry, entries: 0 } });
+    answerImpact();
+    const { container: root } = render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Show rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    expect(widgetTitled(root, "Finding detail").querySelector("[data-suppression-reason]")?.textContent).toBe(
+      "deploy tool sets it (until 2027-01-01) — suppressed by a rule-wide entry (rule rust.lang.security.formatted-sql of semgrep, in every file)",
+    );
+    const suppressions = widgetTitled(root, SUPPRESSIONS_TEXT.title);
+    const row = within(suppressions).getByText("rule rust.lang.security.formatted-sql of semgrep, in every file").closest("tr") as HTMLElement;
+    expect(row.textContent).toContain(SUPPRESSIONS_TEXT.count(1));
+
+    await userEvent.click(within(row).getByRole("button", { name: SUPPRESSIONS_TEXT.remove(wide) }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify(wide));
+  });
+
+  it("sends the entry's own selector from the finding's Unsuppress", async () => {
+    const sent = stubTriage([page()], { status: 200, body: { file: ".logos/security-ignore.toml", entry: entry.entry, entries: 0 } });
+    render(<SecurityView />);
+    await screen.findByRole("heading", { name: "Scanners" });
+
+    await userEvent.click(screen.getByRole("button", { name: `Unsuppress rust.lang.security.formatted-sql at ${sqlLoc}` }));
+    await vi.waitFor(() => expect(sent.some((r) => r.method === "POST")).toBe(true));
+    expect(sent.find((r) => r.method === "POST")?.body).toBe(JSON.stringify(wide));
   });
 });
 
@@ -825,7 +992,7 @@ describe("the finding count (S-760)", () => {
     // swapped unnoticed; the literals are the definition's wording, not the
     // catalogue's own constants.
     const counted = { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 };
-    const { root } = await mount(model({ counts: { counted, excluded: { not_fresh: 7, suppressed: 9, test: 0 } } }));
+    const { root } = await mount(model({ counts: { counted, excluded: { not_fresh: 7, suppressed: 9, test: 0, dev: 0, needs_review: 0 } } }));
     const text = readerText(widgetTitled(root, "Findings"));
     expect(text).toContain("1 critical · 2 high · 3 medium · 4 low · 5 info · 6 unrated — fresh, unsuppressed findings only");
     expect(text).toContain("Left out: 7 findings in files changed since the scan, and 9 suppressed.");
@@ -888,10 +1055,194 @@ function withTestCode(): { page: SecurityModel; inSymbol: SecurityFinding; inPat
   const page = model({
     findings: { ...REAL.security.findings, findings: [...REAL.security.findings.findings, ...planted], total: REAL.security.findings.total + planted.length },
     editions,
-    counts: { counted: REAL.security.counts.counted, excluded: { not_fresh: 0, suppressed: 0, test: planted.length } },
+    counts: { counted: REAL.security.counts.counted, excluded: { not_fresh: 0, suppressed: 0, test: planted.length, dev: 0, needs_review: 0 } },
   });
   return { page, inSymbol, inPath };
 }
+
+/** The real page with one finding its scanner marks low-confidence planted in
+ *  production code, as the server serves it: listed with `needs_review`, counted
+ *  apart (`excluded.needs_review`), and in its category's `findings` but not its
+ *  `production_findings`. */
+function withNeedsReview(): { page: SecurityModel; low: SecurityFinding } {
+  const sql = finding("rust.lang.security.formatted-sql");
+  const low: SecurityFinding = {
+    ...sql,
+    fingerprint: "low-confidence",
+    rule_id: "rust.lang.security.low-confidence-sql",
+    path: "src/db.rs",
+    report_path: "src/db.rs",
+    start_line: 9,
+    confidence: "low",
+    needs_review: true,
+  };
+  const editions = REAL.security.editions.map((e) => ({
+    ...e,
+    categories: e.categories.map((c) =>
+      c.state.state === "covered" && c.state.findings > 0 && e.findings.some((f) => f.categories.includes(c.id))
+        ? { ...c, state: { state: "covered" as const, findings: c.state.findings + 1 }, needs_review_findings: 1 }
+        : c,
+    ),
+    findings: [...e.findings, { scanner_name: low.scanner_name, fingerprint: low.fingerprint, categories: e.findings.find((x) => x.fingerprint === sql.fingerprint)?.categories ?? [], unclassified: null }],
+  }));
+  const page = model({
+    findings: { ...REAL.security.findings, findings: [...REAL.security.findings.findings, low], total: REAL.security.findings.total + 1 },
+    editions,
+    counts: { counted: REAL.security.counts.counted, excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 1 } },
+  });
+  return { page, low };
+}
+
+describe("a finding its scanner marks low-confidence reads needs review (FR-SC-31, S-817)", () => {
+  const rows = (root: HTMLElement) =>
+    [...within(widgetTitled(root, "Findings")).getByRole("table").querySelectorAll("tbody tr")] as HTMLElement[];
+  const scope = () => screen.getByLabelText(SCOPE_TEXT.label) as HTMLSelectElement;
+
+  it("leaves it out of the default list and states how many beside the count, in both widgets", async () => {
+    const { page } = withNeedsReview();
+    const { root } = await mount(page);
+    expect(rows(root)).toHaveLength(2);
+    expect(widgetTitled(root, "Findings").querySelector("[data-needs-review]")).toBeNull();
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 3 findings shown");
+    for (const title of ["Findings", "OWASP Top 10"]) {
+      expect(readerText(widgetTitled(root, title))).toContain("· 1 more needs review");
+    }
+    // The real payload, with none, says so rather than saying nothing.
+    cleanup();
+    const plain = await mount(model());
+    expect(readerText(widgetTitled(plain.root, "Findings"))).toContain("· 0 more need review");
+  });
+
+  it("lists it under All, tagged REVIEW with the scanner's word and what it changes on hover", async () => {
+    const { page } = withNeedsReview();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    expect(rows(root)).toHaveLength(3);
+    const tags = [...widgetTitled(root, "Findings").querySelectorAll("[data-needs-review]")] as HTMLElement[];
+    expect(tags.map((t) => t.getAttribute("title"))).toEqual([SCOPE_TEXT.reviewReason("low")]);
+    expect(within(tags[0]).getByText(SCOPE_TEXT.reviewTag).className).toContain("muted");
+    // On a line of its own, so it widens no column (the e2e spec measures the fit).
+    expect(tags[0].className).toContain(styles.reviewTag);
+    expect(tags[0].closest("tr")?.textContent).toContain("src/db.rs");
+    expect(tags[0].querySelector(".sr-only")?.textContent?.trim()).toBe(SCOPE_TEXT.reviewReason("low"));
+  });
+
+  it("keeps it out of the OWASP count under Production, and in the payload's own count under All", async () => {
+    const { page } = withNeedsReview();
+    const { root } = await mount(page);
+    const injection = () => readerText(within(widgetTitled(root, "OWASP Top 10")).getByText("A05:2025").closest("tr") as HTMLElement);
+    expect(injection()).toContain("1 finding");
+    await userEvent.selectOptions(scope(), "all");
+    expect(injection()).toContain("2 findings");
+    await userEvent.selectOptions(scope(), "test");
+    expect(injection()).toContain("0 findings");
+  });
+
+  it("states it in the finding's detail, and says nothing for a finding the scanner is sure of", async () => {
+    const { page, low } = withNeedsReview();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    const row = rows(root).find((r) => r.textContent?.includes("low-confidence-sql")) as HTMLElement;
+    await userEvent.click(within(row).getByRole("button", { name: /^Show/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    expect(readerText(detail)).toContain(SCOPE_TEXT.reviewReason(low.confidence));
+    const sure = rows(root).find((r) => !r.textContent?.includes("low-confidence-sql")) as HTMLElement;
+    await userEvent.click(within(sure).getByRole("button", { name: /^Show/ }));
+    expect(readerText(widgetTitled(root, "Finding detail"))).not.toContain("Needs review");
+  });
+});
+
+/** The real page with one finding on a dev-only dependency planted, as the
+ *  server serves it: listed with `code_scope: "dev"`, counted apart
+ *  (`excluded.dev`), and in its category's `findings` but not its
+ *  `production_findings`. */
+function withDevDependency(): { page: SecurityModel; dev: SecurityFinding } {
+  const sql = finding("rust.lang.security.formatted-sql");
+  const dev: SecurityFinding = {
+    ...sql,
+    fingerprint: "dev-only",
+    rule_id: "GHSA-dev-only-dependency",
+    path: null,
+    report_path: "web/package-lock.json",
+    start_line: null,
+    code_scope: "dev",
+    code_scope_reason: "dev_dependency",
+  };
+  const editions = REAL.security.editions.map((e) => ({
+    ...e,
+    categories: e.categories.map((c) =>
+      c.state.state === "covered" && c.state.findings > 0 && e.findings.some((f) => f.categories.includes(c.id))
+        ? { ...c, state: { state: "covered" as const, findings: c.state.findings + 1 }, dev_findings: 1 }
+        : c,
+    ),
+    findings: [...e.findings, { scanner_name: dev.scanner_name, fingerprint: dev.fingerprint, categories: e.findings.find((x) => x.fingerprint === sql.fingerprint)?.categories ?? [], unclassified: null }],
+  }));
+  const page = model({
+    findings: { ...REAL.security.findings, findings: [...REAL.security.findings.findings, dev], total: REAL.security.findings.total + 1 },
+    editions,
+    counts: { counted: REAL.security.counts.counted, excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 1, needs_review: 0 } },
+  });
+  return { page, dev };
+}
+
+describe("a finding on a dev-only dependency reads dev (FR-SC-30, S-810)", () => {
+  const rows = (root: HTMLElement) =>
+    [...within(widgetTitled(root, "Findings")).getByRole("table").querySelectorAll("tbody tr")] as HTMLElement[];
+  const scope = () => screen.getByLabelText(SCOPE_TEXT.label) as HTMLSelectElement;
+
+  it("leaves it out of the default list and states how many beside the count, in both widgets", async () => {
+    const { page } = withDevDependency();
+    const { root } = await mount(page);
+    expect(rows(root)).toHaveLength(2);
+    expect(widgetTitled(root, "Findings").querySelector('[data-code-scope="dev"]')).toBeNull();
+    expect(readerText(widgetTitled(root, "Findings"))).toContain("2 of 3 findings shown");
+    for (const title of ["Findings", "OWASP Top 10"]) {
+      expect(readerText(widgetTitled(root, title))).toContain("· 1 more in dev-only dependencies");
+    }
+    // The real payload, with none, says so rather than saying nothing.
+    cleanup();
+    const plain = await mount(model());
+    expect(readerText(widgetTitled(plain.root, "Findings"))).toContain("· 0 more in dev-only dependencies");
+  });
+
+  it("lists it under All alone, tagged DEV with its reason on hover, and not under Test code", async () => {
+    const { page } = withDevDependency();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "test");
+    expect(within(widgetTitled(root, "Findings")).queryByRole("table")).toBeNull();
+    expect(readerText(widgetTitled(root, "Findings"))).toContain(SCOPE_TEXT.hidden(3, "test-code"));
+    await userEvent.selectOptions(scope(), "all");
+    expect(rows(root)).toHaveLength(3);
+    const tags = [...widgetTitled(root, "Findings").querySelectorAll('[data-code-scope="dev"]')] as HTMLElement[];
+    expect(tags.map((t) => t.getAttribute("title"))).toEqual([SCOPE_TEXT.reason.dev_dependency]);
+    expect(within(tags[0]).getByText(SCOPE_TEXT.devTag).className).toContain("muted");
+    expect(tags[0].className).toContain(styles.reviewTag);
+    expect(tags[0].closest("tr")?.textContent).toContain("web/package-lock.json");
+    expect(tags[0].querySelector(".sr-only")?.textContent?.trim()).toBe(SCOPE_TEXT.reason.dev_dependency);
+  });
+
+  it("keeps it out of the OWASP count under Production and Test code, and in the payload's own count under All", async () => {
+    const { page } = withDevDependency();
+    const { root } = await mount(page);
+    const injection = () => readerText(within(widgetTitled(root, "OWASP Top 10")).getByText("A05:2025").closest("tr") as HTMLElement);
+    expect(injection()).toContain("1 finding");
+    await userEvent.selectOptions(scope(), "all");
+    expect(injection()).toContain("2 findings");
+    await userEvent.selectOptions(scope(), "test");
+    expect(injection()).toContain("0 findings");
+  });
+
+  it("states it in the finding's detail as the dependency scope", async () => {
+    const { page } = withDevDependency();
+    const { root } = await mount(page);
+    await userEvent.selectOptions(scope(), "all");
+    const row = rows(root).find((r) => r.textContent?.includes("GHSA-dev-only-dependency")) as HTMLElement;
+    await userEvent.click(within(row).getByRole("button", { name: /^Show/ }));
+    const detail = widgetTitled(root, "Finding detail");
+    expect(readerText(detail)).toContain(SCOPE_TEXT.reason.dev_dependency);
+    expect(detail.querySelector('[data-code-scope="dev"]')).not.toBeNull();
+  });
+});
 
 describe("the code scope (FR-SC-28, S-796)", () => {
   const rows = (root: HTMLElement) =>
@@ -1020,7 +1371,7 @@ describe("the code scope (FR-SC-28, S-796)", () => {
       security: {
         ...page.security,
         findings: { ...page.security.findings, findings },
-        counts: { ...page.security.counts, excluded: { not_fresh: 0, suppressed: 1, test: 1 } },
+        counts: { ...page.security.counts, excluded: { not_fresh: 0, suppressed: 1, test: 1, dev: 0, needs_review: 0 } },
       },
     });
     for (const title of ["Findings", "OWASP Top 10"]) {
@@ -1608,5 +1959,60 @@ describe("the read after Run scan ends (HF-2)", () => {
     expect(await screen.findByText(SCAN_JOB_TEXT.completed(0, 1))).toBeInTheDocument();
     expect(banditState(view.container)).toBe("fresh");
     expect(reads, "one reload at the end").toBe(2);
+  });
+});
+
+describe("one advisory several scanners report is one row naming every reporter (FR-SC-29, S-809)", () => {
+  /** The SQL finding as one Semgrep and OSV-Scanner both report, under two ids. */
+  function withMerged(): { page: SecurityModel; merged: SecurityFinding } {
+    const sql = finding("rust.lang.security.formatted-sql");
+    const reporter = (scanner_name: string, fingerprint: string, rule_id: string, severity: SecurityFinding["severity"]) => ({
+      scanner_name,
+      scanner_version: "2.7.0",
+      fingerprint,
+      rule_id,
+      severity,
+    });
+    const merged: SecurityFinding = {
+      ...sql,
+      reporters: [reporter(sql.scanner_name, sql.fingerprint, sql.rule_id, sql.severity), reporter("osv-scanner", "osv-key", "GHSA-aaaa-bbbb-cccc", "unrated")],
+    };
+    const findings = REAL.security.findings.findings.map((f) => (f.fingerprint === sql.fingerprint ? merged : f));
+    return { page: model({ findings: { ...REAL.security.findings, findings } }), merged };
+  }
+
+  it("lists it once, its scanner cell naming both scanners", async () => {
+    const { page, merged } = withMerged();
+    const { root } = await mount(page);
+    const rows = [...within(widgetTitled(root, "Findings")).getByRole("table").querySelectorAll("tbody tr")] as HTMLElement[];
+    expect(rows).toHaveLength(REAL.security.findings.findings.filter((f) => f.code_scope === "production").length);
+    const row = rows.find((r) => r.textContent?.includes(merged.rule_id)) as HTMLElement;
+    expect(row.textContent).toContain(`${merged.scanner_name}, osv-scanner`);
+  });
+
+  it("names each reporter in the detail with what it reported, and a finding one scanner reported names none", () => {
+    stub(model());
+    const { merged } = withMerged();
+    const classification = { categories: [], unclassified: null };
+    const view = render(<FindingDetail finding={merged} classification={classification} shown={0} />);
+    const reporters = view.container.querySelector("[data-reporters]") as HTMLElement;
+    expect([...reporters.querySelectorAll("li")].map((li) => li.textContent)).toEqual([
+      REPORTERS_TEXT.reporter(merged.scanner_name, "2.7.0", merged.rule_id, merged.severity),
+      REPORTERS_TEXT.reporter("osv-scanner", "2.7.0", "GHSA-aaaa-bbbb-cccc", "unrated"),
+    ]);
+    expect(reporters.textContent).toContain(REPORTERS_TEXT.note);
+    expect(within(view.container).getByText(REPORTERS_TEXT.label).tagName).toBe("DT");
+    cleanup();
+    const single = render(<FindingDetail finding={finding("rust.lang.security.formatted-sql")} classification={classification} shown={0} />);
+    expect(single.container.querySelector("[data-reporters]")).toBeNull();
+  });
+
+  it("states a scanner row's findings counted under another scanner", async () => {
+    const status = {
+      ...REAL.security.status,
+      scanners: REAL.security.status.scanners.map((r) => (r.state === "fresh" ? { ...r, merged: 2 } : r)),
+    };
+    const { root } = await mount(model({ status }));
+    expect(readerText(widgetTitled(root, "Scanners"))).toContain("2 counted under another scanner");
   });
 });

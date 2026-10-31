@@ -10,6 +10,11 @@
  * finding's fingerprint: the path starts as the finding's directory and can be
  * edited, and the entry can be narrowed to the finding's rule and scanner. The
  * server writes the path in its canonical spelling.
+ *
+ * "Record the enclosing symbol as evidence" (FR-SC-32, S-818), offered when the
+ * finding binds a symbol and off by default, sends that symbol as the entry's
+ * evidence: the suppression then holds only while the symbol's source is
+ * unchanged. Left off, nothing is sent and the request is as it always was.
  */
 
 import { useState } from "react";
@@ -17,7 +22,7 @@ import { useState } from "react";
 import { requestDetail } from "../../api/securityClient.ts";
 import type { SecurityFinding, SecuritySelector } from "../../api/types.ts";
 import { Button, Modal, TextareaField, TextField } from "../../components/index.ts";
-import { SUPPRESS_TEXT } from "../../copy/security.copy.ts";
+import { EVIDENCE_TEXT, SUPPRESS_TEXT } from "../../copy/security.copy.ts";
 import { findingLocation, suggestedPath } from "./securityModel.ts";
 import styles from "./SecurityView.module.css";
 
@@ -25,7 +30,7 @@ export interface SuppressDialogProps {
   /** The finding to suppress. */
   finding: SecurityFinding;
   /** Writes the suppression; rejects with the reason it was not written. */
-  onSubmit: (selector: SecuritySelector, reason: string, expires: string | null) => Promise<void>;
+  onSubmit: (selector: SecuritySelector, reason: string, expires: string | null, evidence?: string[]) => Promise<void>;
   onCancel: () => void;
 }
 
@@ -40,6 +45,8 @@ export function SuppressDialog({ finding, onSubmit, onCancel }: SuppressDialogPr
   const [missingPath, setMissingPath] = useState(false);
   const [onlyRule, setOnlyRule] = useState(false);
   const [onlyScanner, setOnlyScanner] = useState(false);
+  const [recordEvidence, setRecordEvidence] = useState(false);
+  const enclosing = finding.context.enclosing.symbol;
 
   const selector = (): SecuritySelector => {
     if (!underPath) return { fingerprint: finding.fingerprint };
@@ -59,7 +66,10 @@ export function SuppressDialog({ finding, onSubmit, onCancel }: SuppressDialogPr
     setFailure(null);
     setSaving(true);
     try {
-      await onSubmit(selector(), reason.trim(), expires === "" ? null : expires);
+      const args = [selector(), reason.trim(), expires === "" ? null : expires] as const;
+      // The fourth argument exists only when evidence is recorded.
+      if (recordEvidence && enclosing) await onSubmit(...args, [enclosing.symbol]);
+      else await onSubmit(...args);
     } catch (e) {
       setFailure(SUPPRESS_TEXT.saveFailed(requestDetail(e)));
       setSaving(false);
@@ -136,6 +146,13 @@ export function SuppressDialog({ finding, onSubmit, onCancel }: SuppressDialogPr
         value={expires}
         onChange={(e) => setExpires(e.target.value)}
       />
+      {enclosing && (
+        <label>
+          <input type="checkbox" checked={recordEvidence} onChange={(e) => setRecordEvidence(e.target.checked)} />{" "}
+          {EVIDENCE_TEXT.recordEvidence}
+          <span className="muted"> — {EVIDENCE_TEXT.recordEvidenceHint(enclosing.name)}</span>
+        </label>
+      )}
       <p className="muted">{SUPPRESS_TEXT.where}</p>
       {failure !== null && (
         <p role="alert" className={styles.alert}>

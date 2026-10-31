@@ -33,7 +33,7 @@ only project it onto an exit code or an MCP error tag. This is the design in
 | **Oversized file** | Degraded | Skips the file with a notice | `warnings` in the read-model; exit `0` | Raise `max_file_bytes` in `.logos/config.toml` to include it |
 | **A file whose facts cannot be persisted** | Degraded | Rolls back that one file and persists every other. On `index` the file is absent from the graph; on `sync`, the watcher, or the reconcile inside `scan`/`check`/`gate` it keeps its last good facts and is marked **stale** | the path in `files_failed`, its reason in `persist_failures`, a warning naming it; `persistence` in `logos status` and `logos scan` until it persists; exit `0` | Usually a Logos defect — file an issue with the reason. The next reconcile retries the file and clears the mark once it persists or is deleted |
 | **No file persisted** — every file that reached persistence failed, or the pipeline itself failed | Correctness | Reports the run as failed | `"failed": true` and a `nothing was persisted` warning in the read-model; exit `1` | See the per-file reasons in `persist_failures`; an index that admits no file at all is not this case and exits `0` |
-| **Partial resolution** | Degraded | Returns the bound results + a coverage number | `resolution_coverage` in `logos status`; exit `0` | `logos sync` after the missing targets land (often nothing to fix — see below) |
+| **Partial resolution** | Degraded | Returns the bound results + a coverage number | `internal_resolution` (and `doc_resolution`) in `logos status`; the deprecated `resolution_coverage` beside them; exit `0` | `logos sync` after the missing targets land (often nothing to fix — see below) |
 | Unknown-symbol query | Degraded | Returns an empty result (+ suggestions where available) | empty read-model; exit `0` | Check the name; re-index if the symbol is new |
 | **No index present** | Correctness | Aborts before doing anything | `error:` on stderr; exit `3` | Run `logos index` |
 | **Corrupt / unreadable index** | Correctness | Aborts | `error:` on stderr; exit `3` | Delete `.logos/logos.db` and run `logos index` |
@@ -128,9 +128,11 @@ A degraded result is *correct about what it could do*, not a defect:
 
 - **`resolution_coverage` around ~50% is normal**, not a broken index — it
   counts every syntactic reference including stdlib/external calls that can
-  never bind to a workspace symbol. See the detailed explanation in
-  [usage.md](usage.md#navigating-the-graph). Look at the `refs_resolved` count
-  and the `artifact_bindings` breakdown to gauge *workspace-internal* resolution.
+  never bind to a workspace symbol, and it is deprecated. See the detailed
+  explanation in [usage.md](usage.md#navigating-the-graph). Read
+  `internal_resolution` — a lower bound over the references that could be
+  internal — and `doc_resolution` to gauge *workspace-internal* resolution
+  ([commands](commands.md#internal_resolution-and-doc_resolution)).
 - **Skipped files** are listed in the producing command's `warnings`. If a skip
   surprises you, the message names the cause (a syntax error, a size over the
   `max_file_bytes` cap) and the fix.
@@ -150,6 +152,7 @@ A degraded result is *correct about what it could do*, not a defect:
 | `no Logos index found under <path>: run `logos index`` | No `.logos/logos.db` yet (exit 3) | `logos index` |
 | An `error:` about a corrupt/unreadable store (exit 3) | The store failed an integrity check | `rm .logos/logos.db && logos index` |
 | A warning `<file>: syntax error(s) present; partial extraction; N declaration(s) truncated and M skipped at a parse error` (exit 0) | The file did not parse cleanly. Declarations next to the damage are kept at their own node instead of taking the broken region's span (*truncated*), and a declaration whose name the parser could not recover emits nothing (*skipped*). The rest of the file and every other file are indexed | Usually unsupported or preprocessor-heavy syntax; nothing to fix in Logos. Exclude the file if its partial symbols are noise |
+| A warning `<file>: partial extraction (no syntax error reported); N annotated declaration(s) read as an expression (a declaration or its annotations are lost)` (exit 0) | The Kotlin grammar read an annotated declaration (two annotations ahead of another declaration, or an annotation with arguments apart from its declaration) as an expression and reported no error, so the declaration or its annotations are missing from the graph. The rest of the file is indexed | A limit of the Kotlin grammar; nothing to fix in Logos. A file written without the annotation shape indexes whole |
 | `… graph store … is at schema vN, expected vM …` (exit 3) | The store was upgraded by a newer Logos than the binary now running it — for example 1.9.0 opening a store that the next release migrated to v27. Schema upgrades are forward-only | Run the newer binary; to go back to the older one, `rm .logos/logos.db && logos index` with it |
 | `invalid TOML in .logos/config.toml: …` | A syntax error or unknown key (exit 2) | Fix the key/line the message names |
 | `logos security scan` exits 2 naming `--consent` and the scanners | The first scan in a project, or a newly installed/enabled scanner, has no recorded network consent. Nothing was started | Run `logos security scan --consent` yourself. An agent's MCP `security_scan` cannot record consent and returns the same instruction |

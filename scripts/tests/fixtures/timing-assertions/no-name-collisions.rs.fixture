@@ -1,0 +1,24 @@
+// Names that merely share a spelling with a timing name are not timing: a field
+// (`range.start`), a call taking an instant, a tuple element that is not the
+// elapsed time. None of these compares a time with anything.
+fn field_named_like_a_local() {
+    let start = Instant::now();
+    run();
+    let end = range.start + 5;
+    assert!(end < 10);
+}
+
+fn tuple_elements_take_their_own_sources() {
+    let t = Instant::now();
+    let (res, took) = (run(), t.elapsed());
+    assert!(res.len() < 10);
+    let (a, b) = (Instant::now(), 5);
+    assert!(b < 10);
+    let _ = (a, took);
+}
+
+fn a_call_that_takes_an_instant_returns_no_time() {
+    let started = Instant::now();
+    let rows = fetch(started);
+    assert!(rows < 100);
+}

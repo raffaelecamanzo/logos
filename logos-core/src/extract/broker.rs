@@ -2826,6 +2826,7 @@ class OrderService {
             path: "Svc.java".to_string(),
             language: "java".to_string(),
             partial: false,
+            parse_damaged: false,
             nodes: Vec::new(),
             edges: Vec::new(),
             refs: Vec::new(),
@@ -2835,6 +2836,7 @@ class OrderService {
             declared_types: Vec::new(),
             namespace: None,
             impl_blocks: Vec::new(),
+            local_bindings: Vec::new(),
         };
         let index = props.map(|p| {
             crate::extract::config::binding::PropertiesIndex::from_sources(

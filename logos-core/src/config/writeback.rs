@@ -280,6 +280,8 @@ pub struct MetricThresholdDefaults {
     pub clone_min_tokens: i64,
     /// `duplicate_min_tokens` (same name on both sides).
     pub duplicate_min_tokens: i64,
+    /// `cohesion_min_classes` (same name on both sides).
+    pub cohesion_min_classes: i64,
 }
 
 impl MetricThresholdDefaults {
@@ -304,6 +306,7 @@ impl MetricThresholdDefaults {
             clone_similarity,
             clone_min_tokens,
             duplicate_min_tokens,
+            cohesion_min_classes,
         } = t;
         Self {
             nesting_depth: nest,
@@ -315,6 +318,7 @@ impl MetricThresholdDefaults {
             clone_similarity,
             clone_min_tokens,
             duplicate_min_tokens,
+            cohesion_min_classes,
         }
     }
 
@@ -334,6 +338,7 @@ impl MetricThresholdDefaults {
             clone_similarity: self.clone_similarity,
             clone_min_tokens: self.clone_min_tokens,
             duplicate_min_tokens: self.duplicate_min_tokens,
+            cohesion_min_classes: self.cohesion_min_classes,
         }
     }
 }

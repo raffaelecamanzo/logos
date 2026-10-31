@@ -322,6 +322,26 @@ fn a_file_holding_one_function_binds_to_the_function_not_its_module() {
     assert_eq!(sign["context"]["blast_radius"]["upstream"], 1, "{sign}");
 }
 
+/// A Python `self.x = …` declares its class's Field on a line of `__init__`
+/// (S-543): a finding on that line still sits in `__init__`, the method that runs
+/// it, never in the field.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_finding_on_a_python_self_write_binds_to_its_method() {
+    let p = inline_project(
+        &[(
+            "app/views.py",
+            "import subprocess\n\n\nclass Runner:\n    def __init__(self, request):\n        self.cmd = request.args[\"cmd\"]\n        self.timeout = 5\n\n    def run(self):\n        return subprocess.call(self.cmd, shell=True)\n",
+        )],
+        &[("app/views.py", 6), ("app/views.py", 10)],
+    );
+    let findings = p.findings();
+    let write = at(&findings, "app/views.py", 6);
+    assert_eq!(enclosing_name(write), Some("__init__"), "{write}");
+    assert_eq!(write["context"]["enclosing"]["symbol"]["kind"], "method", "{write}");
+    assert_eq!(enclosing_name(at(&findings, "app/views.py", 10)), Some("run"));
+}
+
 /// `(verdict, confidence, unresolved_because)` of the finding at `path:line`.
 fn open_at<'a>(findings: &'a Value, path: &str, line: i64) -> (&'a str, &'a str, Option<&'a str>) {
     let r = &at(findings, path, line)["context"]["reachability"];

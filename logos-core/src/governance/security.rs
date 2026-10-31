@@ -25,6 +25,14 @@
 //! gated as `medium`, the rank its default level gave it before it read
 //! `unrated` (S-768), so no verdict changed with the spelling.
 //!
+//! **One advisory is one finding** ([FR-SC-29]). The summary carries the
+//! merged view the reader gives: a dependency advisory several scanners report
+//! on one lockfile, package and version is one [`SummaryFinding`] naming every
+//! reporter, so each rule counts it once. It is evaluated when any reporter's
+//! scan is fresh, is known to a baseline by any reporter's key, and is recorded
+//! by `gate --save` and `security bless` under every reporter's key, so a
+//! reporter that drops out later leaves it known.
+//!
 //! **Missing evidence** ([ADR-79] §7) is not a violation: a required scanner
 //! with no fresh scan at HEAD is a [`MissingScan`], which the surfaces map to
 //! exit 5 ([FR-CL-03]). The gate never runs a scanner.
@@ -41,6 +49,7 @@
 //!
 //! [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
 //! [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
+//! [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 //! [FR-SC-11]: ../../../docs/specs/requirements/FR-SC-11.md
 //! [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
@@ -200,16 +209,57 @@ pub(crate) struct SummaryFinding {
     pub owasp: Vec<String>,
     /// Whether an unexpired ignore entry suppresses it.
     pub suppressed: bool,
+    /// Every stored finding a merged one stands for, its own first
+    /// ([FR-SC-29]); empty for a finding one result stands behind, which is
+    /// its own one reporter.
+    ///
+    /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+    pub reporters: Vec<SummaryReporter>,
+}
+
+/// One scanner's stored finding within a merged [`SummaryFinding`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SummaryReporter {
+    /// The driver that reported it.
+    pub scanner: String,
+    /// Its fingerprint in that driver's snapshot.
+    pub fingerprint: String,
+    /// The keys it was stored under before a re-key.
+    pub legacy_fingerprints: Vec<String>,
+    /// The advisory id that driver reports it under.
+    pub rule_id: String,
 }
 
 impl SummaryFinding {
+    /// Its reporters: each of [`reporters`](Self::reporters), or the finding
+    /// itself when one result stands behind it.
+    fn members(&self) -> Vec<SummaryReporter> {
+        if !self.reporters.is_empty() {
+            return self.reporters.clone();
+        }
+        vec![SummaryReporter {
+            scanner: self.scanner.clone(),
+            fingerprint: self.fingerprint.clone(),
+            legacy_fingerprints: self.legacy_fingerprints.clone(),
+            rule_id: self.rule_id.clone(),
+        }]
+    }
+
     /// Whether `recorded` holds this finding, under its key or one it had
     /// before a re-key — a checked-in baseline is never re-keyed (S-764 ×
     /// S-765), so a secret blessed under its old key stays known: before
     /// history.db migration 7, or, for a history-only secret, before migration
     /// 11 keyed it by its own path instead of the file it bound to (S-780).
+    /// A merged finding is recorded under any reporter's key ([FR-SC-29]): a
+    /// baseline written before the merge recorded each of them.
+    ///
+    /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
     fn recorded_in(&self, recorded: &BTreeSet<String>) -> bool {
-        recorded.contains(&self.fingerprint) || self.legacy_fingerprints.iter().any(|old| recorded.contains(old))
+        let known = |fingerprint: &String, legacy: &[String]| {
+            recorded.contains(fingerprint) || legacy.iter().any(|old| recorded.contains(old))
+        };
+        known(&self.fingerprint, &self.legacy_fingerprints)
+            || self.reporters.iter().any(|r| known(&r.fingerprint, &r.legacy_fingerprints))
     }
 
     /// Whether `locations` (a checked-in baseline's) records this finding by
@@ -217,9 +267,20 @@ impl SummaryFinding {
     /// [`unbound_location`](Self::unbound_location); a bound finding is known by
     /// its fingerprint alone.
     fn located_in(&self, locations: &BTreeSet<(String, String)>) -> bool {
-        self.unbound_location
-            .as_ref()
-            .is_some_and(|path| locations.contains(&(self.rule_id.clone(), path.clone())))
+        self.unbound_location.as_ref().is_some_and(|path| {
+            self.members().into_iter().any(|member| locations.contains(&(member.rule_id, path.clone())))
+        })
+    }
+
+    /// The drivers that reported it, each once, in reporter order.
+    fn scanners(&self) -> Vec<String> {
+        let mut scanners: Vec<String> = Vec::new();
+        for member in self.members() {
+            if !scanners.contains(&member.scanner) {
+                scanners.push(member.scanner);
+            }
+        }
+        scanners
     }
 
     /// `path:line`, `path`, or `(no location)` — never the finding's message,
@@ -249,7 +310,7 @@ impl SummaryFinding {
         format!(
             "{severity} finding `{}` ({}) at {}",
             self.rule_id,
-            self.scanner,
+            self.scanners().join(", "),
             self.location()
         )
     }
@@ -344,7 +405,7 @@ pub(crate) fn check_security(rules: &SecurityRules, summary: &SecuritySummary) -
     let active: Vec<&SummaryFinding> = summary
         .findings
         .iter()
-        .filter(|f| fresh.contains(f.scanner.as_str()) && !f.suppressed)
+        .filter(|f| f.scanners().iter().any(|s| fresh.contains(s.as_str())) && !f.suppressed)
         .collect();
     let mut not_evaluated: Vec<&str> = Vec::new();
     for row in &summary.scanners {
@@ -435,10 +496,15 @@ pub(crate) fn check_security(rules: &SecurityRules, summary: &SecuritySummary) -
 /// - A **suppressed** finding is not: its acceptance is the ignore entry, and
 ///   when that expires or is removed the finding returns to the ratchet
 ///   ([FR-SC-11]) rather than staying accepted for good.
+/// - A **merged** finding is recorded under each reporter's key ([FR-SC-29]).
 ///
 /// [FR-SC-11]: ../../../docs/specs/requirements/FR-SC-11.md
+/// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
 pub(crate) fn baseline_fingerprints(summary: &SecuritySummary) -> Vec<(String, String)> {
-    baselined(summary).map(|f| (f.scanner.clone(), f.fingerprint.clone())).collect()
+    baselined(summary)
+        .flat_map(SummaryFinding::members)
+        .map(|member| (member.scanner, member.fingerprint))
+        .collect()
 }
 
 /// The findings a baseline records, whichever its source: every unsuppressed
@@ -479,7 +545,8 @@ struct CheckedInFile {
 }
 
 /// The checked-in baseline's entries for `summary` — the findings
-/// [`baseline_fingerprints`] records — sorted and without repeats, each path
+/// [`baseline_fingerprints`] records, a merged one once per reporter — sorted
+/// and without repeats, each path
 /// made project-relative by `relative` ([FR-SC-25]).
 ///
 /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
@@ -488,10 +555,13 @@ pub(crate) fn baseline_entries(
     relative: impl Fn(&str) -> Option<String>,
 ) -> Vec<BaselineEntry> {
     let mut entries: Vec<BaselineEntry> = baselined(summary)
-        .map(|f| BaselineEntry {
-            fingerprint: f.fingerprint.clone(),
-            rule_id: f.rule_id.clone(),
-            path: f.path.as_deref().and_then(&relative),
+        .flat_map(|f| {
+            let path = f.path.as_deref().and_then(&relative);
+            f.members().into_iter().map(move |member| BaselineEntry {
+                fingerprint: member.fingerprint,
+                rule_id: member.rule_id,
+                path: path.clone(),
+            })
         })
         .collect();
     entries.sort_by(|a, b| a.key().cmp(&b.key()));

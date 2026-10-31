@@ -183,8 +183,8 @@ pub struct Hotspot {
     pub coverage: CoverageCell,
     /// The findings cell ([FR-SC-14]): the file's counted findings — fresh,
     /// unsuppressed, in production code ([`counts`](super::security::counts)) —
-    /// with the highest severity, and the stale ones and those in test code,
-    /// labelled and uncounted. Absent when no report is stored — no column
+    /// with the highest severity, and the stale ones, those in test code and
+    /// those on a dev-only dependency, labelled and uncounted. Absent when no report is stored — no column
     /// rather than zeros.
     ///
     /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
@@ -560,6 +560,7 @@ mod tests {
             max_nesting_depth: None,
             clone_group: None,
             has_body: None,
+            unbound_accesses: Vec::new(),
         }
     }
 
@@ -983,7 +984,7 @@ mod tests {
     }
 
     fn cell(count: usize, highest: Option<crate::model::Severity>, stale: usize) -> PathFindings {
-        PathFindings { count, highest, stale, test: 0 }
+        PathFindings { count, highest, stale, test: 0, dev: 0, needs_review: 0 }
     }
 
     #[test]

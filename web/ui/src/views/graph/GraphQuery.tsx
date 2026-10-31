@@ -135,9 +135,13 @@ const QUERY_COLUMNS: Column<QueryHit & { onSelect: (id: string) => void }>[] = [
     header: "Name",
     mono: true,
     cell: (r) => (
-      <button type="button" className={styles.queryRowBtn} onClick={() => r.onSelect(r.id)}>
-        {r.label}
-      </button>
+      <>
+        <button type="button" className={styles.queryRowBtn} onClick={() => r.onSelect(r.id)}>
+          {r.label}
+        </button>
+        {/* Reached by a trait fan-out: the caller depends on the trait only (S-712). */}
+        {r.via ? <span className="muted"> via {r.via}</span> : null}
+      </>
     ),
     sortValue: (r) => r.label,
   },

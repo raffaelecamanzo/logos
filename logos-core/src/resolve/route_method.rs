@@ -235,10 +235,13 @@ mod tests {
         ("kotlin/", &["RequestMapping"]),
         ("typescript/", &["all", "use"]),
         ("tsx/", &["all", "use"]),
+        ("javascript/", &["all", "use"]),
         ("python/", &["path", "re_path", "websocket"]),
         ("go/", &["Any", "Handle", "HandleFunc"]),
         ("c-sharp/", &["Route"]),
-        ("php/", &["any", "match"]),
+        // `Route` is a Symfony `#[Route]` with no `methods:` (S-549); `match` has
+        // no row, because its first argument is never the path.
+        ("php/", &["any", "Route"]),
     ];
 
     /// The extraction side names the wildcard, this side interprets it

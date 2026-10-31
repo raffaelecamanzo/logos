@@ -36,7 +36,15 @@
 //!   `passed` and `author` are not keys;
 //! - the credential after a bare `Bearer` or `Basic`, key or no key;
 //! - any word of 20 or more token characters that mixes letters and digits —
-//!   the shape of a generated key or token, whatever its provider.
+//!   the shape of a generated key or token, whatever its provider — except in a
+//!   package coordinate (`github.com/xuri/excelize/v2@2.10.1`,
+//!   `@scope/pkg-name1234567890@1.2.3`), which reads whole: a name, `@`, then a
+//!   version of two or more numeric parts; or a module path with no version
+//!   (`github.com/xuri/excelize/v2`), a dot-qualified host and `/` segments. A
+//!   word in a coordinate's name is left alone only when none of its `/` segments
+//!   is itself token-shaped, so `<token>@1.2.3` and `host.tld/<token>` are
+//!   masked; a coordinate after `://` is a URL's path and is masked as before.
+//!   A coordinate's user-info is masked by the URL rule first.
 //!
 //! [CR-217]: ../../../../docs/requests/CR-217-security-findings-in-graph-context.md
 //! [FR-SC-03]: ../../../../docs/specs/requirements/FR-SC-03.md
@@ -104,6 +112,49 @@ static BEARER: LazyLock<Regex> = LazyLock::new(|| {
 static TOKEN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9_\-+/=]{20,}").expect("the token pattern compiles"));
 
+/// A package coordinate: a name (a Go module path, an npm name, scoped or not),
+/// `@`, then a version (group `version`) of two or more numeric parts (`2.10.1`,
+/// `v0.0.0-2021…`, `1.2.3-rc.1`, `v2.0.0+incompatible`); or a module path with no
+/// version, a dot-qualified host and `/` segments. A match only says where a
+/// coordinate may lie: [`Coordinate::holds`] says whether a word in it is one.
+static COORDINATE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&[
+        r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*",
+        r"@(?P<version>v?[0-9]+(?:\.[0-9]+)+(?:[.\-+][A-Za-z0-9]+)*)",
+        r"|(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}(?:/[A-Za-z0-9_.\-]+)+",
+    ]
+    .concat())
+    .expect("the coordinate pattern compiles")
+});
+
+/// Where a [`COORDINATE`] match lies, and where its version does.
+struct Coordinate {
+    span: Range<usize>,
+    version: Option<Range<usize>>,
+}
+
+impl Coordinate {
+    /// Whether `word`, a token-shaped word, reads whole here: it lies in the
+    /// coordinate, which does not follow `://` (a URL's path is not a package
+    /// path), and it is either in the version (a pseudo-version's commit stamp is
+    /// a word of its own) or made of name-like segments — none of its `/`
+    /// segments is itself token-shaped, so a `<token>@1.2.3`, a `host.tld/<token>`
+    /// and a webhook's path are still masked.
+    fn holds(&self, text: &str, word: &regex::Match<'_>) -> bool {
+        self.span.start <= word.start()
+            && !text[..self.span.start].ends_with("://")
+            && (self.version.as_ref().is_some_and(|v| v.start <= word.start())
+                || word.as_str().split('/').all(|segment| !token_shaped(segment)))
+    }
+}
+
+/// 20 or more token characters mixing letters and digits: the shape of a
+/// generated key or token, whatever its provider.
+fn token_shaped(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    bytes.len() >= 20 && bytes.iter().any(u8::is_ascii_digit) && bytes.iter().any(u8::is_ascii_alphabetic)
+}
+
 /// `text` with every span the [module docs](self) list replaced by [`MASK`].
 pub fn mask_secrets(text: &str) -> String {
     let text = PEM.replace_all(text, MASK);
@@ -111,18 +162,34 @@ pub fn mask_secrets(text: &str) -> String {
     let text = AWS_KEY_ID.replace_all(&text, MASK);
     let text = mask_credential_values(&text);
     let text = BEARER.replace_all(&text, format!("${{1}}{MASK}").as_str());
-    TOKEN
-        .replace_all(&text, |caps: &regex::Captures<'_>| {
-            let word = &caps[0];
-            let mixed = word.bytes().any(|b| b.is_ascii_digit())
-                && word.bytes().any(|b| b.is_ascii_alphabetic());
-            if mixed {
-                MASK.to_string()
-            } else {
-                word.to_string()
-            }
+    mask_tokens(&text)
+}
+
+/// `text` with every token-shaped word masked, bar one a [`Coordinate`] holds.
+fn mask_tokens(text: &str) -> String {
+    let coordinates: Vec<Coordinate> = COORDINATE
+        .captures_iter(text)
+        .map(|caps| Coordinate {
+            span: caps.get(0).expect("a match has a span").range(),
+            version: caps.name("version").map(|m| m.range()),
         })
-        .into_owned()
+        .collect();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for word in TOKEN.find_iter(text) {
+        // The coordinates are sorted and disjoint: the first one that reaches the
+        // word's end is the only one that can hold it.
+        let held = coordinates
+            .get(coordinates.partition_point(|c| c.span.end < word.end()))
+            .is_some_and(|c| c.holds(text, &word));
+        if token_shaped(word.as_str()) && !held {
+            out.push_str(&text[at..word.start()]);
+            out.push_str(MASK);
+            at = word.end();
+        }
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// `text` with the spans both credential patterns find in it masked. Both run
@@ -337,6 +404,96 @@ mod tests {
             let masked = mask_secrets(text);
             assert!(masked.contains(kept), "{kept:?} lost from {masked:?}");
         }
+    }
+
+    /// A package coordinate (`name@version`) reads whole: its path or its scoped
+    /// name can be 20 characters of letters and digits, which is not a token.
+    #[test]
+    fn a_package_coordinate_is_never_masked_as_a_token() {
+        for text in [
+            "Package 'github.com/xuri/excelize/v2@2.10.1' is vulnerable",
+            "Package '@scope/pkg-name1234567890@1.2.3' is vulnerable",
+            // A Go pseudo-version: its commit stamp is a long mixed word of its own.
+            "Package 'github.com/o/r@v0.0.0-20210101123456-abcdef123456' is vulnerable",
+            "Package 'github.com/o/r/v2@v2.0.0+incompatible' is vulnerable",
+            "upgrade @scope/pkg-name1234567890@1.2.3-rc.1, then retry",
+            // The `+` of build metadata, in a word of its own long enough to matter.
+            "Package 'github.com/o/r@v1.2.3+build20210101abcdef123456' ok",
+            // `_` is a name character.
+            "Package '@scope/my_pkg1234567890@1.2.3' ok",
+            // A module path with no version.
+            "Package 'github.com/xuri/excelize/v2' is vulnerable",
+            "no required module provides package github.com/xuri/excelize/v2; run go get",
+            // Every coordinate of a text reads whole, multibyte text beside them too.
+            "github.com/xuri/excelize/v2@2.10.1 and @scope/pkg-name1234567890@1.2.3",
+            "é github.com/xuri/excelize/v2@2.10.1 é @scope/pkg-name1234567890@1.2.3 é",
+        ] {
+            assert_eq!(mask_secrets(text), text);
+        }
+    }
+
+    /// A coordinate exempts a word only as a package name: user-info on it is
+    /// masked, a bare token is masked, and so is a token in a URL's or a module
+    /// path's segment, which is where webhook and API secrets sit (the shapes the
+    /// sprint review found past the first version of the exemption).
+    #[test]
+    fn a_secret_beside_a_package_coordinate_is_still_masked() {
+        let token = "Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6";
+        for (text, secret) in [
+            ("https://user:Tok3n1234567890abcdefgh@registry.example/pkg@1.2.3", "Tok3n1234567890abcdefgh"),
+            ("leaked a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0 here", "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"),
+            // User-info with no scheme, and a bare token before a version.
+            ("connect user:Tok3n1234567890abcdefgh@10.0.0.1 now", "Tok3n1234567890abcdefgh"),
+            ("connect root:Tok3n1234567890abcdefgh@192.168.1.5:5432/db", "Tok3n1234567890abcdefgh"),
+            ("sent Tok3n1234567890abcdefgh@1.2.3", "Tok3n1234567890abcdefgh"),
+            ("sent a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0@v2.0.0 x", "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0"),
+            // A name that is one token-shaped segment is a token, not a name.
+            ("sent pkg-name1234567890abcdefgh@1.2.3 x", "pkg-name1234567890abcdefgh"),
+            // The `@` is not followed by a version: an e-mail address, not a coordinate.
+            (&format!("sent {token}@example.com"), token),
+            // One numeric component is not a version.
+            (&format!("sent {token}@2 today"), token),
+            // The token is not the whole name: `=` is a token character, not a name one.
+            (&format!("key=x{token}@1.2.3"), token),
+            // The token spills past the right edge of the coordinate.
+            (&format!("github.com/o/r@1.2.3/{token}"), token),
+            (&format!("pkg@1.2.3_{token}"), token),
+            // No dot-qualified host: a path, not a module path.
+            (&format!("sent {token}/xuri/excelize/v2 today"), token),
+            (&format!("sent abcdefghij/{token} today"), token),
+            // A secret in the path of a URL or of a dot-qualified host.
+            ("POST https://hooks.slack.com/services/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 failed", "Xy7Kq9Lm2Np4Rs6Tv8Uw0Zab"),
+            ("POST https://discord.com/api/webhooks/123456789012345678/Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3", "Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3"),
+            (&format!("GET https://api.example.com/v1/{token}"), token),
+            (&format!("see example.com/{token}"), token),
+            (&format!("fetch x.io/{token}"), token),
+            (&format!("git clone https://github.com/org/{token}.git"), token),
+            ("host.com/ghp_16C7e42F292c6912E7710c838347Ae178B4a", "ghp_16C7e42F292c6912E7710c838347Ae178B4a"),
+            ("registry.npmjs.org/-/npm/v1/tokens/npm_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3", "npm_Ab1Cd2Ef3Gh4Ij5Kl6Mn7Op8Qr9St0Uv1Wx2Yz3"),
+            ("s3.amazonaws.com/bucket/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY", "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY"),
+            // After `://` a short segment is not read as a package path either.
+            ("POST https://example.com/services/T0A1B2C3D/B0A1B2C3D/short16Chars9", "short16Chars9"),
+            // Beside a coordinate, not in it.
+            (&format!("{token} github.com/xuri/excelize/v2@2.10.1"), token),
+        ] {
+            let masked = mask_secrets(text);
+            assert!(!masked.contains(secret), "{secret:?} survives in {masked:?}");
+            assert!(masked.contains(MASK), "{masked:?}");
+        }
+        assert_eq!(
+            mask_secrets(&format!("{token} github.com/xuri/excelize/v2@2.10.1")),
+            format!("{MASK} github.com/xuri/excelize/v2@2.10.1"),
+        );
+        // A token between two coordinates: only it goes.
+        assert_eq!(
+            mask_secrets(&format!("github.com/xuri/excelize/v2@2.10.1 {token} @scope/pkg-name1234567890@1.2.3")),
+            format!("github.com/xuri/excelize/v2@2.10.1 {MASK} @scope/pkg-name1234567890@1.2.3"),
+        );
+        // The user-info goes and the coordinate after it reads whole.
+        assert_eq!(
+            mask_secrets("https://Tok3n1234567890abcdefgh@registry.example/@scope/pkg-name1234567890@1.2.3"),
+            format!("https://{MASK}@registry.example/@scope/pkg-name1234567890@1.2.3"),
+        );
     }
 
     #[test]

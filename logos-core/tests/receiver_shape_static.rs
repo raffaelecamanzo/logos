@@ -12,7 +12,8 @@
 //! records a proven `Extends`; and no `Calls` edge is a self-loop. A bare call
 //! outside any type is a free call again, bound by the lexical scope, and a
 //! bare call inside a type without `m` never reaches a same-named top-level
-//! function (Kotlin, Scala and C++ declare one; C# has no top-level functions).
+//! function (Kotlin and C++ declare one; C# has no top-level functions) — in
+//! Scala it does when the file shows that no member answers it (S-573).
 //!
 //! Fixtures are written inline into temp directories, like every sibling
 //! binding suite (`receiver_shape.rs`): a fixture tree checked into this
@@ -186,8 +187,9 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             row(&a(8, "J"), "M", RefForm::Method, SELF, true),
             // `base.M()`: the proven base class's `Base.M` (S-522).
             row(&a(9, "K"), "M", RefForm::Method, SUPER, true),
-            // A static call on a type name is a receiver like any other.
-            row(&a(10, "L"), "Run", RefForm::Method, OTHER, false),
+            // A call on a type name is the Path `Helpers::Run` (S-553); the
+            // fixture declares no `Helpers`, so it binds nothing.
+            row(&a(10, "L"), "Helpers::Run", RefForm::Path, None, false),
             // A chain rooted at `this` is a receiver expression, not `this`.
             row(&a(11, "P"), "M", RefForm::Method, OTHER, false),
             // A bare `M()` in `C`, which has no `M`: never `A.M`, `B.M`, `Base.M`.
@@ -211,8 +213,9 @@ fn csharp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
 const KT_FILE: &str = "src/A.kt";
 
 /// A top-level `m` the class methods are named like, a `Base.m` the super
-/// call reaches through the proven `Extends` (S-522), and two top-level
-/// functions whose bare call is free.
+/// call reaches through the proven `Extends` (S-522), a class with no `m`
+/// whose bare `m()` is the free call (S-560), and two top-level functions
+/// whose bare call is free.
 const KT: &str = "\
 fun m(): Int = 0
 
@@ -259,8 +262,9 @@ fn kotlin_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             row(&a(11, "k"), "m", RefForm::Method, SUPER, true),
             // A labelled `this@A` names an instance by label, not by position.
             row(&a(12, "l"), "m", RefForm::Method, OTHER, false),
-            // A bare `m()` in `C`, which has no `m`: never the top-level `m`.
-            row(&a(20, "n"), "m", RefForm::Method, SELF, false),
+            // A bare `m()` in `C`, which declares no `m` and inherits
+            // nothing: the free call, which binds the top-level `m` (S-560).
+            row(&a(20, "n"), "m", RefForm::Path, None, true),
             // A bare call outside a class is a free call, bound by the scope.
             row(&a(25, "free"), "helper", RefForm::Path, None, true),
         ])
@@ -272,6 +276,7 @@ fn kotlin_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_
             edge(&a(9, "n"), &a(8, "m")),
             edge(&a(10, "j"), &a(8, "m")),
             edge(&a(11, "k"), &a(4, "m")),
+            edge(&a(20, "n"), &a(1, "m")),
             edge(&a(25, "free"), &a(23, "helper")),
         ])
     );
@@ -416,12 +421,13 @@ fn scala_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_d
             // `this.m()` and the bare `m()`: `A.m`.
             row(&a(7, "n"), "m", RefForm::Method, SELF, true),
             row(&a(8, "j"), "m", RefForm::Method, SELF, true),
-            // `super.m()`: no proven base, so not even the in-file `Base.m`.
-            row(&a(9, "k"), "m", RefForm::Method, SUPER, false),
+            // `super.m()`: the proven base's `Base.m` (S-575).
+            row(&a(9, "k"), "m", RefForm::Method, SUPER, true),
             // A qualified `A.this` is a receiver expression, not `this`.
             row(&a(10, "q"), "m", RefForm::Method, OTHER, false),
-            // A bare `m()` in `object C`, which has no `m`: never the top-level `m`.
-            row(&a(18, "n"), "m", RefForm::Method, SELF, false),
+            // A bare `m()` in `object C`, which neither declares nor inherits an
+            // `m`: the free call, which reaches the top-level `m` (S-573).
+            row(&a(18, "n"), "m", RefForm::Path, None, true),
             // A bare call in a top-level `def` is a free call.
             row(&a(23, "free"), "helper", RefForm::Path, None, true),
         ])
@@ -432,6 +438,8 @@ fn scala_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_d
         sorted_edges(vec![
             edge(&a(7, "n"), &a(6, "m")),
             edge(&a(8, "j"), &a(6, "m")),
+            edge(&a(9, "k"), &a(2, "m")),
+            edge(&a(18, "n"), &a(25, "m")),
             edge(&a(23, "free"), &a(21, "helper")),
         ])
     );
@@ -565,8 +573,9 @@ class K {
 const CPP_FILE: &str = "src/a.cpp";
 
 /// C++ has no `super` keyword: its super form is the base-qualified call
-/// `Base::m()`, which is the same syntax as a namespace call, so it records
-/// `other` — and stays unbound like every super form here.
+/// `Base::m()`, the same syntax as a namespace call. Since S-579 it records the
+/// Path-form `Base::m`, bound by the qualified name to `Base`'s own `m` — never
+/// `A::m`, the caller's.
 const CPP: &str = "\
 class Base {
 public:
@@ -616,8 +625,8 @@ fn cpp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_doe
             row(&a(9, "n"), "m", RefForm::Method, SELF, true),
             row(&a(10, "j"), "m", RefForm::Method, SELF, true),
             row(&a(12, "p"), "m", RefForm::Method, SELF, true),
-            // `Base::m()`: not even the in-file `Base::m`.
-            row(&a(11, "k"), "m", RefForm::Method, OTHER, false),
+            // `Base::m()`: the qualified name, bound to `Base::m` (S-579).
+            row(&a(11, "k"), "Base::m", RefForm::Path, None, true),
             row(&a(13, "q"), "m", RefForm::Method, OTHER, false),
             // A field reached through `this->` is another object.
             row(&a(14, "r"), "m", RefForm::Method, OTHER, false),
@@ -633,6 +642,7 @@ fn cpp_this_and_bare_calls_bind_the_callers_own_method_and_no_other_receiver_doe
         sorted_edges(vec![
             edge(&a(9, "n"), &a(8, "m")),
             edge(&a(10, "j"), &a(8, "m")),
+            edge(&a(11, "k"), &a(3, "m")),
             edge(&a(12, "p"), &a(8, "m")),
             edge(&a(24, "free_fn"), &a(22, "helper")),
         ])

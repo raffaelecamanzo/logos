@@ -399,8 +399,8 @@ fn dogfood_measures_resolution_accuracy_on_logos_own_source() {
         ("load_files", "hash_source"),
         // extract/mod.rs: extract() delegates to extract_one().
         ("extract", "extract_one"),
-        // extract/mod.rs: collect_refs() normalises via split_path_text().
-        ("collect_refs", "split_path_text"),
+        // extract/mod.rs: call_segments() normalises via split_path_text().
+        ("call_segments", "split_path_text"),
     ];
     for (from, to) in pairs {
         let from_id = node_id(rt, from, NodeKind::Function);

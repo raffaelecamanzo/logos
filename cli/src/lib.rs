@@ -430,14 +430,17 @@ pub(crate) enum Commands {
     },
     /// Every offender the last snapshot recorded, uncapped (FR-QM-19): each
     /// with its symbol id, value and threshold, narrowed by path and dimension.
-    /// Reads the last `scan`; writes nothing.
+    /// Equality's above-average functions are listed only with `--dimension
+    /// equality`. Reads the last `scan`; writes nothing.
     Offenders {
         /// Only offenders defined in files matching this project-relative glob
         /// (`*` stays in one directory, `**` crosses them).
         #[arg(long, value_name = "GLOB")]
         path: Option<String>,
         /// Only this dimension: nesting, conciseness, cohesion, focus,
-        /// uniqueness, acyclicity, depth, equality or redundancy.
+        /// uniqueness, acyclicity, depth, equality or redundancy. Equality's
+        /// entries, the functions above the mean complexity, are not offenders
+        /// and are listed only when this names them.
         #[arg(long)]
         dimension: Option<String>,
         #[command(flatten)] member: MemberArg,
@@ -727,17 +730,40 @@ pub(crate) enum SecurityCommands {
         /// Path to the SARIF report.
         report: PathBuf,
     },
+    /// Re-confirm a suppression whose evidence changed (FR-SC-32): re-record the
+    /// hash of every evidence symbol of the ignore entry that suppresses the
+    /// finding with this fingerprint, keeping its reason, so the finding reads
+    /// suppressed again. Writes `.logos/security-ignore.toml`; the plugin guard
+    /// asks before an agent runs it. Exit 2 and no write when nothing is to be
+    /// re-confirmed: no such entry, no evidence recorded (name it with
+    /// `--evidence`), or an evidence symbol that no longer exists.
+    Reconfirm {
+        /// The fingerprint of the suppressed finding, or of the entry itself.
+        fingerprint: String,
+        /// Record these symbols as the evidence instead of the ones the entry
+        /// names (repeatable): a symbol identity, a canonical symbol or a bare
+        /// name that names one symbol. For a fingerprint entry the finding's own
+        /// enclosing symbol is added. The way to give an entry that records none
+        /// its evidence.
+        #[arg(long = "evidence", value_name = "SYMBOL")]
+        evidence: Vec<String>,
+    },
     /// Each scanner's state — not installed, disabled, never run, stale or
     /// fresh — and the consent state (FR-SC-08).
     Status { #[command(flatten)] member: MemberArg },
     /// The stored findings with OWASP categories and suppressions; the filters
     /// intersect (FR-SC-08). Production code by default, with the number of
-    /// findings in test code it hid; `--scope all` lists every finding (FR-SC-28).
+    /// findings in test code it hid, of those on a dev-only dependency its lockfile
+    /// marks ("dev") and of those its scanner marks low-confidence ("need review");
+    /// `--scope all` lists every finding (FR-SC-28, FR-SC-30, FR-SC-31). One
+    /// advisory several scanners report on one lockfile, package and version is
+    /// one finding naming its `reporters` (FR-SC-29).
     Findings {
         /// Least severity listed: critical, high, medium, low or info; or `unrated` alone.
         #[arg(long)]
         severity: Option<String>,
-        /// A scanner, by registry name or SARIF driver name.
+        /// A scanner, by registry name or SARIF driver name; a merged finding is
+        /// listed under each of its reporters.
         #[arg(long)]
         scanner: Option<String>,
         /// An OWASP category, by id (A05:2025) or number (A05).
@@ -1486,6 +1512,7 @@ mod surface_parity {
         // Security evidence tier (S-667).
         ("security_scan", Twin("security scan")),
         ("security_ingest", Twin("security ingest")),
+        ("security_reconfirm", Twin("security reconfirm")),
         ("security_status", Twin("security status")),
         ("security_findings", Twin("security findings")),
         // Cross-service family — registered only by the federated backing.
@@ -2467,6 +2494,8 @@ mod surface_parity {
             calls: RelationResolution::measured(references, bound, same, cross),
             imports: RelationResolution::measured(0, 0, 0, 0),
             call_residue: None,
+            header_ownership: None,
+            parse_damage: None,
         })
         .collect();
 

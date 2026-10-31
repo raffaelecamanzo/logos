@@ -15,8 +15,9 @@
 //!   change);
 //! - a `symbols` language binds no import, type, member or route relation, in
 //!   or across files (same-file calls tolerated). No shipped language declares
-//!   `symbols` — C and C++ bind same-file calls (7/7 on the 2026-10-03
-//!   inspection) and read `same-file` — so that clause is proven by a synthetic
+//!   `symbols` — C++ binds through its includes since S-579, and C through
+//!   its includes and its link unit since S-584 — so
+//!   that clause is proven by a synthetic
 //!   test, not a fixture.
 //!
 //! Each fixture is deliberately the *same set of shapes* in the language's own
@@ -86,7 +87,7 @@ const RELATIONS: &[(&str, &[i64])] = &[
 /// Edge kinds a `symbols` language must bind **none** of, anywhere: every
 /// relational kind except lexical containment (1), which is declaration
 /// structure rather than a reference, and calls (2), whose same-file binding C
-/// and C++ do perform — their *cross-file* calls are covered by the declared-set
+/// does perform — its *cross-file* calls are covered by the declared-set
 /// comparison above.
 const NON_CALL_RELATIONAL_KINDS: &[i64] = &[
     EdgeKind::Imports as i64,
@@ -231,8 +232,8 @@ fn violation(
 /// The `symbols` clause on its own: a `symbols` language binds no import, type,
 /// member or route relation, in or across files. A function of its own so a
 /// test can reach it with a synthetic locality — through [`violation`] the
-/// cross-file comparison above decides first, and for C and C++ (which bind only
-/// same-file calls) nothing here would ever fire.
+/// cross-file comparison above decides first, and for a language binding any
+/// relation across files nothing here would ever fire.
 fn symbols_violation(
     locality: &BTreeMap<(String, i64), (u64, u64)>,
     language: &str,
@@ -292,76 +293,104 @@ fn tsx_declared_partial_binds_across_files() {
 }
 
 #[test]
+fn javascript_declared_partial_binds_across_files() {
+    verify("javascript", fixtures::JAVASCRIPT);
+}
+
+#[test]
 fn python_declared_partial_binds_calls_imports_and_instantiation() {
     verify("python", fixtures::PYTHON);
 }
 
 #[test]
-fn php_declared_partial_binds_imports_and_type_relations() {
+fn php_declared_partial_binds_calls_on_a_class_name_imports_and_type_relations() {
     verify("php", fixtures::PHP);
 }
 
 #[test]
-fn csharp_declared_partial_binds_imports_and_type_relations() {
+fn csharp_declared_partial_binds_calls_on_a_type_name_imports_and_type_relations() {
     verify("c-sharp", fixtures::C_SHARP);
 }
 
 #[test]
-fn kotlin_declared_partial_binds_imports_and_instantiation() {
+fn kotlin_declared_partial_binds_free_calls_imports_and_instantiation() {
     verify("kotlin", fixtures::KOTLIN);
 }
 
 #[test]
-fn ruby_declared_same_file_binds_nothing_across_files() {
+fn ruby_declared_partial_binds_calls_on_a_constant_requires_and_instantiation() {
     verify("ruby", fixtures::RUBY);
 }
 
 #[test]
-fn scala_declared_partial_binds_imports_and_instantiation() {
+fn scala_declared_partial_binds_calls_on_an_object_imports_and_instantiation() {
     verify("scala", fixtures::SCALA);
 }
 
 #[test]
-fn c_declared_same_file_binds_nothing_across_files() {
+fn c_declared_partial_binds_includes_and_calls_across_files() {
     verify("c", fixtures::C);
 }
 
 #[test]
-fn cpp_declared_same_file_binds_nothing_across_files() {
+fn cpp_declared_partial_binds_includes_free_calls_and_bases() {
     verify("cpp", fixtures::CPP);
+}
+
+/// What raised C++'s calls beyond its free and qualified ones (S-581): the
+/// fixture's `Base other; other.run();` binds `Base::run` in the header,
+/// across the file boundary, through the receiver's declared type.
+#[test]
+fn cpp_fixture_binds_a_call_on_a_declared_type_receiver_across_files() {
+    let tmp = indexed(fixtures::CPP);
+    let conn = Connection::open_with_flags(tmp.path().join(".logos/logos.db"), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let bound: Vec<(String, String)> = conn
+        .prepare(
+            "SELECT fs.path, ft.path FROM edges e \
+             JOIN nodes ns ON ns.id = e.source JOIN files fs ON fs.id = ns.file_id \
+             JOIN nodes nt ON nt.id = e.target JOIN files ft ON ft.id = nt.file_id \
+             WHERE e.kind = ?1 AND ns.name = 'area' AND nt.name = 'run'",
+        )
+        .unwrap()
+        .query_map([EdgeKind::Calls as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(bound, [("src/child.cpp".to_string(), "src/base.hpp".to_string())]);
 }
 
 // ── the suite refuses a wrong declaration, in both directions ────────────────
 
-/// The deliberate-raise proof ([S-570] AC): a language that resolves nothing
-/// across files — Ruby — fails the suite when declared anything more, and a
-/// language that resolves imports and instantiation — Scala, since S-518 and
-/// S-521 — fails when it claims calls too.
+/// The deliberate-raise proof ([S-570] AC): a language that resolves calls and
+/// includes but no type relation or member access across files — C, since its
+/// link unit binds (S-584) — fails the suite when declared either, and a
+/// language that resolves calls, imports and instantiation — Scala, since
+/// S-518, S-521 and S-573 — fails when it claims member access too.
 ///
 /// [S-570]: ../../docs/planning/journal.md#s-570-every-language-declares-its-verified-cross-file-reach-and-scala-is-declared-same-file
 #[test]
 fn a_raised_declaration_fails_the_suite() {
     for raised in [
-        reach("partial", &["calls"]),
-        reach("partial", &["imports"]),
+        reach("partial", &["calls", "imports", "type_relations"]),
+        reach("partial", &["calls", "imports", "member_access"]),
         reach("resolved", &["calls", "imports", "type_relations"]),
     ] {
-        let why = violation("ruby", &raised, fixtures::RUBY)
-            .unwrap_or_else(|| panic!("a Ruby declaration of {raised:?} passed the suite"));
+        let why = violation("c", &raised, fixtures::C)
+            .unwrap_or_else(|| panic!("a C declaration of {raised:?} passed the suite"));
         assert!(why.contains("over-claim"), "{why}");
     }
     for raised in [
-        reach("partial", &["imports", "type_relations", "calls"]),
-        reach("resolved", &["calls", "imports", "type_relations"]),
+        reach("partial", &["calls", "imports", "type_relations", "member_access"]),
+        reach("resolved", &["calls", "imports", "member_access", "type_relations"]),
     ] {
         let why = violation("scala", &raised, fixtures::SCALA)
             .unwrap_or_else(|| panic!("a Scala declaration of {raised:?} passed the suite"));
         assert!(why.contains("over-claim"), "{why}");
     }
     // …and the declarations the descriptors actually carry are the ones that pass.
-    assert_eq!(violation("ruby", &reach("same-file", &[]), fixtures::RUBY), None);
+    assert_eq!(violation("c", &reach("partial", &["calls", "imports"]), fixtures::C), None);
     assert_eq!(
-        violation("scala", &reach("partial", &["imports", "type_relations"]), fixtures::SCALA),
+        violation("scala", &reach("partial", &["calls", "imports", "type_relations"]), fixtures::SCALA),
         None
     );
 }
@@ -385,7 +414,7 @@ fn an_under_claimed_declaration_fails_the_suite() {
 /// A `symbols` declaration is refused when the plugin binds a non-call relation
 /// — even a same-file one the cross-file comparison cannot see — and tolerates
 /// same-file calls and containment. No shipped language declares `symbols`
-/// (C and C++ read `same-file`), so this synthetic test is what keeps the
+/// (C read `same-file` until S-584), so this synthetic test is what keeps the
 /// level's checker able to fail.
 #[test]
 fn a_symbols_declaration_is_refused_when_a_relation_binds() {
@@ -441,27 +470,41 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
     for name in ["rust", "java"] {
         assert_eq!(level(name), "resolved", "{name}");
     }
-    for name in ["go", "typescript", "tsx", "kotlin", "php", "c-sharp", "scala", "python"] {
+    for name in ["go", "typescript", "tsx", "javascript", "kotlin", "php", "c-sharp", "scala", "python"] {
         assert_eq!(level(name), "partial", "{name}");
     }
     // The declared-namespace languages (S-518) bind imports and type relations:
-    // PHP's, C#'s and Kotlin's supertypes (S-522), and the class a Kotlin or
-    // Scala top-level `Foo()` constructs (S-521).
-    for name in ["php", "c-sharp", "kotlin", "scala"] {
-        assert_eq!(declared[name].1, ["imports", "type_relations"], "{name}");
+    // Kotlin's supertypes (S-522), and the class a Kotlin or Scala top-level
+    // `Foo()` constructs (S-521). They bind calls too, below.
+    // C# also binds a call on a type name (`Base.Make()`, S-553), PHP a static
+    // call on a class name (`Base::make()`, S-547), Scala a call on an object
+    // (`Helper.helper()`, S-573) and Kotlin a free call to an imported
+    // top-level `fun` (S-560), not a call on a variable.
+    for name in ["c-sharp", "php", "scala", "kotlin"] {
+        assert_eq!(declared[name].1, ["calls", "imports", "type_relations"], "{name}");
     }
     // Python's import-root path modules (S-519) bind imports, and the bare
     // calls a `from` import brings into view — a call to a class among them as
     // `Instantiates`, a type relation (S-521).
     assert_eq!(declared["python"].1, ["calls", "imports", "type_relations"]);
-    for name in ["ruby", "c", "cpp"] {
-        assert_eq!(level(name), "same-file", "{name}");
-        assert!(declared[name].1.is_empty(), "{name} binds nothing across files");
-    }
+    // Ruby's constants (S-565): a call on a constant binds among its singleton
+    // methods, and `Foo.new` instantiates it, across files; and a `require`
+    // binds the file it loads (S-566); nothing else does.
+    assert_eq!(level("ruby"), "partial");
+    assert_eq!(declared["ruby"].1, ["calls", "imports", "type_relations"]);
+    // C++'s includes (S-579): an `#include` binds its header, and a free or
+    // qualified call, a call on a declared-type receiver (S-581) and a base
+    // class bind through what it includes.
+    assert_eq!(level("cpp"), "partial");
+    assert_eq!(declared["cpp"].1, ["calls", "imports", "type_relations"]);
+    // C's includes and link unit (S-584): an `#include` binds its header, and a
+    // bare call binds through it or to the one non-`static` definition.
+    assert_eq!(level("c"), "partial");
+    assert_eq!(declared["c"].1, ["calls", "imports"]);
     // No shipped language declares `symbols` now; the level stays verifiable
     // through `a_symbols_declaration_is_refused_when_a_relation_binds`.
     assert!(declared.values().all(|(l, _)| l != "symbols"), "{declared:?}");
-    assert_eq!(declared.len(), 13, "thirteen code-language rows: {declared:?}");
+    assert_eq!(declared.len(), 14, "fourteen code-language rows: {declared:?}");
 
     // Every one of them has a fixture, and the fixture set names no other.
     let mut fixture_names: Vec<&str> = fixtures::ALL.iter().map(|(n, _)| *n).collect();
@@ -483,12 +526,12 @@ fn the_languages_payload_carries_reach_as_level_and_cross_file() {
             .unwrap_or_else(|| panic!("{name} row"))
     };
     assert_eq!(
-        row("ruby")["reach"],
-        serde_json::json!({ "level": "same-file", "cross_file": [] })
+        row("c")["reach"],
+        serde_json::json!({ "level": "partial", "cross_file": ["calls", "imports"] })
     );
     assert_eq!(
         row("scala")["reach"],
-        serde_json::json!({ "level": "partial", "cross_file": ["imports", "type_relations"] })
+        serde_json::json!({ "level": "partial", "cross_file": ["calls", "imports", "type_relations"] })
     );
     assert_eq!(
         row("java")["reach"],

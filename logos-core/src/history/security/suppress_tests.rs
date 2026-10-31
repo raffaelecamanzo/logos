@@ -12,7 +12,7 @@ use std::path::Path;
 use chrono::NaiveDate;
 
 use super::suppress::{label, parse_expires, suppress, unsuppress, IgnoreFile, Suppression, IGNORE_FILE};
-use super::{FindingBinding, SecurityFinding, Severity};
+use super::{FindingBinding, ScannerConfidence, SecurityFinding, Severity};
 use crate::config::ConfigError;
 use crate::error::exit_code;
 
@@ -36,6 +36,7 @@ fn finding(fingerprint: &str) -> SecurityFinding {
         fingerprint: fingerprint.into(),
         rule_id: "sql-injection".into(),
         severity: Severity::High,
+        confidence: ScannerConfidence::Unstated,
         cwes: vec!["CWE-89".into()],
         message: "tainted query".into(),
         redacted: false,
@@ -50,6 +51,7 @@ fn finding(fingerprint: &str) -> SecurityFinding {
         legacy_fingerprints: Vec::new(),
         anchor: None,
         freshness: "fresh",
+        reporters: Vec::new(),
     }
 }
 
@@ -336,7 +338,7 @@ fn a_matching_entry_suppresses_the_finding_and_the_reason_rides_with_it() {
     assert!(labelled.findings[0].is_suppressed());
     assert_eq!(
         labelled.findings[0].suppression,
-        Some(Suppression::Suppressed { reason: "accepted".into(), expires: Some(day(2026, 12, 31)), by: FP_A.into() })
+        Some(Suppression::Suppressed { reason: "accepted".into(), expires: Some(day(2026, 12, 31)), by: FP_A.into(), evidence: Vec::new() })
     );
     assert!(!labelled.findings[1].is_suppressed());
     assert_eq!(labelled.findings[1].suppression, None);

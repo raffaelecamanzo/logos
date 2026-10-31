@@ -196,7 +196,7 @@ describe("with no extension active — a build without extensions (S-643, S-644,
     await waitFor(() => expect(redirect).toHaveBeenCalledWith("/"));
     expect(within(sidebar()).getAllByRole("link").map((a) => a.textContent)).toEqual([
       "Dashboard",
-      "Health",
+      "Quality",
       "Security",
       "Coverage",
       "Graph",

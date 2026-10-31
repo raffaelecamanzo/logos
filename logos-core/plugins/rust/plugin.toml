@@ -52,7 +52,7 @@ impl_block_lookup = true
 # publish/subscribe sites keyed by topic (S-291, FR-WS-10) — Rust also declares
 # `reachability` below, so it is the first language to satisfy both halves of
 # the app-wide reachability promotion path (CR-081, FR-WS-12 AC1).
-capabilities = ["symbols", "references", "frameworks", "invocations", "brokers"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "locals"]
 
 # Keywords that increment cyclomatic complexity for this language. Declarative
 # so it becomes tunable via a descriptor override once descriptor shadowing lands
@@ -182,3 +182,6 @@ invocations = "queries/invocations.scm"
 # message-bus `publish`/`send`/`subscribe` method calls, keyed by a static
 # string-literal topic.
 brokers = "queries/brokers.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"

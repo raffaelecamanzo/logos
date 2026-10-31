@@ -43,7 +43,7 @@ use anyhow::Result;
 
 use crate::engine::Engine;
 use crate::graph_store::NodeRow;
-use crate::model::NodeId;
+use crate::model::{NodeId, NodeKind};
 use crate::models::navigation::{
     BranchOverlapResult, ContendedSymbol, LostFile, LostSymbol, MergeCheck, OverlapCoverage,
     RefChangeSummary,
@@ -778,13 +778,23 @@ fn touched_symbols<'a>(
 /// Also the binder a security finding's enclosing symbol is read with
 /// ([`crate::security::context`], S-669): one rule for "which symbol does this
 /// line sit in", never a second one.
+///
+/// A Field whose span lies inside an overlapping callable's is not a candidate
+/// (S-543): Python's `self.x = …` declares its class's field on a line of the
+/// method that writes it, and that line is still the method's to run. A field
+/// outside every callable — a class-body attribute, a Java field — keeps its
+/// own line.
 pub(crate) fn innermost<'a>(nodes: &[&'a NodeRow], (lo, hi): (u32, u32)) -> Vec<&'a NodeRow> {
     let span = |row: &NodeRow| {
         let start = row.start_line.unwrap_or(0).max(0) as u32;
         let end = row.end_line.unwrap_or(0).max(0) as u32;
         (start, end.max(start))
     };
-    let overlapping: Vec<&NodeRow> = nodes
+    let within = |inner: &NodeRow, outer: &NodeRow| {
+        let ((is, ie), (os, oe)) = (span(inner), span(outer));
+        os <= is && oe >= ie
+    };
+    let in_range: Vec<&NodeRow> = nodes
         .iter()
         .copied()
         .filter(|row| {
@@ -792,6 +802,13 @@ pub(crate) fn innermost<'a>(nodes: &[&'a NodeRow], (lo, hi): (u32, u32)) -> Vec<
             start > 0 && start <= hi && end >= lo
         })
         .collect();
+    let in_callable = |field: &NodeRow| {
+        field.kind == NodeKind::Field
+            && in_range
+                .iter()
+                .any(|c| matches!(c.kind, NodeKind::Function | NodeKind::Method) && within(field, c))
+    };
+    let overlapping: Vec<&NodeRow> = in_range.iter().copied().filter(|row| !in_callable(row)).collect();
     overlapping
         .iter()
         .copied()
@@ -976,5 +993,23 @@ mod tests {
         // Past the end of everything: nothing, which the caller counts as an
         // unattributed hunk rather than silently discarding.
         assert!(innermost(&nodes, (500, 500)).is_empty());
+    }
+
+    /// A Field a method's body declares — Python's `self.x = …` (S-543) —
+    /// spans its one line inside that method: the line is still the method's,
+    /// so a finding or a hunk there reaches the callable that runs it. A field
+    /// outside every callable (a class-body attribute, a Java field) still
+    /// takes its own line.
+    #[test]
+    fn a_field_inside_a_callable_leaves_its_line_to_the_callable() {
+        let field = |id, line| NodeRow { kind: NodeKind::Field, ..node(id, line, line) };
+        let class = NodeRow { kind: NodeKind::Class, ..node(1, 1, 30) };
+        let (init, written, declared) = (node(2, 5, 9), field(3, 6), field(4, 2));
+        let nodes = vec![&class, &init, &written, &declared];
+
+        let hit = innermost(&nodes, (6, 6));
+        assert_eq!(hit.iter().map(|r| r.id).collect::<Vec<_>>(), vec![init.id], "the write's line is the method's");
+        let hit = innermost(&nodes, (2, 2));
+        assert_eq!(hit.iter().map(|r| r.id).collect::<Vec<_>>(), vec![declared.id], "a class-body field keeps its line");
     }
 }

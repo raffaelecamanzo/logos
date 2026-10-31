@@ -504,14 +504,30 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | | **+29** |
 ///
 /// [FR-CV-15]: ../../docs/specs/requirements/FR-CV-15.md
+///
+/// **S-818 1381→1401**: `security_reconfirm`, the twin of `logos security
+/// reconfirm` ([FR-SC-32]). Measured 1381→1401 (+20); no headroom. Sibling
+/// sessions in Sprint 109 Iteration 4 add their own deltas to the 1381 this one
+/// branched from; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `SecurityReconfirmParams` (`fingerprint`, `evidence`, and the captured, refused `repo`) | **+12** |
+/// | the `security_reconfirm` tool: the attribute, the `default_member_only` refusal and one `Engine::security_reconfirm_with_evidence` delegation | **+8** |
+/// | | **+20** |
+///
+/// Delegation only: finding the entry, pinning the evidence and the write are the
+/// engine's.
+///
+/// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1381,
-        "mcp adapter exceeds the 1381 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1401,
+        "mcp adapter exceeds the 1401 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

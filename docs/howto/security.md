@@ -479,7 +479,7 @@ coverage.
 | `never_run` | Installed, and no report is stored |
 | `not_applicable` | Installed, no fresh report is stored, and nothing it reads is in the project (gosec without Go files, Bandit without Python files; CodeQL without a language it analyses still reads `never_run` here); `reason` says which files it looked for. No readout starts it, not even for its version: its `installed` copy says `"unprobed": "nothing_to_scan"`. No scan is missing, so neither `check`, the `[security]` table nor the workspace roll-up counts it as one |
 | `stale` | A report is stored but HEAD has moved (`head_moved`), a file it anchors changed (`files_changed`), or only re-scans of some paths stand behind it (`scoped_only`) |
-| `fresh` | A report is stored at this HEAD over unchanged files; a clean scan is `fresh` with `findings: 0` and nothing left out. `findings` counts fresh, unsuppressed findings in production code; `suppressed`, `not_fresh` and `test` state the rest ([test code](#findings-in-test-code)) |
+| `fresh` | A report is stored at this HEAD over unchanged files; a clean scan is `fresh` with `findings: 0` and nothing left out. `findings` counts fresh, unsuppressed findings in production code; `suppressed`, `not_fresh`, `test`, `dev` and `needs_review` state the rest ([test code](#findings-in-test-code), [dev-only dependencies](#findings-on-a-dev-only-dependency), [needs review](#findings-that-need-review)), and `merged` the findings counted on another scanner's row ([one advisory, several scanners](#one-advisory-several-scanners)) |
 
 A scanner that has not run has looked at nothing, so its silence is never a clean
 result: `never_run` carries no count, and every list says what it was drawn from.
@@ -508,7 +508,9 @@ whose report is stored can detect it. A covered category states two counts:
 `state.findings`, over every stored finding under it in every code scope, and
 `production_findings`, the part of it in production code. Suppressed findings are
 in both, whatever `--scope` and the other filters say, and the difference is the
-findings in test code ([below](#findings-in-test-code)). The Security page's OWASP
+findings left out of production: those in test code ([below](#findings-in-test-code)),
+on a [dev-only dependency](#findings-on-a-dev-only-dependency) (`dev_findings`) and
+that [need review](#findings-that-need-review) (`needs_review_findings`). The Security page's OWASP
 list under Production states `production_findings`, so the page and the CLI and MCP
 payloads give the same figure per category. In a workspace, `--repo <MEMBER>` on
 `status` and `findings` answers for one member.
@@ -543,17 +545,159 @@ MCP `security_findings` list production code unless you pass `--scope test` or
 `security status`, the Security page's figure, the workspace roll-up and the
 findings column of Files & Risk and `hotspots` count fresh, unsuppressed findings
 in production code. `status`, the page and the roll-up state the rest by why:
-`suppressed`, `not_fresh` and `test`, "N more in test code". Each finding falls
-in the first of those that holds, so there the counted and the excluded findings
-add up to every stored finding. The per-file cell states `stale` and `test`
-beside its `count`; a suppressed finding, and one bound to no file, joins no
-cell.
+`suppressed`, `not_fresh`, `test` ("N more in test code"), `dev` ("N more in
+dev-only dependencies", [below](#findings-on-a-dev-only-dependency)) and
+`needs_review` ([below](#findings-that-need-review)). Each finding falls in the first of those
+that holds, so there the counted and the excluded findings add up to every stored
+finding. The per-file cell states `stale`, `test`, `dev` and `needs_review` (the page
+shows `+N dev` and `+N review`) beside its `count`; a suppressed finding, and one bound to no file, joins no cell.
 
 **The gate keeps every finding.** The `[security]` ratchet and caps, `gate --save`,
 `security bless` and the branch delta of `review --base` treat a finding in test
 code like any other: a real secret committed in a test is still a leak. Their
 output does not change. To list what earlier releases listed by default, pass
 `--scope all`.
+
+### Findings that need review
+
+A scanner that states how sure it is of a result is believed about it. Each
+finding reads `confidence`: `low`, `medium`, `high` or `unstated`, taken from its
+report by one rule per scanner and stored with the finding (`history.db`
+migration 12):
+
+| Scanner | Where the report states it | Reads as |
+|---------|----------------------------|----------|
+| Semgrep | the rule tag `LOW CONFIDENCE`, `MEDIUM CONFIDENCE` or `HIGH CONFIDENCE` | the tag |
+| CodeQL | the rule's `properties.precision` | `low`, `medium`; `high` and `very-high` read `high` |
+| Bandit | the result's `properties.issue_confidence` | `LOW`, `MEDIUM`, `HIGH` |
+| gosec | the rule's `properties.precision`, which is its own confidence | `low`, `medium`, `high` |
+| Trivy, Gitleaks, OSV-Scanner, Checkov, dependency-check | nothing | `unstated` |
+
+A value a scanner writes on every result is never read as confidence. Semgrep's
+`precision` is `very-high` on every rule, and so is Trivy's: a Semgrep result whose
+rule is tagged `MEDIUM CONFIDENCE` reads `medium` beside `precision: very-high`,
+and Semgrep's tag decides. Which field carries confidence was recorded from each
+scanner's SARIF in `logos-core/tests/fixtures/sarif/README.md`; where that file
+says a fixture was reconstructed from the scanner's writer rather than captured,
+the field is as the writer defines it and has not been checked against a report
+from a scanner run here. A scanner that states nothing reads `unstated`, and so does
+every finding stored before migration 12 until the next ingest of its scanner
+(re-ingesting a stored report decides it anew).
+
+A `low` finding **needs review**, on every surface:
+
+- `security findings` and the MCP `security_findings` list production code that does
+  not need review by default, and state the number left out as
+  `hidden_needs_review`, "N more need review". `--scope all` lists it, with
+  `confidence: "low"` and `needs_review: true`; `--scope test` lists it only when it
+  sits in test code, where it is test code first.
+- `security status`, the Security page, the Dashboard's Security widget and the
+  workspace roll-up leave it out of the count and state the rest as `needs_review`
+  beside `test`: "N more need review". Each finding falls in the first of
+  `suppressed`, `not_fresh`, `test`, `dev` and `needs_review` that holds. The per-file
+  cell of Files & Risk reads `+N review`, and an OWASP category's
+  `needs_review_findings` is its production part that needs review, so production,
+  dev-only, needs review and test code add up to the category's `findings`.
+- On the Security page the finding carries a muted **REVIEW** tag under its location,
+  with "Needs review" and the scanner's word on hover and in the text a screen
+  reader gets, under Code scope **All**.
+
+**The gate keeps every finding.** The `[security]` ratchet and caps, `gate --save`,
+`security bless` and the branch delta of `review --base` count a finding that needs
+review like any other, as they do one in test code: a `max_high = 0` cap fails on a
+low-confidence high finding. Their output does not change; to see what a list left
+out, pass `--scope all`.
+
+### Findings on a dev-only dependency
+
+A lockfile finding carries a **dependency scope**, read each time the finding is
+read and never stored. It reads `dev` when the lockfile itself marks the package
+dev-only, and `production` otherwise:
+
+| Lockfile | Marks a package dev-only by |
+|----------|------------------------------|
+| `package-lock.json`, `npm-shrinkwrap.json` | `"dev": true` on every entry of that name and version (lockfile v1, v2 and v3; `devOptional` is not `dev`) |
+| `pnpm-lock.yaml` | `dev: true` on every `packages` entry of that name and version |
+
+The scope never guesses. A `go.mod`, `Cargo.lock`, `pom.xml`, `yarn.lock` or Python
+finding reads `production`, as does a finding whose package the lockfile does not
+hold, a package it holds once without the flag (a hoisted copy something ships
+depends on), a lockfile that cannot be parsed, and a finding whose message names no
+package (OSV-Scanner's `Package 'name@version'` and Trivy's `Package:` /
+`Installed Version:` are read). A dev package's finding in a fixtures lockfile reads
+`test` first. Go, Cargo, Maven and Python record dev scope in the manifest or not at
+all; covering them is a later change.
+
+A `dev` finding is labelled apart on every surface, as one in test code is:
+
+- `security findings` and the MCP `security_findings` list it with
+  `code_scope: "dev"` and `code_scope_reason: "dev_dependency"` under `--scope all`
+  alone, and state the number the default scope left out as `hidden_dev`, "N more in
+  dev-only dependencies" (`--scope test` counts it in `hidden_by_scope`).
+- `security status`, the Security page, the Dashboard's Security widget and the
+  workspace roll-up leave it out of the count and state it as `dev` beside `test`,
+  after it: each finding falls in the first of `suppressed`, `not_fresh`, `test`,
+  `dev` and `needs_review` that holds. The per-file cell of Files & Risk reads
+  `+N dev`, and an OWASP category's `dev_findings` is its part on a dev-only
+  dependency, apart from `production_findings`.
+- On the Security page the finding carries a muted **DEV** tag under its location,
+  with its reason on hover and in the text a screen reader gets, under Code scope
+  **All**.
+
+**The gate keeps every finding.** The `[security]` ratchet and caps, `gate --save`,
+`security bless` and the branch delta of `review --base` count a finding on a
+dev-only dependency like any other: a `max_severity = "high"` cap fails on a high
+advisory in a dev tool. Their output does not change; to see what a list left out,
+pass `--scope all`.
+
+### One advisory, several scanners
+
+OSV-Scanner, Trivy and Dependency-Check overlap: run together, they report most
+lockfile advisories twice or three times. Each report is stored as it is, per
+scanner, but every surface reads one advisory on one package as **one finding**.
+Two dependency findings are one when they share:
+
+- **the lockfile**, by its path in the project: OSV-Scanner's absolute path and
+  Trivy's relative one name one file;
+- **the package name and version**, compared in one spelling: Trivy's Go version
+  `v2.11.0` is OSV-Scanner's `2.11.0`, Dependency-Check's purl
+  `pkg:maven/org.apache/log4j-core` is `org.apache:log4j-core`, and
+  `pkg:npm/%40vitest/mocker` is `@vitest/mocker`; letter case is ignored;
+- **an advisory id**: the rule id, or an id OSV-Scanner lists in its message as
+  `also known as` (a CVE, a GHSA, a `GO-` or `PYSEC-` id). OSV-Scanner reporting
+  `PYSEC-2018-28`, also known as `CVE-2018-18074`, and Trivy reporting
+  `CVE-2018-18074` are one advisory.
+
+Two advisories on one package whose ids never meet stay two, and so does one
+advisory on two packages, two versions or two lockfiles.
+
+The merged finding:
+
+- names every scanner that reported it in `reporters`, each with its version,
+  its own `fingerprint`, the `rule_id` it used and the `severity` it gave; a
+  finding one scanner alone reported has no `reporters`;
+- reads the highest severity a reporter gave, and an `unrated` reporter never
+  lowers a rated one: OSV-Scanner's unrated beside Trivy's `low` reads `low`;
+- counts once in `security findings`, the MCP tools, the Security page, the
+  Dashboard's Security widget, Files & Risk and the workspace roll-up.
+  `--scanner` lists it under each of its reporters. In `security status` it is
+  counted on one row, its first reporter's, and each other reporter's row states it
+  as `merged`, so every row still accounts for each finding of its report;
+- counts once for a `[security]` cap and the ratchet, and is evaluated while any
+  reporter's scan is fresh. A baseline that recorded any reporter's fingerprint
+  knows it, so a baseline written before findings were merged still matches;
+  `gate --save` and `security bless` record every reporter's fingerprint;
+- is one entry of the branch delta, which names its `reporters`: it is
+  `introduced` only when no reporter's merge-base report held it, and `resolved`
+  only when no reporter still does;
+- is **suppressed** by an ignore entry naming any reporter's fingerprint, the one
+  the Security page writes included. An entry that names a rule or a scanner (a
+  rule-wide entry, or a path entry narrowed to one) covers only the reporters it
+  names: the finding reads suppressed only when every reporter is.
+
+A Dependency-Check report stored before this (history.db migration 14) does not
+record the package, which its message never names: its findings join the others
+once Dependency-Check scans again, or its report is ingested again.
 
 ### Severities, and `unrated`
 
@@ -570,12 +714,17 @@ the Security page's finding detail). There are two cases:
 - the result has no `level` and its rule sets none, so the level is only SARIF's
   default `warning`. Gitleaks writes no level and no score at all, so every
   Gitleaks finding reads `unrated`;
-- the scanner writes the same level on every result. osv-scanner does this: each
-  result reads `warning` whatever the advisory says. osv-scanner 1.x never gives
-  a score, so a 1.9.2 report you ingest from CI reads `unrated` throughout.
-  osv-scanner 2.0.0 and later put the advisory's CVSS score on the rule, where the
-  advisory has one: the pinned 2.7.0, or a 2.x report you ingest, reads the
-  advisory's own rating, and only the advisories with no score read `unrated`.
+- the scanner writes the same level whatever the finding is. osv-scanner does
+  this: each result reads `warning` whatever the advisory says. osv-scanner 1.x
+  never gives a score, so a 1.9.2 report you ingest from CI reads `unrated`
+  throughout. osv-scanner 2.0.0 and later put the advisory's CVSS score on the
+  rule, where the advisory has one: the pinned 2.7.0, or a 2.x report you ingest,
+  reads the advisory's own rating, and only the advisories with no score read
+  `unrated`. Checkov does it too (`error` on a failed check that has no
+  severity, `warning` on a skipped one) and dependency-check writes `warning` on
+  every result: a result of either with no `security-severity` reads `unrated`,
+  and one that carries it reads that rating. The other scanners' levels follow
+  the finding, so they rate it.
 
 `unrated` is listed with the other findings and counted on its own, never inside
 `medium`. `--severity unrated` lists the unrated findings alone. A rated
@@ -585,7 +734,8 @@ works the same way (its *unrated only* option), and the workspace roll-up gives
 `unrated` its own column. Findings stored before this release that read `medium`
 from an osv-scanner 1.x or a Gitleaks report read `unrated` after the upgrade,
 without a new scan. Re-ingest any other report to have its severities decided
-again.
+again: Checkov and dependency-check findings stored before this change keep
+their old severity until a report with new content is ingested.
 
 ## Re-scanning a few files
 
@@ -655,6 +805,19 @@ logos security scan --scanner semgrep --scanner bandit --path src/api --path src
   written while an unrelated same-named file existed, since removed, names it
   again only once re-blessed (`logos security bless`) or rewritten with the
   finding's fingerprint.
+- **One package on one advisory is one dependency finding.** An OSV-Scanner,
+  Trivy or Dependency-Check finding is keyed by its rule, its path (the lockfile,
+  or the file Dependency-Check scanned) and the package's name and version, read
+  from the result (OSV-Scanner's `Package
+  'name@version'`, Trivy's `Package:` / `Installed Version:`, Dependency-Check's
+  purl), never by its position. A result a scanner writes twice in one report is
+  one finding: OSV-Scanner writes a package once per advisory record that matched
+  it, so a Go module with both a `GO-` and a `GHSA-` record was listed twice. Two
+  packages sharing one advisory in one lockfile stay two. Every other finding
+  keeps its key. Stores written before this identity (history.db migration 13)
+  are re-keyed at each of those scanners' next scan or ingest, a repeat's two rows
+  becoming one; each row keeps its old keys, which an ignore entry, the ratchet's
+  baseline, a checked-in baseline and the branch delta still honour.
 - **A re-scan never makes a scanner read `fresh` for the rest.** A scanner whose
   only report is from `--path` scans reads `stale` with `scoped_only`, and one
   whose full scan is from an earlier commit reads `stale` with `head_moved`, so a
@@ -899,6 +1062,117 @@ entry, adding and then removing it restores the file byte for byte. The
 **Suppressions** panel lists every entry with its count, flags an orphaned or
 expired one, and removes an entry directly.
 
+### One entry for a rule, in every file
+
+A scanner rule you have decided does not apply to the project (a Checkov check
+the deploy tool makes moot, say) would need an entry per file, or a `path` glob
+that cannot name "everywhere". An entry with a **`rule` and its `scanner`** and no
+`path` and no `fingerprint` suppresses that rule's findings for that scanner in
+every file:
+
+```toml
+[[ignore]]
+rule = "CKV_K8S_21"
+scanner = "checkov"
+reason = "the namespace is set by the deploy tool, not the manifest"
+expires = 2027-06-30
+```
+
+- **What it matches.** A finding whose rule id is `CKV_K8S_21`, exactly, and whose
+  scanner is `checkov`, in either case, wherever it sits, including a finding
+  that names no file. Another rule of the same scanner, and the same rule of
+  another scanner, stay listed active.
+- **Labelled, never silent.** Each finding it covers is listed as `suppressed`
+  with the entry's reason and, under `by`, `{"rule": …, "scanner": …}`: no `path`
+  and no `fingerprint` in `by` is how a rule-wide entry reads on a finding in
+  `security findings` and the web API. `security status` lists the entry itself,
+  under `suppressions`, as `{rule, scanner, reason, expires}` with its count. On the Security page the finding's
+  detail says "suppressed by a rule-wide entry" with the reason and the expiry,
+  and the **Suppressions** panel lists the entry with its count. An entry that
+  covers no stored finding is `orphaned`.
+- **Expiry.** `expires` works as for any entry: it suppresses through that day,
+  and from the next day the findings return, labelled `expired` with the reason.
+- **The gate.** The `[security]` rules (`check`, `gate`) leave a suppressed
+  finding out as they do any suppression, so the rule-wide entry holds the rule
+  out of the gate; once it expires the findings count again.
+- **Refused, with exit 2 and the line.** A `rule` without a `scanner`, or a
+  `scanner` without a `rule`, when the entry has no `path` and no `fingerprint`:
+  the message names the key that is missing. (Beside a `path`, `rule` and
+  `scanner` stay what they were: a narrowing.) A whole-project `path` glob
+  (`*`, `**`, `.`) is still refused; a rule-wide entry is the way to say "every
+  file", and it must name both the rule and the scanner. A blank `rule` or
+  `scanner`, a `fingerprint` beside either, and the same rule and scanner twice
+  (spelled alike) are refused as well; the same rule of two scanners is two entries.
+- **Canonical spelling.** Rule-wide entries follow the path entries, sorted by
+  rule and then scanner, written `rule` then `scanner` then `reason`. When
+  several entries name a finding, the first unexpired one labels it and counts
+  it: fingerprint, then path, then rule-wide.
+
+The web API's `POST /api/v1/security/suppress` takes the same selector, a `rule`
+and a `scanner` with no `path` or `fingerprint`, and `unsuppress` removes the entry
+by the `by` a finding carries. The Suppress dialog does not offer it yet: write the
+entry in the file.
+
+### Recording what a verdict rests on: `evidence` and `reconfirm`
+
+A suppression's reason is often a claim about other code: "the cookie is Secure
+because `DefaultCookieConfig` sets it". The scanner's fingerprint lapses when the
+matched lines change, but not when that code does. An entry can name the symbols
+its reason rests on, each with a hash of its source as it was when you made the
+verdict:
+
+```toml
+[[ignore]]
+fingerprint = "<the finding's 64-character fingerprint>"
+reason = "the cookie is Secure: DefaultCookieConfig sets it"
+evidence = [
+    { symbol = "internal/config/`cookie.go`/DefaultCookieConfig().", hash = "<64 hex characters>" },
+]
+```
+
+- **It suppresses only while every evidence symbol holds.** The hash covers the
+  exact bytes of the symbol's lines, literals, comments and formatting included,
+  so changing `Secure: true` to `Secure: false` is noticed. (The `fingerprint`
+  the graph keeps on a function is *not* used: it is a normalised shape that
+  ignores literals, and cannot tell that change.) Deleting the symbol is noticed
+  too.
+- **A verdict that stopped holding re-opens.** The finding reads **verdict out of
+  date: re-review**, naming the symbol (`` `DefaultCookieConfig` changed ``, `` no
+  longer exists ``, or `` could not be checked `` with the reason): in
+  `security findings` its `suppression` is `{"state": "out_of_date", "reason": …,
+  "changed": [{"symbol": …, "name": …, "change": "changed"}]}`, and the entry
+  under `status`' `suppressions` lists the same under `out_of_date`. It is
+  **counted** like any unsuppressed finding: in `status` and the page's headline,
+  in `hotspots`, and by the `[security]` gate, its ratchet and every cap, until you
+  re-confirm it. Evidence Logos cannot check never holds: if the index is behind
+  the file (run `logos sync <path>`; a bare `sync` re-reads nothing) or cannot be read, the symbol reads `could not be
+  checked`.
+- **Re-confirm it once you have re-read the code.**
+  `logos security reconfirm <fingerprint>` re-records the hash of every evidence
+  symbol as the code is now, keeps the reason and the expiry, and the finding is
+  suppressed again. The fingerprint is the finding's, or the entry's own. A symbol
+  that no longer exists cannot be re-confirmed: name the symbols the verdict now
+  rests on with `--evidence <symbol>` (repeatable; a symbol identity, a canonical
+  symbol, or a bare name that names exactly one symbol, else the refusal lists
+  the candidates), which records exactly those, plus, for a fingerprint entry, the finding's own enclosing
+  symbol. An expired entry is refused: it suppresses nothing, so extend or remove it.
+  The same flag gives an entry that records no evidence its first. The
+  MCP twin is `logos:security_reconfirm` (`fingerprint`, optional `evidence`).
+  Both write `.logos/security-ignore.toml`, so the [plugin guard](plugin.md) asks
+  before an agent runs either, as it does before an agent edits the file.
+- **On the Security page**, **Suppress…** offers *Record the enclosing symbol as
+  evidence* (off by default). A finding whose verdict is out of date shows the
+  badge and the symbol that changed, with **Re-confirm** beside **Unsuppress**.
+- **An entry without evidence is as before**, and reads **no evidence
+  recorded** (its `suppression` carries no `evidence` key): it suppresses exactly as it did, is never checked against the code,
+  and `reconfirm` refuses it unless you name `--evidence`. A person's suppression
+  may omit evidence.
+- **Evidence is part of the canonical spelling:** after `reason` and `expires`,
+  symbols sorted, one per line. A `hash` that is not 64 lowercase hex characters,
+  an item without `symbol` and `hash`, or the same symbol twice rejects the file
+  with exit 2, naming the line. Record hashes with `reconfirm --evidence` or the
+  page rather than by hand.
+
 ## Reviewing what a branch introduced
 
 A scan lists every finding in the tree. A review asks which of them this branch
@@ -1067,6 +1341,11 @@ allows for scans and suppression.
   system, the page jumps instead of scrolling. An `unrated` finding's badge carries
   its reason, and its detail states it; *unrated only* in **Least severity**
   lists those findings alone ([Severities, and `unrated`](#severities-and-unrated)).
+  One advisory several scanners report is one row whose **Scanner** cell names each
+  of them, and its detail lists every reporter with the id and severity it gave
+  ([One advisory, several scanners](#one-advisory-several-scanners)). A scanner's
+  row in **Scanners** states the findings it shares with another scanner as
+  `counted under another scanner`.
 - **The code scope** control above the table reads **Production**, **Test code** or
   **All**, and starts on Production, as `security findings` does. It is kept in the
   page's address (`?scope=test`, `?scope=all`; Production names none), so a
@@ -1084,7 +1363,8 @@ allows for scans and suppression.
   Each count is of the findings in the code scope, Production by default, and the
   figure states how many findings sit in test code. The counts are the ones
   `security findings` states per category: Production reads `production_findings`,
-  All reads `state.findings` and Test code is the difference. A suppressed finding
+  All reads `state.findings` and Test code is what is left of it after
+  `production_findings`, `dev_findings` and `needs_review_findings`. A suppressed finding
   counts here, as in those two, though the Findings figure leaves it out.
 
 In a workspace, a **Security** page at `/workspace-security` rolls up every member:
@@ -1112,14 +1392,18 @@ Security page, with `+N test` beside the count for the findings in test code
 **One definition of a counted finding.** `security status`, the Security page,
 Files & Risk and the workspace roll-up count a finding the same way: it counts
 unless a current entry in `.logos/security-ignore.toml` suppresses it, its own file
-changed since the scan, or it sits in [test code](#findings-in-test-code). A
+changed since the scan, or it sits in [test code](#findings-in-test-code); a
+production finding its scanner marks low-confidence ([needs
+review](#findings-that-need-review)) is left out too, and so is a finding on a
+[dev-only dependency](#findings-on-a-dev-only-dependency). A
 finding left out is left out for the first of those that holds, in that order.
 Freshness is the finding's, never its report's, so a project whose only report is a
 `--path` scan (its scanner reads `stale` with `scoped_only`) reads the same count on
 all of them. A finding in an edited file is left out and shown apart as `stale`
 (`not_fresh` in `status`, on the page and in the roll-up); a suppressed one is left
-out and counted apart; one in test code is left out and counted apart as `test`; a
-finding bound to no file has none to compare, so it counts on the page and in the
+out and counted apart; one in test code is left out and counted apart as `test`, one
+on a dev-only dependency as `dev` and one its scanner marks low-confidence as
+`needs_review`; a finding bound to no file has none to compare, so it counts on the page and in the
 roll-up, while Files & Risk, which is per file, has no row for it.
 
 Whether the *report* is fresh is a separate figure that changes no count: the
@@ -1133,8 +1417,9 @@ suppressed and changed-file ones included.
 
 ## From an agent: the MCP tools
 
-`logos:security_scan`, `logos:security_ingest`, `logos:security_status` and
-`logos:security_findings` return the same payloads as their commands.
+`logos:security_scan`, `logos:security_ingest`, `logos:security_status`,
+`logos:security_findings` and `logos:security_reconfirm` return the same payloads
+as their commands.
 `logos:security_scan` takes `scanners` and `paths` for a re-scan, and refuses a
 `consent` argument: an agent that meets the consent refusal must ask you to run
 `logos security scan --consent`. No MCP tool installs a scanner; `security install`

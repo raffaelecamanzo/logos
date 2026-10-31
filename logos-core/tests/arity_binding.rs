@@ -268,17 +268,18 @@ class C extends Base {
     )]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
-    // Scala records no class's bases, so neither `inh(1, 2)` reaches `Base`
-    // nor `top(1)` falls through to the top-level `top`: an unseen base may
-    // hold the overload either call reaches.
+    // Scala records a class's proven base (S-575), so `inh(1, 2)` and
+    // `this.inh(1, 2)` reach `Base.inh`, the nearest `inh` that takes two
+    // arguments; `top(1)` still never falls through to the top-level `top`,
+    // since an unseen base may hold the overload it reaches.
     assert_eq!(
         calls_from(rt, "caller@18"),
-        targets(&["dflt@16", "unk@17", "vari@15"]),
+        targets(&["dflt@16", "inh@4", "unk@17", "vari@15"]),
         "every admitted call, and never the own `inh` or `top` the call cannot take"
     );
     assert_eq!(
         residue(&engine, "scala"),
-        reasons(&[(R::NoApplicableOverload, 3), (R::OverloadAmbiguous, 1)])
+        reasons(&[(R::NoApplicableOverload, 2), (R::OverloadAmbiguous, 1)])
     );
 }
 
@@ -379,13 +380,15 @@ struct C : Base {
     )]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
-    // C++ records no class's bases, so neither `inh(1, 2)` reaches `Base` nor
-    // `top(1)` falls through to the free `top`; `none()` and the two
-    // `same(int)`/`same(double)` bind nothing either.
+    // C++ records a class's bases (S-579), so `inh(1, 2)` and `this->inh(1,
+    // 2)`, which the own one-argument `inh` cannot take, reach `Base::inh` —
+    // the overload `using Base::inh;` brings in. `top(1)` still never falls
+    // through to the free `top`; `none()` and the two `same(int)`/
+    // `same(double)` bind nothing either.
     assert_eq!(
         calls_from(rt, "caller@21"),
-        targets(&["dflt@20", "vari@19"]),
-        "every admitted call, and never the own `inh` or `top` the call cannot take"
+        targets(&["dflt@20", "inh@2", "vari@19"]),
+        "every admitted call, the base's `inh`, and never the own `inh` or `top` the call cannot take"
     );
     // A free function's definition records no range — its defaults may sit on
     // a prototype elsewhere (S-591) — and an unknown range never filters: both
@@ -429,12 +432,14 @@ fn typescript_binds_only_a_callable_whose_arity_admits_the_call() {
     let tmp = tree(&[("src/c.ts", TS)]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
-    // TypeScript records no class's bases, so `this.inh(1, 2)` cannot reach
-    // `Base.inh`, and the own `inh(a)` it bound by name before is never bound.
+    // Since S-535 `C extends Base` is a proven `Extends`, so `this.inh(1, 2)`
+    // passes over the own `inh(a)`, which cannot take it, to `Base.inh` — the
+    // `self` walk filters by arity in every language (S-592) — and the own
+    // `inh(a)` it bound by name before is never bound.
     assert_eq!(
         calls_from(rt, "caller@15"),
-        targets(&["dflt@12", "opt@13", "top@5", "unk@14", "vari@11"]),
-        "the free `top`, and every admitted call; `inh(1, 2)` and `none()` bind nothing"
+        targets(&["dflt@12", "inh@2", "opt@13", "top@5", "unk@14", "vari@11"]),
+        "the free `top`, the inherited `inh`, and every admitted call; `none()` binds nothing"
     );
 }
 

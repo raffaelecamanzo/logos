@@ -106,7 +106,9 @@ fn invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala() {
 /// The reverse direction is checked too, so the correspondence is a set
 /// equality rather than a one-way containment: a plugin declaring `invocations`
 /// with no query file on disk fails here as well (the silent no-capture failure
-/// mode S-340 closed, seen from the test side).
+/// mode S-340 closed, seen from the test side). The one exception is pinned by
+/// name: `javascript` runs the `tsx` plugin's queries themselves (S-538), so it
+/// ships no file and must load the shared query instead.
 ///
 /// Rust belongs in the derived set even though
 /// [`invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala`] already
@@ -157,19 +159,39 @@ fn every_language_shipping_an_invocations_query_declares_and_loads_it() {
         );
     }
 
-    // …and nothing declares the capability without shipping the file.
+    // …and nothing declares the capability without shipping the file — save a
+    // language that runs another's queries rather than a copy (S-538:
+    // `javascript` runs `tsx/queries/`), which ships no file of its own and
+    // whose loaded query is the proof instead.
     let mut declaring: Vec<&str> = reg
         .iter()
         .filter(|p| has_capability(*p, "invocations"))
         .map(|p| p.name())
         .collect();
     declaring.sort_unstable();
+    let sharing: Vec<&str> = declaring
+        .iter()
+        .copied()
+        .filter(|name| !shipped.iter().any(|s| s == name))
+        .collect();
     assert_eq!(
-        declaring, shipped,
-        "the set of plugins DECLARING `invocations` and the set SHIPPING a \
-         queries/invocations.scm must be the same set — a declaration with no \
-         file is the silent no-capture failure, a file with no declaration is a \
-         landed arm the extractor never runs"
+        sharing,
+        ["javascript"],
+        "a plugin DECLARING `invocations` with no queries/invocations.scm of its \
+         own is the silent no-capture failure, unless it shares another \
+         language's queries"
+    );
+    for name in &sharing {
+        let plugin = reg.iter().find(|p| p.name() == *name).expect("declared above");
+        assert!(plugin.query("invocations").is_some(), "{name}'s shared invocations query loads");
+    }
+    let mut owning: Vec<&str> = declaring.into_iter().filter(|name| !sharing.contains(name)).collect();
+    owning.sort_unstable();
+    assert_eq!(
+        owning, shipped,
+        "the set of plugins DECLARING `invocations` of their own and the set \
+         SHIPPING a queries/invocations.scm must be the same set — a file with no \
+         declaration is a landed arm the extractor never runs"
     );
 }
 

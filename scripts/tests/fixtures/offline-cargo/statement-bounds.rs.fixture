@@ -1,0 +1,9 @@
+// A literal "metadata" in a comparison does not borrow the next statement's flags,
+// and a package called metadata is not a second subcommand.
+fn bounds(k: &str) {
+    if k == "metadata" {
+        skip();
+    }
+    let o = Command::new("cargo").args(["build", "--offline"]).output();
+    let t = cargo(&["tree", "-p", "metadata", "--offline"]);
+}

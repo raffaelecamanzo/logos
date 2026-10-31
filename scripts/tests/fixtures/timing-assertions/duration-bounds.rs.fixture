@@ -1,0 +1,16 @@
+// Bounds on a time that never passes through `.elapsed()` in the asserting fn:
+// a reported duration field, a millisecond constant, a range, a JSON-keyed read.
+const POINT_QUERY_MS: u128 = 100;
+
+fn reported_field() {
+    assert!(cfg!(coverage) || report.duration_ms < 3_000, "slow");
+}
+
+fn constant_bound(worst: u128) {
+    assert!(cfg!(coverage) || worst < POINT_QUERY_MS, "slow");
+}
+
+fn range_bound(ran: &Value) {
+    let took = ran["duration_ms"].as_u64().unwrap();
+    assert!((1000..5000).contains(&took), "the tool slept a second: {took} ms");
+}

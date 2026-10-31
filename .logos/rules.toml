@@ -1,0 +1,40 @@
+# Written by the Logos web config editor (CR-025, FR-UI-12).
+# This file is the architecture contract enforced by `check_rules` and the gate
+# (FR-CF-03); edits here change what the gate enforces — review the VCS diff.
+
+
+[constraints]
+# 70 (owner, Sprint 109 Phase 5, decision 53): web/ui/src/api/types.ts, the UI's shared types
+# module, has ~51 importing modules; the next-highest module is at 44.
+max_fan_in = 70
+max_cc = 50
+max_clone_ratio = 0.1
+max_brain_methods = 10
+# Ratchet (owner, Sprint 109 Phase 5, decision 53): 1.22.0 counts Rust impl methods toward
+# their struct; the 15 offenders this surfaced are blessed in .logos/rules-baseline.json and
+# any new god container, or growth of a blessed one, fails check.
+no_god_containers = { ratchet = true }
+max_fan_out = 30
+max_nesting_depth = 5
+max_fn_lines = 350
+max_cycles = 7
+[metric_thresholds]
+brain_nesting = 5
+# The branch-delta gate (FR-GV-26, configuration.md § [review]); owner, 2026-10-21.
+# gate and session-end fail on a new or worsened offender in these dimensions,
+# judged per symbol against the merge-base; the aggregate signal may fall at most
+# drift_budget points below the blessed baseline (8291, re-blessed 2026-10-21).
+[review]
+gate_dimensions = ["nesting", "conciseness", "cohesion", "focus", "uniqueness"]
+drift_budget = 5
+accept = "owner"
+trend_window = 2
+# The security gate (owner, 2026-10-31). A new unsuppressed high or critical finding
+# fails check/gate; the findings known at adoption are recorded in the tracked
+# .logos/security-baseline.json (`logos security bless`). Any critical fails, recorded
+# or not. No required_scanners: gate.sh never runs a scanner, so naming one would make
+# every session gate exit 5; the table gates wherever a scan ran at HEAD (Phase 5,
+# pre-publish).
+[security]
+ratchet_min_severity = "high"
+max_severity = "critical"

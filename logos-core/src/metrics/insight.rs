@@ -83,6 +83,7 @@ use crate::models::quality::{
     FixUnit, FixUnitKind, MetricSnapshot, OutlierLabel, OutlierMeasure, WhereToStart,
 };
 
+use super::attribution::ContainerLinks;
 use super::extended::{self, ContainerFacts, ContainerIndex, Thresholds, LOW_COHESION_LCOM4};
 use super::{
     clone_groups_by_mass, is_redundant, redundancy_of, rounded_mean, signal_of, CloneGroupMass,
@@ -104,8 +105,8 @@ pub const OUTLIER_MIN_UNITS: usize = 8;
 /// Rank the fix units and label the outliers of one member's snapshot inputs
 /// — pure, no I/O ([FR-QM-17]).
 ///
-/// `nodes`, `edges`, `functions`, `test_ids`, `thresholds` and `member_access`
-/// are the inputs [`compute`](super::compute) scored, and `current` is what it computed from
+/// `nodes`, `edges`, `links`, `functions`, `test_ids`, `thresholds` and
+/// `member_access` are the inputs [`compute`](super::compute) scored, and `current` is what it computed from
 /// them; `duplicate_groups` are the store's exact-duplicate groups
 /// ([`GraphStore::duplicate_groups`](crate::graph_store::GraphStore::duplicate_groups)),
 /// test members included — they are scoped here. Always
@@ -119,6 +120,7 @@ pub const OUTLIER_MIN_UNITS: usize = 8;
 pub fn where_to_start(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
+    links: &ContainerLinks,
     functions: &[FunctionMetricRow],
     test_ids: &HashSet<NodeId>,
     duplicate_groups: &[Vec<NodeId>],
@@ -126,7 +128,7 @@ pub fn where_to_start(
     member_access: &HashSet<String>,
     current: &MetricSnapshot,
 ) -> WhereToStart {
-    let inputs = Inputs::new(nodes, edges, functions, test_ids, duplicate_groups, member_access);
+    let inputs = Inputs::new(nodes, edges, links, functions, test_ids, duplicate_groups, member_access);
     let outliers = outlier_measures(&inputs, &thresholds);
     let labelled: HashSet<(&str, &str)> = outliers
         .iter()
@@ -203,6 +205,7 @@ impl<'a> Inputs<'a> {
     fn new(
         nodes: &'a [NodeRow],
         edges: &[EdgeRow],
+        links: &ContainerLinks,
         functions: &'a [FunctionMetricRow],
         test_ids: &HashSet<NodeId>,
         duplicate_groups: &[Vec<NodeId>],
@@ -231,7 +234,7 @@ impl<'a> Inputs<'a> {
             .collect();
         let mut inputs = Self {
             by_id: nodes.iter().map(|n| (n.id, n)).collect(),
-            containers: ContainerIndex::build(nodes, edges, functions, test_ids).facts(member_access),
+            containers: ContainerIndex::build(nodes, edges, links, functions, test_ids).facts(member_access),
             production,
             duplicates: Vec::new(),
             clone_groups: Vec::new(),
@@ -358,6 +361,9 @@ fn rank(
                 points,
                 detail: c.detail,
                 outliers,
+                // Read off the store by the snapshot that records the ranking
+                // (S-571); this ranking is pure.
+                partial_parse: false,
             })
         })
         .collect()
@@ -412,8 +418,8 @@ fn function_units(
     }
 }
 
-/// Class units: each low-cohesion class (its `1/LCOM4` becomes 1) or god
-/// container (it stops counting as god).
+/// Class units: each low-cohesion class (its `1/LCOM4` becomes 1) while
+/// Cohesion is in the signal, or god container (it stops counting as god).
 fn class_units(
     inputs: &Inputs<'_>,
     t: &Thresholds,
@@ -425,8 +431,12 @@ fn class_units(
         .iter()
         .filter(|c| extended::is_god(c.methods, c.span, t))
         .count();
+    // A Cohesion that left the signal (no scoreable class, or fewer than
+    // `cohesion_min_classes`, CR-252) has no points to recover: its classes
+    // are ranked for Focus alone.
+    let cohesion_applies = current.cohesion.is_some();
     for c in containers {
-        let low_cohesion = c.lcom4.is_some_and(|l| l >= LOW_COHESION_LCOM4);
+        let low_cohesion = cohesion_applies && c.lcom4.is_some_and(|l| l >= LOW_COHESION_LCOM4);
         let is_god = extended::is_god(c.methods, c.span, t);
         if !low_cohesion && !is_god {
             continue;

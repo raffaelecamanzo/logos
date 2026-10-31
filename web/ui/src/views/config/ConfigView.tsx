@@ -210,6 +210,7 @@ function rulesGroups(r: ParsedRules, d: RulesDefaults): FieldGroup[] {
         { table: "metric_thresholds", key: "clone_similarity", control: "float", initial: initInt(mt.clone_similarity), help: "Clone similarity (0–1).", defaultHint: defaultHint(dmt.clone_similarity) },
         tInt("clone_min_tokens", "Clone minimum tokens."),
         tInt("duplicate_min_tokens", "Exact-duplicate minimum body tokens."),
+        tInt("cohesion_min_classes", "Cohesion minimum scoreable classes."),
       ],
     },
   ];

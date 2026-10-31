@@ -35,6 +35,15 @@
 //!   a metric/algorithm path, so the code subgraph above is untouched and the
 //!   aggregate signal is byte-identical ([ADR-34], [FR-UI-08]).
 //!
+//! Every view keeps the trait-dispatch `calls` edges ([CR-226]) **flagged**
+//! ([`EdgeData::is_dispatch`]) rather than dropped: the dependency view and
+//! the rollups are read by runtime consumers too (impact, `affected`), which
+//! keep them, while every architecture consumer — the metric graph, the DSM —
+//! skips them ([FR-QM-20]).
+//!
+//! [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+//! [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+//!
 //! # Determinism ([NFR-RA-06])
 //!
 //! Vertices are created while iterating nodes in ascending-`id` order (the order
@@ -103,8 +112,27 @@ pub struct EdgeData {
     /// kinds.
     pub kind: Option<EdgeKind>,
     /// How many underlying graph-store edges this edge represents: always `1` for
-    /// symbol-level views; the deduplicated multiplicity for a rollup edge.
+    /// symbol-level views; the deduplicated multiplicity for a rollup edge — of
+    /// its dependency edges alone when it has any (see [`EdgeData::dispatch`]).
     pub weight: u32,
+    /// Whether this edge is a runtime reach through a trait and no dependency
+    /// ([`EdgeRow::is_dispatch`]): the row's own predicate for a symbol-level
+    /// edge; for a rollup edge, `true` only when **every** underlying edge is
+    /// dispatch. A rollup pair with any dependency edge is one non-dispatch
+    /// edge weighted by those alone, so a view without dispatch edges is
+    /// byte-identical to one built before the flag existed. Read it through
+    /// [`EdgeData::is_dispatch`].
+    pub dispatch: bool,
+}
+
+impl EdgeData {
+    /// `true` for an edge every architecture view skips ([`EdgeRow::is_dispatch`],
+    /// [FR-QM-20]); the runtime readers of the same view keep it.
+    ///
+    /// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+    pub fn is_dispatch(&self) -> bool {
+        self.dispatch
+    }
 }
 
 /// A derived, in-memory petgraph view of the code graph at one granularity.
@@ -356,6 +384,7 @@ fn build_symbol_level(
             EdgeData {
                 kind: Some(edge.kind),
                 weight: 1,
+                dispatch: edge.is_dispatch(),
             },
         );
     }
@@ -458,9 +487,11 @@ fn build_rollup(
         node_to_index.entry(node.id).or_insert(idx);
     }
 
-    // Aggregate dependency edges into a deterministic (src, dst) -> weight map,
+    // Aggregate dependency edges into a deterministic (src, dst) -> weights map,
     // dropping self-loops (an aggregate depending on itself is not a coupling).
-    let mut aggregated: BTreeMap<(usize, usize), u32> = BTreeMap::new();
+    // The two weights count a pair's dependency edges and its dispatch edges
+    // apart, so the edge the pair becomes is a dependency whenever any one is.
+    let mut aggregated: BTreeMap<(usize, usize), RollupWeight> = BTreeMap::new();
     for edge in edges {
         if edge.kind == EdgeKind::Contains
             || is_structural_fact(edge.kind)
@@ -483,17 +514,39 @@ fn build_rollup(
         if src == dst {
             continue;
         }
-        *aggregated.entry((src.index(), dst.index())).or_insert(0) += 1;
+        let weight = aggregated.entry((src.index(), dst.index())).or_default();
+        if edge.is_dispatch() {
+            weight.dispatch += 1;
+        } else {
+            weight.dependency += 1;
+        }
     }
     for ((src, dst), weight) in aggregated {
-        graph.add_edge(
-            NodeIndex::new(src),
-            NodeIndex::new(dst),
-            EdgeData { kind: None, weight },
-        );
+        graph.add_edge(NodeIndex::new(src), NodeIndex::new(dst), weight.edge());
     }
 
     finish(granularity, graph, by_key)
+}
+
+/// One rollup pair's underlying edges, dependency and dispatch counted apart.
+#[derive(Debug, Default)]
+struct RollupWeight {
+    dependency: u32,
+    dispatch: u32,
+}
+
+impl RollupWeight {
+    /// The pair's one rollup edge: a dependency weighted by its dependency
+    /// edges when it has any, else a dispatch edge weighted by its dispatch
+    /// edges — kept for the runtime readers of the rollup (`affected`).
+    fn edge(&self) -> EdgeData {
+        let dispatch = self.dependency == 0;
+        EdgeData {
+            kind: None,
+            weight: if dispatch { self.dispatch } else { self.dependency },
+            dispatch,
+        }
+    }
 }
 
 /// The file-rollup vertex key/label for a node: its defining file, or the
