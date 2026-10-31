@@ -23,13 +23,42 @@ abi_version = 15
 # No `frameworks` capability: Scala ships no dominant-framework detector in this
 # increment (the Play/Akka split has no single annotation idiom analogous to
 # Spring) — an honest absence, not a stub (CR-009).
-capabilities = ["symbols", "references"]
+capabilities = ["symbols", "references", "locals"]
+
+# The optional member-access capability (S-575, CR-183, FR-EX-28, FR-QM-11,
+# ADR-39): Cohesion scores a class only in a language that declares it. Scala's
+# queries capture `this.x` and the bare forms — `semaphore.acquire(n)`,
+# `rate - n`, `s"$label"` — as `Accesses` edges (`queries/references.scm`,
+# `@ref.access` and `@ref.access.bare`), and a class's constructor parameters
+# are its fields (`queries/symbols.scm`), so its classes' LCOM4 has its
+# shared-field links. Stated ceilings: a field a class inherits, or an outer
+# class declares, adds no link, and a name any local of the method declares
+# hides the field in the whole method.
+member_access = true
+
+# A supertype's kind follows the type it binds (S-575, FR-RS-15): `extends A
+# with B with C` names a base class and mixed-in traits alike — a trait may
+# head the clause, and a class needs no `with` — so each entry is captured
+# once and its edge is `Extends` to the class it binds, `Implements` to a trait.
+# An `object` is never a supertype, so a trait and its companion `object` name
+# the trait; a class and its companion stay unbound — both are classes here.
+supertype_kind_follows_target = true
+
+# A trait with a bodied method is a container (S-575, CR-183, FR-QM-11): Scala
+# writes state and behaviour into traits (the cake pattern's service traits),
+# so such a trait counts for Focus and, under `member_access`, for Cohesion, as
+# a class does. A trait of abstract declarations only is no container.
+bodied_traits_are_containers = true
 
 # How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
 # a class, object or trait is a call on the current instance — recorded with the
 # `self` receiver shape and bound among that type's own members only, never
 # to a same-named top-level function. Outside one it is a free call, bound by
-# the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
+# the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`). Inside
+# one that neither inherits nor declares the name (nor is a case class, an enum
+# or an anonymous `new T { … }`), where the file binds no value of it, it is a
+# free call too (S-573, `@ref.implicit.*`): the member that would
+# hide the imports and the package is shown absent.
 implicit_receiver = "self"
 
 # Callables overload by name (S-592, FR-RS-43): a bare call binds only a
@@ -42,7 +71,8 @@ overloaded_calls = true
 # one candidate is a class records `Instantiates` to it. A class and its
 # companion `object` are both captured as classes, so `Foo()` naming the pair
 # stays unbound; so does a bare `Foo()` inside a class, read as a call on the
-# current instance (above).
+# current instance (above) — unless the file shows no member answers it
+# (S-573, `queries/references.scm`, `@ref.implicit.*`), which makes it free.
 class_call_instantiates = true
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
@@ -85,21 +115,47 @@ test_convention = "scala-test"
 # types, so they share one interop family — the fully-qualified type index and
 # the namespace-files index reach only targets of the source's own family, and a
 # C# `using` never binds a PHP namespace of the same spelling.
+# A class and its companion `object` are one name (S-573, FR-RS-36): a call on
+# the name binds among the object's methods (`queries/symbols.scm` marks them as
+# taking no instance receiver), never the class's, and a path or wildcard
+# through the name reads both. The name itself still names two declarations, so
+# an import of it or a `new` of it binds neither (NFR-RA-05).
+# A Scala 3 top-level `def` is a member of its file's package (S-573), as the
+# package's types are: an import names it, `import ox.*` brings it into view,
+# and a free call from the same package reaches it.
+# A name a wildcard import brings into view outranks one the package declares in
+# another file (S-573): Scala's precedence, where Java reads the package first.
 [module_model]
 kind = "namespace"
 family = "jvm"
+companion_objects = true
+top_level_callables = true
+wildcards_outrank_package = true
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
-# files through the declared package (S-518); calls bind only inside the file
-# that wrote them. Of the type relations, only the `Instantiates` a top-level
-# `Foo()` records binds across files (S-521); no Scala supertype is captured.
+# files through the declared package (S-518). A call on an object
+# (`StringUtil.decode(t)`), a call to a top-level `def` through an import, a
+# wildcard or the package, and a bare call no member of its class answers bind
+# across files (S-573), and so does a call `x.m(…)` on a receiver whose type the
+# file declares — a class parameter, a `val`/`var`, a parameter, `val x = new
+# T(…)` (S-576), among that class's own methods, never its companion object's.
+# A call on any other receiver — an untyped lambda or pattern
+# variable, `val x = make()`, a chain — and a parameterless selection `x.m`,
+# which may read a field, bind in no file, which is why the level stays
+# `partial`. Of the type relations, the `Instantiates` a top-level `Foo()`
+# (S-521) or a `new Foo(…)` (S-573) records binds across files, and so does
+# each `extends`/`with` supertype (S-575). A field access binds only inside the
+# class, and so inside its file.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports", "type_relations"]
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"

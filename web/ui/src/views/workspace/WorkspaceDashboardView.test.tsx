@@ -21,6 +21,7 @@ import {
   DASHBOARD_TEXT,
   members,
   reachability,
+  workspaceResolution,
   workspaceSecurityWidget,
 } from "../../copy/workspaceDashboard.copy.ts";
 import { expectOneWidgetStack, widgetTitle, widgetTitled } from "../../test/widgetStack.ts";
@@ -30,6 +31,8 @@ import { setScopedMember } from "../../workspace/scope.ts";
 import {
   coverageRider,
   degradedMember,
+  PARTIAL_REFERENCE_RESOLUTION,
+  referenceResolution,
   memberStatus,
   oneDegraded,
   POPULATED_COVERAGE,
@@ -46,6 +49,24 @@ import {
 import { EDGE_COLOR } from "../graph/graphModel.ts";
 import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { WorkspaceDashboardView } from "./WorkspaceDashboardView.tsx";
+
+/** A workspace reference resolution with no figure (S-637): every member read
+ *  records no code reference, so it is stated absent — never 0% or 100%. */
+const ABSENT_REFERENCE_RESOLUTION = referenceResolution(
+  {
+    internal_resolution: {
+      resolved: 0,
+      internal_candidates: 0,
+      provably_external: 0,
+      code_references: 0,
+      lower_bound: null,
+      absence: { cause: "no-references-recorded" },
+    },
+    cross_member: { named_by_another_member: 0, type_in_another_member: 0, bridge_bound: 0 },
+    summary: "no figure: no code reference is recorded, summed over 3 of 3 members",
+  },
+  3,
+);
 
 /** The reads this view issues, each with the card that read alone supplies.
  *
@@ -275,35 +296,37 @@ describe("the reachability rider's shortfall caveat (FR-WS-16, NFR-CC-04)", () =
 });
 
 describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
-  it("shows each member's OWN resolution coverage, named — and no mean of them", async () => {
+  it("shows each member's OWN resolution over its internal candidates, named — and no mean of them", async () => {
     // Three deliberately distinct per-member signals whose mean is a distinctive
     // string, over three DIFFERENT denominators — so this spec pins the CR-111
     // duty (the ratio is never bare) and the BR-56 one (it is never averaged) at
-    // the same time.
+    // the same time. The column reads each member's internal-candidate figure
+    // (S-637), not the deprecated ratio over every reference.
+    const own = (resolved: number, internal_candidates: number) =>
+      statusInfo({
+        internal_resolution: {
+          resolved,
+          internal_candidates,
+          provably_external: 7,
+          code_references: internal_candidates + 7,
+          lower_bound: resolved / internal_candidates,
+          absence: null,
+        },
+      });
     await mount({
       status: workspaceStatus({
         members: [
-          memberStatus("api", {
-            result: statusInfo({ resolution_coverage: 0.4, refs_resolved: 40, refs_total: 100 }),
-          }),
-          memberStatus("orders", {
-            result: statusInfo({ resolution_coverage: 0.6, refs_resolved: 600, refs_total: 1000 }),
-          }),
-          memberStatus("web", {
-            result: statusInfo({
-              resolution_coverage: 0.8,
-              refs_resolved: 8_000,
-              refs_total: 10_000,
-            }),
-          }),
+          memberStatus("api", { result: own(40, 100) }),
+          memberStatus("orders", { result: own(600, 1_000) }),
+          memberStatus("web", { result: own(8_000, 10_000) }),
         ],
       }),
     });
 
     for (const [member, own] of [
-      ["api", "40.0% (40 of 100 refs)"],
-      ["orders", "60.0% (600 of 1,000 refs)"],
-      ["web", "80.0% (8,000 of 10,000 refs)"],
+      ["api", "40.0% (40 of 100 internal candidates; 107 code references, 7 provably external)"],
+      ["orders", "60.0% (600 of 1,000 internal candidates; 1,007 code references, 7 provably external)"],
+      ["web", "80.0% (8,000 of 10,000 internal candidates; 10,007 code references, 7 provably external)"],
     ] as const) {
       const row = within(card(/^Members$/)).getByRole("row", { name: new RegExp(member) });
       expect(within(row).getByText(own)).toBeInTheDocument();
@@ -472,6 +495,7 @@ const DASHBOARD_WIDGETS = [
   "Spec conformance (declared endpoints vs controllers)",
   "Coverage by intake",
   "Cross-service reachability",
+  "Reference resolution across the workspace",
   "Members",
 ];
 
@@ -572,6 +596,59 @@ describe("every widget explains itself, in one stack (S-613)", () => {
     expect(figureText(w)).toContain(DASHBOARD_TEXT.keepThemNone);
     expect(w.querySelector(`.${statesStyles.empty}`)).toBeNull();
     expect(w.querySelector("table")).toBeNull();
+  });
+
+  it("Reference resolution across the workspace: the pooled figure, its population and the members it summed (S-637)", async () => {
+    const { container } = await mount();
+    const w = widget(container, "Reference resolution across the workspace");
+    expectWidgetCopy(w, workspaceResolution);
+    const lines = [...w.querySelectorAll('[data-widget-part="figure"] p')].map((p) => readerText(p));
+    expect(lines).toEqual([
+      "75.0% at least, of the internal candidates resolved",
+      "800 internal candidates of 1,000 code references (200 provably external).",
+      "12 references count as internal because another service declares their names, " +
+        "and 3 because another service declares their types; " +
+        "4 calls are resolved by a cross-service call into another service.",
+      "Pooled over 3 of 3 members — their counts summed, never their figures averaged.",
+    ]);
+  });
+
+  it("Reference resolution across the workspace names a member it could not read (S-637, NFR-CC-04)", async () => {
+    const { container } = await mount(WIDGET_STATES["degraded member"]);
+    const w = widget(container, "Reference resolution across the workspace");
+    expectWidgetCopy(w, workspaceResolution);
+    expect(figureText(w)).toContain("Pooled over 2 of 3 members");
+    expect(figureText(w)).toContain("1 member is not summed, because its references were not read: web.");
+    expect(PARTIAL_REFERENCE_RESOLUTION.members.unread).toEqual(["web"]);
+  });
+
+  it("Reference resolution across the workspace states an absent figure, never 0% or 100%", async () => {
+    const { container } = await mount({
+      status: workspaceStatus({ reference_resolution: ABSENT_REFERENCE_RESOLUTION }),
+    });
+    const w = widget(container, "Reference resolution across the workspace");
+    expectWidgetCopy(w, workspaceResolution);
+    expect(figureText(w)).toContain("No figure: no code reference recorded.");
+    expect(figureText(w)).not.toMatch(/\d+\.\d%/);
+
+    // Every code reference provably external: the count is named, still no ratio.
+    expect(
+      DASHBOARD_TEXT.workspaceResolutionAbsent({ ...ABSENT_REFERENCE_RESOLUTION.internal_resolution, code_references: 4, provably_external: 4 }),
+    ).toBe("No figure: all 4 code references provably external.");
+  });
+
+  it("Members states a member's absent figure in words, never as a percentage", async () => {
+    await mount({
+      status: workspaceStatus({
+        members: [
+          memberStatus("api", {
+            result: statusInfo({ internal_resolution: ABSENT_REFERENCE_RESOLUTION.internal_resolution }),
+          }),
+        ],
+      }),
+    });
+    const row = within(card(/^Members$/)).getByRole("row", { name: /api/ });
+    expect(within(row).getByText("no code reference recorded")).toBeInTheDocument();
   });
 
   it("Members glosses its figure headers", async () => {

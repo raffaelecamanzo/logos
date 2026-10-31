@@ -1,0 +1,14 @@
+// Two measurements compared with each other (a ratio, not a duration bound),
+// equality, and a bound on something that is not time: none are sites.
+#[test]
+fn not_sites() {
+    let t = Instant::now();
+    let cold = t.elapsed();
+    let t = Instant::now();
+    let warm = t.elapsed();
+    assert!(warm < cold, "warm start beats cold start");
+    assert_eq!(cold.as_secs(), 0);
+    let count = 3usize;
+    assert!(count < 10);
+    assert!(Vec::<u8>::new().len() < 4, "generics are not comparisons");
+}

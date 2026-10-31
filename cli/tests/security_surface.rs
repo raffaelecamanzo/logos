@@ -650,6 +650,99 @@ fn a_path_entry_holds_an_absolute_lockfile_finding_out_of_every_surface() {
     assert_eq!(status["suppressions"][0]["orphaned"], false, "{status}");
 }
 
+/// A rule-wide entry (a rule and its scanner, no path, no fingerprint) holds
+/// that rule's findings out of every file on every surface and out of the
+/// `[security]` gate — and an expired one hands them back (S-814).
+#[test]
+fn a_rule_wide_entry_holds_a_rule_out_of_every_file_and_the_gate_until_it_expires() {
+    let w = World::new();
+    for lock in ["Cargo.lock", "web/Cargo.lock"] {
+        fs::create_dir_all(w.root.join(lock).parent().unwrap()).unwrap();
+        fs::write(w.root.join(lock), "# lockfile\n").unwrap();
+    }
+    let report = w.root.parent().unwrap().join("osv-rule-wide.sarif");
+    let result = |rule: &str, lock: &str| {
+        serde_json::json!({
+            "ruleId": rule,
+            "level": "error",
+            "message": {"text": format!("Package 'rmcp@1.7.0' is vulnerable to '{rule}'.")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/{lock}", w.root.display())}}}]
+        })
+    };
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+        "results": [
+            result("CVE-2026-63127", "Cargo.lock"),
+            result("CVE-2026-63127", "web/Cargo.lock"),
+            result("CVE-2026-99999", "Cargo.lock"),
+        ]
+    }]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+    w.rules(Some("[security]\nmax_severity = \"info\"\n"));
+    let named = |verdict: &Value| -> BTreeSet<String> {
+        let messages = verdict["violations"].as_array().unwrap().iter().filter_map(|v| v["message"].as_str());
+        messages.flat_map(|m| ["CVE-2026-63127", "CVE-2026-99999"].into_iter().filter(|a| m.contains(a)).map(str::to_string)).collect()
+    };
+    let (code, before) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "{before}");
+    assert_eq!(named(&before), BTreeSet::from(["CVE-2026-63127".to_string(), "CVE-2026-99999".to_string()]), "{before}");
+
+    let entry = |expires: &str| {
+        format!(
+            "[[ignore]]\nrule = \"CVE-2026-63127\"\nscanner = \"OSV-Scanner\"\nreason = \"code never compiled\"\n{expires}"
+        )
+    };
+    fs::write(w.root.join(".logos/security-ignore.toml"), entry("")).unwrap();
+    let (code, after) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "the other advisory still fails: {after}");
+    assert_eq!(named(&after), BTreeSet::from(["CVE-2026-99999".to_string()]), "{after}");
+    let (code, gated) = w.verdict(&["gate"]);
+    assert_eq!(code, Some(1), "the gate fails on the other advisory alone: {gated}");
+    let gated = gated.to_string();
+    assert!(gated.contains("CVE-2026-99999") && !gated.contains("CVE-2026-63127"), "{gated}");
+
+    let findings = w.json(&["security", "findings"]);
+    let by_rule = |rule: &str| -> Vec<&Value> {
+        findings["findings"].as_array().unwrap().iter().filter(|f| f["rule_id"] == rule).collect()
+    };
+    assert_eq!(by_rule("CVE-2026-63127").len(), 2, "{findings}");
+    for held in by_rule("CVE-2026-63127") {
+        assert_eq!(held["suppression"]["state"], "suppressed", "{held}");
+        assert_eq!(held["suppression"]["reason"], "code never compiled", "{held}");
+        assert_eq!(held["suppression"]["by"], serde_json::json!({"rule": "CVE-2026-63127", "scanner": "OSV-Scanner"}), "{held}");
+    }
+    assert!(by_rule("CVE-2026-99999")[0]["suppression"].is_null(), "a rule one entry does not name stays listed active");
+    let status = w.json(&["security", "status"]);
+    assert_eq!(status["suppressions"][0]["suppressed"], 2, "{status}");
+    assert_eq!(status["suppressions"][0]["orphaned"], false, "{status}");
+    assert_eq!(status["suppressions"][0]["entry"]["rule"], "CVE-2026-63127", "{status}");
+
+    // Dated in the past, the entry no longer holds anything out.
+    fs::write(w.root.join(".logos/security-ignore.toml"), entry("expires = 2020-01-01\n")).unwrap();
+    let (code, lapsed) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "{lapsed}");
+    assert_eq!(named(&lapsed), BTreeSet::from(["CVE-2026-63127".to_string(), "CVE-2026-99999".to_string()]), "{lapsed}");
+    let findings = w.json(&["security", "findings"]);
+    assert_eq!(by_rule_state(&findings, "CVE-2026-63127"), ["expired", "expired"], "{findings}");
+
+    // A rule with no scanner is a configuration fault: exit 2, naming the key.
+    fs::write(w.root.join(".logos/security-ignore.toml"), "[[ignore]]\nrule = \"CVE-2026-63127\"\nreason = \"r\"\n").unwrap();
+    let out = w.logos(&["security", "findings"]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("has a `rule` but no `scanner`"), "{out:?}");
+}
+
+fn by_rule_state(findings: &Value, rule: &str) -> Vec<String> {
+    findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["rule_id"] == rule)
+        .map(|f| f["suppression"]["state"].as_str().unwrap_or("none").to_string())
+        .collect()
+}
+
 /// A finding in a fixtures directory reads `test`, is hidden from the default
 /// listing and still fails the `[security]` gate: with no `.logos/security-ignore.toml`
 /// entry for the directory, which is what this repository's own file dropped
@@ -694,6 +787,321 @@ fn a_fixtures_finding_reads_test_is_hidden_by_default_and_still_reaches_the_gate
         assert_eq!(code, Some(1), "{verb} fails on the fixture finding: {verdict}");
         assert!(verdict.to_string().contains("CVE-2026-11111"), "{verb} names it: {verdict}");
     }
+}
+
+/// `app/cookie.py`: the symbol a verdict about `delete`'s query rests on.
+const COOKIE_PY: &str = "def default_cookie_config():\n    return {\"secure\": True}\n";
+
+/// A suppression whose evidence changed counts again, fails a `[security]` cap
+/// and reads "verdict out of date" naming the symbol, until `security reconfirm`
+/// re-records the hashes and keeps the reason ([S-818], [FR-SC-32], BR-102):
+/// - `reconfirm --evidence` gives an entry that records none its first evidence,
+///   adding the finding's own enclosing symbol;
+/// - flipping a literal in the evidence symbol re-opens the finding, which the
+///   cap then fails on; re-confirming holds it out again with the original reason;
+/// - deleting the symbol re-opens it too, and `reconfirm` then refuses, writing
+///   nothing;
+/// - an entry that records no evidence is unchanged and reads as such.
+///
+/// [S-818]: ../../docs/planning/journal.md#s-818-a-suppression-records-its-evidence-and-re-opens-when-the-evidence-changes
+/// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+#[test]
+fn a_suppression_whose_evidence_changed_counts_again_until_it_is_reconfirmed() {
+    let w = World::new();
+    let cookie = w.root.join("app/cookie.py");
+    fs::write(&cookie, COOKIE_PY).unwrap();
+    assert!(w.logos(&["index"]).status.success());
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    w.ingest(&semgrep);
+    w.rules(Some("[security]\nmax_severity = \"high\"\n"));
+    let findings = w.json(&["security", "findings"]);
+    let high = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["severity"] == "high")
+        .unwrap_or_else(|| panic!("the high finding: {findings}"));
+    let fingerprint = high["fingerprint"].as_str().unwrap().to_string();
+    let state = |payload: &Value| -> Value {
+        payload["findings"].as_array().unwrap().iter().find(|f| f["fingerprint"] == fingerprint.as_str()).unwrap()["suppression"].clone()
+    };
+    let cap_fails = || {
+        let (code, verdict) = w.verdict(&["check"]);
+        (code == Some(1) && verdict["violations"].to_string().contains("security:max_severity"), verdict)
+    };
+    assert!(cap_fails().0, "the unsuppressed high finding fails the cap");
+
+    // A person's entry with no evidence: suppressed as before, labelled so.
+    let ignore = w.root.join(".logos/security-ignore.toml");
+    let entry = format!("[[ignore]]\nfingerprint = \"{fingerprint}\"\nreason = \"the query is built from constants\"\n");
+    fs::write(&ignore, &entry).unwrap();
+    let held = state(&w.json(&["security", "findings"]));
+    assert_eq!((held["state"].as_str(), held.get("evidence").is_none()), (Some("suppressed"), true), "{held}");
+    assert!(!cap_fails().0, "the suppressed finding is out of the cap");
+    let out = w.logos(&["security", "reconfirm", &fingerprint]);
+    assert_eq!(out.status.code(), Some(2), "nothing to re-confirm without evidence: {out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("records no evidence"), "{out:?}");
+    assert_eq!(fs::read_to_string(&ignore).unwrap(), entry, "a refusal writes nothing");
+
+    // `reconfirm --evidence` records the named symbol and the enclosing one.
+    let written = w.json(&["security", "reconfirm", &fingerprint, "--evidence", "default_cookie_config"]);
+    assert_eq!(written["file"], ".logos/security-ignore.toml");
+    let symbols: Vec<&str> = written["entry"]["evidence"].as_array().unwrap().iter().map(|e| e["symbol"].as_str().unwrap()).collect();
+    assert_eq!(symbols.len(), 2, "{written}");
+    assert!(symbols[0].ends_with("default_cookie_config().") && symbols[1].ends_with("delete()."), "{symbols:?}");
+    let held = state(&w.json(&["security", "findings"]));
+    assert_eq!(held["state"], "suppressed", "{held}");
+    let names: Vec<&str> = held["evidence"].as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["default_cookie_config", "delete"], "{held}");
+    assert!(!cap_fails().0);
+    let with_evidence = fs::read_to_string(&ignore).unwrap();
+
+    // The literal flips: the verdict is out of date, the finding counts again.
+    fs::write(&cookie, COOKIE_PY.replace("True", "False")).unwrap();
+    assert!(w.logos(&["sync", "app/cookie.py"]).status.success());
+    let findings = w.json(&["security", "findings"]);
+    let reopened = state(&findings);
+    assert_eq!(reopened["state"], "out_of_date", "{reopened}");
+    assert_eq!(reopened["reason"], "the query is built from constants", "{reopened}");
+    assert_eq!((reopened["changed"][0]["name"].as_str(), reopened["changed"][0]["change"].as_str()), (Some("default_cookie_config"), Some("changed")));
+    let (fails, verdict) = cap_fails();
+    assert!(fails, "an out-of-date verdict fails the cap: {verdict}");
+    let status = w.json(&["security", "status"]);
+    assert_eq!(status["suppressions"][0]["out_of_date"][0]["name"], "default_cookie_config", "{status}");
+    assert_eq!(status["suppressions"][0]["suppressed"], 0, "{status}");
+    assert_eq!(fs::read_to_string(&ignore).unwrap(), with_evidence, "reading rewrites nothing");
+
+    // Re-confirmed, it is suppressed again with its original reason.
+    let confirmed = w.json(&["security", "reconfirm", &fingerprint]);
+    assert_eq!(confirmed["entry"]["reason"], "the query is built from constants");
+    let back = state(&w.json(&["security", "findings"]));
+    assert_eq!((back["state"].as_str(), back["reason"].as_str()), (Some("suppressed"), Some("the query is built from constants")), "{back}");
+    assert!(!cap_fails().0);
+
+    // Deleting the symbol re-opens it, and it cannot be re-confirmed.
+    fs::remove_file(&cookie).unwrap();
+    assert!(w.logos(&["sync", "app/cookie.py"]).status.success());
+    let gone = state(&w.json(&["security", "findings"]));
+    assert_eq!((gone["state"].as_str(), gone["changed"][0]["change"].as_str()), (Some("out_of_date"), Some("gone")), "{gone}");
+    assert!(cap_fails().0, "a deleted evidence symbol fails the cap");
+    let before = fs::read(&ignore).unwrap();
+    let out = w.logos(&["security", "reconfirm", &fingerprint]);
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("default_cookie_config"), "{out:?}");
+    assert_eq!(fs::read(&ignore).unwrap(), before, "a refused re-confirm writes nothing");
+}
+
+/// A finding its scanner marks low-confidence (the low-confidence Semgrep fixture's
+/// two rules are `LOW CONFIDENCE`) reads "needs review": left out of the default list and
+/// of `status`'s count with the number stated, listed and labelled by `--scope
+/// all`, and still failing a `[security]` cap and still in the blessed baseline
+/// (S-817, FR-SC-31, BR-101).
+#[test]
+fn a_needs_review_finding_is_left_out_of_every_list_and_count_and_still_reaches_the_cap_and_bless() {
+    let w = World::new();
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep-low-confidence.sarif");
+    w.ingest(&semgrep);
+    w.rules(Some("[security]\nmax_severity = \"high\"\n"));
+
+    let default = w.json(&["security", "findings"]);
+    assert_eq!(default["findings"].as_array().unwrap().len(), 0, "the default lists no finding that needs review: {default}");
+    assert_eq!((&default["hidden_needs_review"], &default["hidden_by_scope"]), (&serde_json::json!(2), &serde_json::json!(0)), "{default}");
+    let all = w.json(&["security", "findings", "--scope", "all"]);
+    let listed = all["findings"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{all}");
+    for finding in listed {
+        assert_eq!((finding["confidence"].as_str(), finding["needs_review"].as_bool()), (Some("low"), Some(true)), "{finding}");
+    }
+    assert_eq!(all["hidden_needs_review"], 0, "`--scope all` hides nothing: {all}");
+
+    let status = w.json(&["security", "status"]);
+    let semgrep_row = row(&status, "semgrep");
+    assert_eq!((&semgrep_row["findings"], &semgrep_row["needs_review"]), (&serde_json::json!(0), &serde_json::json!(2)), "{semgrep_row}");
+
+    // The cap counts them: the report holds a `high` one.
+    for verb in ["check", "gate"] {
+        let (code, verdict) = w.verdict(&[verb]);
+        assert_eq!(code, Some(1), "{verb} fails on a finding that needs review: {verdict}");
+        assert!(verdict.to_string().contains("python.sqlalchemy.security.sqlalchemy-execute-raw-query"), "{verb} names it: {verdict}");
+    }
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &blessed["findings"]), (Some(0), &serde_json::json!(2)), "bless records both: {blessed}");
+}
+
+/// A finding on a package its `package-lock.json` marks `"dev": true` reads `dev`:
+/// left out of the default list and of `status`'s count with the number stated,
+/// listed and labelled by `--scope all`, a production npm finding beside it
+/// staying in the count — and the dev one alone still fails a `[security]` cap
+/// and is in the blessed baseline (S-810, FR-SC-30, BR-100).
+#[test]
+fn a_dev_only_dependency_finding_is_left_out_of_every_list_and_count_and_still_reaches_the_cap_and_bless() {
+    let w = World::new();
+    let web = w.root.join("web");
+    fs::create_dir_all(&web).unwrap();
+    fs::write(
+        web.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"packages":{"node_modules/vite":{"version":"5.0.0","dev":true},"node_modules/react":{"version":"18.2.0"}}}"#,
+    )
+    .unwrap();
+    let result = |package: &str, advisory: &str, level: &str| {
+        serde_json::json!({
+            "ruleId": advisory,
+            "level": level,
+            "message": {"text": format!("Package '{package}' is vulnerable to '{advisory}'.")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/package-lock.json", web.display())}}}]
+        })
+    };
+    let report = w.root.parent().unwrap().join("osv-dev.sarif");
+    // OSV-Scanner's `error` is `high`; the production one is a `note`, so only the dev one reaches the cap.
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [{
+        "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+        "results": [result("vite@5.0.0", "GHSA-vite-dev", "error"), result("react@18.2.0", "GHSA-react-prod", "note")]
+    }]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+    w.rules(Some("[security]\nmax_severity = \"high\"\n"));
+
+    let default = w.json(&["security", "findings"]);
+    let rules = |v: &Value| v["findings"].as_array().unwrap().iter().map(|f| f["rule_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(rules(&default), ["GHSA-react-prod"], "the default lists no dev-only finding: {default}");
+    assert_eq!((&default["hidden_dev"], &default["hidden_by_scope"]), (&serde_json::json!(1), &serde_json::json!(0)), "{default}");
+    let all = w.json(&["security", "findings", "--scope", "all"]);
+    let dev = all["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "GHSA-vite-dev").unwrap();
+    assert_eq!((dev["code_scope"].as_str(), dev["code_scope_reason"].as_str()), (Some("dev"), Some("dev_dependency")), "{dev}");
+    assert_eq!((all["findings"].as_array().unwrap().len(), &all["hidden_dev"]), (2, &serde_json::json!(0)), "`--scope all` hides nothing: {all}");
+    let prod = all["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "GHSA-react-prod").unwrap();
+    assert_eq!(prod["code_scope"], "production", "{prod}");
+
+    let status = w.json(&["security", "status"]);
+    let osv = row(&status, "osv-scanner");
+    assert_eq!((&osv["findings"], &osv["dev"]), (&serde_json::json!(1), &serde_json::json!(1)), "{osv}");
+
+    // The cap counts it: only the dev one is high.
+    for verb in ["check", "gate"] {
+        let (code, verdict) = w.verdict(&[verb]);
+        assert_eq!(code, Some(1), "{verb} fails on a dev-only dependency's high finding: {verdict}");
+        assert!(verdict.to_string().contains("GHSA-vite-dev"), "{verb} names it: {verdict}");
+    }
+    let (code, blessed) = w.verdict(&["security", "bless"]);
+    assert_eq!((code, &blessed["findings"]), (Some(0), &serde_json::json!(2)), "bless records both: {blessed}");
+}
+
+/// [UAT-SC-14] (S-809, FR-SC-29) through the binary, on a fixture shaped on
+/// desk-picker: OSV-Scanner holds one `go.mod` result twice, byte for byte,
+/// and Trivy repeats that advisory under its CVE; OSV-Scanner also reports a
+/// dev-only and a production npm advisory.
+/// - `security findings` lists the `go.mod` advisory once, naming both
+///   scanners, at Trivy's `high` (OSV-Scanner's own is unrated); the
+///   headline holds it and the production npm one, and states the dev one.
+/// - `status` counts it once, on Trivy's row, and states it merged on
+///   OSV-Scanner's.
+/// - A `[security]` cap counts each of the three advisories once.
+/// - A checked-in baseline and an ignore file written before the merge, which
+///   name OSV-Scanner's key alone, still match it: the ratchet reads nothing
+///   new, and the entry suppresses both reporters on every surface.
+///
+/// [UAT-SC-14]: ../../docs/specs/requirements/UAT-SC-14.md
+#[test]
+fn one_lockfile_advisory_two_scanners_report_reads_once_on_every_surface() {
+    let w = World::new();
+    let web = w.root.join("web");
+    fs::create_dir_all(&web).unwrap();
+    fs::write(
+        web.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"packages":{"node_modules/vite":{"version":"5.0.0","dev":true},"node_modules/react":{"version":"18.2.0"}}}"#,
+    )
+    .unwrap();
+    fs::write(w.root.join("go.mod"), "module example.test/app\n").unwrap();
+    let osv = |package: &str, advisory: &str, aka: &str, path: &str, level: &str| {
+        serde_json::json!({
+            "ruleId": advisory, "level": level,
+            "message": {"text": format!("Package '{package}' is vulnerable to '{advisory}' (also known as {aka}).")},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/{path}", w.root.display())}}}]
+        })
+    };
+    let go = osv("github.com/xuri/excelize/v2@2.11.0", "CVE-2026-107214", "'GO-2026-6684', 'GHSA-2j4c-ffch-9f23'", "go.mod", "warning");
+    let trivy = serde_json::json!({
+        "ruleId": "CVE-2026-107214", "level": "error",
+        "message": {"text": "Package: github.com/xuri/excelize/v2\nInstalled Version: v2.11.0\nVulnerability CVE-2026-107214\nSeverity: HIGH"},
+        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "go.mod", "uriBaseId": "ROOTPATH"}, "region": {"startLine": 1}}}]
+    });
+    let report = w.root.parent().unwrap().join("desk-picker.sarif");
+    let sarif = serde_json::json!({"version": "2.1.0", "runs": [
+        {"tool": {"driver": {"name": "osv-scanner", "version": "2.7.0", "rules": []}}, "results": [
+            go.clone(),
+            go,
+            osv("vite@5.0.0", "GHSA-vite-dev", "'CVE-2026-1'", "web/package-lock.json", "error"),
+            osv("react@18.2.0", "GHSA-react-prod", "'CVE-2026-2'", "web/package-lock.json", "error"),
+        ]},
+        {"tool": {"driver": {"name": "Trivy", "version": "0.76.0", "rules": []}}, "results": [trivy]}
+    ]});
+    fs::write(&report, sarif.to_string()).unwrap();
+    w.ingest(&report);
+
+    let all = w.json(&["security", "findings", "--scope", "all"]);
+    let listed = all["findings"].as_array().unwrap();
+    assert_eq!(listed.len(), 3, "three advisories, the go.mod one once: {all}");
+    let go_mod = listed.iter().find(|f| f["rule_id"] == "CVE-2026-107214").unwrap();
+    let reporters = |f: &Value| -> Vec<(String, String)> {
+        f["reporters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["scanner_name"].as_str().unwrap().to_string(), r["fingerprint"].as_str().unwrap().to_string()))
+            .collect()
+    };
+    let named = reporters(go_mod);
+    assert_eq!(named.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>(), ["Trivy", "osv-scanner"], "{go_mod}");
+    assert_eq!(go_mod["severity"], "high", "{go_mod}");
+    let dev = listed.iter().find(|f| f["rule_id"] == "GHSA-vite-dev").unwrap();
+    assert_eq!(dev["code_scope"], "dev", "{dev}");
+    let default = w.json(&["security", "findings"]);
+    let rules = |v: &Value| v["findings"].as_array().unwrap().iter().map(|f| f["rule_id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    assert_eq!(rules(&default), ["CVE-2026-107214", "GHSA-react-prod"], "{default}");
+    assert_eq!(default["hidden_dev"], 1, "1 more in dev-only dependencies: {default}");
+
+    let status = w.json(&["security", "status"]);
+    let counts = |scanner: &str| {
+        let r = row(&status, scanner);
+        (r["findings"].as_u64(), r["dev"].as_u64(), r["merged"].as_u64())
+    };
+    assert_eq!(counts("trivy"), (Some(1), Some(0), Some(0)), "{status}");
+    assert_eq!(counts("osv-scanner"), (Some(1), Some(1), Some(1)), "{status}");
+
+    w.rules(Some("[security]\nratchet_min_severity = \"critical\"\nmax_severity = \"high\"\n"));
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!(code, Some(1), "{check}");
+    let capped: Vec<&str> = check["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["rule"] == "security:max_severity")
+        .map(|v| v["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(capped.len(), 3, "each advisory once: {capped:?}");
+    assert_eq!(capped.iter().filter(|m| m.contains("CVE-2026-107214") && m.contains("(Trivy, osv-scanner)")).count(), 1, "{capped:?}");
+
+    // Written before the merge, both name OSV-Scanner's key alone.
+    let osv_key = &named[1].1;
+    let others: Vec<String> = listed.iter().filter(|f| f["rule_id"] != "CVE-2026-107214").map(|f| f["fingerprint"].as_str().unwrap().to_string()).collect();
+    let entry = |fingerprint: &str, rule: &str, path: &str| serde_json::json!({"fingerprint": fingerprint, "rule_id": rule, "path": path});
+    let baseline = serde_json::json!({"version": 1, "findings": [
+        entry(osv_key, "CVE-2026-107214", "go.mod"),
+        entry(&others[0], "x", "web/package-lock.json"),
+        entry(&others[1], "y", "web/package-lock.json"),
+    ]});
+    fs::write(w.root.join(".logos/security-baseline.json"), serde_json::to_string_pretty(&baseline).unwrap() + "\n").unwrap();
+    w.rules(Some("[security]\nratchet_min_severity = \"high\"\n"));
+    let (code, check) = w.verdict(&["check"]);
+    assert_eq!((code, ratchet_violations(&check).len()), (Some(0), 0), "OSV-Scanner's key holds the merged finding: {check}");
+
+    fs::write(w.root.join(".logos/security-ignore.toml"), format!("[[ignore]]\nfingerprint = \"{osv_key}\"\nreason = \"fixed upstream\"\n")).unwrap();
+    let default = w.json(&["security", "findings"]);
+    let go_mod = default["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "CVE-2026-107214").unwrap();
+    assert_eq!(go_mod["suppression"]["state"], "suppressed", "{go_mod}");
+    let status = w.json(&["security", "status"]);
+    assert_eq!((row(&status, "trivy")["findings"].as_u64(), row(&status, "trivy")["suppressed"].as_u64()), (Some(0), Some(1)), "{status}");
+    assert_eq!(status["suppressions"][0]["suppressed"], 1, "{status}");
 }
 
 /// `security install|uninstall|scan --install` through the binary (S-744,
@@ -1444,7 +1852,7 @@ const SCANNER_FLAGS: [&str; 4] = ["metrics", "no-git", "nvdApiKey", "propertyfil
 /// Every bare `--flag` span in `markdown` that no `logos security` command lists
 /// and no scanner owns, and how many were checked.
 fn unknown_bare_flags(markdown: &str) -> (Vec<String>, usize) {
-    let helps: Vec<String> = ["scan", "install", "uninstall", "ingest", "status", "findings"]
+    let helps: Vec<String> = ["scan", "install", "uninstall", "ingest", "status", "findings", "reconfirm"]
         .iter()
         .map(|sub| help(&["security", sub]).unwrap_or_else(|| panic!("`logos security {sub}` has no help")))
         .collect();
@@ -1730,8 +2138,39 @@ fn the_page_names_the_one_definition_of_a_counted_finding() {
         "A scanner you disable keeps its stored findings in every count until you re-scan without it.",
         "A file a `--path` scan never read reads `0` in Files & Risk, which is the absence of a finding and not proof of a scan",
         "The OWASP table below the findings is the one exception",
+        "a production finding its scanner marks low-confidence ([needs review](#findings-that-need-review)) is left out too",
+        "and so is a finding on a [dev-only dependency](#findings-on-a-dev-only-dependency)",
+        "### Findings on a dev-only dependency",
+        "### Findings that need review",
+        "**The gate keeps every finding.** The `[security]` ratchet and caps, `gate --save`, `security bless` and the branch delta of `review --base` count a finding that needs review like any other",
     ] {
         assert!(page.contains(needle), "docs/howto/security.md no longer says: {needle}");
+    }
+}
+
+/// S-814: the manual shows the rule-wide entry, and the example it prints is a
+/// file Logos accepts and writes back unchanged — so a reader who pastes it can
+/// still triage from the Security page, which refuses a file spelled otherwise.
+#[test]
+fn the_page_shows_the_rule_wide_entry_in_the_canonical_spelling() {
+    let page = security_page();
+    let section = page.split("### One entry for a rule, in every file").nth(1).expect("the rule-wide section");
+    let section = section.split("\n## ").next().unwrap();
+    let example = section.split("```toml\n").nth(1).and_then(|rest| rest.split("```").next()).expect("a toml example");
+    let file = logos_core::history::security::IgnoreFile::parse(example).expect("the example is a file Logos accepts");
+    assert_eq!(file.len(), 1);
+    assert_eq!(file.to_toml(), example, "the example is in the canonical spelling");
+    assert!(matches!(file.entries()[0].selector, logos_core::history::security::Selector::Rule { .. }));
+
+    let section = section.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in [
+        "A `rule` without a `scanner`, or a `scanner` without a `rule`",
+        "the message names the key that is missing",
+        "A whole-project `path` glob (`*`, `**`, `.`) is still refused",
+        "suppressed by a rule-wide entry",
+        "so the rule-wide entry holds the rule out of the gate",
+    ] {
+        assert!(section.contains(needle), "the rule-wide section no longer says: {needle}");
     }
 }
 
@@ -1913,6 +2352,8 @@ fn commands_md_names_the_fields_of_the_security_section_review_emits() {
         freshness: "fresh".into(),
         reachability: "unknown".into(),
         confidence: "unbound".into(),
+        // Merged (S-809), so its optional `reporters` is emitted and named too.
+        reporters: vec!["semgrep".into(), "Trivy".into()],
     };
     let keys = |value: Value| -> Vec<String> { value.as_object().expect("an object").keys().cloned().collect() };
     let mut emitted = keys(serde_json::to_value(&entry).unwrap());
@@ -2010,7 +2451,8 @@ fn a_second_cli_scan_or_install_is_refused_naming_the_running_scan() {
             .spawn()
             .expect("the logos binary runs"),
     );
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline =
+        std::time::Instant::now() + logos_core::perf::scaled(std::time::Duration::from_secs(60));
     while runs() == 0 {
         assert!(std::time::Instant::now() < deadline, "the first scan never started semgrep");
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2093,7 +2535,8 @@ fn a_scan_stopped_by_a_signal_leaves_no_scanner_beside_the_next_one() {
             )
         };
         let wait_for = |what: &str, done: &dyn Fn() -> bool| {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let deadline = std::time::Instant::now()
+                + logos_core::perf::scaled(std::time::Duration::from_secs(60));
             while !done() {
                 assert!(std::time::Instant::now() < deadline, "SIG{signal}: {what}");
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -2207,7 +2650,8 @@ fn a_keyed_scan_stopped_by_a_signal_leaves_no_key_file() {
                 .spawn()
                 .expect("the logos binary runs"),
         );
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now()
+            + logos_core::perf::scaled(std::time::Duration::from_secs(60));
         while !seen.exists() {
             assert!(std::time::Instant::now() < deadline, "SIG{signal}: Dependency-Check never started");
             std::thread::sleep(std::time::Duration::from_millis(20));

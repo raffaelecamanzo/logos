@@ -195,12 +195,14 @@ static int secret() { return 42; }
 
 #[test]
 fn cpp_owns_dot_h_headers() {
-    // The fixed `.h` → C++ ownership rule (FR-PL-07): a `.h` header is parsed by
-    // the C++ grammar and its declarations extract, including a class.
+    // The `.h` default (FR-PL-07): a registry no repository has decided for —
+    // nor one whose C sources outnumber its C++ ones (S-582) — reads a `.h`
+    // header with the C++ grammar, and its declarations extract, a class too.
     let reg = registry();
-    assert!(
-        reg.for_extension("h").is_some(),
-        "the C++ plugin claims .h"
+    assert_eq!(
+        reg.for_extension("h").map(|p| p.name()),
+        Some("cpp"),
+        "the C++ plugin reads .h by default"
     );
     let facts = facts_for(
         &reg,
@@ -253,11 +255,16 @@ int production(int a) { return a; }
         .filter(|n| matches!(n.kind, NodeKind::Function | NodeKind::Method))
         .map(|n| (n.name.clone(), n.test_evidence))
         .collect();
-    // Both GoogleTest macros parse as functions named for the macro keyword and
-    // carry evidence; the production function does not.
-    assert_eq!(evidence.get("TEST"), Some(&true), "TEST is evidence: {evidence:?}");
+    // Both GoogleTest macros parse as functions written with the macro keyword
+    // and carry evidence, named for the suite and test they declare (S-580); the
+    // production function does not.
     assert_eq!(
-        evidence.get("TEST_F"),
+        evidence.get("WidgetSuite.Adds"),
+        Some(&true),
+        "TEST is evidence: {evidence:?}"
+    );
+    assert_eq!(
+        evidence.get("WidgetFixture.Subtracts"),
         Some(&true),
         "TEST_F is evidence: {evidence:?}"
     );

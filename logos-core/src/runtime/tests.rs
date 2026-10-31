@@ -338,10 +338,10 @@ fn many_reads_run_concurrently_up_to_the_pool_size() {
 /// effect that harness exists to expose. Re-run it in isolation before
 /// treating a breach as a regression, the standing convention for every
 /// wall-clock assertion here. The band is scaled by `LOGOS_PERF_TOLERANCE`
-/// when it is set (CI sets 3), and is the raw 200 ms otherwise: the shared
-/// GitHub runner measured 212.9 ms and 216.6 ms on two consecutive runs of the
-/// Sprint 108 pull request, with no store or pool change, so the unscaled band
-/// failed CI every time on that host.
+/// (CI sets 3; 1.15 by default, so 230 ms): the shared GitHub runner measured
+/// 212.9 ms and 216.6 ms on two consecutive runs of the Sprint 108 pull request,
+/// with no store or pool change, so the raw 200 ms band failed CI every time on
+/// that host (HF-11).
 ///
 /// Skipped under coverage instrumentation: an instrumented suite at cargo's
 /// default parallelism measured 923 ms here with no store or pool change.
@@ -361,20 +361,17 @@ fn runtime_open_stays_within_its_store_and_pool_regression_band() {
     // and opening every reader connection, not a partially-initialized shell.
     assert_eq!(runtime.db_path(), db.as_path());
 
-    // Unset (or below 1.0) keeps the raw band; CI widens it for its slower host.
-    let tolerance = std::env::var("LOGOS_PERF_TOLERANCE")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| *v >= 1.0)
-        .unwrap_or(1.0);
-    let band = Duration::from_millis(200).mul_f64(tolerance);
+    // 200 ms scaled by `LOGOS_PERF_TOLERANCE` (230 ms at the 1.15 default; CI
+    // widens it for its slower host).
+    let band = crate::perf::scaled_ms(200);
     assert!(
         elapsed < band,
         "Runtime::open took {elapsed:?}, over its {band:?} store-and-pool regression band \
-         (200 ms × LOGOS_PERF_TOLERANCE {tolerance}; measured ~27 ms). Re-run in isolation before calling it a regression — this \
+         (200 ms × LOGOS_PERF_TOLERANCE {}; measured ~27 ms). Re-run in isolation before calling it a regression — this \
          guard is known to flake under full-suite load. NOTE: this band is NOT the \
          NFR-PE-05 cold-start budget; that is \
-         cold_start_to_ready_engine_is_within_pe05_budget)"
+         cold_start_to_ready_engine_is_within_pe05_budget)",
+        crate::perf::tolerance()
     );
 }
 

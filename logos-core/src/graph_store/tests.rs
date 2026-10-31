@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        40,
-        "v40 = migration 40 (S-761 CR-238 the where-to-start rows carry an identity)"
+        44,
+        "v44 = migration 44 (S-571 CR-181 a file's parse damage)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 40,
+        recorded, 44,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 40);
+        assert_eq!(store.schema_version().unwrap(), 44);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 40);
+    assert_eq!(store.schema_version().unwrap(), 44);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 40, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 44, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 40);
+    assert_eq!(reopened.schema_version().unwrap(), 44);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -914,17 +914,20 @@ fn all_edges_returns_every_edge_in_canonical_order() {
             EdgeRow {
                 source: a,
                 target: b,
-                kind: EdgeKind::Calls
+                kind: EdgeKind::Calls,
+                dispatch: false,
             },
             EdgeRow {
                 source: a,
                 target: b,
-                kind: EdgeKind::References
+                kind: EdgeKind::References,
+                dispatch: false,
             },
             EdgeRow {
                 source: c,
                 target: a,
-                kind: EdgeKind::Contains
+                kind: EdgeKind::Contains,
+                dispatch: false,
             },
         ]
     );
@@ -1020,6 +1023,23 @@ fn proto_service_bodies_returns_only_proto_services_with_a_body() {
 
 // ── S-024-HF: the incremental framework-gate footprint probe ─────────────────
 
+/// No language declaring a receiver parameter.
+fn no_receivers() -> ReceiverParameters {
+    ReceiverParameters::default()
+}
+
+/// Detector prefixes matched on any reference kind — every language's rule
+/// before S-541, and still Rust's.
+fn any_kind(prefixes: &[&str]) -> Vec<DetectorPrefix> {
+    prefixes
+        .iter()
+        .map(|p| DetectorPrefix {
+            prefix: (*p).to_string(),
+            import_only: false,
+        })
+        .collect()
+}
+
 #[test]
 fn framework_footprint_is_false_for_a_plain_graph() {
     let mut store = mem();
@@ -1030,12 +1050,12 @@ fn framework_footprint_is_false_for_a_plain_graph() {
         .unwrap();
     assert!(
         !store
-            .has_framework_footprint(&["axum".to_string(), "actix_web".to_string()])
+            .has_framework_footprint(&any_kind(&["axum", "actix_web"]), &no_receivers())
             .unwrap(),
         "no promoted node and no detector ref ⇒ no footprint (the sync skip case)"
     );
     // No detectors declared at all is also footprint-free with no promoted node.
-    assert!(!store.has_framework_footprint(&[]).unwrap());
+    assert!(!store.has_framework_footprint(&[], &no_receivers()).unwrap());
 }
 
 #[test]
@@ -1044,16 +1064,16 @@ fn framework_footprint_is_true_when_a_promoted_node_exists() {
     // no detector list supplied.
     let store = mem();
     seed(&store, 0, "GET /users", NodeKind::Route);
-    assert!(store.has_framework_footprint(&[]).unwrap());
+    assert!(store.has_framework_footprint(&[], &no_receivers()).unwrap());
 
     let store2 = mem();
     seed(&store2, 0, "AppState", NodeKind::Component);
-    assert!(store2.has_framework_footprint(&[]).unwrap());
+    assert!(store2.has_framework_footprint(&[], &no_receivers()).unwrap());
 }
 
 #[test]
 fn framework_footprint_matches_an_unresolved_detector_ref_by_whole_segment() {
-    let detectors = ["axum".to_string()];
+    let detectors = any_kind(&["axum"]);
 
     // An exact detector target and one extending it by a whole `::` segment are
     // both the candidacy fingerprint (mirroring `matches_detector`).
@@ -1063,7 +1083,7 @@ fn framework_footprint_matches_an_unresolved_detector_ref_by_whole_segment() {
             .write_batch(|w| w.insert_unresolved_ref(&path_ref(None, "local src", target)))
             .unwrap();
         assert!(
-            store.has_framework_footprint(&detectors).unwrap(),
+            store.has_framework_footprint(&detectors, &no_receivers()).unwrap(),
             "an unresolved `{target}` ref is a framework footprint"
         );
     }
@@ -1075,7 +1095,7 @@ fn framework_footprint_matches_an_unresolved_detector_ref_by_whole_segment() {
         .write_batch(|w| w.insert_unresolved_ref(&path_ref(None, "local src", "axumish::route")))
         .unwrap();
     assert!(
-        !store.has_framework_footprint(&detectors).unwrap(),
+        !store.has_framework_footprint(&detectors, &no_receivers()).unwrap(),
         "`axumish::route` shares only a substring prefix — not a detector"
     );
 }
@@ -1094,9 +1114,120 @@ fn framework_footprint_ignores_a_resolved_detector_ref() {
         .unwrap();
     assert!(
         !store
-            .has_framework_footprint(&["axum".to_string()])
+            .has_framework_footprint(&any_kind(&["axum"]), &no_receivers())
             .unwrap(),
         "a resolved ref is outside the unresolved candidacy fingerprint"
+    );
+}
+
+/// An import-only detector (S-541) is matched by an `Imports` row alone, as
+/// the framework pass matches it: a `next()` callback is no Next.js footprint,
+/// while the same `Calls` row still is one under a detector matched on any
+/// kind — the language whose prefix it is decides.
+#[test]
+fn an_import_only_detector_is_a_footprint_only_through_an_imports_row() {
+    let only_imports = [DetectorPrefix {
+        prefix: "next".to_string(),
+        import_only: true,
+    }];
+    let ledger = |kind: EdgeKind, target: &'static str| {
+        let mut store = mem();
+        store
+            .write_batch(|w| {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    kind,
+                    ..path_ref(None, "local src", target)
+                })
+            })
+            .unwrap();
+        store
+    };
+
+    let callback = ledger(EdgeKind::Calls, "next");
+    assert!(
+        !callback.has_framework_footprint(&only_imports, &no_receivers()).unwrap(),
+        "a `next()` call is not an import of `next`"
+    );
+    assert!(
+        callback.has_framework_footprint(&any_kind(&["next"]), &no_receivers()).unwrap(),
+        "a detector matched on any kind still sees the call"
+    );
+    for target in ["next", "next::server"] {
+        assert!(
+            ledger(EdgeKind::Imports, target)
+                .has_framework_footprint(&only_imports, &no_receivers())
+                .unwrap(),
+            "an import of `{target}` is the footprint"
+        );
+    }
+}
+
+/// A parameter binding a language names as a framework receiver (S-541) is a
+/// footprint on its own, in a file of a declaring language; a variable of that
+/// name, a parameter one letter longer, and the same parameter in another
+/// language's file are not.
+#[test]
+fn a_receiver_parameter_binding_is_a_footprint() {
+    let names = ["app".to_string(), "router".to_string()];
+    let receivers = ReceiverParameters {
+        names: names.to_vec(),
+        extensions: vec!["js".to_string(), "mjs".to_string()],
+    };
+    let bound_in = |path: &'static str, name: &'static str, kind: LocalBindingKind| {
+        let mut store = mem();
+        store
+            .conn
+            .execute("INSERT INTO files(id, path) VALUES (1, ?1)", [path])
+            .unwrap();
+        store
+            .write_batch(|w| {
+                w.replace_file_local_bindings(
+                    1,
+                    &[NewLocalBinding {
+                        name,
+                        kind,
+                        line: 2,
+                        column: 28,
+                        scope_start_line: 2,
+                        scope_start_column: 17,
+                        scope_end_line: 5,
+                        scope_end_column: 1,
+                        hoisted: false,
+                    }],
+                )
+            })
+            .unwrap();
+        store
+    };
+    let bound = |name, kind| bound_in("src/meta.js", name, kind);
+
+    let module = bound("app", LocalBindingKind::Parameter);
+    assert!(module.has_framework_footprint(&[], &receivers).unwrap());
+    assert_eq!(
+        module.files_binding_parameters(&names).unwrap(),
+        [(1, "app".to_string())]
+    );
+    assert!(
+        !bound_in("app/factory.py", "app", LocalBindingKind::Parameter)
+            .has_framework_footprint(&[], &receivers)
+            .unwrap(),
+        "a Python `def init_app(app)` is no JavaScript router module"
+    );
+    assert!(
+        !module.has_framework_footprint(&[], &no_receivers()).unwrap(),
+        "no language names a receiver: no footprint"
+    );
+    assert!(
+        !bound("app", LocalBindingKind::Variable)
+            .has_framework_footprint(&[], &receivers)
+            .unwrap(),
+        "a variable named `app` is not a received app"
+    );
+    assert!(
+        !bound("apps", LocalBindingKind::Parameter)
+            .has_framework_footprint(&[], &receivers)
+            .unwrap(),
+        "`apps` is not `app`"
     );
 }
 
@@ -1143,11 +1274,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v40 forward-only).
+    // data (the runner applies v2..v44 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        40,
+        44,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -1523,6 +1654,69 @@ fn insert_edge_if_live_skips_a_deleted_endpoint_and_keeps_the_transaction() {
     assert_eq!(live, Some(true), "the live edge is created in the same transaction");
     assert_eq!(duplicate, Some(false), "the duplicate stays a quiet no-op");
     assert_eq!(store.all_edges().unwrap().len(), 1);
+}
+
+#[test]
+fn a_dispatch_marker_yields_to_an_unmarked_bind_in_either_order() {
+    // S-712 (CR-226 BR-76): a direct call to an implementation is a
+    // dependency, so an unmarked write of the edge clears its dispatch marker,
+    // whichever is written first; of two markers the smaller stays, and any
+    // other payload is the first write's. No upgrade is an insertion.
+    let mut store = mem();
+    let caller = seed(&store, 1, "caller", NodeKind::Function);
+    let (first, second, third) = (
+        seed(&store, 2, "first", NodeKind::Method),
+        seed(&store, 3, "second", NodeKind::Method),
+        seed(&store, 4, "third", NodeKind::Method),
+    );
+    let (marked_a, marked_b) = ("dispatch:local a", "dispatch:local b");
+    let writes = [
+        // Marked, then direct.
+        (caller, first, EdgeKind::Calls, Some(marked_a)),
+        (caller, first, EdgeKind::Calls, None),
+        // Direct, then marked.
+        (caller, second, EdgeKind::Calls, None),
+        (caller, second, EdgeKind::Calls, Some(marked_a)),
+        // Two markers, the larger first.
+        (caller, third, EdgeKind::Calls, Some(marked_b)),
+        (caller, third, EdgeKind::Calls, Some(marked_a)),
+        (caller, third, EdgeKind::Calls, Some(marked_b)),
+        // A relation payload is never touched, by a marker or by `None`.
+        (first, second, EdgeKind::ArtifactRef, Some("tf-module-call")),
+        (first, second, EdgeKind::ArtifactRef, None),
+        (first, second, EdgeKind::ArtifactRef, Some(marked_a)),
+    ];
+    let upgrades = store
+        .write_batch(|w| {
+            writes
+                .iter()
+                .map(|&(source, target, kind, payload)| w.insert_edge_with_payload_if_live(source, target, kind, payload))
+                .collect::<Result<Vec<_>>>()
+        })
+        .unwrap();
+    let created: Vec<bool> = upgrades.iter().map(|o| o.expect("every endpoint is live")).collect();
+    assert_eq!(created, [true, false, true, false, true, false, false, true, false, false]);
+    let payload = |source: NodeId, target: NodeId, kind: EdgeKind| -> Option<String> {
+        store
+            .conn
+            .query_row(
+                "SELECT payload FROM edges WHERE source = ?1 AND target = ?2 AND kind = ?3",
+                rusqlite::params![source.get(), target.get(), kind.as_i32()],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    assert_eq!(payload(caller, first, EdgeKind::Calls), None, "marked, then direct");
+    assert_eq!(payload(caller, second, EdgeKind::Calls), None, "direct, then marked");
+    assert_eq!(payload(caller, third, EdgeKind::Calls).as_deref(), Some(marked_a), "the smaller marker");
+    assert_eq!(payload(first, second, EdgeKind::ArtifactRef).as_deref(), Some("tf-module-call"));
+    assert_eq!(
+        store.dispatch_links().unwrap(),
+        [(caller, third, "local a".to_string())],
+        "the one marked edge, read back by its trait method"
+    );
+    let via = store.dispatched_via(&[(caller, first), (caller, third), (third, caller)]).unwrap();
+    assert_eq!(via.into_iter().collect::<Vec<_>>(), [((caller, third), "local a".to_string())]);
 }
 
 #[test]
@@ -2895,7 +3089,7 @@ fn structural_check_stays_within_the_point_query_budget() {
     let elapsed = start.elapsed();
     assert!(report.is_ok(), "the large healthy fixture is sound");
     assert!(
-        elapsed < std::time::Duration::from_millis(250),
+        elapsed < crate::perf::scaled(std::time::Duration::from_millis(250)),
         "structural_check must stay within the point-query budget (NFR-PE-01), took {elapsed:?}"
     );
 }
@@ -3342,6 +3536,7 @@ fn offender(name: &str, file: &str, line: Option<i64>, detail: &str) -> Offender
         measure: Some("nesting_depth"),
         value: Some(6),
         threshold: Some(4),
+        partial_parse: false,
     }
 }
 
@@ -3611,6 +3806,7 @@ fn populated_ranking() -> WhereToStart {
                 points: 41,
                 detail: "LCOM4 23 · 25 methods · span 600".into(),
                 outliers: vec!["lcom4", "span"],
+                partial_parse: false,
             },
             FixUnit {
                 kind: FixUnitKind::CloneGroup,
@@ -3622,6 +3818,7 @@ fn populated_ranking() -> WhereToStart {
                 points: 2,
                 detail: "clone group #3 · 2 members × 30 lines".into(),
                 outliers: Vec::new(),
+                partial_parse: false,
             },
         ],
         outliers: vec![
@@ -3973,4 +4170,64 @@ fn holds_symbols_reads_whether_any_symbol_row_exists() {
     assert!(!store.holds_symbols().unwrap(), "a fresh store holds none");
     store.upsert_symbol(&LogosSymbol::parse("local 1").unwrap()).unwrap();
     assert!(store.holds_symbols().unwrap(), "an orphan symbol row counts too");
+}
+
+/// The population read groups the unbound invocation call sites by
+/// declaration and target with their row count (S-637): two rows one
+/// declaration records for one target (a path and a method form) are one group
+/// of two, a bound row and a provider-side row are none, and a non-invocation
+/// row is none.
+#[test]
+fn unbound_invocation_call_sites_group_by_declaration_and_target_with_their_rows() {
+    let store = mem();
+    let row = |symbol: &str, target: &str, form: RefForm, kind: EdgeKind, payload: Option<&str>, resolved: bool| {
+        store
+            .conn
+            .execute(
+                "INSERT INTO unresolved_refs (source_symbol, target, form, kind, payload, resolved) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![symbol, target, form.as_i32(), kind.as_i32(), payload, resolved],
+            )
+            .expect("the row inserts");
+    };
+    let binding = EdgeKind::ArtifactBinding;
+    row("local fetch", "GET /a", RefForm::Path, binding, Some("http-client-call"), false);
+    row("local fetch", "GET /a", RefForm::Method, binding, Some("http-client-call"), false);
+    row("local fetch", "GET /b", RefForm::Path, binding, Some("http-client-call"), true);
+    row("local listen", "orders", RefForm::Path, EdgeKind::ArtifactRef, Some("broker-subscribe"), false);
+    row("local fetch", "GET /a", RefForm::Path, EdgeKind::Calls, None, false);
+
+    let population = store.reference_population().expect("the population reads");
+    assert_eq!(
+        population.unbound_invocations,
+        [UnboundInvocation { source_symbol: "local fetch".to_string(), target: "GET /a".to_string(), rows: 2 }]
+    );
+    assert_eq!((population.code_references, population.code_resolved), (5, 1));
+}
+
+/// A call the binder marked as made through a local value (S-594) is a code
+/// reference but no unbound target the name test judges (S-635): the same
+/// shape is an internal candidate whether or not the local's name is declared
+/// somewhere, never provably external by a name collision's absence.
+#[test]
+fn a_local_value_call_is_counted_but_never_judged_by_its_name() {
+    let store = mem();
+    let row = |target: &str, alias: Option<&str>| {
+        store
+            .conn
+            .execute(
+                "INSERT INTO unresolved_refs (source_symbol, target, form, kind, alias, resolved) \
+                 VALUES ('local run', ?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![target, RefForm::Path.as_i32(), EdgeKind::Calls.as_i32(), alias],
+            )
+            .expect("the row inserts");
+    };
+    row("callback", Some(crate::resolve::LOCAL_VALUE_ALIAS));
+    row("helper", Some(crate::resolve::LOCAL_VALUE_ALIAS));
+    row("missing", None);
+
+    let population = store.reference_population().expect("the population reads");
+    assert_eq!((population.code_references, population.code_resolved), (3, 0), "every row is a reference");
+    let judged: Vec<&str> = population.unbound_code.iter().map(|group| group.target.as_str()).collect();
+    assert_eq!(judged, ["missing"], "only the unmarked row meets the name test");
 }

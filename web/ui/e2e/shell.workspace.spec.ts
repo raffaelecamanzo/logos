@@ -31,14 +31,14 @@ test("the workspace sidebar renders both sections in the new order", async ({ pa
       .evaluateAll((links) => links.map((a) => a.textContent?.trim()));
   await expect(nav.getByRole("region", { name: "Workspace" })).toBeVisible();
   const workspace = await labels("Workspace");
-  expect(workspace.slice(0, 4)).toEqual(["Dashboard", "Workspace", "Health", "Security"]);
+  expect(workspace.slice(0, 4)).toEqual(["Dashboard", "Workspace", "Quality", "Security"]);
   expect(workspace.slice(-2)).toEqual(["Statistics", "Config"]);
   // Coverage, if a view has been registered for it, sits between Security and Statistics.
   expect(workspace.filter((l) => l === "Coverage").length).toBeLessThanOrEqual(1);
   if (workspace.includes("Coverage")) expect(workspace.indexOf("Coverage")).toBe(4);
   expect(await labels("Service")).toEqual([
     "Dashboard",
-    "Health",
+    "Quality",
     "Security",
     "Coverage",
     "Graph",

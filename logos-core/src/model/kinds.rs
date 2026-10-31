@@ -928,7 +928,9 @@ impl TryFrom<i32> for ReceiverShape {
 /// value, by reference, by mutable reference, or typed — or none, for an
 /// associated function such as `fn new() -> Self`. It is the input rustc's
 /// method probe orders candidates by; [`ReceiverMode::None`] is exactly a
-/// callable recorded `takes_self = false`.
+/// callable recorded `takes_self = false` — which also holds for a Ruby
+/// callable of the class or module object (S-565: `def self.x`, a
+/// `class << self` method, a `module_function`).
 ///
 /// Like [`ReceiverShape`], the discriminants are a frozen part of the on-disk
 /// contract: the `nodes.receiver_mode` column is guarded by
@@ -939,7 +941,8 @@ impl TryFrom<i32> for ReceiverShape {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum ReceiverMode {
-    /// No receiver: an associated function (`fn new() -> Self`).
+    /// No receiver: an associated function (`fn new() -> Self`), or a Ruby
+    /// callable of the class or module object (S-565).
     #[serde(rename = "none")]
     None = 0,
     /// By value: `self`, `mut self`.
@@ -993,10 +996,81 @@ impl TryFrom<i32> for ReceiverMode {
     /// # Errors
     /// Returns [`UnknownKind`] if `value` is not a known mode discriminant.
     fn try_from(value: i32) -> Result<Self, Self::Error> {
-        ReceiverMode::ALL
-            .into_iter()
-            .find(|m| m.as_i32() == value)
-            .ok_or(UnknownKind(value))
+        by_discriminant(&ReceiverMode::ALL, value, ReceiverMode::as_i32)
+    }
+}
+
+/// The member of `all` whose stored discriminant (`as_i32`) is `value` — the
+/// one lookup every list-declared kind recovers itself by ([`ReceiverMode`],
+/// [`LocalBindingKind`]).
+///
+/// # Errors
+/// Returns [`UnknownKind`] if no member's discriminant is `value`.
+fn by_discriminant<T: Copy>(all: &[T], value: i32, as_i32: fn(T) -> i32) -> Result<T, UnknownKind> {
+    all.iter().copied().find(|&k| as_i32(k) == value).ok_or(UnknownKind(value))
+}
+
+/// What kind of name a callable's body binds locally (S-593, [FR-EX-33]): a
+/// parameter, a local variable, or a local import — the closed lexicon a
+/// local-binding fact records.
+///
+/// Like [`ReceiverMode`], the discriminants are a frozen part of the on-disk
+/// contract: the `local_bindings.kind` column is guarded by
+/// `CHECK (kind IN (1,2,3))` (migration 41).
+///
+/// [FR-EX-33]: ../../../../docs/specs/requirements/FR-EX-33.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(i32)]
+pub enum LocalBindingKind {
+    /// A parameter: a function's, a method's, a closure's or a lambda's, and a
+    /// PHP closure's `use` capture.
+    #[serde(rename = "parameter")]
+    Parameter = 1,
+    /// A local variable: a `let` / `var` / `const` / `:=` declaration, an
+    /// assignment target that declares, a loop, `catch`, `with` or pattern
+    /// binding, and a local function or class declaration.
+    #[serde(rename = "variable")]
+    Variable = 2,
+    /// A local import: an `import` / `from … import` / `use` / `using` inside
+    /// a callable body.
+    #[serde(rename = "import")]
+    Import = 3,
+}
+
+impl LocalBindingKind {
+    /// Every kind, in declaration (discriminant) order — the list the
+    /// migration-41 `CHECK (kind IN (…))` clause must equal.
+    pub const ALL: [LocalBindingKind; 3] = [
+        LocalBindingKind::Parameter,
+        LocalBindingKind::Variable,
+        LocalBindingKind::Import,
+    ];
+
+    /// The stable integer discriminant written to `local_bindings.kind`.
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// The lexicon token (matches the `serde` representation), and the
+    /// capture-name suffix a plugin's `@local.<kind>` capture spells.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LocalBindingKind::Parameter => "parameter",
+            LocalBindingKind::Variable => "variable",
+            LocalBindingKind::Import => "import",
+        }
+    }
+}
+
+impl TryFrom<i32> for LocalBindingKind {
+    type Error = UnknownKind;
+
+    /// Recover a [`LocalBindingKind`] from its stored discriminant.
+    ///
+    /// # Errors
+    /// Returns [`UnknownKind`] if `value` is not a known kind discriminant.
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        by_discriminant(&LocalBindingKind::ALL, value, LocalBindingKind::as_i32)
     }
 }
 
@@ -1065,6 +1139,18 @@ mod tests {
         }
         assert_eq!(ReceiverMode::try_from(-1), Err(UnknownKind(-1)));
         assert_eq!(ReceiverMode::try_from(5), Err(UnknownKind(5)));
+    }
+
+    #[test]
+    fn local_binding_kind_discriminants_are_frozen_and_roundtrip() {
+        for (idx, kind) in LocalBindingKind::ALL.iter().enumerate() {
+            assert_eq!(kind.as_i32(), idx as i32 + 1, "{kind:?} discriminant drifted");
+            assert_eq!(LocalBindingKind::try_from(kind.as_i32()), Ok(*kind));
+            let json = serde_json::to_string(kind).unwrap();
+            assert_eq!(json, format!("\"{}\"", kind.as_str()));
+        }
+        assert_eq!(LocalBindingKind::try_from(0), Err(UnknownKind(0)));
+        assert_eq!(LocalBindingKind::try_from(4), Err(UnknownKind(4)));
     }
 
     #[test]

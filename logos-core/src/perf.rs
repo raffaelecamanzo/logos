@@ -15,8 +15,9 @@
 //! advisory without re-reading the working tree.
 //!
 //! The budgets themselves are asserted as release-gating fitness functions in
-//! `logos-core/tests/perf_envelope.rs`; this module owns only the single number
-//! that defines the envelope and the advisory both surfaces share.
+//! `logos-core/tests/perf_envelope.rs`; this module owns the single number
+//! that defines the envelope, the advisory both surfaces share, and the one
+//! wall-clock tolerance every timing assertion scales through ([`scaled`]).
 //!
 //! [NFR-PE-01]: ../../../docs/specs/requirements/NFR-PE-01.md
 //! [NFR-PE-02]: ../../../docs/specs/requirements/NFR-PE-02.md
@@ -90,9 +91,132 @@ pub(crate) fn envelope_advisory(indexed_loc: u64) -> Option<String> {
     })
 }
 
+/// The environment variable that widens every wall-clock band ([`tolerance`]).
+pub const TOLERANCE_ENV: &str = "LOGOS_PERF_TOLERANCE";
+
+/// The multiplier a band carries when [`TOLERANCE_ENV`] is unset or unusable:
+/// 1.15 since 2026-09-21 (the Sprint 74 human review measured a loaded host
+/// breaching a raw budget with no code change).
+pub const DEFAULT_TOLERANCE: f64 = 1.15;
+
+/// The largest multiplier [`TOLERANCE_ENV`] may carry. A band 1000× its budget
+/// asserts nothing, and a still larger one overflows [`Duration::mul_f64`].
+pub const MAX_TOLERANCE: f64 = 1000.0;
+
+/// The one reading of [`TOLERANCE_ENV`] — a pure function of the raw value, so
+/// the rule is testable without touching the process environment.
+///
+/// A value that is not a finite number in `1.0..=`[`MAX_TOLERANCE`] is ignored: a
+/// budget is never tightened by accident, and an infinite or enormous
+/// multiplier would panic in [`Duration::mul_f64`].
+pub(crate) fn tolerance_from(raw: Option<&str>) -> f64 {
+    raw.and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| (1.0..=MAX_TOLERANCE).contains(v))
+        .unwrap_or(DEFAULT_TOLERANCE)
+}
+
+/// The wall-clock tolerance multiplier: [`TOLERANCE_ENV`] when it holds a finite
+/// number in `1.0..=`[`MAX_TOLERANCE`], else [`DEFAULT_TOLERANCE`]. Set `LOGOS_PERF_TOLERANCE=1.0` to
+/// measure against the raw budgets.
+///
+/// This is the only source that reads the variable. Every test that compares an
+/// elapsed time with a duration scales the duration through [`scaled`] (or reads
+/// this), and `scripts/check-timing-assertions.py` fails the gate on one that
+/// does not. It lives in the library, not a test file, so the unit tests of
+/// `logos-core` and the integration tests of every package reach it as
+/// `logos_core::perf`; production code never calls it.
+pub fn tolerance() -> f64 {
+    tolerance_from(std::env::var(TOLERANCE_ENV).ok().as_deref())
+}
+
+/// `budget` widened by [`tolerance`] — the form an elapsed-time bound takes:
+/// `assert!(elapsed < perf::scaled(Duration::from_secs(5)))`.
+pub fn scaled(budget: std::time::Duration) -> std::time::Duration {
+    budget.mul_f64(tolerance())
+}
+
+/// [`scaled`] for a budget stated in milliseconds, the unit the NFR budgets use.
+pub fn scaled_ms(budget_ms: u64) -> std::time::Duration {
+    scaled(std::time::Duration::from_millis(budget_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_unset_or_unusable_tolerance_is_the_default() {
+        let ignored = [
+            None,
+            Some(""),
+            Some("fast"),
+            Some("0.5"),
+            Some("0"),
+            Some("-2"),
+            Some("NaN"),
+            Some("inf"),
+            Some("1e300"),
+            Some("1000.5"),
+        ];
+        for raw in ignored {
+            assert_eq!(tolerance_from(raw), DEFAULT_TOLERANCE, "{raw:?} is ignored");
+        }
+    }
+
+    #[test]
+    fn a_tolerance_of_one_or_more_is_read() {
+        assert_eq!(
+            tolerance_from(Some("1.0")),
+            1.0,
+            "1.0 measures the raw budget"
+        );
+        assert_eq!(tolerance_from(Some("3")), 3.0);
+        assert_eq!(
+            tolerance_from(Some(" 2.5\n")),
+            2.5,
+            "whitespace is not part of the number"
+        );
+    }
+
+    #[test]
+    fn the_largest_tolerance_is_read_and_scales_without_panicking() {
+        assert_eq!(tolerance_from(Some("1000")), MAX_TOLERANCE);
+        let day = std::time::Duration::from_secs(86_400);
+        assert_eq!(day.mul_f64(tolerance_from(Some("1000"))).as_secs(), 86_400_000);
+    }
+
+    #[test]
+    fn the_environment_is_what_tolerance_and_scaled_read() {
+        // `tolerance()` is the pure reading applied to the live variable (CI sets
+        // it to 3, a developer may leave it unset), so whatever this process
+        // holds, the three entry points agree with it and never tighten a budget.
+        let raw = std::env::var(TOLERANCE_ENV).ok();
+        let want = tolerance_from(raw.as_deref());
+        assert_eq!(tolerance(), want);
+        let budget = std::time::Duration::from_millis(200);
+        assert_eq!(scaled(budget), budget.mul_f64(want));
+        assert_eq!(scaled_ms(200), scaled(budget));
+        assert!(scaled_ms(200) >= budget);
+        if raw.is_none() {
+            assert_eq!(scaled_ms(200), std::time::Duration::from_millis(230));
+        }
+    }
+
+    #[test]
+    fn a_budget_scales_by_the_tolerance_and_the_default_band_is_230_ms() {
+        let band = std::time::Duration::from_millis(200);
+        // `scaled` reads the process environment; this asserts the arithmetic
+        // it applies, through the same pure reading it uses.
+        assert_eq!(
+            band.mul_f64(tolerance_from(None)),
+            std::time::Duration::from_millis(230)
+        );
+        assert_eq!(
+            band.mul_f64(tolerance_from(Some("3"))),
+            std::time::Duration::from_millis(600)
+        );
+        assert!(scaled(band) >= band, "a budget is never tightened");
+    }
 
     #[test]
     fn inside_the_envelope_is_silent() {

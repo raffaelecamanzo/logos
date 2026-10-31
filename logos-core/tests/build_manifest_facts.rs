@@ -150,14 +150,24 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// where-to-start tables and their flag column, of migration 37 (S-676), the
 /// offender value columns, the uncapped offender table and their flag column,
 /// of migration 38 (S-523), the graph-dimension flags and cross-module
-/// count, of migration 39 (S-755), the baseline's re-bless record, and of
+/// count, of migration 39 (S-755), the baseline's re-bless record, of
 /// migration 40 (S-761), the where-to-start rows' identity (its rebuilt tables
-/// go with migration 36's); the next [`Engine::start`] re-applies all
-/// nineteen, as it does on a real upgrade.
+/// go with migration 36's), of migration 41 (S-593), the local-binding
+/// table, of migration 42 (S-602), the `nodes.type_arity` column, of
+/// migration 43 (S-712), the dispatch re-bind, and of migration 44 (S-571),
+/// the `files.parse_damaged` column and the snapshot entries' `partial_parse`
+/// flags; the next [`Engine::start`] re-applies all twenty-three, as it does
+/// on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DELETE FROM schema_versions WHERE version = 40; \
+        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
+         DELETE FROM schema_versions WHERE version = 43; \
+         ALTER TABLE nodes DROP COLUMN type_arity; DELETE FROM schema_versions WHERE version = 42; \
+         DROP TABLE local_bindings; DELETE FROM schema_versions WHERE version = 41; \
+         DELETE FROM schema_versions WHERE version = 40; \
          ALTER TABLE baseline DROP COLUMN attribution; ALTER TABLE baseline DROP COLUMN reason; \
          DELETE FROM schema_versions WHERE version = 39; \
          ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \

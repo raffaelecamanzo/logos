@@ -102,6 +102,14 @@ pub struct FrameworkStats {
     /// `path-not-composed` reason for it (S-378). Zero on every codebase whose
     /// prefixes and paths are written literals or fold.
     pub routes_not_composed: u64,
+    /// Route handlers written as a method value (`s.PullHandler`, Go) that the
+    /// pass left **unlinked** because the receiver they are called on is not
+    /// the registering method's own, so its type is not proven (S-526,
+    /// NFR-RA-05). The route node is still promoted; only its `RoutesTo` edge is
+    /// withheld. A handler written through an imported package (`http.NotFound`)
+    /// is not counted — its receiver is a package, not a value. Zero on every
+    /// codebase whose method-value handlers are the registering method's own.
+    pub handlers_receiver_unproven: u64,
     /// Wall-clock cost of the whole pass for this run (OQ-07 evidence).
     pub duration_ms: u64,
 }

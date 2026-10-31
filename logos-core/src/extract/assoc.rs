@@ -1,7 +1,8 @@
 //! The declaration facts one **associated-item lookup** reads (S-606, [CR-202]
 //! F1 and F3, [FR-EX-34]): every impl block's header, each callable's receiver
-//! mode, each enum's variant names, and which declarations are required
-//! signatures.
+//! mode, each enum's variant names, which declarations are required
+//! signatures, which types are aliases (S-525), and each type's type-parameter
+//! count (S-602).
 //!
 //! All of them are read off the parse tree while it is in hand, from captures a
 //! plugin's own `symbols` query declares — no language is named here
@@ -26,13 +27,26 @@
 //!   [`ReceiverMode`] token (`value`, `ref`, `mut`, `typed`). A parameter
 //!   captured as several modes takes the strongest — `typed` > `mut` > `ref` >
 //!   `value` — so a query may capture every receiver `value` and refine it.
+//!   `none` marks a callable with no instance receiver at all, called on its
+//!   class or module object (S-565: Ruby's `def self.x`, a `class << self`
+//!   method, a `module_function`); it records the callable as not taking
+//!   `self`.
 //! - `@item.signature` — a declaration that is a required signature of its
 //!   container: a member its implementors supply, with no body of its own (a
-//!   Rust trait's `fn m(&self);`).
+//!   Rust trait's `fn m(&self);`, a Go interface's method spec). The persisted
+//!   marker (`NodeFact::signature`) is also set, without this capture, on a
+//!   C-family prototype paired with a definition of its file (S-577, `definition`).
 //! - `@item.uninherited` — an interface member that a type implementing the
 //!   interface does not inherit (S-609, [FR-RS-48]): a Java `static` or
 //!   `private` interface method, a Kotlin `private` interface `fun` or an
 //!   interface's `companion object` `fun`.
+//! - `@item.alias` — a declaration that is an alias of another type rather than
+//!   a new one (S-525, [FR-EX-15]): a Go `type A = B`, which `type L int8` is
+//!   not.
+//! - `@item.type_parameters` — a type declaration's type-parameter list (S-602,
+//!   [CR-199]): its items, comments aside, are the declaration's generic arity, so C#'s
+//!   `Result<T>` records 1. A type whose plugin declares `type_arity` and whose
+//!   list no capture names records 0 (`NodeFact::type_arity`).
 //!
 //! # Type paths
 //!
@@ -45,6 +59,8 @@
 //! [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
 //! [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 //! [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
+//! [FR-EX-15]: ../../../docs/specs/requirements/FR-EX-15.md
+//! [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -53,7 +69,7 @@ use tree_sitter::Node;
 use crate::model::ReceiverMode;
 
 use super::arity::owning_decl;
-use super::Decl;
+use super::{list_arity, Decl};
 
 /// The capture-name prefix of the vocabulary.
 const GROUP: &str = "item.";
@@ -92,6 +108,11 @@ pub(super) struct DeclItemFacts {
     /// Whether the declaration is an interface member its implementors do not
     /// inherit.
     pub(super) uninherited: bool,
+    /// Whether the declaration is an alias of another type.
+    pub(super) alias: bool,
+    /// The items of the declaration's captured type-parameter list, comments
+    /// aside; `None` when no list is captured.
+    pub(super) type_parameters: Option<u32>,
 }
 
 /// The companions one impl block's matches captured.
@@ -114,6 +135,8 @@ pub(super) struct AssocCaptures<'tree> {
     receivers: Vec<(Node<'tree>, ReceiverMode)>,
     signatures: HashSet<usize>,
     uninherited: HashSet<usize>,
+    aliases: HashSet<usize>,
+    type_parameter_lists: Vec<Node<'tree>>,
 }
 
 impl<'tree> AssocCaptures<'tree> {
@@ -150,6 +173,10 @@ impl<'tree> AssocCaptures<'tree> {
             "uninherited" => {
                 self.uninherited.insert(node.id());
             }
+            "alias" => {
+                self.aliases.insert(node.id());
+            }
+            "type_parameters" => self.type_parameter_lists.push(node),
             _ => {
                 let mode = name
                     .strip_prefix("receiver.")
@@ -169,6 +196,7 @@ impl<'tree> AssocCaptures<'tree> {
         for (i, decl) in decls.iter().enumerate() {
             out[i].signature = self.signatures.contains(&decl.node.id());
             out[i].uninherited = self.uninherited.contains(&decl.node.id());
+            out[i].alias = self.aliases.contains(&decl.node.id());
         }
 
         // Each declaration's receiver: the strongest mode any capture gives it.
@@ -178,6 +206,13 @@ impl<'tree> AssocCaptures<'tree> {
                 if slot.is_none_or(|m| m.as_i32() < mode.as_i32()) {
                     *slot = Some(mode);
                 }
+            }
+        }
+
+        // Each type's arity: the parameters of the list it owns.
+        for &list in &self.type_parameter_lists {
+            if let Some(i) = owning_decl(list, &decl_at) {
+                out[i].type_parameters = Some(list_arity(list));
             }
         }
 

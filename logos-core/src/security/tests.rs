@@ -274,7 +274,7 @@ fn expected_runs(w: &World) -> Vec<(&'static str, Vec<Vec<String>>)> {
             "checkov",
             vec![strings(&[
                 "--output", "sarif", "--output-file-path", &dir("checkov"), "--soft-fail", "--quiet",
-                "--skip-path", ".logos", "--directory", ".",
+                "--skip-framework", "secrets", "--skip-path", ".logos", "--directory", ".",
             ])],
         ),
         (
@@ -893,6 +893,7 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
             targets: &Targets::Root,
             root: None,
             nvd_key_file: None,
+            gitleaks_runs: false,
         };
         let full = s.render(s.run, &fill);
         let Some(slot) = s.path_slot else {
@@ -903,13 +904,15 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
         let runs: Vec<Vec<OsString>> =
             slot.runs(&scope).into_iter().map(|run| s.render(s.run, &Fill { scope: Some(run), ..fill })).collect();
         // Every placeholder before the path position renders one element but
-        // `Extra` (one per flag), `Ignored` (none here: nothing is ignored) and
-        // `Unignored`, whose full-scan targets are the full scan's path elements
-        // (`.` here: nothing is ignored) and which a scoped run leaves out.
+        // `Extra` (one per flag), `Ignored` (none here: nothing is ignored),
+        // `SkipSecrets` (none here: Gitleaks does not run) and `Unignored`,
+        // whose full-scan targets are the full scan's path elements (`.` here:
+        // nothing is ignored) and which a scoped run leaves out.
         let before = &s.run[..s.run.iter().position(|a| *a == super::registry::Arg::Paths).unwrap()];
         let ignored = before.iter().filter(|a| matches!(a, super::registry::Arg::Ignored(_))).count();
         let unignored = before.iter().filter(|a| **a == super::registry::Arg::Unignored).count();
-        let at = before.len() + extra.len() - 1 - ignored - unignored;
+        let skipped = before.iter().filter(|a| **a == super::registry::Arg::SkipSecrets).count();
+        let at = before.len() + extra.len() - 1 - ignored - skipped - unignored;
         let full_paths = if unignored > 0 { strings(&["."]) } else { strings(slot.full) };
         let (_, want_runs) = expected.iter().find(|(n, _)| *n == s.name).unwrap();
         assert_eq!(runs.len(), want_runs.len(), "{}: one run per slot group", s.name);
@@ -1319,7 +1322,11 @@ fn a_deadline_and_an_exit_end_the_whole_process_group() {
     let start = Instant::now();
     let f = run(&hang, &[], &launch(Some(Duration::from_millis(300)))).unwrap();
     assert_eq!(f.status, None, "killed at the deadline");
-    assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < crate::perf::scaled(Duration::from_secs(10)),
+        "{:?}",
+        start.elapsed()
+    );
 
     // A process the scanner left running is killed with it: its marker, due
     // two seconds later, never appears.
@@ -1332,7 +1339,11 @@ fn a_deadline_and_an_exit_end_the_whole_process_group() {
     let f = run(&leave, &[], &launch(None)).unwrap();
     assert!(f.status.is_some_and(|s| s.success()));
     assert_eq!(f.stdout, "done\n");
-    assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < crate::perf::scaled(Duration::from_secs(10)),
+        "{:?}",
+        start.elapsed()
+    );
     std::thread::sleep(Duration::from_secs(3));
     assert!(!marker.exists(), "the leftover process outlived the scanner");
 
@@ -1391,6 +1402,130 @@ fn a_scoped_directory_output_scanner_runs_per_path_and_merges_into_one_report() 
     assert!(!Path::new(&w.out("checkov.sarif")).exists(), "no whole-project report was written");
 }
 
+/// Each Checkov run's argv from `--soft-fail` on: where the secrets skip sits,
+/// and everything the template fixes after it.
+fn checkov_tails(w: &World) -> Vec<Vec<String>> {
+    w.runs("checkov")
+        .iter()
+        .map(|run| {
+            let at = run.iter().position(|a| a == "--soft-fail").expect("a Checkov run carries --soft-fail");
+            run[at..].to_vec()
+        })
+        .collect()
+}
+
+/// S-813: with Gitleaks enabled and installed, Checkov is told to skip its
+/// `secrets` framework — whichever scanners the call selects — and with
+/// Gitleaks absent or disabled its argv is the template's alone.
+#[test]
+fn checkov_skips_its_secrets_framework_only_while_gitleaks_runs() {
+    let skip = strings(&["--soft-fail", "--quiet", "--skip-framework", "secrets", "--skip-path", ".logos", "--directory", "."]);
+    let plain = strings(&["--soft-fail", "--quiet", "--skip-path", ".logos", "--directory", "."]);
+    let checkov_alone = Selection::Only(strings(&["checkov"]));
+
+    // Installed and enabled: the flag, with Checkov selected on its own.
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    w.stub("gitleaks", 0);
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), std::slice::from_ref(&skip));
+    assert!(w.runs("gitleaks").is_empty(), "Gitleaks was only consulted, never run");
+
+    // Not installed: unchanged.
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), std::slice::from_ref(&plain), "gitleaks not installed");
+
+    // Installed but disabled by the repository's config (the only place a
+    // scanner is switched off): unchanged.
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    w.stub("gitleaks", 0);
+    w.repo_config("[security_scan.gitleaks]\nenabled = false\n");
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), std::slice::from_ref(&plain), "gitleaks disabled");
+
+    // A user-level `path` is the only copy considered, as the run itself reads
+    // it: an executable one off the search path counts, and a missing one does
+    // not even with a copy on the search path.
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    let custom = w.user.join("tools").join("gitleaks-pinned");
+    fs::create_dir_all(custom.parent().unwrap()).unwrap();
+    w.stub_at(&custom, "gitleaks", "gitleaks-pinned", 0, "");
+    w.user_config(&format!("[security_scan.gitleaks]\npath = \"{}\"\n", custom.display()));
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), [skip], "an executable gitleaks path off the search path");
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    w.stub("gitleaks", 0);
+    w.user_config(&format!("[security_scan.gitleaks]\npath = \"{}\"\n", w.user.join("missing").display()));
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), std::slice::from_ref(&plain), "a gitleaks path that is no executable");
+
+    // Near misses: another scanner installed leaves the argv alone.
+    let w = World::new(PROJECT);
+    w.stub("checkov", 0);
+    w.stub("trivy", 0);
+    w.scan(&checkov_alone);
+    assert_eq!(checkov_tails(&w), [plain], "only trivy installed");
+}
+
+/// S-813: a scoped run ([FR-SC-17]) follows the same rule — each per-path
+/// Checkov run carries the flag before its `--skip-path`, and none does
+/// without Gitleaks.
+///
+/// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
+#[test]
+fn a_scoped_checkov_run_leaves_secrets_to_gitleaks_by_the_same_rule() {
+    for (gitleaks, flag) in [(true, &["--skip-framework", "secrets"][..]), (false, &[][..])] {
+        let w = World::new(PROJECT);
+        w.stub("checkov", 0);
+        if gitleaks {
+            w.stub("gitleaks", 0);
+        }
+        let scope = super::resolve_scope(&w.root, &strings(&["infra/main.tf", "app"])).unwrap();
+        w.open().unwrap().scan_in(&Selection::Only(strings(&["checkov"])), Some(&scope)).unwrap();
+        let tails = checkov_tails(&w);
+        let with = |kind: &[&str]| {
+            let mut argv = strings(&["--soft-fail", "--quiet"]);
+            argv.extend(strings(flag));
+            argv.extend(strings(&["--skip-path", ".logos"]));
+            argv.extend(strings(kind));
+            argv
+        };
+        assert_eq!(tails, [with(&["--file", "infra/main.tf"]), with(&["--directory", "app"])], "gitleaks installed: {gitleaks}");
+    }
+}
+
+/// S-813: the flag is Checkov's alone — rendering every template with
+/// Gitleaks running adds `--skip-framework` to no other scanner.
+#[test]
+fn only_checkovs_template_carries_the_secrets_skip() {
+    let fill = Fill {
+        out: Path::new("/out"),
+        extra: &[],
+        scope: None,
+        language: "",
+        database: Path::new(""),
+        pinned_config: Path::new("/pinned"),
+        ignored: &[],
+        targets: &Targets::Root,
+        root: None,
+        nvd_key_file: None,
+        gitleaks_runs: true,
+    };
+    for s in &REGISTRY {
+        let carries = s.render(s.run, &fill).iter().any(|a| a == "--skip-framework");
+        assert_eq!(carries, s.name == "checkov", "{}", s.name);
+    }
+    let off = Fill { gitleaks_runs: false, ..fill };
+    for s in &REGISTRY {
+        assert!(s.render(s.run, &off).iter().all(|a| a != "--skip-framework"), "{}", s.name);
+    }
+}
+
 /// The `[security]` gate reads a scanner fresh exactly when `status` does: a
 /// stale state of any kind — a scoped-only snapshot included — is stale with
 /// its reason, never fresh ([FR-SC-10], [FR-SC-17]).
@@ -1409,8 +1544,11 @@ fn the_gate_reads_every_stale_state_stale_with_its_reason() {
         suppressed: 0,
         not_fresh: 0,
         test: 2,
+        dev: 6,
+        needs_review: 4,
+        merged: 0,
     };
-    // Its counts never move the gate: test code reads as any other (BR-98).
+    // Its counts never move the gate: test code, a dev-only dependency's finding and a needs-review finding read as any other (BR-98, BR-100, BR-101).
     let fresh = ScanState::Fresh {
         snapshot_head: "h".to_string(),
         version: "1".to_string(),
@@ -1418,6 +1556,9 @@ fn the_gate_reads_every_stale_state_stale_with_its_reason() {
         suppressed: 0,
         not_fresh: 0,
         test: 3,
+        dev: 7,
+        needs_review: 5,
+        merged: 0,
     };
     let cases = [
         (fresh, ScanFreshness::Fresh),
@@ -1454,6 +1595,7 @@ fn two_files_of_one_go_package_name_the_package_once() {
         targets: &Targets::Root,
         root: None,
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let argv = gosec.render(gosec.run, &fill);
     let at = argv.iter().position(|a| a == "-quiet").unwrap() + 1;
@@ -1481,6 +1623,7 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         targets: &Targets::Root,
         root: Some("/r"),
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let with = Fill { ignored: &ignored, ..base };
     let expected: &[(&str, &[&str])] = &[
@@ -1561,6 +1704,7 @@ fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
         targets: &Targets::Root,
         root: Some("/srv/my.app"),
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let argv = checkov.render(checkov.run, &fill);
     let patterns: Vec<regex::Regex> = argv
@@ -1621,6 +1765,7 @@ fn gosecs_tree_expression_skips_the_directory_and_below_and_not_its_near_misses(
         targets: &Targets::Root,
         root: Some("/srv/project"),
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let values = exclude_dirs(&argv);
@@ -1664,6 +1809,7 @@ fn gosec_reads_excluded_only_when_every_ignored_directory_fits_the_budget() {
             targets: &Targets::Root,
             root: Some("/srv/project"),
             nvd_key_file: None,
+            gitleaks_runs: false,
         };
         let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(exclude_dirs(&argv).len(), n - cut, "{n} ignored: what the argv carries");
@@ -1817,6 +1963,7 @@ fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
             targets: &Targets::Root,
             root: None,
             nvd_key_file: None,
+            gitleaks_runs: false,
         };
         let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let argv = argv.join(" ");
@@ -1885,6 +2032,7 @@ fn osv_scanners_unignored_targets_are_the_argv_tail_its_committed_harness_rows_r
         targets: &Targets::Paths(paths.clone()),
         root: None,
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let tail = argv[argv.iter().position(|a| a == "--recursive").expect("the template recurses")..].join(" ");
@@ -2171,6 +2319,7 @@ fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
         targets: &Targets::Root,
         root: Some("/srv/project"),
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let none = Fill { ignored: &[], ..fill };
     for s in REGISTRY.iter().filter(|s| s.takes_exclusion_flag()) {
@@ -2439,6 +2588,7 @@ fn unignored_targets_render_only_in_a_whole_project_run_of_a_path_capable_scanne
         targets: &targets,
         root: None,
         nvd_key_file: None,
+        gitleaks_runs: false,
     };
     let render = |name: &str, fill: &Fill<'_>| -> Vec<String> {
         let s = scanner(name).unwrap();
@@ -2571,6 +2721,7 @@ fn no_key_adds_nothing_and_no_other_scanner_is_handed_one() {
         targets: &Targets::Root,
         root: None,
         nvd_key_file: Some(Path::new("/key")),
+        gitleaks_runs: false,
     };
     for s in REGISTRY.iter().filter(|s| s.name != "dependency-check") {
         let argv = s.render(s.run, &fill);

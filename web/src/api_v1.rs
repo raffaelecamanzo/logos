@@ -2749,7 +2749,7 @@ mod coverage_stream_tests {
         }
 
         release.send(()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(20));
         while jobs.snapshot(JobKind::CoverageRun, root).unwrap().state == JobState::Running {
             assert!(Instant::now() < deadline, "A never ended");
             std::thread::sleep(Duration::from_millis(5));
@@ -2978,8 +2978,9 @@ async fn coverage_prepared_start(jobs: Arc<AnalysisJobs>, engine: Arc<Engine>, b
 
 // ── Security triage (S-672, [FR-SC-12]) ──────────────────────────────────────
 //
-// The suppression dialog's two writes: add one entry to the committed
-// `.logos/security-ignore.toml`, and remove one. Both are intent-guarded POSTs
+// The suppression dialog's writes: add one entry to the committed
+// `.logos/security-ignore.toml`, remove one, and re-confirm the evidence of one
+// (S-818, [FR-SC-32]). All are intent-guarded POSTs
 // (`SECURITY_TRIAGE_POST_ROUTES`) scoped to the member (`?repo=`). A refused
 // entry or a hand-spelled file is `422` with the reason and no write; a failed
 // write is `500`.
@@ -2987,9 +2988,11 @@ async fn coverage_prepared_start(jobs: Arc<AnalysisJobs>, engine: Arc<Engine>, b
 // [FR-SC-12]: ../../docs/specs/requirements/FR-SC-12.md
 
 /// What `POST /api/v1/security/suppress` reads: one finding's `fingerprint`,
-/// or a `path` glob optionally narrowed by `rule` and `scanner` (S-770).
-/// Exactly one of `fingerprint` and `path` is checked when the selector is
-/// built, so both or neither is a `422` that says so.
+/// a `path` glob optionally narrowed by `rule` and `scanner` (S-770), or a
+/// `rule` and its `scanner` alone — that rule of that scanner in every file
+/// (S-814). Exactly one of `fingerprint` and `path` — or, with neither, both
+/// `rule` and `scanner` — is checked when the selector is built, so both or
+/// neither is a `422` that says so, and so is a `rule` without its `scanner`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SuppressRequest {
@@ -3006,6 +3009,22 @@ struct SuppressRequest {
     /// suppresses until removed.
     #[serde(default)]
     expires: Option<String>,
+    /// The symbols the reason rests on ([FR-SC-32], S-818): each a symbol
+    /// identity, a canonical symbol or a bare name naming one symbol. The
+    /// finding's own enclosing symbol is added to a fingerprint entry's. Absent
+    /// or empty records none: the entry reads "no evidence recorded".
+    ///
+    /// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+    #[serde(default)]
+    evidence: Vec<String>,
+}
+
+/// What `POST /api/v1/security/reconfirm` reads: the `fingerprint` of the
+/// finding an entry suppresses, or of the entry itself.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReconfirmRequest {
+    fingerprint: String,
 }
 
 /// What `POST /api/v1/security/unsuppress` reads: the selector of the entry
@@ -3032,19 +3051,19 @@ fn triage_body<T: serde::de::DeserializeOwned>(body: &[u8], shape: &str) -> Resu
 }
 
 /// `POST /api/v1/security/suppress[?repo=]` — add a suppression for one
-/// finding, or for every finding under a path: the written file, the entry and
-/// the file's entry count.
+/// finding, for every finding under a path, or for one rule of one scanner in
+/// every file: the written file, the entry and the file's entry count.
 pub(crate) async fn security_suppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
     let request: SuppressRequest = match triage_body(
         &body,
-        r#"{"fingerprint": …} or {"path": …, "rule"?: …, "scanner"?: …}, with "reason": … and "expires": "YYYY-MM-DD" | null"#,
+        r#"{"fingerprint": …}, {"path": …, "rule"?: …, "scanner"?: …} or {"rule": …, "scanner": …}, with "reason": …, "expires": "YYYY-MM-DD" | null and "evidence"?: [symbol, …]"#,
     ) {
         Ok(request) => request,
         Err(refused) => return refused.into_response(),
     };
     let outcome = bridge(engine, "api_v1_security_suppress", Surface::Web, move |e| {
         let selector = Selector::from_parts(request.fingerprint, request.path, request.rule, request.scanner)?;
-        e.security_suppress(selector, &request.reason, request.expires.as_deref())
+        e.security_suppress_with_evidence(selector, &request.reason, request.expires.as_deref(), &request.evidence)
     })
     .await;
     written(outcome)
@@ -3054,7 +3073,7 @@ pub(crate) async fn security_suppress(MemberEngine(engine): MemberEngine, body: 
 /// the written file, the entry removed and the entries left.
 pub(crate) async fn security_unsuppress(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
     let request: UnsuppressRequest =
-        match triage_body(&body, r#"{"fingerprint": …} or {"path": …, "rule"?: …, "scanner"?: …}"#) {
+        match triage_body(&body, r#"{"fingerprint": …}, {"path": …, "rule"?: …, "scanner"?: …} or {"rule": …, "scanner": …}"#) {
             Ok(request) => request,
             Err(refused) => return refused.into_response(),
         };
@@ -3063,6 +3082,23 @@ pub(crate) async fn security_unsuppress(MemberEngine(engine): MemberEngine, body
         e.security_unsuppress(selector)
     })
     .await;
+    written(outcome)
+}
+
+/// `POST /api/v1/security/reconfirm[?repo=]` — re-record the evidence hashes of
+/// the entry that suppresses a finding, keeping its reason ([FR-SC-32], S-818):
+/// the written file, the entry and the entries held. An entry that records no
+/// evidence, a missing entry or an evidence symbol that no longer exists is
+/// `422` with the reason and no write.
+///
+/// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+pub(crate) async fn security_reconfirm(MemberEngine(engine): MemberEngine, body: Bytes) -> Response {
+    let request: ReconfirmRequest = match triage_body(&body, r#"{"fingerprint": …}"#) {
+        Ok(request) => request,
+        Err(refused) => return refused.into_response(),
+    };
+    let outcome =
+        bridge(engine, "api_v1_security_reconfirm", Surface::Web, move |e| e.security_reconfirm(&request.fingerprint)).await;
     written(outcome)
 }
 

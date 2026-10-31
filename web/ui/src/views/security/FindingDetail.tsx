@@ -28,13 +28,25 @@ import type { ImpactEntry, ImpactResult, SecurityFinding } from "../../api/types
 import { Badge, DataTable, DEFAULT_TABLE_PAGE_SIZE, Widget, type Column } from "../../components/index.ts";
 import {
   CONTEXT_TEXT,
+  EVIDENCE_TEXT,
   FINDINGS_TABLE_TEXT,
+  REPORTERS_TEXT,
   SECURITY_ABSENCE,
   UNCLASSIFIED_TEXT,
   findingDetail,
+  evidenceNote,
   suppressionNote,
+  suppressionState,
 } from "../../copy/security.copy.ts";
-import { findingLocation, findingMessage, reachabilityText, scopeReasonText, type Classification } from "./securityModel.ts";
+import {
+  findingLocation,
+  devDependencyText,
+  findingMessage,
+  needsReviewText,
+  reachabilityText,
+  scopeReasonText,
+  type Classification,
+} from "./securityModel.ts";
 import styles from "./SecurityView.module.css";
 
 export function FindingDetail({
@@ -71,6 +83,8 @@ export function FindingDetail({
   const { enclosing, reachability, blast_radius: blast } = finding.context;
   const reach = reachabilityText(reachability);
   const scopeReason = scopeReasonText(finding);
+  const reviewReason = needsReviewText(finding);
+  const devReason = devDependencyText(finding);
   return (
     <Widget
       title={title}
@@ -94,19 +108,57 @@ export function FindingDetail({
         )}
         <dt>Message</dt>
         <dd>{findingMessage(finding)}</dd>
+        {finding.reporters !== undefined && finding.reporters.length > 0 && (
+          <>
+            <dt>{REPORTERS_TEXT.label}</dt>
+            <dd data-reporters>
+              <ul className={styles.reporters}>
+                {finding.reporters.map((r) => (
+                  <li key={`${r.scanner_name}\u0000${r.fingerprint}`}>
+                    {REPORTERS_TEXT.reporter(r.scanner_name, r.scanner_version, r.rule_id, r.severity)}
+                  </li>
+                ))}
+              </ul>
+              <span className="muted">{REPORTERS_TEXT.note}</span>
+            </dd>
+          </>
+        )}
         {finding.suppression && (
           <>
             <dt>{FINDINGS_TABLE_TEXT.suppression}</dt>
             <dd>
-              <Badge tone="muted">{finding.suppression.state}</Badge>{" "}
+              <Badge tone={finding.suppression.state === "out_of_date" ? "orange" : "muted"}>
+                {suppressionState(finding.suppression)}
+              </Badge>{" "}
               <span data-suppression-reason>{suppressionNote(finding.suppression)}</span>
             </dd>
+            {finding.suppression.state !== "expired" && (
+              <>
+                <dt>{EVIDENCE_TEXT.label}</dt>
+                <dd data-suppression-evidence={finding.suppression.state}>
+                  {finding.suppression.state === "out_of_date" && <strong>{EVIDENCE_TEXT.outOfDate}. </strong>}
+                  {evidenceNote(finding.suppression)}
+                </dd>
+              </>
+            )}
           </>
         )}
         {scopeReason !== null && (
           <>
             <dt>Code</dt>
             <dd data-code-scope="test">{scopeReason}</dd>
+          </>
+        )}
+        {devReason !== null && (
+          <>
+            <dt>Dependency scope</dt>
+            <dd data-code-scope="dev">{devReason}</dd>
+          </>
+        )}
+        {reviewReason !== null && (
+          <>
+            <dt>Confidence</dt>
+            <dd data-needs-review="true">{reviewReason}</dd>
           </>
         )}
         <dt>OWASP</dt>

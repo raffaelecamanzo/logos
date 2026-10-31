@@ -2,10 +2,10 @@
 //! ADR-13, NFR-MA-02).
 //!
 //! Hosts the rmcp [`ServerHandler`](rmcp::ServerHandler) exposing the
-//! namespaced `logos:*` tools (FR-MC-01..06): 8 navigation tools, 9 quality
-//! tools, 1 temporal tool (`hotspots`, CR-006), and 4 coverage tools
-//! (`coverage_ingest`/`coverage_status`/`coverage_refresh`, CR-007/CR-036;
-//! `coverage_run`, CR-234), each wired to one
+//! namespaced `logos:*` tools (FR-MC-01..06): the navigation and quality tools,
+//! the temporal `hotspots` (CR-006), the coverage tools (`coverage_ingest`/
+//! `coverage_status`/`coverage_refresh`, CR-007/CR-036; `coverage_run`, CR-234)
+//! and the `security_*` tools (CR-217; `security_reconfirm`, S-818), each wired to one
 //! [`Engine`](logos_core::Engine) method (the quality set delegates to the
 //! governance engine, S-020).
 //!

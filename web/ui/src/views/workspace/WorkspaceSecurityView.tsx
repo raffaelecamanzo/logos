@@ -187,6 +187,8 @@ function MembersWidget({ answer }: { answer: WorkspaceSecurityAnswer }) {
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.reportsFresh(s.reports_fresh, s.reports_stored)}</FigureNote>
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.excluded(s.excluded.not_fresh, s.excluded.suppressed)}</FigureNote>
           <FigureNote block>{WORKSPACE_SECURITY_TEXT.testCode(s.excluded.test)}</FigureNote>
+          <FigureNote block>{WORKSPACE_SECURITY_TEXT.devOnly(s.excluded.dev)}</FigureNote>
+          <FigureNote block>{WORKSPACE_SECURITY_TEXT.needsReview(s.excluded.needs_review)}</FigureNote>
         </div>
       }
     >

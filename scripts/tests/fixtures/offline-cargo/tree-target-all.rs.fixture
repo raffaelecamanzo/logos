@@ -1,0 +1,4 @@
+fn every_platform() {
+    let a = cargo(&["tree", "--offline", "--target", "all"]);
+    let b = cargo(&["tree", "--target=all", "--offline"]);
+}

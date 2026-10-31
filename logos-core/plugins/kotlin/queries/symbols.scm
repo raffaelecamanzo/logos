@@ -9,19 +9,27 @@
 ; class-bearing applicability (FR-QM-11): mapping a class construct to
 ; `@symbol.class` (NodeKind::Class) is the whole declaration — "the kind a
 ; construct extracts to is its declared applicability" (metrics::extended). So
-; Cohesion/Focus apply to Kotlin classes (and enum classes / objects) and the
-; field-sharing LCOM4 premise holds.
+; Cohesion/Focus apply to Kotlin classes, objects and companion objects, whose
+; member `fun`s are Methods (below), and the field-sharing LCOM4 premise holds.
+; An `enum class` is an Enum, which — as in Java and Rust — is no cohesion
+; container.
 ;
-; v1 policy: Kotlin's `class_declaration` covers `class`, `interface`, and
-; `enum class`; the anonymous `class`/`interface` keyword token disjointly
-; partitions the two so no declaration is double-captured. An `enum class`
-; carries the `class` token (plus an `enum` modifier), so it folds into Class —
-; class-like and applicability-bearing, which is the honest answer for LCOM4.
+; Kotlin's `class_declaration` covers `class`, `interface`, and `enum class`;
+; the anonymous `class`/`interface` keyword token disjointly partitions the
+; first two so no declaration is double-captured. An `enum class` carries the
+; `class` token (plus an `enum` modifier), so the class pattern names it too:
+; the `@decl.enum` marker below makes it an Enum (extract::definition). Both
+; kinds render a type descriptor, so no symbol changes.
 
-; A class (or enum class) → Class.
+; A class (or enum class) → Class; an enum class is re-kinded by its marker.
 (class_declaration
   "class"
   name: (identifier) @symbol.class)
+
+; An `enum class` → Enum (S-559, FR-EX-24).
+(class_declaration
+  (modifiers (class_modifier "enum"))
+  "class") @decl.enum
 
 ; An interface (incl. `fun interface`) → Interface.
 (class_declaration
@@ -32,11 +40,75 @@
 (object_declaration
   name: (identifier) @symbol.class)
 
-; Every `fun` (top-level or member) → Function, the uniform v1 policy Rust also
-; uses (its `impl` methods collapse to Function): the kind is fixed by the
-; capture name, and Kotlin models member and free functions with one node, so a
-; single mapping keeps extraction honest rather than guessing nesting.
+; A `companion object` → Class, a node of its own that holds its members
+; (S-559, FR-EX-24): `Svc#Companion#create().`, which is where
+; `Svc.Companion.create()` and `import …Svc.Companion.create` point. A named
+; one takes its name; an anonymous one is `Companion`, which the grammar writes
+; as no name — the `companion` keyword is the node captured and the setting
+; names it.
+(companion_object
+  name: (identifier) @symbol.class)
+(companion_object
+  !name
+  "companion" @symbol.class
+  (#set! symbol.name "Companion"))
+
+; A `typealias` → TypeAlias (S-559, FR-EX-24). The grammar's field for the
+; alias name is `type`, which `Foo<T> = …`'s own type parameters follow.
+(type_alias
+  type: (identifier) @symbol.type_alias)
+
+; A `fun` → Function, unless it is written in a class, object, interface or
+; companion body (the marker below). Kotlin models member and free functions
+; with one node, and a second pattern naming a member would name the same
+; declaration twice, the first taken whichever the query lists first — so
+; every `fun` is named here and a member is re-kinded by its marker
+; (extract::definition). Function and Method render one descriptor, so the
+; symbol is the same either way. A function in a function body stays a
+; Function: a local, not a member.
 (function_declaration
+  name: (identifier) @symbol.function)
+
+; A member `fun` → Method (S-559, FR-EX-24): a direct child of the body of a
+; class, interface, object, companion object or `enum class`. That is what lets
+; Cohesion and Focus count Kotlin's members (metrics::extended). The body of an
+; object expression (`object : Runnable { … }`) and of an enum entry
+; (`A { … }`) is a `class_body` too, but belongs to no declared type: their
+; `fun`s stay Functions, as they were, and count toward no container.
+(class_declaration
+  (class_body
+    (function_declaration) @decl.method))
+(object_declaration
+  (class_body
+    (function_declaration) @decl.method))
+(companion_object
+  (class_body
+    (function_declaration) @decl.method))
+(enum_class_body
+  (function_declaration) @decl.method)
+
+; An extension `fun String.toSlug()` (S-560, FR-RS-31) is captured once more,
+; with `@symbol.self_type` on its receiver type's name — the type written right
+; before the function's name, `T?` unwrapped, and its last segment when written
+; qualified (`fun a.b.Module.single()` is `Module`'s) — as Go's receiver is
+; (`plugin.toml`'s `extension_functions`). A receiver call names it only when it
+; records one. A return type follows the parameters, so the anchor tells the two
+; apart.
+(function_declaration
+  (user_type (identifier) @symbol.self_type .)
+  .
+  name: (identifier) @symbol.function)
+(function_declaration
+  (user_type (identifier) @symbol.self_type . (type_arguments) .)
+  .
+  name: (identifier) @symbol.function)
+(function_declaration
+  (nullable_type (user_type (identifier) @symbol.self_type .))
+  .
+  name: (identifier) @symbol.function)
+(function_declaration
+  (nullable_type (user_type (identifier) @symbol.self_type . (type_arguments) .))
+  .
   name: (identifier) @symbol.function)
 
 ; A `private` interface `fun` (S-609, CR-202, FR-RS-48): a class implementing
@@ -51,7 +123,7 @@
       (modifiers (visibility_modifier "private"))) @item.uninherited))
 
 ; Nor does it inherit the interface's `companion object` functions: they are
-; recorded as the interface's members, but Kotlin links only a superCLASS's
+; the interface's companion's members, and Kotlin links only a superCLASS's
 ; companion scope into a subclass, never a super-interface's.
 (class_declaration
   "interface"
@@ -72,6 +144,42 @@
   (property_declaration
     (variable_declaration
       (identifier) @symbol.field)))
+
+; A primary-constructor `val`/`var` parameter → Field (S-559, FR-EX-24): a
+; property of its class, declared where the class is. A plain parameter
+; (`c: Int`) is no property and names none. The binding keyword precedes the
+; name, which is the first identifier after it — a default value that is itself
+; an identifier (`val a: Int = DEFAULT`) follows the type.
+(class_parameter
+  ["val" "var"]
+  .
+  (identifier) @symbol.field)
+
+; An annotated declaration the grammar read as an expression (S-559, FR-EX-24;
+; `damage` is no `symbol`: nothing is declared here). `tree-sitter-kotlin-ng`
+; 1.1 reads a type declaration carrying two or more annotations, with another
+; declaration after it, as an annotated expression, and an annotation with
+; arguments (`@OptIn(X::class)`) apart from the declaration it precedes — and
+; `has_error()` stays false, so the declaration or its annotations are lost
+; with no error to report (frameworks.scm). Two shapes, both at the top of a
+; file, are counted into the file's partial-extraction warning:
+;   - an annotated expression the declaration that follows it is the other half
+;     of (`@OptIn(X::class)` then `class C`, a `fun`, an `object` or a
+;     `typealias`);
+;   - one that holds the swallowed declaration whole, read as an infix call
+;     (`@A @B class C { … }` is `class` applying `C` to a lambda; a modifier
+;     such as `open` or `expect` nests one infix more), under up to three
+;     annotations.
+; An annotated expression with neither is not counted: it is what a Gradle
+; `.kts` script's `@Suppress("x") plugins { … }` is, a statement and no loss.
+(source_file
+  (annotated_expression) @damage.misread
+  .
+  [(class_declaration) (object_declaration) (function_declaration) (type_alias)])
+(source_file
+  [(annotated_expression (infix_expression))
+   (annotated_expression (annotated_expression (infix_expression)))
+   (annotated_expression (annotated_expression (annotated_expression (infix_expression))))] @damage.misread)
 
 ; The file's `package` header (S-472, S-518, FR-RS-13). Not a declaration — its
 ; capture group is `module`, not `symbol`, so the declaration walk skips it. It is

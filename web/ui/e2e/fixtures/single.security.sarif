@@ -9,6 +9,7 @@
           "rules": [
             { "id": "rust.lang.security.format-injection", "properties": { "tags": ["CWE-89: SQL Injection", "security"] } },
             { "id": "generic.secrets.hardcoded-token", "properties": { "tags": ["CWE-798: Hard-coded Credentials", "security"] } },
+            { "id": "rust.lang.security.string-built-query", "properties": { "precision": "very-high", "tags": ["CWE-89: SQL Injection", "LOW CONFIDENCE", "security"] } },
             { "id": "rust.lang.security.a-deliberately-long-rule-id-rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr", "properties": { "tags": ["CWE-89: SQL Injection", "security"] } }
           ]
         }
@@ -37,6 +38,12 @@
           "level": "error",
           "message": { "text": "A formatted string reaches an output sink, in a fixture." },
           "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "tests/fixtures/payments.rs" }, "region": { "startLine": 7 } } }]
+        },
+        {
+          "ruleId": "rust.lang.security.string-built-query",
+          "level": "warning",
+          "message": { "text": "A query built from a string that may hold input." },
+          "locations": [{ "physicalLocation": { "artifactLocation": { "uri": "src/main.rs" }, "region": { "startLine": 20 } } }]
         }
       ]
     }

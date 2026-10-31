@@ -1,0 +1,15 @@
+// A typed `let` names a type, not a variable: `Duration` in `let x: Duration = ..`
+// must never become a name the check reads as measured or scaled.
+fn a() {
+    let start = Instant::now();
+    work();
+    let took: Duration = start.elapsed();
+    assert!(took < Duration::from_secs(1));
+}
+
+fn b() {
+    let start = Instant::now();
+    let limit: Duration = logos_core::perf::scaled(Duration::from_millis(100));
+    assert!(start.elapsed() < limit);
+    assert!(start.elapsed() < Duration::from_millis(5));
+}

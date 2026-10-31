@@ -145,8 +145,8 @@ fn indexed(file: &str, text: &str) -> (Vec<Row>, Vec<(String, String)>) {
 // ── TypeScript, TSX, JavaScript: `this.` / `super.` ──────────────────────────
 
 /// One class body, written once for the three TS-family fixtures: `this.m()`,
-/// `super.m()` and `other.m()`. `Base` declares `m` in the same file — the
-/// super call still binds nothing, since no `Extends` is proven.
+/// `super.m()` and `other.m()`. `Base` declares `m` in the same file, and since
+/// S-535 `A extends Base` is a proven `Extends`, so the super call binds it.
 const TS_FAMILY: &str = "\
 class Base {
   m() {
@@ -186,14 +186,14 @@ fn assert_ts_family(file: &str) {
             row(&at(8, "m"), "m", METHOD, OTHER, false),
             // `this.m()` inside `A.n`: `self`, bound to `A.m`.
             row(&at(12, "n"), "m", METHOD, SELF, true),
-            // `super.m()` inside `A.k`: `super`, unbound — neither `Base.m`
-            // (no proven `Extends`) nor `A.m`.
-            row(&at(16, "k"), "m", METHOD, SUPER, false),
+            // `super.m()` inside `A.k`: `super`, bound to `Base.m` through
+            // the proven `Extends` (S-535) — never to `A.m`.
+            row(&at(16, "k"), "m", METHOD, SUPER, true),
         ])
     );
     assert_eq!(
         edges,
-        sorted_edges(vec![edge(&at(12, "n"), &at(8, "m"))])
+        sorted_edges(vec![edge(&at(12, "n"), &at(8, "m")), edge(&at(16, "k"), &at(2, "m"))])
     );
 }
 
@@ -373,12 +373,24 @@ class A(Base):
 class B:
     def m(self, other):
         return 1
+
+
+class C:
+    @top
+    @helper.m
+    @pkg.sub.deco
+    @helper.n(1)
+    def x(self):
+        return 2
 ",
     );
     let at = |line: u32, name: &str| format!("{file}:{name}@{line}");
     assert_eq!(
         rows,
         sorted(vec![
+            // A bare decorator is a call row of its enclosing class, and the
+            // builtin binds nothing (S-545).
+            row(&at(6, "A"), "classmethod", PATH, None, false),
             row(&at(7, "m"), "m", METHOD, OTHER, false),
             row(&at(10, "n"), "m", METHOD, SELF, true),
             row(&at(14, "c"), "m", METHOD, SELF, true),
@@ -393,6 +405,13 @@ class B:
             // caller's own hierarchy does not decide: `other` (S-522).
             row(&at(23, "t"), "m", METHOD, OTHER, false),
             row(&at(23, "t"), "super", PATH, None, false),
+            // A bare decorator is a call of the class holding the method: `@name`
+            // a free call, `@mod.name` and `@a.b.c` an `other`-receiver method
+            // call, and `@mod.name(1)` that one call, never a second row (S-545).
+            row(&at(32, "C"), "top", PATH, None, false),
+            row(&at(32, "C"), "m", METHOD, OTHER, false),
+            row(&at(32, "C"), "deco", METHOD, OTHER, false),
+            row(&at(32, "C"), "n", METHOD, OTHER, false),
         ])
     );
     assert_eq!(
@@ -446,8 +465,10 @@ class B {
     assert_eq!(
         rows,
         sorted(vec![
-            // `$other->m()` and the named-class `B::m()`: both `other`.
+            // `$other->m()` is `other`; the named-class `B::m()` is the Path
+            // `B::m` (S-547), which has no shape and binds `B`'s `m`.
             row(&at(7, "m"), "m", METHOD, OTHER, false),
+            row(&at(7, "m"), "B::m", PATH, None, true),
             row(&at(11, "n"), "m", METHOD, SELF, true),
             // `self::m()` and `static::m()`: one `self` row.
             row(&at(15, "s"), "m", METHOD, SELF, true),
@@ -458,6 +479,7 @@ class B {
     assert_eq!(
         edges,
         sorted_edges(vec![
+            edge(&at(7, "m"), &at(25, "m")),
             edge(&at(11, "n"), &at(7, "m")),
             edge(&at(15, "s"), &at(7, "m")),
             edge(&at(19, "k"), &at(3, "m")),
@@ -569,18 +591,18 @@ end
     assert_eq!(
         rows,
         sorted(vec![
-            // The superclass constant: a free framework fingerprint, as before.
-            row(&at(15, "A"), "Base", PATH, None, false),
             row(&at(16, "m"), "m", METHOD, OTHER, false),
             row(&at(20, "n"), "m", METHOD, SELF, true),
             // A bare call inside a class: `self` — `A.m`, never the top-level
             // `m` the scope walk would reach first.
             row(&at(24, "i"), "m", METHOD, SELF, true),
-            // `super` inside `A.k` calls `Base#k`: recorded as `k`, unbound —
-            // never `A.k` itself, the self-loop.
-            row(&at(28, "k"), "k", METHOD, SUPER, false),
-            // `super(x)` nested in an assignment.
-            row(&at(32, "j"), "j", METHOD, SUPER, false),
+            // `super` inside `A.k` calls `Base#k`: recorded as `k`, bound
+            // through the proven `A < Base` (S-568) — never `A.k` itself, the
+            // self-loop.
+            row(&at(28, "k"), "k", METHOD, SUPER, true),
+            // `super(x)` nested in an assignment; the local `y` it is assigned
+            // to, read on the next line, is no call.
+            row(&at(32, "j"), "j", METHOD, SUPER, true),
             // A bare call outside any class is a free call, bound by scope.
             row(&at(48, "helper"), "m", PATH, None, true),
         ])
@@ -590,6 +612,8 @@ end
         sorted_edges(vec![
             edge(&at(20, "n"), &at(16, "m")),
             edge(&at(24, "i"), &at(16, "m")),
+            edge(&at(28, "k"), &at(6, "k")),
+            edge(&at(32, "j"), &at(10, "j")),
             edge(&at(48, "helper"), &at(44, "m")),
         ])
     );
@@ -698,8 +722,7 @@ end
     assert_eq!(
         rows,
         sorted(vec![
-            row(&at(1, "Widget"), "Struct", PATH, None, false),
-            row(&at(1, "Widget"), "new", METHOD, OTHER, false),
+            // `Struct.new` instantiates `Struct` (S-565): no `Calls` row.
             row(&at(6, "key"), "name", METHOD, OTHER, false),
             // A singleton calling a singleton: unbound too, not wrong.
             row(&at(10, "label"), "key", METHOD, OTHER, false),
@@ -712,7 +735,9 @@ end
 
 /// Ruby's `super` from a singleton method (`def self.k`), and as a statement
 /// `super(x)` one level into the body: both record the enclosing method's name
-/// as a `super` call, unbound, and never the caller itself.
+/// as a `super` call, and never bind the caller itself. The instance method's
+/// binds its base's through the proven `A < Base` (S-568); the singleton's
+/// stays unbound, since a `def self.k` answers no walk of instance methods.
 #[cfg(feature = "lang-ruby")]
 #[test]
 fn ruby_super_from_a_singleton_method_and_as_a_statement_records_super() {
@@ -745,10 +770,9 @@ end
     assert_eq!(
         rows,
         sorted(vec![
-            row(&at(11, "A"), "Base", PATH, None, false),
             row(&at(12, "k"), "k", METHOD, SUPER, false),
-            row(&at(16, "j"), "j", METHOD, SUPER, false),
+            row(&at(16, "j"), "j", METHOD, SUPER, true),
         ])
     );
-    assert_eq!(edges, Vec::<(String, String)>::new());
+    assert_eq!(edges, sorted_edges(vec![edge(&at(16, "j"), &at(6, "j"))]));
 }

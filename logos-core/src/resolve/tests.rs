@@ -18,7 +18,7 @@
 //!     └── fn run    (5)
 //! ```
 
-use super::binder::{bind, residue, Index, Outcome, Residue};
+use super::binder::{bind, bindable, residue, Index, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, ImplBlockRow, NodeArity, NodeRow, UnresolvedRefRow};
@@ -46,6 +46,7 @@ fn contains(source: i64, target: i64) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind: EdgeKind::Contains,
+        dispatch: false,
     }
 }
 
@@ -1410,6 +1411,7 @@ fn tf_module_call_binds_to_every_admitted_tf_in_its_source_dir() {
             targets: vec![NodeId(52), NodeId(53)],
             kind: EdgeKind::ArtifactRef,
             payload: Some("tf-module-call".to_string()),
+            dispatch: None,
         },
         "the module call binds to every admitted .tf directly in its source dir"
     );
@@ -1923,8 +1925,16 @@ fn bind_dyn(refs: &[UnresolvedRefRow], r: &UnresolvedRefRow, policy: BindingPoli
     bind(r, &ix, policy)
 }
 
-/// Assert a `BoundMany` fan-out to exactly `targets` (order-independent).
-fn bound_many_to(outcome: Outcome, source: i64, mut targets: Vec<i64>, kind: EdgeKind) {
+/// Assert a `BoundMany` fan-out to exactly `targets` (order-independent),
+/// whose dispatch marker names the trait method `dispatch.0` on exactly the
+/// implementors `dispatch.1` (S-712) — or, for `None`, marks nothing.
+fn bound_many_to(
+    outcome: Outcome,
+    source: i64,
+    mut targets: Vec<i64>,
+    kind: EdgeKind,
+    dispatch: Option<(&str, Vec<i64>)>,
+) {
     targets.sort_unstable();
     match outcome {
         Outcome::BoundMany {
@@ -1932,6 +1942,7 @@ fn bound_many_to(outcome: Outcome, source: i64, mut targets: Vec<i64>, kind: Edg
             targets: got_targets,
             kind: got_kind,
             payload,
+            dispatch: got_dispatch,
         } => {
             let mut got: Vec<i64> = got_targets.iter().map(|t| t.0).collect();
             got.sort_unstable();
@@ -1939,6 +1950,9 @@ fn bound_many_to(outcome: Outcome, source: i64, mut targets: Vec<i64>, kind: Edg
             assert_eq!(got, targets, "fan-out target set");
             assert_eq!(got_kind, kind, "fan-out edge kind");
             assert_eq!(payload, None, "code fan-out carries no payload");
+            let got_dispatch = got_dispatch.map(|d| (d.method, d.implementors.iter().map(|t| t.0).collect::<Vec<_>>()));
+            let want = dispatch.map(|(method, ids)| (method.to_string(), ids));
+            assert_eq!(got_dispatch, want, "the fan-out's dispatch marker");
         }
         other => panic!("expected BoundMany, got {other:?}"),
     }
@@ -1956,6 +1970,50 @@ fn dyn_trait_method_call_fans_out_to_trait_default_and_impls() {
         2,
         vec![42, 51, 61],
         EdgeKind::Calls,
+        Some(("local sym42", vec![51, 61])),
+    );
+}
+
+#[test]
+fn a_trait_fan_out_marks_each_impl_and_never_the_trait_method() {
+    // S-712 (CR-226 BR-76): the impls (51, 61) are reached by dispatch and
+    // carry `dispatch:<the trait method's symbol>`; the edge to the trait's
+    // own default (42) is the caller's dependency and carries nothing.
+    let scope = [implements(200, 51, "Plug"), implements(201, 61, "Plug")];
+    let r = dyn_call(300, 2, "Plug::run");
+    let Outcome::BoundMany {
+        dispatch: Some(dispatch), ..
+    } = bind_dyn(&scope, &r, BindingPolicy::Strict)
+    else {
+        panic!("expected a marked fan-out");
+    };
+    assert_eq!(dispatch.payload_of(NodeId(51)).as_deref(), Some("dispatch:local sym42"));
+    assert_eq!(dispatch.payload_of(NodeId(61)).as_deref(), Some("dispatch:local sym42"));
+    assert_eq!(dispatch.payload_of(NodeId(42)), None, "the trait method's own edge");
+    assert_eq!(dispatch.payload_of(NodeId(71)), None, "a node outside the set");
+}
+
+#[test]
+fn a_fan_out_through_a_required_signature_is_named_by_the_signature() {
+    // `trait Plug { fn run(&self); }`: the bodyless `run` (43) is no node of
+    // the binding index (`bindable`), so it is never a target; the fan-out's
+    // marker still names it, read from the whole snapshot.
+    let (mut nodes, mut edges) = dyn_fixture();
+    nodes.retain(|n| n.id != NodeId(42));
+    edges.retain(|e| e.target != NodeId(42));
+    nodes.push(node(43, "run", NodeKind::Method, "src/lib.rs"));
+    edges.push(contains(41, 43));
+    let signatures = std::collections::HashSet::from([NodeId(43)]);
+    let r = dyn_call(300, 2, "Plug::run");
+    let refs = vec![implements(200, 51, "Plug"), implements(201, 61, "Plug"), r.clone()];
+    let (bind_nodes, bind_edges) = bindable(&nodes, &edges, &signatures);
+    let ix = Index::build(&bind_nodes, &bind_edges, &refs).with_trait_signatures(&nodes, &edges, &signatures);
+    bound_many_to(
+        bind(&r, &ix, BindingPolicy::Strict),
+        2,
+        vec![51, 61],
+        EdgeKind::Calls,
+        Some(("local sym43", vec![51, 61])),
     );
 }
 
@@ -1988,6 +2046,7 @@ fn dyn_call_with_a_default_but_no_impls_binds_the_default_only() {
         2,
         vec![42],
         EdgeKind::Calls,
+        None,
     );
 }
 
@@ -2247,6 +2306,7 @@ fn a_package_import_binding_several_files_needs_exactly_one_definition() {
             targets: vec![NodeId(330), NodeId(340)],
             kind: EdgeKind::Imports,
             payload: None,
+            dispatch: None,
         },
         "precondition: the import binds the whole package"
     );
@@ -3481,6 +3541,7 @@ fn a_namespace_wildcard_binds_to_every_other_file_declaring_the_namespace() {
                 targets: vec![NodeId(400), NodeId(410), NodeId(430)],
                 kind: EdgeKind::Imports,
                 payload: None,
+                dispatch: None,
             },
             "every file declaring `Shop.Domain`, whatever its directory"
         );
@@ -3493,6 +3554,7 @@ fn a_namespace_wildcard_binds_to_every_other_file_declaring_the_namespace() {
                 targets: vec![NodeId(410), NodeId(430)],
                 kind: EdgeKind::Imports,
                 payload: None,
+                dispatch: None,
             }
         );
         // `using System.Text.Json;` names no in-repository namespace.
@@ -3697,6 +3759,20 @@ fn enclosing_index_of_kinds(
     refs: &[UnresolvedRefRow],
     enclosing: bool,
 ) -> Index {
+    let (nodes, edges, mut layout) = enclosing_graph(types, kinds, nested);
+    if enclosing {
+        layout = layout.with_enclosing_namespaces(["cs".to_string()]);
+    }
+    Index::build_with_layout(&nodes, &edges, refs, layout)
+}
+
+/// The graph and layout [`enclosing_index_of_kinds`] builds its index over,
+/// before any key is declared.
+fn enclosing_graph(
+    types: &[(&str, &str, &str)],
+    kinds: &[(i64, NodeKind)],
+    nested: &[(i64, &str, i64)],
+) -> (Vec<NodeRow>, Vec<EdgeRow>, PackageLayout) {
     let (mut nodes, mut edges, mut declared) = (Vec::new(), Vec::new(), Vec::new());
     for (i, (ext, namespace, name)) in types.iter().enumerate() {
         let i = i as i64;
@@ -3712,13 +3788,10 @@ fn enclosing_index_of_kinds(
         nodes.push(node(*id, name, NodeKind::Class, &file));
         edges.push(contains(ty(*outer), *id));
     }
-    let mut layout = super::package_key::PackageLayout::default()
+    let layout = super::package_key::PackageLayout::default()
         .with_namespace_extensions(["cs".to_string(), "fx".to_string()])
         .with_declared_namespaces(declared);
-    if enclosing {
-        layout = layout.with_enclosing_namespaces(["cs".to_string()]);
-    }
-    Index::build_with_layout(&nodes, &edges, refs, layout)
+    (nodes, edges, layout)
 }
 
 /// `target` as a supertype of the type at index `source`.
@@ -3782,6 +3855,43 @@ fn two_types_in_one_enclosing_namespace_bind_nothing_and_never_fall_through() {
     // A level that holds one type does not mind the ambiguity beyond it.
     let types = [("cs", "A", "Base"), ("cs", "A", "Base"), ("cs", "A.B", "Base"), ("cs", "A.B.C", "D")];
     bound_to(bind_enclosing(&types, &[], &[], &extends(3, 3, "Base")), ty(3), ty(2), EdgeKind::Extends);
+}
+
+/// S-602 / CR-199: under the type-arity key, the own namespace admits only the
+/// written arity — `Result` and `Result<T>` in `A.Sub` are no ambiguity — and a
+/// written arity no level holds binds nothing. A row of unknown arity admits
+/// any: it stays ambiguous between the two, as before, never reaching the plain
+/// `A.Result` past them, and binds a lone `Box<T>` a written `Box` would not;
+/// without the key, a recorded arity filters nothing.
+#[test]
+fn the_written_arity_filters_a_level_and_an_unknown_one_admits_any() {
+    let index = |types: &[(&str, &str, &str)], arities: &[(i64, u32)], r: &UnresolvedRefRow, key: bool| {
+        let (nodes, edges, mut layout) = enclosing_graph(types, &[], &[]);
+        layout = layout.with_enclosing_namespaces(["cs".to_string()]);
+        if key {
+            layout = layout.with_type_arity(["cs".to_string()]);
+        }
+        let refs = std::slice::from_ref(r);
+        let arities = arities.iter().map(|&(i, arity)| (NodeId(ty(i)), arity));
+        Index::build_with_layout(&nodes, &edges, refs, layout).with_type_arities(arities, &nodes, refs)
+    };
+    let types = [("cs", "A", "Result"), ("cs", "A.Sub", "Result"), ("cs", "A.Sub", "Result"), ("cs", "A.Sub", "Impl")];
+    let arities = [(0, 0), (1, 0), (2, 1), (3, 0)];
+    let result = |arity: Option<u32>| UnresolvedRefRow { arg_count: arity, ..extends(1, 3, "Result") };
+    let boxes = [("cs", "A.Sub", "Box"), ("cs", "A.Sub", "Impl")];
+    let box_arities = [(0, 1), (1, 0)];
+    let boxed = |arity: Option<u32>| UnresolvedRefRow { arg_count: arity, ..extends(2, 1, "Box") };
+    for policy in POLICIES {
+        let bind_in = |r: &UnresolvedRefRow, key: bool| bind(r, &index(&types, &arities, r, key), policy);
+        bound_to(bind_in(&result(Some(0)), true), ty(3), ty(1), EdgeKind::Extends);
+        bound_to(bind_in(&result(Some(1)), true), ty(3), ty(2), EdgeKind::Extends);
+        assert_eq!(bind_in(&result(Some(2)), true), Outcome::Unbound, "no `Result<,>` anywhere");
+        assert_eq!(bind_in(&result(None), true), Outcome::Unbound, "an unknown arity admits both");
+        assert_eq!(bind_in(&result(Some(0)), false), Outcome::Unbound, "no key, no filter");
+        let bind_box = |r: &UnresolvedRefRow| bind(r, &index(&boxes, &box_arities, r, true), policy);
+        assert_eq!(bind_box(&boxed(Some(0))), Outcome::Unbound, "`Box` is not `Box<T>`");
+        bound_to(bind_box(&boxed(None)), ty(1), ty(0), EdgeKind::Extends);
+    }
 }
 
 /// A qualified head is read under each enclosing namespace: `B.Thing` written
@@ -3954,6 +4064,178 @@ fn a_language_that_does_not_declare_the_key_binds_as_before() {
     assert_eq!(bind_enclosing(&types, &[], &[], &extends(1, 1, "Base")), Outcome::Unbound);
 }
 
+// ── S-603 / CR-199: a `using` inside a namespace block ──────────────────────
+
+/// `using target;` written in the block of namespace `block`, in the file of
+/// the type at index `source` — recorded as extraction records it.
+fn block_using(id: i64, source: i64, target: &str, block: &[&str]) -> UnresolvedRefRow {
+    let block: Vec<String> = block.iter().map(|s| s.to_string()).collect();
+    let alias = super::binder::block_wildcard_alias(&block);
+    make_ref(id, ty_file(source), ty(source), target, Some(&alias), RefForm::Glob, EdgeKind::Imports)
+}
+
+/// `using target;` written outside every namespace block.
+fn file_using(id: i64, source: i64, target: &str) -> UnresolvedRefRow {
+    make_ref(id, ty_file(source), ty(source), target, None, RefForm::Glob, EdgeKind::Imports)
+}
+
+/// The CR-199 shape: `namespace Acme.Sub { using X; class Impl : Foo }`, with
+/// `Acme.Foo` and `X.Foo`, binds `X.Foo` — the block's `using` is read at
+/// `Acme.Sub`'s level, before `Acme`. The same `using X;` at file level binds
+/// `Acme.Foo`, as before.
+#[test]
+fn a_using_inside_a_namespace_block_is_read_before_the_enclosing_namespaces() {
+    let types = [("cs", "Acme", "Foo"), ("cs", "X", "Foo"), ("cs", "Acme.Sub", "Impl")];
+    let r = extends(1, 2, "Foo");
+    let block = block_using(10, 2, "X", &["Acme", "Sub"]);
+    bound_to(bind_enclosing(&types, &[], &[block], &r), ty(2), ty(1), EdgeKind::Extends);
+    bound_to(bind_enclosing(&types, &[], &[file_using(10, 2, "X")], &r), ty(2), ty(0), EdgeKind::Extends);
+}
+
+/// Nested blocks (`namespace A { using X; namespace B { using Y; class C : Foo } }`):
+/// `A.B`'s types, then `A.B`'s `using`s, then `A`'s types, then `A`'s `using`s,
+/// then the file's — each step reached only when every nearer one supplies none.
+#[test]
+fn nested_blocks_read_each_levels_types_then_its_usings_outward() {
+    let usings = [
+        block_using(10, 0, "Y", &["A", "B"]),
+        block_using(11, 0, "X", &["A"]),
+        file_using(12, 0, "Z"),
+    ];
+    let foo = |namespaces: &[&'static str]| -> Vec<(&'static str, &'static str, &'static str)> {
+        std::iter::once(("cs", "A.B", "C")).chain(namespaces.iter().map(|ns| ("cs", *ns, "Foo"))).collect()
+    };
+    // Index 1 is the `Foo` each case expects, whatever lies further out.
+    for (case, namespaces) in [
+        ("own types first", &["A.B", "Y", "A", "X", "Z"][..]),
+        ("then the innermost block's usings", &["Y", "A", "X", "Z"][..]),
+        ("then the next level's types", &["A", "X", "Z"][..]),
+        ("then that level's usings", &["X", "Z"][..]),
+        ("then the file's", &["Z"][..]),
+    ] {
+        let outcome = bind_enclosing(&foo(namespaces), &[], &usings, &extends(1, 0, "Foo"));
+        assert_eq!(outcome, bound(ty(0), ty(1), EdgeKind::Extends), "{case}");
+    }
+}
+
+/// Two types the `using`s of one block supply bind nothing, and the walk never
+/// falls through to an outer level or to the file's `using`s; one supplied
+/// once, by two `using`s of the same namespace, is no ambiguity.
+#[test]
+fn two_candidates_from_one_blocks_usings_bind_nothing_and_never_fall_through() {
+    let types = [("cs", "A.B", "C"), ("cs", "Y", "Foo"), ("cs", "W", "Foo"), ("cs", "A", "Foo"), ("cs", "Z", "Foo")];
+    let usings = [
+        block_using(10, 0, "Y", &["A", "B"]),
+        block_using(11, 0, "W", &["A", "B"]),
+        file_using(12, 0, "Z"),
+    ];
+    assert_eq!(bind_enclosing(&types, &[], &usings, &extends(1, 0, "Foo")), Outcome::Unbound);
+    // A call through the head says why.
+    let call = make_ref(2, ty_file(0), ty(0), "Foo::m", None, RefForm::Path, EdgeKind::Calls);
+    let mut refs = usings.to_vec();
+    refs.push(call.clone());
+    let ix = enclosing_index(&types, &[], &refs, true);
+    assert_eq!(bind(&call, &ix, BindingPolicy::Balanced), Outcome::Unbound);
+    assert_eq!(super::binder::residue(&call, &ix, BindingPolicy::Balanced), Some(Residue::TypeAmbiguous));
+    // The same namespace imported twice supplies one type.
+    let twice = [block_using(10, 0, "Y", &["A", "B"]), block_using(11, 0, "Y", &["A"])];
+    bound_to(bind_enclosing(&types, &[], &twice, &extends(3, 0, "Foo")), ty(0), ty(1), EdgeKind::Extends);
+}
+
+/// A qualified head keeps the order: `Outer.Inner` from `A.B` reads the
+/// block's `using X;` before the enclosing `A`, and `A.Outer` before a
+/// file-level `using X;`.
+#[test]
+fn a_qualified_head_reads_a_blocks_usings_before_the_next_level_out() {
+    let types = [("cs", "A", "Outer"), ("cs", "X", "Outer"), ("cs", "A.B", "D")];
+    let nested = [(900, "Inner", 0), (901, "Inner", 1)];
+    let r = extends(1, 2, "Outer::Inner");
+    let block = block_using(10, 2, "X", &["A", "B"]);
+    bound_to(bind_enclosing(&types, &nested, &[block], &r), ty(2), 901, EdgeKind::Extends);
+    bound_to(bind_enclosing(&types, &nested, &[file_using(10, 2, "X")], &r), ty(2), 900, EdgeKind::Extends);
+}
+
+/// On the qualified-head rung too, a level's own types come before the
+/// `using`s of that level's block: `Outer.Inner` from `A.B`, with `using X;`
+/// in the `A` block, is `A.Outer.Inner`, never `X.Outer.Inner`.
+#[test]
+fn a_qualified_head_reads_a_levels_types_before_its_blocks_usings() {
+    let types = [("cs", "A", "Outer"), ("cs", "X", "Outer"), ("cs", "A.B", "D")];
+    let nested = [(900, "Inner", 0), (901, "Inner", 1)];
+    let r = extends(1, 2, "Outer::Inner");
+    bound_to(bind_enclosing(&types, &nested, &[block_using(10, 2, "X", &["A"])], &r), ty(2), 900, EdgeKind::Extends);
+}
+
+/// A level's block read never takes the file's `using static`s: those stay
+/// file-level, after every level — written outside a block or inside one — so
+/// a type nested in the static wildcard's type never beats an enclosing
+/// namespace's.
+#[test]
+fn a_blocks_level_never_reads_the_files_static_usings() {
+    let types = [("cs", "A", "Foo"), ("cs", "X", "Util"), ("cs", "A.B", "C")];
+    let nested = [(900, "Foo", 1)];
+    let r = extends(1, 2, "Foo");
+    let static_using = make_ref(10, ty_file(2), ty(2), "X::Util", Some("*"), RefForm::Glob, EdgeKind::Imports);
+    bound_to(bind_enclosing(&types, &nested, std::slice::from_ref(&static_using), &r), ty(2), ty(0), EdgeKind::Extends);
+    // Beside a block `using` that supplies nothing, at every level.
+    let usings = [static_using, block_using(11, 2, "Empty", &["A"]), block_using(12, 2, "Empty", &["A", "B"])];
+    bound_to(bind_enclosing(&types, &nested, &usings, &r), ty(2), ty(0), EdgeKind::Extends);
+}
+
+/// A block whose namespace is not one the source's walk passes through —
+/// a sibling `namespace Other { using X; }` — is never read for it.
+#[test]
+fn a_block_off_the_sources_walk_is_never_read() {
+    let types = [("cs", "X", "Foo"), ("cs", "A.B", "C")];
+    let r = extends(1, 1, "Foo");
+    assert_eq!(bind_enclosing(&types, &[], &[block_using(10, 1, "X", &["Other"])], &r), Outcome::Unbound);
+    bound_to(bind_enclosing(&types, &[], &[block_using(10, 1, "X", &["A"])], &r), ty(1), ty(0), EdgeKind::Extends);
+}
+
+/// A block enclosing none of the file's declarations records the empty block
+/// (`{}`), whose `using`s are read nowhere — not at an enclosing level, not
+/// at file level, and not as the own level of a global-namespace source.
+#[test]
+fn a_using_of_a_block_enclosing_no_declaration_is_read_nowhere() {
+    for (types, source) in [
+        (vec![("cs", "X", "Foo"), ("cs", "A.B", "C")], 1),
+        (vec![("cs", "X", "Foo"), ("cs", "", "C")], 1),
+    ] {
+        let r = extends(1, source, "Foo");
+        assert_eq!(bind_enclosing(&types, &[], &[block_using(10, source, "X", &[])], &r), Outcome::Unbound, "{types:?}");
+        bound_to(bind_enclosing(&types, &[], &[file_using(10, source, "X")], &r), ty(source), ty(0), EdgeKind::Extends);
+    }
+}
+
+/// An unreached head's candidates follow the walk: each level, then its
+/// block's `using`s, then the file's.
+#[test]
+fn an_unreached_heads_candidates_list_each_blocks_usings_at_its_level() {
+    let types = [("cs", "A.B", "D")];
+    let call = make_ref(1, ty_file(0), ty(0), "Gone::m", None, RefForm::Path, EdgeKind::Calls);
+    let refs = [block_using(10, 0, "Y", &["A", "B"]), block_using(11, 0, "X", &["A"]), file_using(12, 0, "Z"), call.clone()];
+    let ix = enclosing_index(&types, &[], &refs, true);
+    let Some(Residue::ExternalType { candidates }) = super::binder::residue(&call, &ix, BindingPolicy::Balanced) else {
+        panic!("expected an external type");
+    };
+    let name = |ns: &[&str]| -> Vec<String> { ns.iter().chain(&["Gone"]).map(|s| s.to_string()).collect() };
+    assert_eq!(candidates, [name(&["A", "B"]), name(&["Y"]), name(&["A"]), name(&["X"]), name(&["Z"])]);
+}
+
+/// A sync that dirties a token only a block's `using` spells re-selects the
+/// rows of its file, as one a file-level `using` spells does.
+#[test]
+fn a_blocks_using_selects_its_files_rows_on_a_sync() {
+    let types = [("cs", "Acme", "Foo"), ("cs", "Acme.Sub", "Impl")];
+    let r = extends(1, 1, "Foo");
+    let refs = [block_using(10, 1, "Vendor", &["Acme", "Sub"]), r.clone()];
+    let ix = enclosing_index(&types, &[], &refs, true);
+    let dirty: std::collections::HashSet<String> = ["vendor".to_string()].into_iter().collect();
+    assert!(ix.ref_affected(&r, &dirty));
+    let clean: std::collections::HashSet<String> = ["elsewhere".to_string()].into_iter().collect();
+    assert!(!ix.ref_affected(&r, &clean));
+}
+
 // ── S-596 / FR-SY-12: the incremental sweep and its retraction ─────────────
 
 fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
@@ -3961,6 +4243,7 @@ fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 
@@ -4107,10 +4390,12 @@ fn a_swept_source_retracts_only_the_reference_edges_no_row_produces() {
     assert!(none.is_empty());
 }
 
-/// A capture row out of a swept source restores its edge only when one of the
-/// source's own re-bound rows produces it too; otherwise it comes back unbound
-/// and its edge is retracted. A capture row out of an unswept source keeps its
-/// binding: it still stands in for its source's row.
+/// A capture row out of a swept source restores nothing: an edge one of the
+/// source's own re-bound rows produces is written by that row — so the
+/// capture's payload-less bind never unmarks the dispatch marker that row
+/// stamps (S-712) — and one no row produces is retracted. A capture row out
+/// of an unswept source keeps its binding: it still stands in for its
+/// source's row.
 #[test]
 fn a_capture_row_never_restores_an_edge_its_source_no_longer_produces() {
     let (nodes, mut edges) = fixture();
@@ -4126,7 +4411,8 @@ fn a_capture_row_never_restores_an_edge_its_source_no_longer_produces() {
     let stale = super::retract_unproduced(&nodes, &edges, &swept, &captures, &mut outcomes);
     assert_eq!(stale, [(NodeId(2), NodeId(5), EdgeKind::Calls)]);
     assert_eq!(outcomes[1].2, Outcome::Unbound);
-    assert_eq!(outcomes[2].2, bound(2, 3, EdgeKind::Calls));
+    assert_eq!(outcomes[2].2, Outcome::Unbound, "row 1 writes the produced edge itself");
+    assert_eq!(outcomes[0].2, bound(2, 3, EdgeKind::Calls));
     assert_eq!(outcomes[3].2, bound(3, 5, EdgeKind::Calls));
 }
 

@@ -179,7 +179,8 @@ fn pointer_value_generic_and_unnamed_receivers_record_their_base_type() {
 }
 
 /// A free `func` and every non-method declaration kind the Go query captures
-/// (struct, interface, const, var) record no self type, even in a file whose
+/// (struct, interface, type alias, field, interface spec, const, var) record no
+/// self type, even in a file whose
 /// methods do.
 #[test]
 fn a_free_function_and_the_type_declarations_record_none() {
@@ -207,34 +208,22 @@ fn a_free_function_and_the_type_declarations_record_none() {
     }
 }
 
-/// The Go `symbols` query as it stood before S-509: the same declarations, no
-/// `@symbol.self_type`. Dropped on disk it overrides the embedded query
-/// (FR-PL-04), giving the byte-identity baseline the fact must not move.
-const SYMBOLS_BEFORE_S509: &str = "\
-(function_declaration
-  name: (identifier) @symbol.function)
-
-(method_declaration
-  name: (field_identifier) @symbol.method)
-
-(type_declaration
-  (type_spec
-    name: (type_identifier) @symbol.struct
-    type: (struct_type)))
-
-(type_declaration
-  (type_spec
-    name: (type_identifier) @symbol.interface
-    type: (interface_type)))
-
-(const_declaration
-  (const_spec
-    name: (identifier) @symbol.constant))
-
-(var_declaration
-  (var_spec
-    name: (identifier) @symbol.variable))
-";
+/// The shipped Go `symbols` query without S-509's `@symbol.self_type` patterns:
+/// every declaration it captures, none of the receiver base types. Dropped on
+/// disk it overrides the embedded query (FR-PL-04), giving the byte-identity
+/// baseline the fact must not move. Derived from the embedded query, so a later
+/// declaration pattern reaches both sides and this compares the fact alone.
+fn symbols_without_self_type() -> String {
+    let shipped = include_str!("../plugins/go/queries/symbols.scm");
+    let kept: Vec<&str> = shipped
+        .split("\n\n")
+        .filter(|block| !(block.contains("receiver: (parameter_list") && block.contains("@symbol.self_type")))
+        .collect();
+    let baseline = kept.join("\n\n");
+    assert!(!baseline.contains(") @symbol.self_type"), "every self-type pattern was dropped");
+    assert!(baseline.contains("@symbol.method"), "the plain method pattern is kept");
+    baseline
+}
 
 /// The fact rides beside the node: every node (symbol, kind, lines) and every
 /// edge is what the pre-S509 query yields on the same files, and only the
@@ -244,7 +233,7 @@ const SYMBOLS_BEFORE_S509: &str = "\
 fn the_fact_changes_no_node_symbol_or_edge() {
     let files = [("svc/forms.go", FORMS), ("plain/plain.go", PLAIN)];
     let baseline_tmp = tree(&files);
-    write(baseline_tmp.path(), ".logos/plugins/go/queries/symbols.scm", SYMBOLS_BEFORE_S509);
+    write(baseline_tmp.path(), ".logos/plugins/go/queries/symbols.scm", &symbols_without_self_type());
     let baseline = index(baseline_tmp.path());
     let baseline_rt = baseline.runtime().unwrap();
     assert!(self_types(baseline_rt).is_empty(), "the pre-S509 query records no self type");
@@ -258,7 +247,7 @@ fn the_fact_changes_no_node_symbol_or_edge() {
     assert_eq!(got, nodes(baseline_rt), "nodes and symbols are byte-identical");
     assert_eq!(edges(rt), edges(baseline_rt), "edges are byte-identical");
     let methods = got.iter().filter(|(_, k, _)| k == "Method").count();
-    assert_eq!(methods, 11, "one node per method declaration: {got:?}");
+    assert_eq!(methods, 12, "one node per method declaration and per interface spec: {got:?}");
 }
 
 /// Re-extracting a file whose declarations are unchanged yields the identical

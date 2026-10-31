@@ -39,7 +39,7 @@ use regex::Regex;
 use serde::Deserialize;
 
 use super::redact;
-use super::Severity;
+use super::{ScannerConfidence, Severity};
 
 /// The security report formats ingested ([FR-SC-01]). A `Serialize` read-model
 /// field so the ingest summary renders the detected format on every surface.
@@ -103,6 +103,9 @@ pub struct ParsedFinding {
     pub rule_id: String,
     /// The normalised severity ([`Severity::from_sarif`]).
     pub severity: Severity,
+    /// The confidence the scanner states ([`read_confidence`]); `unstated`
+    /// when it states none. Not part of the finding's identity.
+    pub confidence: ScannerConfidence,
     /// Sorted, de-duplicated `CWE-<n>` identifiers.
     pub cwes: Vec<String>,
     /// The rule message, or the fixed redacted text for a secret-class finding.
@@ -128,6 +131,25 @@ pub struct ParsedFinding {
     /// That commit's date as Gitleaks gives it (`partialFingerprints.date`),
     /// which orders a secret's commits. Never stored.
     pub committed_at: Option<String>,
+    /// The package a dependency result names, as its scanner states it
+    /// ([`read_package`]); `None` for every other result. Hashed into the
+    /// stored fingerprint in place of the region and the report's identity
+    /// since history.db migration 13 ([`super::fingerprint`]), never stored
+    /// itself.
+    pub package: Option<PackageCoordinate>,
+}
+
+/// A dependency's name and version, verbatim as one scanner states them: two
+/// scanners may spell one package apart (Trivy's `v2.11.0` against
+/// OSV-Scanner's `2.11.0`), and only one scanner's results are ever keyed
+/// against each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageCoordinate {
+    /// The package name: `regex`, `@vitest/mocker`, `github.com/xuri/excelize/v2`,
+    /// or a purl's `pkg:<type>/<namespace>/<name>`.
+    pub name: String,
+    /// The installed version.
+    pub version: String,
 }
 
 /// A source region: 1-based lines and columns, each as given (or absent).
@@ -226,6 +248,12 @@ struct PropertyBag {
     #[serde(rename = "security-severity")]
     security_severity: Option<serde_json::Value>,
     cwe: Option<serde_json::Value>,
+    /// CodeQL's and gosec's rule confidence; Semgrep and Trivy write it on
+    /// every rule, so it is read per scanner ([`read_confidence`]). A value of
+    /// another type is no confidence, never a rejected report, as `security-severity` is.
+    precision: Option<serde_json::Value>,
+    /// Bandit's per-result confidence.
+    issue_confidence: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -265,6 +293,10 @@ struct Message {
 #[serde(rename_all = "camelCase")]
 struct Location {
     physical_location: Option<PhysicalLocation>,
+    /// Read only for Dependency-Check, whose result names its package nowhere
+    /// else ([`read_package`]). Kept untyped so a shape this parser never read
+    /// before rejects no report that ingested until now.
+    logical_locations: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -462,10 +494,10 @@ fn parse_result(
                 .and_then(|p| p.security_severity.as_ref())
                 .and_then(cvss)
         });
-    // A level the report left out is SARIF's default, and the level a scanner
-    // writes on every result is its own: neither rates the finding, so with no
-    // score it reads `unrated` (S-768).
-    let rating = level.filter(|&l| fixed_level(scanner_name) != Some(l));
+    // A level the report left out is SARIF's default, and a level a scanner
+    // writes whatever the finding is is its own: neither rates the finding, so
+    // with no score it reads `unrated` (S-768, S-811).
+    let rating = level.filter(|l| !fixed_levels(scanner_name).contains(l));
     let severity = Severity::from_sarif(score, rating);
 
     let tags: Vec<&str> = rule
@@ -475,6 +507,7 @@ fn parse_result(
         .flat_map(|p| p.tags.iter().map(String::as_str))
         .collect();
     let cwes = collect_cwes(rule, result.properties.as_ref(), &tags);
+    let confidence = read_confidence(scanner_name, rule, result.properties.as_ref(), &tags);
 
     let physical = result
         .locations
@@ -488,6 +521,8 @@ fn parse_result(
     let region = physical.and_then(|p| p.region).unwrap_or_default();
 
     let identity = identity_pairs(&result);
+    // Read from the message as the scanner wrote it, before any masking.
+    let package = read_package(scanner_name, &message, result.locations.first());
     let (commit, committed_at) = if redact::is_gitleaks(scanner_name) {
         let partial = |key: &str| {
             result
@@ -517,6 +552,7 @@ fn parse_result(
     Ok(Some(ParsedFinding {
         rule_id,
         severity,
+        confidence,
         cwes,
         message,
         redacted,
@@ -525,17 +561,203 @@ fn parse_result(
         identity,
         commit,
         committed_at,
+        package,
     }))
 }
 
-/// The level a scanner writes on every result, whatever the advisory says, so
-/// it rates nothing: OSV-Scanner's `warning`. Its SARIF writer
-/// (`internal/output/sarif.go`) sets `WithLevel("warning")` on each result at
-/// 1.9.2 and still at 2.7.0; from 2.0.0 a rating, when the advisory has one,
-/// is the rule's `security-severity` instead. The driver name is matched with
-/// ASCII case and surrounding space ignored, as [`redact::is_gitleaks`] does.
-fn fixed_level(scanner_name: &str) -> Option<&'static str> {
-    is_osv_scanner(scanner_name).then_some("warning")
+/// The package a dependency result names ([FR-SC-02] as amended by CR-252):
+/// its name and version, which key it in place of its region and the report's
+/// identity, so an exact repeat in one report is one finding and two packages
+/// sharing one advisory stay two ([`super::fingerprint`], history.db
+/// migration 13).
+///
+/// **One reading rule per dependency scanner**, kept here and nowhere else;
+/// any other scanner, and a result its scanner names no package in (a Trivy
+/// secret or misconfiguration), has none and keeps its key. Recorded from each
+/// scanner's SARIF writer (S-808; `logos-core/tests/fixtures/sarif/README.md`):
+///
+/// | Scanner | Package is stated in | Read as |
+/// |---------|----------------------|---------|
+/// | OSV-Scanner | the result message `Package '<name>@<version>' is vulnerable to '<id>' …` | split at the last `@` (an npm scope keeps its own) |
+/// | Trivy | the result message lines `Package: <name>` and `Installed Version: <version>` | both lines, each trimmed |
+/// | dependency-check | the first location's `logicalLocations[0].fullyQualifiedName`, a purl | `pkg:<type>/<path>` and the version before any `?` or `#` |
+///
+/// Matching is ASCII case- and surrounding-space-insensitive on the driver
+/// name, as [`is_osv_scanner`] is. A name or version that reads empty is no
+/// package.
+///
+/// [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
+fn read_package(scanner_name: &str, message: &str, location: Option<&Location>) -> Option<PackageCoordinate> {
+    match scanner_name.trim().to_ascii_lowercase().as_str() {
+        "osv-scanner" => osv_message_package(message),
+        "trivy" => trivy_message_package(message),
+        "dependency-check" => {
+            let purl = location?
+                .logical_locations
+                .as_ref()?
+                .get(0)?
+                .get("fullyQualifiedName")?
+                .as_str()?
+                .trim();
+            let bare = purl.split(['?', '#']).next().unwrap_or_default();
+            let (name, version) = bare.strip_prefix("pkg:").and(bare.rsplit_once('@'))?;
+            PackageCoordinate::read(name, version)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `scanner_name` is a dependency scanner — one [`read_package`] reads
+/// a package for — matched as it matches a driver name.
+pub(crate) fn names_packages(scanner_name: &str) -> bool {
+    matches!(scanner_name.trim().to_ascii_lowercase().as_str(), "osv-scanner" | "trivy" | "dependency-check")
+}
+
+/// The advisory ids a dependency finding is known by besides its rule id
+/// ([FR-SC-29]), read from its stored message. **One reading rule per
+/// scanner**, recorded from each one's SARIF writer
+/// (`logos-core/tests/fixtures/sarif/README.md`):
+///
+/// | Scanner | Aliases are stated in | Read as |
+/// |---------|-----------------------|---------|
+/// | OSV-Scanner | the message's `(also known as '<id>', '<id>')` | each quoted id |
+/// | Trivy, dependency-check | nowhere: the rule id is the one advisory id | none |
+///
+/// OSV-Scanner's rule `deprecatedIds` lists the rule id and these same ids,
+/// and is not stored. A message with no such clause reads none.
+///
+/// [FR-SC-29]: ../../../../docs/specs/requirements/FR-SC-29.md
+pub(crate) fn message_aliases(message: &str) -> Vec<String> {
+    let Some((_, rest)) = message.split_once("(also known as ") else {
+        return Vec::new();
+    };
+    let list = rest.split_once(')').map_or(rest, |(list, _)| list);
+    list.split(',')
+        .map(|id| id.trim().trim_matches('\'').trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The package a stored finding's message names, whichever of the two
+/// message forms [`read_package`] reads it is in — OSV-Scanner's or Trivy's:
+/// the one spelling of both, for a reader that has only the message
+/// ([`crate::security::lockfile`]).
+pub(crate) fn message_package(message: &str) -> Option<PackageCoordinate> {
+    osv_message_package(message).or_else(|| trivy_message_package(message))
+}
+
+/// OSV-Scanner's `Package '<name>@<version>' is vulnerable to '<id>' …`,
+/// split at the last `@`, so an npm scope's own `@` stays in the name.
+fn osv_message_package(message: &str) -> Option<PackageCoordinate> {
+    let (coordinate, _) = message.strip_prefix("Package '")?.split_once("' is vulnerable to '")?;
+    let (name, version) = coordinate.rsplit_once('@')?;
+    PackageCoordinate::read(name, version)
+}
+
+/// Trivy's `Package: <name>` and `Installed Version: <version>` lines.
+fn trivy_message_package(message: &str) -> Option<PackageCoordinate> {
+    let line = |label: &str| message.lines().find_map(|l| l.strip_prefix(label));
+    PackageCoordinate::read(line("Package:")?, line("Installed Version:")?)
+}
+
+impl PackageCoordinate {
+    /// `name` and `version`, each trimmed; `None` when either reads empty.
+    fn read(name: &str, version: &str) -> Option<Self> {
+        let (name, version) = (name.trim(), version.trim());
+        (!name.is_empty() && !version.is_empty()).then(|| Self { name: name.to_string(), version: version.to_string() })
+    }
+}
+
+/// What the scanner states of its own confidence in a result ([FR-SC-31]).
+///
+/// **One reading rule per scanner**, kept here and nowhere else; a scanner not
+/// in the table, and a result its scanner states nothing for, is `unstated`.
+/// The field was recorded from each scanner's SARIF (the captured Trivy,
+/// Gitleaks and OSV-Scanner reports and the reconstructed rest, see
+/// `logos-core/tests/fixtures/sarif/README.md`):
+///
+/// | Scanner | Confidence is | Read as |
+/// |---------|---------------|---------|
+/// | Semgrep | the rule tag `LOW`/`MEDIUM`/`HIGH CONFIDENCE` | the tag |
+/// | CodeQL | the rule `properties.precision` | `low`, `medium`; `high` and `very-high` → `high` |
+/// | Bandit | the result `properties.issue_confidence` | `LOW`/`MEDIUM`/`HIGH` |
+/// | gosec | the rule `properties.precision` (its confidence, lower-cased) | `low`/`medium`/`high` |
+/// | Trivy | none: `precision: very-high` is on every rule | `unstated` |
+/// | Gitleaks, OSV-Scanner, Checkov, dependency-check | none | `unstated` |
+///
+/// A value a scanner writes on every result is never confidence: Semgrep's
+/// `precision` is `very-high` on every rule, so a `LOW CONFIDENCE` rule
+/// reads `low` however its `precision` reads, and a `MEDIUM CONFIDENCE` one
+/// with `precision: very-high` reads `medium`. Matching is ASCII case- and
+/// surrounding-space-insensitive, as [`redact::is_gitleaks`] matches a driver.
+///
+/// [FR-SC-31]: ../../../../docs/specs/requirements/FR-SC-31.md
+fn read_confidence(
+    scanner_name: &str,
+    rule: Option<&Rule>,
+    result_props: Option<&PropertyBag>,
+    tags: &[&str],
+) -> ScannerConfidence {
+    let name = scanner_name.trim().to_ascii_lowercase();
+    let rule_precision = || rule.and_then(|r| r.properties.as_ref()).and_then(|p| p.precision.as_ref()).and_then(|v| v.as_str());
+    match name.as_str() {
+        // "Semgrep OSS", or "semgrep" before the OSS suffix.
+        n if n.starts_with("semgrep") => tags
+            .iter()
+            .find_map(|tag| match tag.trim().to_ascii_uppercase().as_str() {
+                "LOW CONFIDENCE" => Some(ScannerConfidence::Low),
+                "MEDIUM CONFIDENCE" => Some(ScannerConfidence::Medium),
+                "HIGH CONFIDENCE" => Some(ScannerConfidence::High),
+                _ => None,
+            })
+            .unwrap_or_default(),
+        "codeql" | "gosec" => rule_precision().map(precision_confidence).unwrap_or_default(),
+        "bandit" => result_props
+            .and_then(|p| p.issue_confidence.as_ref())
+            .and_then(|v| v.as_str())
+            .map(precision_confidence)
+            .unwrap_or_default(),
+        _ => ScannerConfidence::Unstated,
+    }
+}
+
+/// A scanner's own confidence word as a [`ScannerConfidence`]: `low`,
+/// `medium`, and `high` or CodeQL's `very-high`, ASCII case ignored; any other
+/// word, Bandit's `UNDEFINED` included, is `unstated`.
+fn precision_confidence(word: &str) -> ScannerConfidence {
+    match word.trim().to_ascii_lowercase().as_str() {
+        "low" => ScannerConfidence::Low,
+        "medium" => ScannerConfidence::Medium,
+        "high" | "very-high" => ScannerConfidence::High,
+        _ => ScannerConfidence::Unstated,
+    }
+}
+
+/// The levels a scanner writes whatever the finding is, so they rate nothing:
+/// a result at one of them, with no score, reads `unrated`. The one table of
+/// them, read from each of the nine registered scanners' SARIF writers
+/// (S-811; per-scanner evidence and provenance are in
+/// `tests/fixtures/sarif/README.md`):
+///
+/// | Scanner | Fixed level | Where it is written |
+/// |---------|-------------|---------------------|
+/// | OSV-Scanner | `warning` | `internal/output/sarif.go` sets `WithLevel("warning")` on each result at 1.9.2 and still at 2.7.0; from 2.0.0 a rating, when the advisory has one, is the rule's `security-severity` instead |
+/// | Checkov | `error`, `warning` | `sarif.py` `_create_results`: `warning` by default, `error` for a failed check with no severity (108 of 108 on desk-picker); a check with a severity writes `security-severity` beside a level mapped from it |
+/// | dependency-check | `warning` | `sarifReport.vsl` writes `"level": "warning"` on every result; the rule's CVSS base score is `security-severity` |
+/// | Bandit, gosec, Semgrep, Trivy, CodeQL | none | the level is the scanner's own severity, mapped (Trivy's captured report reads all three) |
+/// | Gitleaks | none | no result level is written at all |
+///
+/// A score outranks the level, so a result that carries `security-severity`
+/// keeps its rating. The driver name is matched with ASCII case and
+/// surrounding space ignored, as [`redact::is_gitleaks`] does.
+fn fixed_levels(scanner_name: &str) -> &'static [&'static str] {
+    match scanner_name.trim().to_ascii_lowercase().as_str() {
+        "osv-scanner" => &["warning"],
+        "checkov" => &["error", "warning"],
+        "dependency-check" => &["warning"],
+        _ => &[],
+    }
 }
 
 /// Whether `scanner_name` is OSV-Scanner's driver name, ASCII case and
@@ -725,6 +947,145 @@ mod tests {
         )
     }
 
+    /// A rule property bag with Semgrep's shape: a constant `precision` and
+    /// one confidence tag.
+    fn semgrep_rule(confidence_tag: &str, precision: &str) -> String {
+        format!(
+            r#"{{"id":"r","properties":{{"precision":"{precision}","tags":["CWE-89: SQL","{confidence_tag}","security"]}}}}"#
+        )
+    }
+
+    fn confidence_by(driver: &str, result: &str, rules: &str) -> ScannerConfidence {
+        one(&log_by(driver, result, rules)).confidence
+    }
+
+    const PLAIN: &str = r#"{"ruleId":"r","message":{"text":"m"}}"#;
+
+    /// FR-SC-31: Semgrep's confidence is its tag; its `precision` is
+    /// `very-high` on every rule and says nothing of it.
+    #[test]
+    fn semgrep_confidence_is_its_tag_and_never_its_constant_precision() {
+        let read = |tag: &str, precision: &str| confidence_by("Semgrep OSS", PLAIN, &semgrep_rule(tag, precision));
+        assert_eq!(read("LOW CONFIDENCE", "very-high"), ScannerConfidence::Low);
+        assert_eq!(read("MEDIUM CONFIDENCE", "very-high"), ScannerConfidence::Medium, "precision is not read");
+        assert_eq!(read("HIGH CONFIDENCE", "very-high"), ScannerConfidence::High);
+        // `precision: low` on a MEDIUM rule must not lower it.
+        assert_eq!(read("MEDIUM CONFIDENCE", "low"), ScannerConfidence::Medium);
+        // Near misses: no confidence tag, a tag that merely contains the words.
+        assert_eq!(confidence_by("Semgrep OSS", PLAIN, r#"{"id":"r","properties":{"precision":"low","tags":["security"]}}"#), ScannerConfidence::Unstated);
+        assert_eq!(read("NO CONFIDENCE", "very-high"), ScannerConfidence::Unstated);
+        assert_eq!(read("LOW CONFIDENCE INTERVAL", "very-high"), ScannerConfidence::Unstated);
+        assert_eq!(read("low confidence", "very-high"), ScannerConfidence::Low, "case is ignored");
+        // The driver name is matched as the other scanner tables match it.
+        assert_eq!(confidence_by(" semgrep oss ", PLAIN, &semgrep_rule("LOW CONFIDENCE", "very-high")), ScannerConfidence::Low);
+        // The driver name before the OSS suffix, and with space around it, is Semgrep's.
+        assert_eq!(confidence_by("semgrep", PLAIN, &semgrep_rule("LOW CONFIDENCE", "very-high")), ScannerConfidence::Low);
+        assert_eq!(confidence_by("Semgrep OSS", PLAIN, &semgrep_rule("  medium confidence ", "very-high")), ScannerConfidence::Medium);
+        // Another scanner carrying the same tag is not Semgrep.
+        assert_eq!(confidence_by("other", PLAIN, &semgrep_rule("LOW CONFIDENCE", "very-high")), ScannerConfidence::Unstated);
+    }
+
+    /// FR-SC-31: CodeQL's confidence is the rule's `precision`.
+    #[test]
+    fn codeql_confidence_is_the_rules_precision() {
+        let read = |precision: &str| {
+            confidence_by("CodeQL", PLAIN, &format!(r#"{{"id":"r","properties":{{"precision":"{precision}"}}}}"#))
+        };
+        assert_eq!(read("low"), ScannerConfidence::Low);
+        assert_eq!(read("medium"), ScannerConfidence::Medium);
+        assert_eq!(read("high"), ScannerConfidence::High);
+        assert_eq!(read("very-high"), ScannerConfidence::High);
+        assert_eq!(read("lower"), ScannerConfidence::Unstated, "a token CodeQL does not write is not read");
+        assert_eq!(confidence_by("CodeQL", PLAIN, r#"{"id":"r"}"#), ScannerConfidence::Unstated);
+        // A CodeQL rule lives under `tool.extensions`, as the real report has it.
+        let ext = r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"CodeQL"},"extensions":[{"name":"q","rules":[{"id":"r","properties":{"precision":"low"}}]}]},"results":[{"ruleId":"r","message":{"text":"m"}}]}]}"#;
+        assert_eq!(one(ext).confidence, ScannerConfidence::Low);
+    }
+
+    /// FR-SC-31: Bandit states confidence per result, gosec per rule; every
+    /// other scanner states none, whatever its `precision` says (Trivy's is
+    /// `very-high` on every rule).
+    #[test]
+    fn bandit_and_gosec_state_theirs_and_every_other_scanner_states_none() {
+        let bandit = |c: &str| {
+            confidence_by(
+                "Bandit",
+                &format!(r#"{{"ruleId":"r","message":{{"text":"m"}},"properties":{{"issue_confidence":"{c}","issue_severity":"HIGH"}}}}"#),
+                r#"{"id":"r","properties":{"precision":"high"}}"#,
+            )
+        };
+        assert_eq!(bandit("LOW"), ScannerConfidence::Low, "the result's own, not the rule's precision");
+        assert_eq!(bandit("MEDIUM"), ScannerConfidence::Medium);
+        assert_eq!(bandit("HIGH"), ScannerConfidence::High);
+        assert_eq!(bandit("UNDEFINED"), ScannerConfidence::Unstated);
+
+        let gosec = |p: &str| confidence_by("gosec", PLAIN, &format!(r#"{{"id":"r","properties":{{"precision":"{p}"}}}}"#));
+        assert_eq!(gosec("low"), ScannerConfidence::Low);
+        assert_eq!(gosec("medium"), ScannerConfidence::Medium);
+        assert_eq!(gosec("high"), ScannerConfidence::High);
+
+        for driver in ["Trivy", "gitleaks", "osv-scanner", "Checkov", "dependency-check", "unknown-tool"] {
+            let rule = r#"{"id":"r","properties":{"precision":"low","tags":["LOW CONFIDENCE"]}}"#;
+            assert_eq!(confidence_by(driver, PLAIN, rule), ScannerConfidence::Unstated, "{driver}");
+        }
+    }
+
+    /// A property of another type than a word is no confidence and never
+    /// rejects the report: `precision` and `issue_confidence` were ignored
+    /// before they were read, so a report that was accepted stays accepted.
+    #[test]
+    fn a_confidence_property_that_is_not_a_word_reads_unstated_and_the_report_still_parses() {
+        for rule in [r#"{"id":"r","properties":{"precision":5}}"#, r#"{"id":"r","properties":{"precision":["low"]}}"#, r#"{"id":"r","properties":{"precision":null}}"#] {
+            for driver in ["Checkov", "CodeQL", "gosec"] {
+                assert_eq!(confidence_by(driver, PLAIN, rule), ScannerConfidence::Unstated, "{driver} {rule}");
+            }
+        }
+        for value in ["3", r#"{"a":1}"#, "true"] {
+            let result = format!(r#"{{"ruleId":"r","message":{{"text":"m"}},"properties":{{"issue_confidence":{value}}}}}"#);
+            assert_eq!(confidence_by("Bandit", &result, ""), ScannerConfidence::Unstated, "Bandit {value}");
+            assert_eq!(confidence_by("Trivy", &result, ""), ScannerConfidence::Unstated, "Trivy {value}");
+        }
+    }
+
+    /// The captured and reconstructed fixtures read as the table records.
+    #[test]
+    fn each_fixture_report_reads_the_confidence_its_table_row_records() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif");
+        let read = |file: &str| -> Vec<(String, ScannerConfidence)> {
+            let text = std::fs::read_to_string(fixtures.join(file)).expect("fixture");
+            Sarif
+                .parse(&text)
+                .expect("parses")
+                .into_iter()
+                .flat_map(|run| run.findings)
+                .map(|f| (f.rule_id, f.confidence))
+                .collect()
+        };
+        let counted = |rows: &[(String, ScannerConfidence)], c: ScannerConfidence| rows.iter().filter(|(_, got)| *got == c).count();
+        let semgrep = read("semgrep.sarif");
+        assert_eq!(
+            semgrep.iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+            [ScannerConfidence::Medium, ScannerConfidence::High],
+            "the Semgrep fixture's rules are MEDIUM and HIGH CONFIDENCE beside `precision: very-high`: {semgrep:?}"
+        );
+        let low = read("semgrep-low-confidence.sarif");
+        assert_eq!(counted(&low, ScannerConfidence::Low), low.len(), "every rule of the low-confidence fixture is LOW CONFIDENCE: {low:?}");
+        assert!(!low.is_empty());
+        let bandit = read("bandit.sarif");
+        assert_eq!(counted(&bandit, ScannerConfidence::Medium), bandit.len(), "{bandit:?}");
+        assert!(!bandit.is_empty());
+        for file in ["trivy.sarif", "gitleaks.sarif", "osv-scanner.sarif", "osv-scanner-1.9.2.sarif", "osv-scanner-2.7.0.sarif", "checkov.sarif", "dependency-check.sarif"] {
+            let rows = read(file);
+            assert!(!rows.is_empty(), "{file}");
+            assert_eq!(counted(&rows, ScannerConfidence::Unstated), rows.len(), "{file} states no confidence");
+        }
+        for file in ["codeql.sarif", "gosec.sarif"] {
+            let rows = read(file);
+            assert!(!rows.is_empty(), "{file}");
+            assert_eq!(counted(&rows, ScannerConfidence::Unstated), 0, "{file} states one on every rule: {rows:?}");
+        }
+    }
+
     #[test]
     fn cwe_tokens_are_read_in_every_scanner_spelling_and_a_near_miss_is_not() {
         let found = |s: &str| {
@@ -755,6 +1116,14 @@ mod tests {
         assert_eq!(f.severity, Severity::Medium, "a level the report gives is a rating");
     }
 
+    /// The severity a one-result report reads, for the fixed-level tests.
+    fn rated(driver: &str, level: &str, rules: &str) -> Severity {
+        let result = format!(r#"{{"ruleId":"r","level":"{level}","message":{{"text":"m"}}}}"#);
+        one(&log_by(driver, &result, rules)).severity
+    }
+
+    const SCORED_RULE: &str = r#"{"id":"r","properties":{"security-severity":"9.8"}}"#;
+
     /// OSV-Scanner writes `warning` on every result, so that level rates
     /// nothing: without a score it reads `unrated` (S-768). Each case sits
     /// beside its near miss: another level, another driver one word away, a
@@ -762,17 +1131,62 @@ mod tests {
     /// scanner.
     #[test]
     fn osv_scanners_fixed_warning_reads_unrated_and_its_near_misses_do_not() {
-        let at = |driver: &str, level: &str, rules: &str| {
-            let result = format!(r#"{{"ruleId":"r","level":"{level}","message":{{"text":"m"}}}}"#);
-            one(&log_by(driver, &result, rules)).severity
-        };
+        let at = rated;
         assert_eq!(at("osv-scanner", "warning", ""), Severity::Unrated);
         assert_eq!(at(" OSV-Scanner ", "warning", ""), Severity::Unrated, "case and space are ignored");
         assert_eq!(at("osv-scanner", "error", ""), Severity::High, "only its fixed level is no rating");
         assert_eq!(at("osv-scanner-wrapper", "warning", ""), Severity::Medium, "another driver's warning rates");
         assert_eq!(at("Trivy", "warning", ""), Severity::Medium);
-        let scored = r#"{"id":"r","properties":{"security-severity":"9.8"}}"#;
-        assert_eq!(at("osv-scanner", "warning", scored), Severity::Critical, "the advisory's own rating");
+        assert_eq!(at("osv-scanner", "warning", SCORED_RULE), Severity::Critical, "the advisory's own rating");
+    }
+
+    /// Checkov writes `error` on every failed check that has no severity, and
+    /// `warning` on a skipped one (S-811; its `sarif.py` `_create_results`; on
+    /// desk-picker 108 of 108 findings read `high`): without a score neither
+    /// rates anything. A check with a severity carries it as `security-severity`
+    /// and keeps that rating. Each case sits beside its near miss.
+    #[test]
+    fn checkovs_fixed_levels_read_unrated_and_its_scored_and_near_misses_do_not() {
+        assert_eq!(rated("Checkov", "error", ""), Severity::Unrated);
+        let result = r#"{"ruleId":"r","level":"error","message":{"text":"m"}}"#;
+        assert_eq!(one(&log_by("Checkov", result, "")).severity.reason(), Some("the scanner gave none"));
+        assert_eq!(rated("Checkov", "warning", ""), Severity::Unrated, "a skipped check's default");
+        assert_eq!(rated(" checkov ", "error", ""), Severity::Unrated, "case and space are ignored");
+        // The rule's `defaultConfiguration.level` is Checkov's constant too.
+        let rule = r#"{"id":"r","defaultConfiguration":{"level":"error"}}"#;
+        let bare = r#"{"ruleId":"r","message":{"text":"m"}}"#;
+        assert_eq!(one(&log_by("Checkov", bare, rule)).severity, Severity::Unrated);
+        // A check that has a severity carries it as a score: that rates.
+        assert_eq!(rated("Checkov", "error", SCORED_RULE), Severity::Critical);
+        assert_eq!(rated("Checkov", "note", r#"{"id":"r","properties":{"security-severity":"3.9"}}"#), Severity::Low);
+        // Near misses: a level Checkov's writer never writes without a score,
+        // another driver one word away, the same level from another scanner.
+        assert_eq!(rated("Checkov", "note", ""), Severity::Low);
+        assert_eq!(rated("Checkov-wrapper", "error", ""), Severity::High);
+        assert_eq!(rated("Trivy", "error", ""), Severity::High);
+    }
+
+    /// dependency-check's `sarifReport.vsl` writes `"level": "warning"` on every
+    /// result (S-811); a rule's CVSS score, when it has one, is the rating.
+    #[test]
+    fn dependency_checks_fixed_warning_reads_unrated_and_its_scored_and_near_misses_do_not() {
+        assert_eq!(rated("dependency-check", "warning", ""), Severity::Unrated);
+        assert_eq!(rated(" Dependency-Check ", "warning", ""), Severity::Unrated, "case and space are ignored");
+        assert_eq!(rated("dependency-check", "warning", SCORED_RULE), Severity::Critical);
+        assert_eq!(rated("dependency-check", "error", ""), Severity::High, "only its fixed level is no rating");
+        assert_eq!(rated("dependency-check-wrapper", "warning", ""), Severity::Medium);
+    }
+
+    /// The other six registered scanners write a level that follows the finding
+    /// (S-811 audit): Bandit, gosec, Semgrep, Trivy and CodeQL map their own
+    /// severity to it, and Gitleaks writes none. Each one's level is a rating.
+    #[test]
+    fn a_scanner_whose_level_follows_the_finding_keeps_every_level_as_a_rating() {
+        for driver in ["Bandit", "gosec", "Semgrep OSS", "Trivy", "CodeQL", "gitleaks"] {
+            for (level, want) in [("error", Severity::High), ("warning", Severity::Medium), ("note", Severity::Low)] {
+                assert_eq!(rated(driver, level, ""), want, "{driver} {level}");
+            }
+        }
     }
 
     /// `kind`: a passed or not-applicable check is no finding; an `open` result
@@ -945,6 +1359,98 @@ mod tests {
         assert_eq!(uri_to_path("src/a.py"), "src/a.py");
         assert_eq!(uri_to_path("a%2"), "a%2", "a truncated escape is kept literally");
         assert_eq!(uri_to_path("a%zz"), "a%zz", "a non-hex escape is kept literally");
+    }
+
+    fn package_by(driver: &str, result: &str) -> Option<(String, String)> {
+        one(&log_by(driver, result, "")).package.map(|p| (p.name, p.version))
+    }
+
+    fn coordinate(name: &str, version: &str) -> Option<(String, String)> {
+        Some((name.to_string(), version.to_string()))
+    }
+
+    /// S-808: each dependency scanner's package is read where its SARIF writer
+    /// states it, an npm scope and a purl's qualifiers included; every near
+    /// miss — another scanner writing the same text, a message one word off, a
+    /// purl that is no purl, a malformed logical location — reads none and
+    /// rejects nothing.
+    #[test]
+    fn each_dependency_scanner_names_its_package_where_its_writer_states_it() {
+        let osv = |text: &str| format!(r#"{{"ruleId":"CVE-1","message":{{"text":"{text}"}}}}"#);
+        let scoped = osv("Package '@vitest/mocker@3.2.7' is vulnerable to 'CVE-1' (also known as 'GHSA-82fw-gwwq-j7x9').");
+        assert_eq!(package_by("osv-scanner", &scoped), coordinate("@vitest/mocker", "3.2.7"), "the scope's own `@` stays in the name");
+        assert_eq!(package_by(" OSV-Scanner ", &scoped), coordinate("@vitest/mocker", "3.2.7"), "the driver in any case");
+        assert_eq!(package_by("osv-scanner-wrapper", &scoped), None, "a near-miss driver");
+        assert_eq!(package_by("Semgrep OSS", &scoped), None, "another scanner writing the same text");
+        assert_eq!(package_by("osv-scanner", &osv("Package 'regex' is vulnerable to 'CVE-1'.")), None, "no version");
+        assert_eq!(package_by("osv-scanner", &osv("Package 'regex@' is vulnerable to 'CVE-1'.")), None, "an empty version");
+        assert_eq!(package_by("osv-scanner", &osv("Packages 'regex@1.5.1' is vulnerable to 'CVE-1'.")), None, "one word off");
+
+        let trivy = |text: &str| format!(r#"{{"ruleId":"CVE-1","message":{{"text":"{text}"}}}}"#);
+        let vuln = trivy("Package: github.com/xuri/excelize/v2\\nInstalled Version: v2.11.0\\nVulnerability CVE-1\\nSeverity: HIGH");
+        assert_eq!(package_by("Trivy", &vuln), coordinate("github.com/xuri/excelize/v2", "v2.11.0"), "verbatim, its `v` kept");
+        assert_eq!(package_by("Trivy", &trivy("Package: Django\\nVulnerability CVE-1")), None, "no installed version");
+        assert_eq!(package_by("Trivy", &trivy("Artifact: Dockerfile\\nType: dockerfile\\nVulnerability DS002")), None, "a misconfiguration");
+        assert_eq!(package_by("Bandit", &vuln), None, "another scanner writing the same lines");
+
+        let dc = |fqn: &str| {
+            format!(
+                r#"{{"ruleId":"CVE-1","message":{{"text":"CVE-1 - d"}},"locations":[{{"physicalLocation":{{"artifactLocation":{{"uri":"file:///p/lib/a.jar"}}}},"logicalLocations":[{{"fullyQualifiedName":{fqn}}}]}}]}}"#
+            )
+        };
+        let purl = |p: &str| dc(&format!("\"{p}\""));
+        let log4j = coordinate("pkg:maven/org.apache.logging.log4j/log4j-core", "2.14.1");
+        assert_eq!(package_by("dependency-check", &purl("pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1")), log4j);
+        assert_eq!(package_by("dependency-check", &purl("pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1?type=jar")), log4j, "qualifiers dropped");
+        assert_eq!(package_by("dependency-check", &purl("pkg:npm/%40vitest/mocker@3.2.7#dist")), coordinate("pkg:npm/%40vitest/mocker", "3.2.7"), "a subpath dropped");
+        assert_eq!(package_by("dependency-check", &purl("cpe:2.3:a:apache:log4j:2.14.1:*:*:*:*:*:*:*")), None, "a CPE is no purl");
+        assert_eq!(package_by("dependency-check", &purl("maven/org.apache.logging.log4j/log4j-core@2.14.1")), None, "a name and version with no `pkg:` is no purl");
+        assert_eq!(package_by("dependency-check", &purl("log4j-core@2.14.1")), None, "nor is a bare `name@version`");
+        assert_eq!(package_by("dependency-check", &purl("pkg:maven/a/b")), None, "a purl with no version");
+        assert_eq!(package_by("Trivy", &purl("pkg:maven/a/b@1")), None, "only Dependency-Check's logical location is read");
+        for malformed in ["3", "null", r#"{"a":1}"#] {
+            assert_eq!(package_by("dependency-check", &dc(malformed)), None, "{malformed}: no package, and the report still parses");
+        }
+        let not_a_list = r#"{"ruleId":"CVE-1","message":{"text":"m"},"locations":[{"logicalLocations":"x"}]}"#;
+        assert_eq!(package_by("dependency-check", not_a_list), None, "a shape never read before rejects nothing");
+    }
+
+    /// S-808: the captured and upstream reports read as the table records —
+    /// every OSV-Scanner result, every Trivy vulnerability and every
+    /// Dependency-Check result names its package; a Trivy secret or
+    /// misconfiguration, and every other scanner's result, names none.
+    #[test]
+    fn each_fixture_report_reads_the_package_its_table_row_records() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif");
+        let read = |file: &str| -> Vec<(String, Option<(String, String)>)> {
+            let text = std::fs::read_to_string(fixtures.join(file)).expect("fixture");
+            Sarif
+                .parse(&text)
+                .expect("parses")
+                .into_iter()
+                .flat_map(|run| run.findings)
+                .map(|f| (f.rule_id, f.package.map(|p| (p.name, p.version))))
+                .collect()
+        };
+        for file in ["osv-scanner-1.9.2.sarif", "osv-scanner-2.7.0.sarif"] {
+            let mut got: Vec<_> = read(file).into_iter().map(|(_, p)| p).collect();
+            got.sort();
+            assert_eq!(
+                got,
+                [coordinate("github.com/gogo/protobuf", "1.3.1"), coordinate("regex", "1.5.1"), coordinate("regex", "1.5.1")],
+                "{file}: upstream's repeat names one package twice"
+            );
+        }
+        let trivy = read("trivy.sarif");
+        let named = trivy.iter().filter(|(_, p)| p.is_some()).count();
+        assert_eq!((named, trivy.len()), (40, 46), "Trivy's 40 vulnerabilities name a package, its 6 secrets and misconfigurations none");
+        assert!(trivy.contains(&("CVE-2019-14234".to_string(), coordinate("Django", "2.2.0"))), "{trivy:?}");
+        let dc = read("dependency-check.sarif");
+        assert!(!dc.is_empty() && dc.iter().all(|(_, p)| *p == coordinate("pkg:maven/org.apache.logging.log4j/log4j-core", "2.14.1")), "{dc:?}");
+        for file in ["semgrep.sarif", "gitleaks.sarif", "bandit.sarif", "gosec.sarif", "checkov.sarif", "codeql.sarif"] {
+            let rows = read(file);
+            assert!(!rows.is_empty() && rows.iter().all(|(_, p)| p.is_none()), "{file} names no package: {rows:?}");
+        }
     }
 
     #[test]

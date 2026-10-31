@@ -18,8 +18,11 @@
 //! # Positive evidence only — never inference
 //!
 //! Evidence comes from an attribute, a name idiom, a lexically enclosing
-//! `it`/`test`/`describe` call, or a filename — **never** from call-graph
-//! reachability ([ADR-18]). A production
+//! `it`/`test`/`describe` call, a Scala class, trait or object extending a
+//! test-framework base, a test macro in a C function's type position, a C
+//! test-framework header the file includes, a cmocka `cmocka_unit_test(f)`
+//! registration, or a filename — **never** from call-graph reachability
+//! ([ADR-18]). A production
 //! function adjacent to (a sibling of) a test therefore carries no evidence: a
 //! false positive would silently exempt production code from the quality gate.
 //!
@@ -28,6 +31,8 @@
 //! [NFR-MA-01]: ../../../docs/specs/requirements/NFR-MA-01.md
 //! [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
 //! [CR-001]: ../../../docs/requests/CR-001-test-aware-quality-metrics.md
+
+use std::collections::HashSet;
 
 use tree_sitter::Node;
 
@@ -44,7 +49,9 @@ use crate::plugin::TestConvention;
 ///
 /// `node` is the declaration node (the captured name's parent — a
 /// `function_item`, `method_declaration`, `variable_declarator`, …), `source`
-/// the file's bytes for reading attribute/identifier text.
+/// the file's bytes for reading attribute/identifier text, and `file` the facts
+/// about the whole file a convention reads, computed once for the file and shared
+/// by every declaration in it ([`FileFacts`]).
 ///
 /// [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
@@ -56,6 +63,7 @@ pub(crate) fn test_evidence(
     path: &str,
     convention: TestConvention,
     source: &[u8],
+    file: &mut FileFacts,
 ) -> bool {
     // Only functions/methods carry the evidence the production scope reasons
     // about; a type or module is never a test in its own right.
@@ -71,10 +79,11 @@ pub(crate) fn test_evidence(
         TestConvention::JavaAnnotations => java_annotations(node, source),
         TestConvention::KotlinAnnotations => kotlin_annotations(node, source),
         TestConvention::CSharpAttributes => csharp_attributes(node, source),
-        TestConvention::CppTestMacros => cpp_test_macro(name),
+        TestConvention::CppTestMacros => cpp_test_macro(node, source),
         TestConvention::RubyTest => ruby_test(node, name, source),
         TestConvention::PhpUnit => php_unit(node, name, path, source),
         TestConvention::ScalaTest => scala_test(node, source),
+        TestConvention::CTestMacros => c_test_macro(node, name, source, file),
     }
 }
 
@@ -278,14 +287,14 @@ fn js_callee_is_test(callee: Node<'_>, source: &[u8]) -> bool {
 
 // ── Go ───────────────────────────────────────────────────────────────────────
 
-/// Go: a `Test`/`Benchmark`/`Fuzz` function in a `*_test.go` file. The filename
+/// Go: a `Test`/`Benchmark`/`Fuzz`/`Example` function in a `*_test.go` file. The filename
 /// gate is what `go test` itself requires, and it is what keeps a production
 /// `TestRunner` type's constructor out of the test scope.
 fn go_test_func(name: &str, path: &str) -> bool {
     if !path.ends_with("_test.go") {
         return false;
     }
-    ["Test", "Benchmark", "Fuzz"].iter().any(|prefix| {
+    ["Test", "Benchmark", "Fuzz", "Example"].iter().any(|prefix| {
         name.strip_prefix(prefix).is_some_and(|rest| {
             // `go test` recognises `Test`/`TestXxx` but not `Testify` —
             // the char after the prefix must not be a lowercase letter.
@@ -363,31 +372,217 @@ fn kotlin_annotation_simple_name<'s>(annotation: Node<'_>, source: &'s [u8]) -> 
 
 // ── C++ ──────────────────────────────────────────────────────────────────────
 
-/// C++ (S-058): a GoogleTest/Catch2 function-like test macro, identified by the
-/// declaration's *name*. `TEST(Suite, Name) { … }` and its `TEST_F`/`TEST_P`/
-/// `TYPED_TEST` siblings parse as return-type-less `function_definition`s whose
-/// `function_declarator` identifier is the macro keyword itself, so the captured
-/// symbol name *is* `TEST`/`TEST_F`/… — a name match is the single signal
-/// available at extraction time (the captured declarator), keeping the test
-/// classification stable ([FR-AN-05]).
+/// C++ (S-058, S-580): a GoogleTest/Catch2 function-like test macro, identified
+/// by the macro keyword the declaration is written with. `TEST(Suite, Name) {
+/// … }` and its `TEST_F`/`TEST_P`/`TYPED_TEST` siblings parse as return-type-less
+/// `function_definition`s whose `function_declarator` identifier is the macro
+/// keyword itself. A Catch2 `TEST_CASE("name", "[tag]") { … }` parses as a call
+/// statement followed by a block, and the block is the declaration
+/// (`extract::test_name`), so its keyword is the call before it.
+///
+/// The keyword is read off the tree, not off the declared name: a test macro's
+/// declaration is named by its arguments (`Suite.Name`, the Catch2 string), so
+/// the name no longer says which macro it is. The classification stays stable
+/// ([FR-AN-05]).
 ///
 /// Positive-evidence-only ([ADR-18]): the recognised set is the exact macro
-/// keywords, never a prefix, so a production function is not swept in. The Catch2
-/// keywords are recognised for completeness, but their string-argument form
-/// (`TEST_CASE("name", "[tag]")`) does not parse as a function under
-/// `tree-sitter-cpp`, so no node ever reaches this check for them — the measured
-/// precision floor, surfaced honestly ([NFR-RA-05]).
-fn cpp_test_macro(name: &str) -> bool {
-    matches!(
-        name,
-        "TEST"
-            | "TEST_F"
-            | "TEST_P"
-            | "TYPED_TEST"
-            | "TYPED_TEST_P"
-            | "TEST_CASE"
-            | "SCENARIO"
-    )
+/// keywords, never a prefix, so a production function is not swept in.
+fn cpp_test_macro(node: Node<'_>, source: &[u8]) -> bool {
+    cpp_macro_keyword(node, source).is_some_and(|keyword| {
+        matches!(
+            keyword,
+            "TEST" | "TEST_F" | "TEST_P" | "TYPED_TEST" | "TYPED_TEST_P" | "TEST_CASE" | "SCENARIO"
+        )
+    })
+}
+
+/// The identifier a C++ declaration is written with: the declarator's name for a
+/// function (a `function_definition`, a `declaration`, the declarator itself),
+/// the callee of the statement before a block.
+fn cpp_macro_keyword<'s>(node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    if node.kind() == "compound_statement" {
+        let mut head = node.prev_sibling();
+        while let Some(n) = head.filter(|n| n.is_extra()) {
+            head = n.prev_sibling();
+        }
+        let call = head.filter(|n| n.kind() == "expression_statement")?.named_child(0)?;
+        let callee = call.child_by_field_name("function").filter(|_| call.kind() == "call_expression")?;
+        return (callee.kind() == "identifier").then(|| callee.utf8_text(source).ok()).flatten();
+    }
+    let mut at = node;
+    // A function declarator under at most a few pointer/reference wrappers.
+    for _ in 0..4 {
+        if at.kind() == "function_declarator" {
+            let name = at.child_by_field_name("declarator")?;
+            return matches!(name.kind(), "identifier" | "field_identifier")
+                .then(|| name.utf8_text(source).ok())
+                .flatten();
+        }
+        at = at.child_by_field_name("declarator")?;
+    }
+    None
+}
+
+// ── C ────────────────────────────────────────────────────────────────────────
+
+/// The function-like macros C test suites define a case with, written where a
+/// return type would be: libuv's `TEST_IMPL(name) { … }`, a one-argument
+/// `TEST(name) { … }` / `TEST_CASE(name) { … }`, and greatest's
+/// `TEST name(void) { … }`. An exact list — never a prefix — so a production
+/// macro of a similar shape is not swept in ([ADR-18]).
+///
+/// The two-argument `TEST(group, name) { … }` (Unity fixtures, GoogleTest-style C)
+/// is not in reach: tree-sitter-c reads it as an expression statement followed by
+/// a bare block, so no function node exists to mark — the same measured floor
+/// as C++'s `TEST_CASE("…")`, surfaced rather than fabricated ([NFR-RA-05]).
+///
+/// [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const C_TEST_MACROS: [&str; 3] = ["TEST_IMPL", "TEST", "TEST_CASE"];
+
+/// The Unity headers (`unity.h`, `unity_fixture.h`). Unity and cmocka cases are
+/// plain functions, so the header a file includes is the only evidence its
+/// functions are cases.
+const C_UNITY_HEADERS: [&str; 2] = ["unity.h", "unity_fixture.h"];
+/// The cmocka header.
+const C_CMOCKA_HEADER: &str = "cmocka.h";
+
+/// cmocka's registration macros — `cmocka_unit_test(f)`,
+/// `cmocka_unit_test_setup(f, setup)`, `cmocka_unit_test_prestate(f, state)`, …
+/// — whose first argument is the case. An exact list: `cmocka_unit_testing(f)`
+/// registers nothing.
+const C_CMOCKA_REGISTRATIONS: [&str; 6] = [
+    "cmocka_unit_test",
+    "cmocka_unit_test_setup",
+    "cmocka_unit_test_teardown",
+    "cmocka_unit_test_setup_teardown",
+    "cmocka_unit_test_prestate",
+    "cmocka_unit_test_prestate_setup_teardown",
+];
+
+/// What the file as a whole says about its tests, read the first time a
+/// declaration needs it and kept for every later one in the file. A per-file fact
+/// recomputed per function is quadratic: a thousand-function file whose prologue
+/// is a few thousand lines would walk that prologue a thousand times.
+#[derive(Default)]
+pub(crate) struct FileFacts {
+    c_headers: Option<CHeaders>,
+    cmocka_cases: Option<HashSet<String>>,
+}
+
+/// Which C test frameworks a file includes, by header.
+#[derive(Clone, Copy)]
+struct CHeaders {
+    unity: bool,
+    cmocka: bool,
+}
+
+/// C (S-583, [CR-185]): a function defined through a known test macro, a Unity
+/// `test_*` function, or a cmocka case.
+///
+/// `TEST_IMPL(name) { … }` parses as a `function_definition` whose `type` is the
+/// macro (a `type_identifier`) and whose declarator is the parenthesised
+/// `(name)`, so the macro is the evidence and the argument the declared name.
+/// A Unity or cmocka case is an ordinary function, `void test_x(void)` or
+/// `static void case_x(void **state)`; the framework header the file includes is
+/// the evidence — a `test_` name alone would mark any production helper — and
+/// for cmocka the case is also the function a `cmocka_unit_test(f)`
+/// registration names, whatever its own name.
+///
+/// [CR-185]: ../../../docs/requests/CR-185-c-resolves-includes-prototypes-headers-and-macros.md
+fn c_test_macro(node: Node<'_>, name: &str, source: &[u8], file: &mut FileFacts) -> bool {
+    if node.kind() != "function_definition" {
+        return false;
+    }
+    if c_type_is_test_macro(node, source) {
+        return true;
+    }
+    let Some(unit) = c_translation_unit(node) else {
+        return false;
+    };
+    let headers = *file
+        .c_headers
+        .get_or_insert_with(|| c_included_headers(unit, source));
+    if name.starts_with("test_") {
+        return headers.unity || headers.cmocka;
+    }
+    headers.cmocka
+        && file
+            .cmocka_cases
+            .get_or_insert_with(|| cmocka_registered(unit, source))
+            .contains(name)
+}
+
+/// `true` when the definition's `type` is one of [`C_TEST_MACROS`].
+fn c_type_is_test_macro(node: Node<'_>, source: &[u8]) -> bool {
+    node.child_by_field_name("type")
+        .filter(|ty| ty.kind() == "type_identifier")
+        .and_then(|ty| ty.utf8_text(source).ok())
+        .is_some_and(|ty| C_TEST_MACROS.contains(&ty))
+}
+
+/// The `translation_unit` a node is in.
+fn c_translation_unit(node: Node<'_>) -> Option<Node<'_>> {
+    let mut up = node.parent();
+    while let Some(n) = up {
+        if n.kind() == "translation_unit" {
+            return Some(n);
+        }
+        up = n.parent();
+    }
+    None
+}
+
+/// The test frameworks the file's top-level `#include`s name, matched by the
+/// include path's file name (`cmocka.h` of `<cmocka.h>` or `"vendor/cmocka.h"`;
+/// never a longer name that merely ends in it). An include inside an `#ifdef`
+/// block is not read.
+fn c_included_headers(unit: Node<'_>, source: &[u8]) -> CHeaders {
+    let mut headers = CHeaders {
+        unity: false,
+        cmocka: false,
+    };
+    let mut cursor = unit.walk();
+    for include in unit.children(&mut cursor).filter(|c| c.kind() == "preproc_include") {
+        let Some(path) = include
+            .child_by_field_name("path")
+            .and_then(|p| p.utf8_text(source).ok())
+        else {
+            continue;
+        };
+        let path = path.trim_matches(|ch| matches!(ch, '"' | '<' | '>'));
+        let file = path.rsplit('/').next().unwrap_or(path);
+        headers.unity |= C_UNITY_HEADERS.contains(&file);
+        headers.cmocka |= file == C_CMOCKA_HEADER;
+    }
+    headers
+}
+
+/// The functions the file registers as cmocka cases: the first argument of every
+/// `cmocka_unit_test*(…)` call in it (the `tests[]` array, in `main` or at file
+/// scope). One walk of the file; only read for a file that includes `cmocka.h`.
+fn cmocka_registered(unit: Node<'_>, source: &[u8]) -> HashSet<String> {
+    let mut cases = HashSet::new();
+    let mut stack = vec![unit];
+    while let Some(n) = stack.pop() {
+        if n.kind() == "call_expression" {
+            let registers = n
+                .child_by_field_name("function")
+                .and_then(|f| f.utf8_text(source).ok())
+                .is_some_and(|f| C_CMOCKA_REGISTRATIONS.contains(&f));
+            let case = n
+                .child_by_field_name("arguments")
+                .and_then(|args| args.named_child(0))
+                .filter(|arg| arg.kind() == "identifier")
+                .and_then(|arg| arg.utf8_text(source).ok());
+            if let (true, Some(case)) = (registers, case) {
+                cases.insert(case.to_string());
+            }
+        }
+        let mut cursor = n.walk();
+        stack.extend(n.children(&mut cursor));
+    }
+    cases
 }
 
 /// The JUnit `@Test`-family simple names.
@@ -625,21 +820,114 @@ fn comment_has_test_tag(text: &str) -> bool {
 /// callable lexically enclosed by it.
 const SCALA_TEST_MARKERS: [&str; 2] = ["test", "it"];
 
+/// The ScalaTest suite styles (`FunSuite`, `FlatSpec`, …) whose `Any…`/`Async…`/
+/// `Fixture…` prefixes and `…Like` suffix [`scala_is_test_base`] composes: the
+/// 3.x `org.scalatest.funsuite.AnyFunSuite` family, its async and fixture
+/// variants, and the 2.x names MUnit's `FunSuite` shares.
+const SCALA_TEST_STYLES: [&str; 7] = [
+    "FunSuite",
+    "FlatSpec",
+    "FunSpec",
+    "WordSpec",
+    "FreeSpec",
+    "PropSpec",
+    "FeatureSpec",
+];
+/// The prefixes a ScalaTest style takes (`AnyFunSuite`, `AsyncFlatSpec`,
+/// `FixtureAnyWordSpec`); the empty one is the 2.x / MUnit bare name.
+const SCALA_TEST_STYLE_PREFIXES: [&str; 6] = [
+    "",
+    "Any",
+    "Async",
+    "Fixture",
+    "FixtureAny",
+    "FixtureAsync",
+];
+/// The test bases that are no composition of a style: MUnit's `ScalaCheckSuite`
+/// and `CatsEffectSuite` and the Specs2 `Specification` (also its `…Like` trait).
+const SCALA_TEST_BASES: [&str; 4] = [
+    "ScalaCheckSuite",
+    "CatsEffectSuite",
+    "Specification",
+    "SpecificationLike",
+];
+
 /// Scala: a node that **is**, or is lexically enclosed by, a `test(…)`/`it(…)`
-/// marker call (S-061, [FR-EX-06]). Walking the node itself plus its ancestors
-/// covers both shapes: a marker call passed directly, and a `def` that may sit
-/// inside a test block.
-/// Positive-evidence-only ([ADR-18]): only the `test`/`it` names match, so a
-/// production call enclosing a helper is never a false positive.
+/// marker call, or a member of a class, trait or object that extends a ScalaTest,
+/// MUnit or Specs2 base (S-061, S-574, [FR-EX-06]). Walking the node itself plus
+/// its ancestors covers every shape: a marker call passed directly, a `def` that
+/// may sit inside a test block, and a `def` of a suite class (including one
+/// nested in it, such as a fixture class).
+/// Positive-evidence-only ([ADR-18]): only the `test`/`it` names and the exact
+/// framework base names match, so a production call enclosing a helper and a
+/// production class beside a suite are never false positives.
 fn scala_test(node: Node<'_>, source: &[u8]) -> bool {
     let mut current = Some(node);
     while let Some(n) = current {
-        if n.kind() == "call_expression" && scala_call_head_is_marker(n, source) {
+        if (n.kind() == "call_expression" && scala_call_head_is_marker(n, source))
+            || scala_extends_test_base(n, source)
+        {
             return true;
         }
         current = n.parent();
     }
     false
+}
+
+/// `true` when `node` is a class, trait or object whose `extends` clause lists a
+/// test base — the first parent or any `with` mixin (`extends Matchers with
+/// AnyWordSpecLike`) or comma-separated parent (Scala 3).
+fn scala_extends_test_base(node: Node<'_>, source: &[u8]) -> bool {
+    if !matches!(
+        node.kind(),
+        "class_definition" | "trait_definition" | "object_definition"
+    ) {
+        return false;
+    }
+    let Some(clause) = node.child_by_field_name("extend") else {
+        return false;
+    };
+    let mut cursor = clause.walk();
+    let found = clause
+        .children_by_field_name("type", &mut cursor)
+        .any(|ty| {
+            // The named bases are never generic (Specs2's `Specification`), where
+            // a Spring Data / DDD `Specification[User]` is: a generic parent is
+            // matched by the ScalaTest styles alone.
+            let generic = ty.kind() == "generic_type";
+            scala_type_name(ty, source).is_some_and(|name| scala_is_test_base(name, generic))
+        });
+    found
+}
+
+/// The unqualified name a parent type is written with: a `type_identifier`'s own
+/// text, the last segment of a qualified `a.b.AnyFunSuite`, or the constructor of
+/// a generic one. Any other shape (a refinement, a tuple type) names no base.
+fn scala_type_name<'s>(ty: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    match ty.kind() {
+        "type_identifier" => ty.utf8_text(source).ok(),
+        "stable_type_identifier" => {
+            let last = ty.named_child(ty.named_child_count().checked_sub(1)?)?;
+            scala_type_name(last, source)
+        }
+        "generic_type" => scala_type_name(ty.child_by_field_name("type")?, source),
+        _ => None,
+    }
+}
+
+/// `true` when `name` is exactly a ScalaTest suite style, with or without its
+/// `Any`/`Async`/`Fixture…` prefix and `Like` suffix, or — when the parent is not
+/// `generic` — another named base. An exact comparison: `AnyFunSuiteHelper` and
+/// `MyFunSuite` are no test base.
+fn scala_is_test_base(name: &str, generic: bool) -> bool {
+    if !generic && SCALA_TEST_BASES.contains(&name) {
+        return true;
+    }
+    let style = name.strip_suffix("Like").unwrap_or(name);
+    SCALA_TEST_STYLE_PREFIXES
+        .iter()
+        .filter_map(|prefix| style.strip_prefix(prefix))
+        .any(|rest| SCALA_TEST_STYLES.contains(&rest))
 }
 
 /// `true` when a `call_expression`'s leading callee identifier is a Scala test
@@ -725,7 +1013,7 @@ mod tests {
         // Pre-order, left-to-right (push children reversed).
         while let Some(n) = stack.pop() {
             if n.kind() == decl_kind && node_name(n, bytes) == target {
-                return test_evidence(n, target, node_kind, path, convention, bytes);
+                return test_evidence(n, target, node_kind, path, convention, bytes, &mut FileFacts::default());
             }
             for i in (0..n.child_count()).rev() {
                 if let Some(c) = n.child(i) {
@@ -1027,6 +1315,9 @@ package p
 func TestThing(t *testing.T) {}
 func BenchmarkThing(b *testing.B) {}
 func FuzzThing(f *testing.F) {}
+func ExampleThing() {}
+func Example() {}
+func Exampled() {}
 func Testify() {}
 func prod() {}
 ";
@@ -1047,6 +1338,12 @@ func prod() {}
             "BenchmarkXxx in _test.go"
         );
         assert!(probe_in("foo_test.go", "FuzzThing"), "FuzzXxx in _test.go");
+        assert!(probe_in("foo_test.go", "ExampleThing"), "ExampleXxx in _test.go");
+        assert!(probe_in("foo_test.go", "Example"), "the package example in _test.go");
+        assert!(
+            !probe_in("foo_test.go", "Exampled"),
+            "Example followed by a lowercase letter is not an example"
+        );
         assert!(
             !probe_in("foo_test.go", "Testify"),
             "Test followed by a lowercase letter is not a test func"
@@ -1384,6 +1681,8 @@ class MathSuite extends munit.FunSuite {
     def helper(): Int = 1
     assertEquals(helper(), 1)
   }
+}
+object MathOps {
   def prod(): Int = 2
 }
 ";
@@ -1411,6 +1710,119 @@ class MathSuite extends munit.FunSuite {
             ),
             "a production def beside the tests carries none"
         );
+    }
+
+    /// Probe the `def` named `target` in `src` under the Scala convention.
+    #[cfg(feature = "lang-scala")]
+    fn scala_def_is_test(src: &str, target: &str) -> bool {
+        let lang: tree_sitter::Language = tree_sitter_scala::LANGUAGE.into();
+        probe(
+            &lang,
+            "core/Probe.scala",
+            src,
+            "function_definition",
+            target,
+            NodeKind::Method,
+            TestConvention::ScalaTest,
+        )
+    }
+
+    #[cfg(feature = "lang-scala")]
+    #[test]
+    fn scala_members_of_a_class_extending_a_test_base_carry_evidence() {
+        // S-574: ScalaTest, MUnit and Specs2 bases, bare, qualified, generic,
+        // mixed in with `with` or listed after a comma.
+        for header in [
+            "class A extends AnyFunSuite",
+            "class A extends AnyFlatSpec with Matchers",
+            "class A extends Matchers with AnyWordSpecLike",
+            "class A extends org.scalatest.funsuite.AnyFunSuite",
+            "class A extends munit.FunSuite",
+            "class A extends FunSuite",
+            "class A extends FlatSpec",
+            "class A extends AsyncFreeSpec",
+            "class A extends FixtureAnyFunSpec",
+            "class A extends ScalaCheckSuite",
+            "class A extends CatsEffectSuite",
+            "class A extends Specification",
+            "class A extends org.specs2.mutable.Specification",
+            "class A extends SpecificationLike",
+            "class A extends AnyFunSuite, Matchers",
+            "class A extends AnyFunSuite[Int]",
+            "class A extends org.scalatest.funsuite.AnyFunSuite[Int]",
+            "class A extends FixtureFunSuite",
+            "class A extends FixtureAsyncFunSpec",
+            "class A extends AnyPropSpec",
+            "class A extends AnyFeatureSpec",
+            "abstract class A extends AnyFunSuite",
+            "trait A extends AnyFunSuite",
+            "object A extends AnyFunSuite",
+            "class A(x: Int) extends AnyFunSuite(x)",
+        ] {
+            let src = format!("{header} {{\n  def helper(): Int = 1\n}}\n");
+            assert!(scala_def_is_test(&src, "helper"), "{header}");
+        }
+    }
+
+    #[cfg(feature = "lang-scala")]
+    #[test]
+    fn scala_members_of_a_class_extending_a_near_miss_base_carry_none() {
+        // Production classes are unchanged: only the exact framework names are
+        // evidence, never a name that merely resembles one.
+        for header in [
+            "class A",
+            "class A extends Runnable",
+            "class A extends Matchers",
+            "class A extends AnyFunSuiteHelper",
+            "class A extends MyFunSuite",
+            "class A extends FunSuites",
+            "class A extends Suite",
+            "class A extends SpecificationHelper",
+            "class A extends Anyfunsuite",
+            "class A extends Foo with Bar",
+            // A JPA / DDD `Specification[T]` is generic; the Specs2 base never is.
+            "class A extends Specification[User]",
+            "class A extends org.springframework.data.jpa.domain.Specification[User]",
+            "class A extends SpecificationLike[User]",
+            // `Like` belongs to the ScalaTest styles and Specs2's own trait only.
+            "class A extends CatsEffectSuiteLike",
+            "class A extends ScalaCheckSuiteLike",
+        ] {
+            let src = format!("{header} {{\n  def helper(): Int = 1\n}}\n");
+            assert!(!scala_def_is_test(&src, "helper"), "{header}");
+        }
+    }
+
+    #[cfg(feature = "lang-scala")]
+    #[test]
+    fn scala_a_test_base_marks_its_own_class_not_its_siblings() {
+        // The evidence is the enclosing template: a sibling class and a def
+        // after the class are untouched.
+        let src = "\
+class FooSpec extends AnyFlatSpec {
+  def inSpec(): Int = 1
+}
+class Foo {
+  def inProd(): Int = 2
+}
+def topLevel(): Int = 3
+";
+        assert!(scala_def_is_test(src, "inSpec"));
+        assert!(!scala_def_is_test(src, "inProd"));
+        assert!(!scala_def_is_test(src, "topLevel"));
+    }
+
+    #[cfg(feature = "lang-scala")]
+    #[test]
+    fn scala_a_nested_member_of_a_test_class_carries_evidence() {
+        let src = "\
+class FooSpec extends AnyFlatSpec {
+  class Fixture {
+    def build(): Int = 1
+  }
+}
+";
+        assert!(scala_def_is_test(src, "build"));
     }
 
     #[cfg(feature = "lang-rust")]

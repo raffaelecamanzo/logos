@@ -598,6 +598,56 @@ fn integration_helper() {}
     );
 }
 
+/// Indexing real Scala marks the callables of a suite through each Scala test
+/// convention — a class extending a ScalaTest base, a `*Spec.scala` file and the
+/// `src/it/scala` source set — and leaves a production class, also one named
+/// like a suite beneath a production root, untouched ([S-574], [CR-183]).
+///
+/// [S-574]: ../../docs/planning/journal.md#s-574-scala-test-conventions-are-recognised
+/// [CR-183]: ../../docs/requests/CR-183-scala-resolves-imports-calls-and-relations.md
+#[test]
+fn index_marks_scala_suites_by_base_class_file_name_and_it_source_set_not_production() {
+    let tmp = TempDir::new().unwrap();
+    // No test path, no test-looking name: the base class is the only signal.
+    write(
+        tmp.path(),
+        "app/Checks.scala",
+        "class Checks extends AnyFlatSpec with Matchers {\n  def base_case(): Int = 1\n}\n",
+    );
+    write(
+        tmp.path(),
+        "app/StoreSpec.scala",
+        "class StoreSpec {\n  def by_file_name(): Int = 2\n}\n",
+    );
+    write(
+        tmp.path(),
+        "svc/src/it/scala/Flow.scala",
+        "class Flow {\n  def by_source_set(): Int = 3\n}\n",
+    );
+    write(
+        tmp.path(),
+        "app/Store.scala",
+        "class Store {\n  def production_one(): Int = 4\n}\n",
+    );
+    write(
+        tmp.path(),
+        "svc/src/main/scala/CacheSpec.scala",
+        "class CacheSpec {\n  def production_two(): Int = 5\n}\n",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    let snap = snapshot(engine.runtime().unwrap());
+
+    for name in ["base_case", "by_file_name", "by_source_set"] {
+        assert!(named(&snap, name, NodeKind::Method).is_test, "{name} is a test callable");
+    }
+    for name in ["production_one", "production_two"] {
+        assert!(!named(&snap, name, NodeKind::Method).is_test, "{name} is production");
+    }
+}
+
 // ── FR-AN-06 / UAT-QM-12: near-clone clustering, end-to-end over real source ─
 
 /// The UAT-QM-12 fixture, indexed end-to-end: two functions identical modulo

@@ -23,13 +23,20 @@ abi_version = 15
 # name (S-590, CR-189, FR-RS-07).
 implicit_receiver = "none"
 
+# Go writes no `implements` clause: a type implements an interface when its method
+# set covers every method the interface declares (S-529, CR-172, FR-RS-18). The
+# resolution pass records that `Implements` itself, matching methods by name and
+# parameter count with embedded fields' methods promoted and embedded interfaces
+# expanded; a generic interface is reported not computed.
+method_set_implements = true
+
 # `brokers` captures message-broker publish/subscribe sites (S-408, FR-WS-10,
 # ADR-54). Go's arm is the receiver-gated Kafka Streams topology form only —
 # `queries/brokers.scm` records why the Rust file's bare-verb patterns were
 # deliberately not ported, and which half of the arm the reference estate
 # measures: capture is fixture-only, over-capture is 0 rows over its 262 real
 # `.go` files.
-capabilities = ["symbols", "references", "frameworks", "invocations", "brokers"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "brokers", "locals"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # `case` covers both switch and select arms.
@@ -40,14 +47,38 @@ complexity_keywords = ["if", "else", "for", "case", "&&", "||"]
 # select). Depth 0 is a flat body; each nested statement adds one.
 nesting_block_kinds = ["if_statement", "for_statement", "expression_switch_statement", "type_switch_statement", "select_statement"]
 
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11, S-525):
+# a Function/Method is implemented when its declaration has a direct `block` child.
+# An interface's method spec (`Check(e int) bool`) is a Method with none, so it is
+# bodyless; every `func` with a body keeps its body, its tokens and its metrics.
+body_node_kinds = ["block"]
+
 # Go's export rule is the language's capitalisation convention: a
 # leading-uppercase name is exported (FR-AN-01).
 export_convention = "capitalized"
 
 # How Go marks a function as a test (S-027, FR-EX-06, ADR-18): a `Test`/
-# `Benchmark`/`Fuzz` function defined in a `*_test.go` file (the filename gate
-# `go test` itself uses). Feeds the unified `is_test` annotation (S-028).
+# `Benchmark`/`Fuzz`/`Example` function defined in a `*_test.go` file (the
+# filename gate `go test` itself uses). Feeds the unified `is_test` annotation
+# (S-028).
 test_convention = "go-test-func"
+
+# The functions the Go runtime calls itself (S-530, FR-AN-01): a package's
+# `main` and its `init` functions have no caller in source, so each is a
+# dead-code live root in a `.go` file — and only there: a Rust `fn init` stays
+# an ordinary function.
+entry_points = ["main", "init"]
+
+# Go does NOT declare `reachability` (S-530, CR-172, ADR-39): its callables keep
+# `is_dead = NULL`. With the roots above and `reachability = true` set for the
+# measurement, zap @ 4892335e reported 12 dead of 1,190 functions and methods
+# and ollama @ 42e911bc 737 of 9,360. Re-judged against the source, a sample of
+# 30 (zap's 12, 18 of ollama's drawn at random) held 30 live, where the bar to
+# declare is at most 2. The first missing link: 10 a call on a typed receiver
+# (`b.pool.put(b)`, `go s.start()`), 6 a function or method value
+# (`sr.newFileSinkFromURL`, a map of constructors), 2 a function declared once per
+# build tag, and 12 a caller itself falsely dead. Declare it only after those
+# shapes bind and a fresh sample passes.
 
 # The ratified v1 Go framework set (FR-FW-03): net/http + Gin. Canonical
 # `::`-joined prefixes of the import paths ("net/http",
@@ -74,14 +105,28 @@ framework_detectors = ["net::http", "github.com::gin-gonic::gin"]
 # carries the measurement that established it (NFR-RA-05).
 http_client_detectors = ["net::http"]
 
+# A Go package is a directory: every file in it that declares the same `package`
+# clause shares one scope (S-528, CR-172, FR-RS-17). The path model's keys are
+# unchanged; `directory_packages` records each file's clause (`queries/symbols.scm`
+# captures it as `@package.name`) and lets a bare name its own file does not
+# declare bind to the exactly-one top-level declaration of that name among the
+# package's other files. A name declared twice (build-tag variants) stays
+# unbound, and a `package foo_test` file is a package of its own.
+[module_model]
+kind = "path"
+directory_packages = true
+
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): some relations bind
 # across files, not all.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
+# A type implementing an interface of another file or package, and a method
+# reading a field of its receiver's struct declared in another file of the
+# package, bind across files since S-529.
 [reach]
 level = "partial"
-cross_file = ["calls", "imports"]
+cross_file = ["calls", "imports", "type_relations", "member_access"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -99,6 +144,9 @@ invocations = "queries/invocations.scm"
 # `extract::broker::receiver_is_topology` resolves the receiver to a
 # `StreamsBuilder`/`KStream` binding the same file declares.
 brokers = "queries/brokers.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` text → HTTP method (S-015). Gin's router verbs
 # name themselves; net/http registrations (`HandleFunc`/`Handle`) and Gin's
 # `Any` carry no single verb.

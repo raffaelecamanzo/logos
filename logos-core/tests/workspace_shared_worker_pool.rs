@@ -299,7 +299,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
     // The recv_timeout above still proves navigation never waits on the pool
     // under coverage; only the point-query wall-clock budget is skipped there.
     assert!(
-        cfg!(coverage) || worst < POINT_QUERY_MS,
+        cfg!(coverage) || worst < logos_core::perf::scaled_ms(POINT_QUERY_MS as u64).as_millis(),
         "a member's search took {worst} ms while another member occupied every \
          worker of the shared pool — that is the [NFR-PE-01] starvation [ADR-63] \
          trades private pools against; distribution: {latencies_ms:?}"

@@ -264,16 +264,16 @@ fn a_kotlin_multiplatform_import_binds_through_the_package_header() {
     let (_tmp, engine) = indexed(fixtures::KOTLIN);
     let rt = engine.runtime().unwrap();
     let koin = "core/src/commonMain/kotlin/org/koin/core/Koin.kt";
+    // A top-level function is a member of its package too (S-560, FR-RS-31).
     assert_eq!(
         edges_from(rt, koin, EdgeKind::Imports),
-        strings(&["core/src/commonMain/kotlin/org/koin/core/module/Module.kt:Module:class"])
+        strings(&[
+            "core/src/commonMain/kotlin/org/koin/core/module/Module.kt:Module:class",
+            "core/src/commonMain/kotlin/org/koin/core/module/Module.kt:module:function",
+        ])
     );
-    // A top-level function and a library type stay unbound: a function is not
-    // a declared type (KOTLIN-G1's own story), and the library is not here.
-    assert_eq!(
-        unbound_imports(rt, koin),
-        strings(&["kotlinx::coroutines::CoroutineScope", "org::koin::core::module::module"])
-    );
+    // A library type stays unbound: the library is not here.
+    assert_eq!(unbound_imports(rt, koin), strings(&["kotlinx::coroutines::CoroutineScope"]));
     // `import org.koin.core.module.*` names the package's files.
     assert_eq!(
         edges_from(rt, "core/src/jvmMain/kotlin/org/koin/core/KoinPlatform.kt", EdgeKind::Imports),
@@ -300,16 +300,17 @@ fn scala_imports_bind_through_the_declared_package() {
             // `import cats.data._` names the package's one file.
             &format!("{chain}:Chain:module"),
             // `import cats.data.Chain`: the class and its companion object
-            // share the name — ambiguous, so neither; `cats.data.Chain.empty`
-            // walks into that ambiguity too. `Validated` from the group binds.
+            // share the name — ambiguous, so neither. `cats.data.Chain.empty`
+            // names the companion object's member (S-573), which binds.
+            // `Validated` from the group binds.
             &format!("{chain}:Validated:trait"),
+            &format!("{chain}:empty:method"),
         ])
     );
     assert_eq!(
         unbound_imports(rt, main),
         strings(&[
             "cats::data::Chain",
-            "cats::data::Chain::empty",
             "cats::data::Missing",
             "scala::util::Try",
         ])
@@ -649,4 +650,198 @@ fn a_csharp_global_namespace_type_is_not_bound_from_a_namespace() {
     write(tmp.path(), BASE, "public class Base { }\n");
     let engine = index(&tmp);
     assert!(edges_from(engine.runtime().unwrap(), WIDGET, EdgeKind::Extends).is_empty());
+}
+
+// ── A `using` inside a namespace block (S-603, CR-199, FR-RS-45) ─────────────
+
+const ACME_FOO: &str = "src/Acme/Foo.cs";
+const VENDOR_FOO: &str = "src/Vendor/Foo.cs";
+const IMPL: &str = "src/Acme/Sub/Impl.cs";
+
+/// `Acme.Foo` and `X.Foo`, and an `Impl` in `Acme.Sub` naming `Foo` beside a
+/// `using X;` written where `impl_source` puts it.
+fn block_tree(impl_source: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), ACME_FOO, "namespace Acme\n{\n    public class Foo { }\n}\n");
+    write(tmp.path(), VENDOR_FOO, "namespace X\n{\n    public class Foo { }\n}\n");
+    write(tmp.path(), IMPL, impl_source);
+    tmp
+}
+
+const BLOCK_USING: &str = "namespace Acme.Sub\n{\n    using X;\n\n    public class Impl : Foo { }\n}\n";
+const FILE_USING: &str = "using X;\n\nnamespace Acme.Sub\n{\n    public class Impl : Foo { }\n}\n";
+
+/// The CR-199 shape: a `using X;` inside `namespace Acme.Sub { … }` is read
+/// before the enclosing `Acme`, so `Foo` is `X.Foo`; at file level it is read
+/// after every enclosing namespace, so `Foo` is `Acme.Foo`, as before. A
+/// `using` after a file-scoped `namespace Acme.Sub;` is inside it.
+#[test]
+fn a_csharp_using_inside_a_namespace_block_is_read_before_the_enclosing_namespace() {
+    let extends = |source: &str| {
+        let tmp = block_tree(source);
+        let engine = index(&tmp);
+        edges_from(engine.runtime().unwrap(), IMPL, EdgeKind::Extends)
+    };
+    assert_eq!(extends(BLOCK_USING), strings(&["src/Vendor/Foo.cs:Foo:class"]));
+    assert_eq!(extends(FILE_USING), strings(&["src/Acme/Foo.cs:Foo:class"]));
+    let file_scoped = "namespace Acme.Sub;\n\nusing X;\n\npublic class Impl : Foo { }\n";
+    assert_eq!(extends(file_scoped), strings(&["src/Vendor/Foo.cs:Foo:class"]));
+}
+
+/// Nested blocks: each `using` records the namespace in force where it is
+/// written — the innermost one `A.B`, the outer `A`, a file-level one none —
+/// and `Foo` is read at `A.B`'s `using`s before `A`'s types, which come before
+/// `A`'s `using`s; two at one level bind nothing and never fall through.
+#[test]
+fn nested_csharp_blocks_read_each_levels_usings_after_its_types() {
+    let tmp = TempDir::new().unwrap();
+    for (rel, ns) in [("src/Y.cs", "Y"), ("src/A.cs", "A"), ("src/X.cs", "X")] {
+        write(tmp.path(), rel, &format!("namespace {ns}\n{{\n    public class Foo {{ }}\n}}\n"));
+    }
+    let nested = "src/C.cs";
+    write(
+        tmp.path(),
+        nested,
+        "using Z;\n\nnamespace A\n{\n    using X;\n\n    namespace B\n    {\n        using Y;\n\n        public class C : Foo { }\n    }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let mut rows: Vec<(String, Option<String>)> = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::Imports && r.form == RefForm::Glob)
+                .map(|r| (r.target, r.alias))
+                .collect())
+        })
+        .unwrap();
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![
+            ("X".to_string(), Some("{A}".to_string())),
+            ("Y".to_string(), Some("{A.B}".to_string())),
+            ("Z".to_string(), None),
+        ]
+    );
+    assert_eq!(edges_from(rt, nested, EdgeKind::Extends), strings(&["src/Y.cs:Foo:class"]));
+
+    // `Y` no longer supplies it: `A`'s own `Foo` comes before `A`'s `using X;`.
+    write(tmp.path(), "src/Y.cs", "namespace Y\n{\n    public class Other { }\n}\n");
+    engine.sync(&["src/Y.cs".into()]);
+    assert_eq!(edges_from(rt, nested, EdgeKind::Extends), strings(&["src/A.cs:Foo:class"]));
+
+    // A second `using` of the inner block supplying `Foo` is an ambiguity the
+    // walk stops at: neither `A.Foo` nor `X.Foo` is reached past it.
+    write(tmp.path(), "src/Y.cs", "namespace Y\n{\n    public class Foo { }\n}\n");
+    write(tmp.path(), "src/W.cs", "namespace W\n{\n    public class Foo { }\n}\n");
+    write(
+        tmp.path(),
+        nested,
+        "using Z;\n\nnamespace A\n{\n    using X;\n\n    namespace B\n    {\n        using Y;\n        using W;\n\n        public class C : Foo { }\n    }\n}\n",
+    );
+    engine.sync(&["src/Y.cs".into(), "src/W.cs".into(), nested.into()]);
+    assert!(edges_from(rt, nested, EdgeKind::Extends).is_empty());
+}
+
+/// Sync ≡ reindex (NFR-RA-06) when a block-scoped `using` is added, moved to
+/// file level and removed: each state a sync reaches equals a cold index of
+/// the same tree.
+#[test]
+fn sync_equals_a_full_reindex_when_a_block_scoped_using_is_added_moved_and_removed() {
+    let tmp = block_tree("namespace Acme.Sub\n{\n    public class Impl : Foo { }\n}\n");
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let files = [ACME_FOO, VENDOR_FOO, IMPL];
+    for (source, expected) in [
+        (BLOCK_USING, "src/Vendor/Foo.cs:Foo:class"),
+        (FILE_USING, "src/Acme/Foo.cs:Foo:class"),
+        (BLOCK_USING, "src/Vendor/Foo.cs:Foo:class"),
+        ("namespace Acme.Sub\n{\n    public class Impl : Foo { }\n}\n", "src/Acme/Foo.cs:Foo:class"),
+    ] {
+        write(tmp.path(), IMPL, source);
+        engine.sync(&[IMPL.into()]);
+        assert_eq!(edges_from(rt, IMPL, EdgeKind::Extends), strings(&[expected]), "{source}");
+        assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{source}");
+    }
+    // The supplying namespace leaving and returning re-binds the block's row too.
+    write(tmp.path(), IMPL, BLOCK_USING);
+    engine.sync(&[IMPL.into()]);
+    write(tmp.path(), VENDOR_FOO, "namespace X\n{\n    public class Bar { }\n}\n");
+    engine.sync(&[VENDOR_FOO.into()]);
+    assert_eq!(edges_from(rt, IMPL, EdgeKind::Extends), strings(&["src/Acme/Foo.cs:Foo:class"]));
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
+}
+
+/// A block holding only `using`s applies them to no declaration: in
+/// `using Y; namespace A { using X; } namespace A.B { class C : Foo { } }` the
+/// `A` block encloses no code, so `Foo` is the file-level `Y.Foo` and never
+/// `X.Foo`. Its row records the empty block, `{}`.
+#[test]
+fn a_csharp_block_enclosing_no_declaration_lends_its_usings_to_none() {
+    let tmp = TempDir::new().unwrap();
+    for (rel, ns) in [("src/X.cs", "X"), ("src/Y.cs", "Y")] {
+        write(tmp.path(), rel, &format!("namespace {ns}\n{{\n    public class Foo {{ }}\n}}\n"));
+    }
+    let file = "src/C.cs";
+    write(
+        tmp.path(),
+        file,
+        "using Y;\n\nnamespace A\n{\n    using X;\n}\n\nnamespace A.B\n{\n    public class C : Foo { }\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges_from(rt, file, EdgeKind::Extends), strings(&["src/Y.cs:Foo:class"]));
+    let mut rows: Vec<(String, Option<String>)> = rt
+        .submit_read(|store| {
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::Imports && r.form == RefForm::Glob)
+                .map(|r| (r.target, r.alias))
+                .collect())
+        })
+        .unwrap();
+    rows.sort();
+    assert_eq!(rows, vec![("X".to_string(), Some("{}".to_string())), ("Y".to_string(), None)]);
+}
+
+/// A block enclosing only some of the file's declarations never lends its
+/// `using`s to the others: `namespace A.B { using X; class D {} }` beside a
+/// second `namespace A.B { class C : Foo {} }` records no block, so `X` is read
+/// after every level, as before blocks were recorded, and `C`'s `Foo` stays the
+/// enclosing `A.Foo` — as it does when the first block holds no declaration at
+/// all, whose `using` is read nowhere.
+#[test]
+fn a_csharp_sibling_blocks_using_never_reaches_a_declaration_outside_it() {
+    for (first_block, alias) in [
+        ("namespace A.B\n{\n    using X;\n\n    public class D { }\n}\n", None),
+        ("namespace A.B\n{\n    using X;\n}\n", Some("{}".to_string())),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        for (rel, ns) in [("src/X.cs", "X"), ("src/A.cs", "A")] {
+            write(tmp.path(), rel, &format!("namespace {ns}\n{{\n    public class Foo {{ }}\n}}\n"));
+        }
+        let file = "src/App.cs";
+        write(tmp.path(), file, &format!("{first_block}\nnamespace A.B\n{{\n    public class C : Foo {{ }}\n}}\n"));
+        let engine = index(&tmp);
+        let rt = engine.runtime().unwrap();
+        let extends: Vec<String> = edges_from(rt, file, EdgeKind::Extends)
+            .into_iter()
+            .filter(|e| e.contains(":Foo:"))
+            .collect();
+        assert_eq!(extends, strings(&["src/A.cs:Foo:class"]), "{first_block}");
+        let aliases: Vec<Option<String>> = rt
+            .submit_read(|store| {
+                Ok(store
+                    .unresolved_refs()?
+                    .into_iter()
+                    .filter(|r| r.kind == EdgeKind::Imports && r.form == RefForm::Glob)
+                    .map(|r| r.alias)
+                    .collect())
+            })
+            .unwrap();
+        assert_eq!(aliases, vec![alias], "{first_block}");
+    }
 }

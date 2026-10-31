@@ -1432,6 +1432,7 @@ mod tests {
             path: "svc.proto".to_string(),
             language: "proto".to_string(),
             partial: false,
+            parse_damaged: false,
             nodes: Vec::new(),
             edges: Vec::new(),
             refs: Vec::new(),
@@ -1441,6 +1442,7 @@ mod tests {
             declared_types: Vec::new(),
             namespace: None,
             impl_blocks: Vec::new(),
+            local_bindings: Vec::new(),
         }
     }
 
@@ -1770,6 +1772,8 @@ mod tests {
             variants: None,
             signature: false,
             uninherited: false,
+            alias: false,
+            type_arity: None,
         }
     }
 
@@ -1875,6 +1879,7 @@ mod infra_tests {
             path: "svc.proto".to_string(),
             language: "proto".to_string(),
             partial: false,
+            parse_damaged: false,
             nodes: Vec::new(),
             edges: Vec::new(),
             refs: Vec::new(),
@@ -1884,6 +1889,7 @@ mod infra_tests {
             declared_types: Vec::new(),
             namespace: None,
             impl_blocks: Vec::new(),
+            local_bindings: Vec::new(),
         }
     }
 

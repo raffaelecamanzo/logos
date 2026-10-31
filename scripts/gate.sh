@@ -40,12 +40,16 @@
 # Usage:
 #   bash scripts/gate.sh probe    # resolve paths + counts, run no gates
 #   bash scripts/gate.sh fast     # iteration loop: clippy, touched packages, arch,
-#                                 public terms, the script suites when scripts/,
-#                                 plugins/ or .claude-plugin/ changed (skips the
-#                                 two timing suites; `full` does not)
+#                                 public terms, timing assertions, offline cargo,
+#                                 the script suites
+#                                 when scripts/, plugins/ or .claude-plugin/ changed
+#                                 (skips the two timing suites; `full` does not)
 #   bash scripts/gate.sh full     # pre-handoff: every package, the agents-marker
-#                                 leg, deny, public terms, the script suites, ui,
-#                                 the ui-e2e browser leg (full only, never fast)
+#                                 leg, deny, public terms, timing assertions,
+#                                 offline cargo, the script suites, ui, the ui-e2e browser leg (full
+#                                 only, never fast)
+#   bash scripts/gate.sh ci       pre-publish: ci.yml's test steps in a native arm64
+#                                 Linux container with an empty cargo home (S-806)
 #
 # `full` RESUMES: a gate that already passed for this exact tree is not re-run,
 # so a run killed by memory pressure continues where it stopped when invoked
@@ -61,7 +65,9 @@
 # Exit codes:
 #   0  every gate in the tier passed
 #   1  at least one gate failed or was skipped
-#   2  usage error / not a git repository / missing prerequisite
+#   2  usage error / not a git repository / missing prerequisite (for `ci`: Docker
+#      missing, its daemon down, a non-arm64 engine, an image that cannot be run, or
+#      one whose Rust is not the local toolchain's)
 
 set -uo pipefail
 
@@ -70,28 +76,103 @@ TIER="${1:-}"
 
 usage() {
     cat >&2 <<'EOF'
-usage: bash scripts/gate.sh {probe|fast|full}
+usage: bash scripts/gate.sh {probe|fast|full|ci}
 
   probe  resolve the evidence path, the tree id and the per-package expected
          test-binary counts, then exit. Runs no gates and writes no evidence.
   fast   clippy + the packages the working tree touches + the architecture
-         gate + the public-terms gate, plus the script suites exactly when
-         `git diff --name-only` against the gate base touches scripts/. Emits
+         gate + the public-terms gate + the timing-assertions gate + the
+         offline-cargo gate, plus the script suites exactly when
+         `git diff --name-only` against the gate base touches scripts/,
+         plugins/ or .claude-plugin/. Emits
          tier "fast", which only `verify-evidence.sh --tier fast` accepts.
   full   all packages, the agents-marker leg (the `observability::` unit
          tests with logos-core's `agents` marker on), cargo-deny, the
-         public-terms gate, the script suites (one unit per
-         scripts/tests/test-*.sh), and the web/ui gates, including the ui-e2e
-         browser leg (never run by fast). Emits
+         public-terms gate, the timing-assertions gate, the offline-cargo gate,
+         the script suites (one unit per scripts/tests/test-*.sh), and the web/ui
+         gates, including the ui-e2e browser leg (never run by fast). Emits
          tier "full", which is what verify-evidence.sh requires.
+  ci     ci.yml's test steps — the web UI build, the script suites and
+         `cargo test --workspace --no-fail-fast` at LOGOS_PERF_TOLERANCE=3 — in a
+         native arm64 Linux container from an image pinned by digest, whose Rust
+         is the local toolchain's. The cargo home is empty at every start; only
+         the build directory persists, in the named Docker volume
+         $GATE_CI_VOLUME (default logos-ci-target). Exits 2 naming the cause: Docker
+         missing, its daemon down, a non-arm64 engine, an image that cannot be
+         run, or an image whose Rust is not the local one. Also tunable:
+         GATE_CI_IMAGE, GATE_CI_JOBS (compile jobs, 2), GATE_CI_TEST_THREADS (4).
+         Emits tier "ci", which only
+         `verify-evidence.sh --tier ci` accepts. Run once per publish.
 EOF
     exit 2
 }
 
 case "$TIER" in
-    probe | fast | full) ;;
+    probe | fast | full | ci) ;;
     *) usage ;;
 esac
+
+# ------------------------------------------------------------------ the ci tier
+#
+# `ci` reproduces what GitHub's runner does and a warm developer machine hides:
+# a cargo home that starts empty, so every dependency is fetched for the platform
+# being built, and a Linux userland (S-806, NFR-MA-11, CR-251). Sprint 108's
+# HF-12 passed the full gate and failed CI for exactly that: a test asking for
+# every platform's crates, offline, against a cache that held the host's.
+#
+# THE IMAGE is pinned by digest: the tag keeps it readable, the digest is what is
+# pulled, so a moved tag changes nothing. `GATE_CI_IMAGE` overrides it. Its Rust
+# must be the local toolchain's (checked on every run, below), so a green here is
+# a statement about the compiler the owner builds with. When the local toolchain
+# moves, resolve the new tag's digest and replace this line:
+#   curl -sI -H "Authorization: Bearer $TOKEN" \
+#     -H "Accept: application/vnd.oci.image.index.v1+json" \
+#     https://registry-1.docker.io/v2/library/rust/manifests/<version>-bookworm
+# The digest is the manifest list's, which holds the arm64 image the run selects.
+CI_IMAGE="${GATE_CI_IMAGE:-rust:1.99.1-bookworm@sha256:e9da6f6c3ed5095fd5d33bf7cdf309830a178a8147888f1b2f76d5769bd9306c}"
+# The one thing that persists between runs: cargo's build directory (the cargo
+# home is the container's own filesystem, gone with it). Reported by
+# disk-check.sh; reclaimed with `docker volume rm`.
+CI_VOLUME="${GATE_CI_VOLUME:-logos-ci-target}"
+CI_PLATFORM=linux/arm64
+
+# Exit 2 — never a pass, never a skip — when the run cannot happen, naming what is
+# wrong: Docker, its daemon, the engine's architecture, the image, or its Rust. A pass for a run that did not happen is the one
+# outcome this tier must make impossible.
+ci_require_docker() {
+    local arch local_rust image_rust
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "gate.sh ci: Docker is not installed (no \`docker\` on PATH); the ci tier runs in a Linux container" >&2
+        exit 2
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "gate.sh ci: the Docker daemon is not running (\`docker info\` failed); start Docker and re-run" >&2
+        exit 2
+    fi
+    # Native or nothing: an x86_64 engine emulating arm64 is the cost this tier
+    # exists to avoid, and a run on it would measure the emulator's timing.
+    arch="$(docker info --format '{{.Architecture}}' 2>/dev/null)"
+    case "$arch" in
+        aarch64 | arm64) ;;
+        *)
+            echo "gate.sh ci: the Docker engine is '$arch', not a native arm64 engine; the ci tier does not emulate" >&2
+            exit 2
+            ;;
+    esac
+    # The image's compiler against the local one: `rustc 1.99.1 (hash date)`
+    # against `rustc 1.99.1 (hash date) (Homebrew)` compare on the version alone.
+    local_rust="$(rustc --version 2>/dev/null | awk '{ print $2 }')"
+    echo "gate.sh ci: checking the image's Rust (the first run pulls $CI_IMAGE)" >&2
+    image_rust="$(docker run --rm --platform "$CI_PLATFORM" "$CI_IMAGE" rustc --version 2>/dev/null | awk '{ print $2 }')"
+    if [ -z "$image_rust" ]; then
+        echo "gate.sh ci: could not run \`rustc --version\` in $CI_IMAGE (pull failed or no network)" >&2
+        exit 2
+    fi
+    if [ "$local_rust" != "$image_rust" ]; then
+        echo "gate.sh ci: the image's Rust is $image_rust but the local toolchain is ${local_rust:-unknown}; pin an image whose Rust matches (CI_IMAGE in scripts/gate.sh)" >&2
+        exit 2
+    fi
+}
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"
 if [ -z "$ROOT" ]; then
@@ -106,6 +187,9 @@ for prereq in python3 cargo git; do
         exit 2
     fi
 done
+
+# Before anything slow: a machine that cannot run the container learns it now.
+[ "$TIER" = ci ] && ci_require_docker
 
 EVID="$(git rev-parse --path-format=absolute --git-path gate-evidence)"
 mkdir -p "$EVID" || exit 2
@@ -436,6 +520,54 @@ pkg_features() { # flavor pkg -> sets FEAT
     fi
 }
 
+# One cargo test log, read the one way: every leg that runs cargo test and records
+# its denominator (a package's run here, the ci tier's whole-workspace run) goes
+# through this, so a log is never counted two ways. Sets T_STARTED / T_FINISHED
+# (binaries that announced themselves / that summarised), T_PASSED / T_FAILED /
+# T_IGNORED (summed over every result line), T_TRUNC and T_VERDICT.
+parse_test_log() { # log expected-binaries cargo-exit
+    local log="$1" expected="$2" rc="$3" p f g
+    # `Running` / `Doc-tests` are cargo's stderr; `test result:` is libtest's
+    # stdout. Both are in this one file, in order, which is what makes the
+    # started-vs-finished comparison meaningful.
+    T_STARTED="$(grep -c -E '^[[:space:]]*(Running|Doc-tests)[[:space:]]' "$log")"
+    T_FINISHED="$(grep -c -E '^test result: (ok|FAILED)\.' "$log")"
+
+    # Sum across BOTH `ok.` and `FAILED.` lines — a failed suite still passed
+    # most of its tests, so counting only `ok.` undercounts the moment anything
+    # fails. Key on the FOLLOWING field name, never a fixed column: the two line
+    # shapes have different token counts before the numbers.
+    read -r p f g <<EOF
+$(awk '/^test result: (ok|FAILED)\./ {
+         for (i = 1; i <= NF; i++) {
+           if ($(i+1) == "passed;")  p += $i
+           if ($(i+1) == "failed;")  f += $i
+           if ($(i+1) == "ignored;") g += $i
+         }
+       }
+       END { printf "%d %d %d\n", p, f, g }' "$log")
+EOF
+    T_PASSED="$p" T_FAILED="$f" T_IGNORED="$g"
+
+    T_TRUNC=none
+    T_VERDICT=pass
+    if grep -q -E '^error: (could not compile|none of the selected packages)' "$log"; then
+        T_TRUNC=build_error
+        T_VERDICT=fail
+    elif [ "$T_STARTED" -eq 0 ]; then
+        T_TRUNC=no_binaries
+        T_VERDICT=fail
+    elif [ "$T_STARTED" -gt "$T_FINISHED" ]; then
+        T_TRUNC=killed
+        T_VERDICT=fail
+    elif [ "$T_FINISHED" -lt "$expected" ]; then
+        T_TRUNC=fail_fast
+        T_VERDICT=fail
+    elif [ "$f" -gt 0 ] || [ "$rc" -ne 0 ]; then
+        T_VERDICT=fail
+    fi
+}
+
 run_test_unit() { # gate pkg expected floor flavor -> sets UNIT_VERDICT
     local gate="$1" pkg="$2" expected="$3" floor="$4" flavor="$5"
     local log="$EVID/$gate--$pkg.log" rc started finished p f g trunc verdict
@@ -457,44 +589,9 @@ run_test_unit() { # gate pkg expected floor flavor -> sets UNIT_VERDICT
         >"$log" 2>&1
     rc=$?
 
-    # `Running` / `Doc-tests` are cargo's stderr; `test result:` is libtest's
-    # stdout. Both are in this one file, in order, which is what makes the
-    # started-vs-finished comparison meaningful.
-    started="$(grep -c -E '^[[:space:]]*(Running|Doc-tests)[[:space:]]' "$log")"
-    finished="$(grep -c -E '^test result: (ok|FAILED)\.' "$log")"
-
-    # Sum across BOTH `ok.` and `FAILED.` lines — a failed suite still passed
-    # most of its tests, so counting only `ok.` undercounts the moment anything
-    # fails. Key on the FOLLOWING field name, never a fixed column: the two line
-    # shapes have different token counts before the numbers.
-    read -r p f g <<EOF
-$(awk '/^test result: (ok|FAILED)\./ {
-         for (i = 1; i <= NF; i++) {
-           if ($(i+1) == "passed;")  p += $i
-           if ($(i+1) == "failed;")  f += $i
-           if ($(i+1) == "ignored;") g += $i
-         }
-       }
-       END { printf "%d %d %d\n", p, f, g }' "$log")
-EOF
-
-    trunc=none
-    verdict=pass
-    if grep -q -E '^error: (could not compile|none of the selected packages)' "$log"; then
-        trunc=build_error
-        verdict=fail
-    elif [ "$started" -eq 0 ]; then
-        trunc=no_binaries
-        verdict=fail
-    elif [ "$started" -gt "$finished" ]; then
-        trunc=killed
-        verdict=fail
-    elif [ "$finished" -lt "$expected" ]; then
-        trunc=fail_fast
-        verdict=fail
-    elif [ "$f" -gt 0 ] || [ "$rc" -ne 0 ]; then
-        verdict=fail
-    fi
+    parse_test_log "$log" "$expected" "$rc"
+    started="$T_STARTED" finished="$T_FINISHED" p="$T_PASSED" f="$T_FAILED" g="$T_IGNORED"
+    trunc="$T_TRUNC" verdict="$T_VERDICT"
 
     add_unit "$pkg" "$expected" "$floor" "$started" "$finished" \
         "$p" "$f" "$g" "$rc" "$verdict" "$trunc" "$argv"
@@ -715,6 +812,126 @@ EOF
     fi
 }
 
+# ----------------------------------------------------------- timing assertions
+#
+# Every elapsed-time upper bound in a Rust test scales its duration through
+# logos_core::perf (S-804, NFR-MA-11): a bound that holds where it was written
+# fails on a loaded CI host (HF-11), and only a check over the whole tree keeps
+# the next one from being written raw. scripts/check-timing-assertions.py walks
+# every .rs file, whatever this change touched, and prints its denominator as
+# its last line:
+#     timing-assertions: files=N sites=M scaled=S lower=L hits=H
+# One evidence unit, `sites`: expected = started = finished = the timing
+# assertions found, passed = those that scale or are minimums, failed = hits
+# (bounds that bypass the helper), ignored = the minimums. A walk that found no
+# site is exit 3, recorded `no_binaries` like the term gate's empty walk: a
+# pattern that matches nothing must never read as a pass.
+gate_timing_assertions() {
+    local gate=timing-assertions
+    local log="$EVID/$gate.log" rc verdict trunc=none
+    local files sites scaled lower hits
+    local argv="python3 scripts/check-timing-assertions.py"
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is not installed" >"$log"
+        write_evidence "$gate" "$argv" 127 fail no_binaries
+        record "$gate" fail "(python3 missing)"
+        return
+    fi
+    # Exactly $argv: gate.sh runs from $ROOT, the script's default root.
+    python3 scripts/check-timing-assertions.py >"$log" 2>&1
+    rc=$?
+    # The script's last line, keyed by name so a reordering cannot shift a count.
+    read -r files sites scaled lower hits <<EOF
+$(awk '/^timing-assertions: / {
+         for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+       }
+       END {
+         printf "%d %d %d %d %d\n", v["files"], v["sites"], v["scaled"], v["lower"], v["hits"]
+       }' "$log")
+EOF
+    case $rc in
+        0) verdict=pass ;;
+        1) verdict=fail ;;
+        3)
+            verdict=fail
+            trunc=no_binaries
+            ;;
+        *)
+            verdict=fail
+            trunc=usage_error
+            ;;
+    esac
+    add_unit sites "$sites" 1 "$sites" "$sites" "$((sites - hits))" "$hits" "$lower" \
+        "$rc" "$verdict" "$trunc" "$argv"
+    write_evidence "$gate" "$argv" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "($sites timing assertions in $files files scanned; $scaled scaled, $lower minimums, $hits unscaled$([ "$trunc" = none ] || echo "; $trunc"))"
+    if [ "$verdict" != pass ]; then
+        awk '!/^timing-assertions: / && n++ < 20 { print "    " $0 }' "$log"
+    fi
+}
+
+# ---------------------------------------------------------------- offline cargo
+#
+# An offline cargo call in a test source names its platform (S-805, NFR-MA-11):
+# `cargo metadata --offline` resolves every target's crates, Android's included,
+# unless told otherwise, and a one-host build never downloaded them, so it passed
+# where it was written and failed on CI (HF-12). scripts/check-offline-cargo.py
+# walks every .rs file, whatever this change touched, and prints its denominator
+# as its last line:
+#     offline-cargo: files=N sites=M metadata=A tree=T hits=H
+# One evidence unit, `sites`: expected = started = finished = the offline cargo
+# calls found, passed = those that resolve one platform, failed = hits (`metadata`
+# with no --filter-platform/--target, `tree` with --target all), ignored = 0. A
+# walk that found no site is exit 3, recorded `no_binaries` like the term gate's
+# empty walk: a scanner that matches nothing must never read as a pass.
+gate_offline_cargo() {
+    local gate=offline-cargo
+    local log="$EVID/$gate.log" rc verdict trunc=none
+    local files sites meta tree hits
+    local argv="python3 scripts/check-offline-cargo.py"
+    if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
+    reset_units
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "python3 is not installed" >"$log"
+        write_evidence "$gate" "$argv" 127 fail no_binaries
+        record "$gate" fail "(python3 missing)"
+        return
+    fi
+    # Exactly $argv: gate.sh runs from $ROOT, the script's default root.
+    python3 scripts/check-offline-cargo.py >"$log" 2>&1
+    rc=$?
+    # The script's last line, keyed by name so a reordering cannot shift a count.
+    read -r files sites meta tree hits <<EOF
+$(awk '/^offline-cargo: / {
+         for (i = 2; i <= NF; i++) { split($i, kv, "="); v[kv[1]] = kv[2] }
+       }
+       END {
+         printf "%d %d %d %d %d\n", v["files"], v["sites"], v["metadata"], v["tree"], v["hits"]
+       }' "$log")
+EOF
+    case $rc in
+        0) verdict=pass ;;
+        1) verdict=fail ;;
+        3)
+            verdict=fail
+            trunc=no_binaries
+            ;;
+        *)
+            verdict=fail
+            trunc=usage_error
+            ;;
+    esac
+    add_unit sites "$sites" 1 "$sites" "$sites" "$((sites - hits))" "$hits" 0 \
+        "$rc" "$verdict" "$trunc" "$argv"
+    write_evidence "$gate" "$argv" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "($sites offline cargo calls in $files files scanned; $meta metadata, $tree tree, $hits unfiltered$([ "$trunc" = none ] || echo "; $trunc"))"
+    if [ "$verdict" != pass ]; then
+        awk '!/^offline-cargo: / && n++ < 20 { print "    " $0 }' "$log"
+    fi
+}
+
 # --------------------------------------------------------------- script suites
 #
 # This repository's own script tests (every scripts/tests/test-*.sh: the gate,
@@ -748,8 +965,27 @@ suite_counts() { # log -> "passed failed" of the last summary line, or nothing
         END { if (last != "") print last }' "$1"
 }
 
+# One suite's evidence unit, from its log and exit status: the one reading of "did
+# this suite prove anything", shared by the local leg below and the ci tier's
+# (whose suites ran in the container). Sets SUITE_PASSED / SUITE_FAILED /
+# SUITE_VERDICT / SUITE_WHY and records the unit, under the argv given.
+record_suite_unit() { # name log exit argv
+    local name="$1" log="$2" rc="$3" argv="$4" sp sf fin trunc
+    read -r sp sf <<EOF
+$(suite_counts "$log")
+EOF
+    sp="${sp:-0}" sf="${sf:-0}"
+    fin=1 SUITE_VERDICT=pass trunc=none SUITE_WHY=""
+    if [ "$rc" -ge 128 ]; then fin=0 trunc=killed; fi
+    if [ "$rc" -eq 0 ] && [ "$sp" -eq 0 ] && [ "$sf" -eq 0 ]; then sf=1 SUITE_WHY="  [counted no passing check]"; fi
+    if [ "$rc" -ne 0 ] && [ "$sf" -eq 0 ]; then sf=1; fi
+    if [ "$rc" -ne 0 ] || [ "$sf" -ne 0 ]; then SUITE_VERDICT=fail; fi
+    add_unit "$name" 1 1 1 "$fin" "$sp" "$sf" 0 "$rc" "$SUITE_VERDICT" "$trunc" "$argv"
+    SUITE_PASSED="$sp" SUITE_FAILED="$sf"
+}
+
 gate_script_suites() {
-    local gate=script-suites worst=pass ex=0 n=0 name log rc t0 sp sf fin verdict trunc why suite
+    local gate=script-suites worst=pass ex=0 n=0 name log rc t0 sp sf verdict why suite
     local passed=0 failed=0
     if gate_done "$gate"; then record "$gate" pass "(cached, same tree)"; return; fi
     reset_units
@@ -763,17 +999,8 @@ gate_script_suites() {
         rc=0 t0=$SECONDS
         (cd "$ROOT" && env -u GATE_FORCE -u GATE_BASE CARGO_TERM_COLOR=never \
             bash "scripts/tests/$name.sh") </dev/null >"$log" 2>&1 || rc=$?
-        read -r sp sf <<EOF
-$(suite_counts "$log")
-EOF
-        sp="${sp:-0}" sf="${sf:-0}"
-        fin=1 verdict=pass trunc=none why=""
-        if [ "$rc" -ge 128 ]; then fin=0 trunc=killed; fi
-        if [ "$rc" -eq 0 ] && [ "$sp" -eq 0 ] && [ "$sf" -eq 0 ]; then sf=1 why="  [counted no passing check]"; fi
-        if [ "$rc" -ne 0 ] && [ "$sf" -eq 0 ]; then sf=1; fi
-        if [ "$rc" -ne 0 ] || [ "$sf" -ne 0 ]; then verdict=fail; fi
-        add_unit "$name" 1 1 1 "$fin" "$sp" "$sf" 0 "$rc" "$verdict" "$trunc" \
-            "env -u GATE_FORCE -u GATE_BASE bash scripts/tests/$name.sh"
+        record_suite_unit "$name" "$log" "$rc" "env -u GATE_FORCE -u GATE_BASE bash scripts/tests/$name.sh"
+        sp="$SUITE_PASSED" sf="$SUITE_FAILED" verdict="$SUITE_VERDICT" why="$SUITE_WHY"
         passed=$((passed + sp)) failed=$((failed + sf))
         printf '    %-24s %s  %s passed, %s failed, %ss%s\n' "$name" "$verdict" "$sp" "$sf" "$((SECONDS - t0))" \
             "$([ "$verdict" = pass ] || echo "$why  (exit $rc; $log)")"
@@ -928,6 +1155,174 @@ EOF
     record "$gate" "$verdict" "($passed passed, $failed failed, $skipped skipped of $listed$([ "$trunc" = none ] || echo "; $trunc"))"
 }
 
+# ----------------------------------------------------------------------- ci tier
+#
+# ONE container run, three legs, each recorded as its own gate so a reader sees
+# which of ci.yml's steps failed. The container does the work and writes each
+# leg's log and exit status to a mounted directory (scripts/ci-container.sh);
+# THIS script reads them. The counting, the verdicts and the evidence are the host's
+# — the same parse_test_log / record_suite_unit every other tier uses — so a
+# container that dies midway cannot write itself a pass: a leg with no exit status
+# is a failed leg that started nothing.
+#
+# What the container is given is the tree being certified, not the working
+# directory: `git archive` of TREE_ID, the very identity the evidence carries, so
+# an untracked file is in it, an ignored one is not, and what ran is what the
+# marker will name.
+#
+# Evidence names are `ci-*`, never `test` or `script-suites`: a run of this tier
+# must not overwrite the full tier's evidence for the same tree, and
+# verify-evidence.sh's two other tiers must not mistake one for the other.
+CI_CARGO_JOBS="${GATE_CI_JOBS:-2}"
+CI_TEST_THREADS="${GATE_CI_TEST_THREADS:-4}"
+CI_PERF_TOLERANCE=3
+
+# The output directory is the container's to write, so nothing in it is followed:
+# a symlink there is a file the leg did not write, never a file to read.
+ci_regular() { # path -> 0 when it is a regular file and not a link
+    [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+ci_leg_rc() { # out-dir leg -> the leg's exit status; status 1 (and 255) when it never wrote one
+    local f="$1/$2.rc" v=""
+    ci_regular "$f" && [ -s "$f" ] && v="$(tr -d '[:space:]' <"$f")"
+    # A status is 0-255: anything longer or non-numeric is not one a process left.
+    case "$v" in
+        '' | *[!0-9]* | ????*)
+            echo 255
+            return 1
+            ;;
+    esac
+    if [ "$v" -gt 255 ]; then
+        echo 255
+        return 1
+    fi
+    echo "$v"
+}
+
+# The web UI build: `npm ci && npm run build`, as ci.yml's step does.
+ci_record_ui() { # out-dir note
+    local out="$1" gate=ci-ui-build rc ran verdict=pass trunc=none
+    local argv="(cd web/ui && npm ci && npm run build)"
+    rc="$(ci_leg_rc "$out" ui-build)" && ran=yes || ran=no
+    if ci_regular "$out/ui-build.log"; then cp "$out/ui-build.log" "$EVID/$gate.log"; else : >"$EVID/$gate.log"; fi
+    reset_units
+    if [ "$ran" = no ]; then verdict=fail trunc=no_binaries; fi
+    if [ "$rc" -ne 0 ]; then verdict=fail; fi
+    write_evidence "$gate" "$argv; $2" "$rc" "$verdict" "$trunc"
+    record "$gate" "$verdict" "$([ "$ran" = yes ] || echo "(never ran: no exit status)")"
+}
+
+# The script suites: every scripts/tests/test-*.sh the TREE holds (the host's
+# roster, so a suite the container skipped has no exit status and fails as killed).
+ci_record_suites() { # out-dir note
+    local out="$1" gate=ci-script-suites worst=pass ex=0 n=0 suite name rc ran passed=0 failed=0
+    local log
+    reset_units
+    : >"$EVID/$gate.log"
+    for suite in "$ROOT"/scripts/tests/test-*.sh; do
+        [ -e "$suite" ] || break
+        n=$((n + 1))
+        name="$(basename "$suite" .sh)"
+        rc="$(ci_leg_rc "$out" "script-suites--$name")" && ran=yes || ran=no
+        log="$out/script-suites--$name.log"
+        ci_regular "$log" || log=/dev/null
+        # A suite with no exit status was killed with the container: 137.
+        [ "$ran" = yes ] || rc=137
+        cat "$log" >>"$EVID/$gate.log"
+        record_suite_unit "$name" "$log" "$rc" "bash scripts/tests/$name.sh"
+        passed=$((passed + SUITE_PASSED)) failed=$((failed + SUITE_FAILED))
+        if [ "$SUITE_VERDICT" != pass ]; then
+            worst=fail ex=1
+            printf '    %-24s %s  (exit %s%s)\n' "$name" "$SUITE_VERDICT" "$rc" "$SUITE_WHY"
+        fi
+    done
+    if [ "$n" -eq 0 ]; then
+        add_unit "(none)" 1 1 0 0 0 0 0 1 fail no_binaries ""
+        worst=fail ex=1
+    fi
+    write_evidence "$gate" "bash scripts/tests/test-*.sh; $2" "$ex" "$worst" none
+    record "$gate" "$worst" "($n suite(s); $passed passed, $failed failed)"
+}
+
+# `cargo test --workspace --no-fail-fast`: ONE unit, `workspace`, whose expected
+# count is every package's binaries from `cargo metadata` — what the full tier sums
+# over its packages — so a run that executed fewer binaries than the workspace
+# holds is a truncated run.
+ci_record_test() { # out-dir note
+    local out="$1" gate=ci-test rc ran p expected=0 floor=0
+    local log="$out/test.log"
+    ci_regular "$log" || log=/dev/null
+    local argv="cargo test --workspace --jobs $CI_CARGO_JOBS --no-fail-fast -- --test-threads=$CI_TEST_THREADS (LOGOS_PERF_TOLERANCE=$CI_PERF_TOLERANCE)"
+    rc="$(ci_leg_rc "$out" test)" && ran=yes || ran=no
+    cp "$log" "$EVID/$gate.log"
+    for p in $(pkg_names); do
+        expected=$((expected + $(pkg_field "$p" 2)))
+        floor=$((floor + $(floor_for "$p")))
+    done
+    reset_units
+    parse_test_log "$log" "$expected" "$rc"
+    add_unit workspace "$expected" "$floor" "$T_STARTED" "$T_FINISHED" \
+        "$T_PASSED" "$T_FAILED" "$T_IGNORED" "$rc" "$T_VERDICT" "$T_TRUNC" "$argv"
+    write_evidence "$gate" "$argv; $2" "$rc" "$T_VERDICT" "$T_TRUNC"
+    record "$gate" "$T_VERDICT" "($T_FINISHED of $expected binaries, $T_PASSED passed, $T_FAILED failed$([ "$T_TRUNC" = none ] || echo "; $T_TRUNC")$([ "$ran" = yes ] || echo "; never ran: no exit status"))"
+    [ "$T_VERDICT" = pass ] || awk '/^test .* FAILED$|^failures:$/ && n++ < 20 { print "    " $0 }' "$log"
+}
+
+gate_ci() {
+    local out="$EVID/ci-out" src="$EVID/ci-src.tar" crc note
+    note="image $CI_IMAGE, volume $CI_VOLUME"
+    rm -rf "$out"
+    rm -f "$EVID"/ci-*.json "$EVID"/ci-*.log
+    mkdir -p "$out" && chmod 700 "$out" || exit 2
+    echo "ci: $CI_PLATFORM container from $CI_IMAGE"
+    echo "    build volume $CI_VOLUME, cargo home empty, tolerance $CI_PERF_TOLERANCE, container log $EVID/ci-container.log"
+    # `git archive` obeys export-ignore and export-subst: a tree carrying either would
+    # reach the container smaller than the tree the evidence names.
+    if git grep -q -E 'export-(ignore|subst)' "$TREE_ID" -- ':(glob)**/.gitattributes' 2>/dev/null; then
+        echo "gate.sh ci: the tree has export-ignore/export-subst in a .gitattributes; the container would not receive the tree it certifies" >&2
+        exit 2
+    fi
+    git archive --format=tar -o "$src" "$TREE_ID" || {
+        echo "gate.sh ci: could not archive tree $TREE_ID" >&2
+        exit 2
+    }
+    # The tree goes in on stdin and the entry script comes out of it, so what runs
+    # is the certified tree's own scripts/ci-container.sh. The container's
+    # filesystem is discarded with it (--rm): the cargo home it fills is empty at
+    # every start, and only /ci-target outlives the run.
+    docker run --rm -i --init --platform "$CI_PLATFORM" \
+        -v "$CI_VOLUME:/ci-target" -v "$out:/out" \
+        -e CI_OUT=/out -e CARGO_TARGET_DIR=/ci-target -e CARGO_TERM_COLOR=never \
+        -e CI_UID="$(id -u)" -e CI_GID="$(id -g)" \
+        -e LOGOS_PERF_TOLERANCE="$CI_PERF_TOLERANCE" \
+        -e CI_CARGO_JOBS="$CI_CARGO_JOBS" -e CI_TEST_THREADS="$CI_TEST_THREADS" \
+        "$CI_IMAGE" bash -c 'mkdir -p /work && tar -x -C /work && cd /work && exec bash scripts/ci-container.sh' \
+        <"$src" >"$EVID/ci-container.log" 2>&1
+    crc=$?
+    rm -f "$src"
+    if [ "$crc" -ne 0 ]; then
+        echo "    container exited $crc; legs without an exit status are failures"
+        tail -n 5 "$EVID/ci-container.log" | sed 's/^/      /'
+    fi
+    ci_record_ui "$out" "$note"
+    ci_record_suites "$out" "$note"
+    ci_record_test "$out" "$note"
+}
+
+# The tree is the evidence's identity: if it moved while a tier ran, the evidence
+# describes a tree that no longer exists.
+check_tree_stable() {
+    local after
+    after="$(compute_tree_id)"
+    if [ "$after" != "$TREE_ID" ]; then
+        echo
+        echo "gate.sh: the tree changed while gating ($TREE_ID -> $after)." >&2
+        echo "         The evidence describes a tree that no longer exists." >&2
+        GATES_FAILED="$GATES_FAILED tree-stability"
+    fi
+}
+
 # ------------------------------------------------- what this branch changed, and from where
 #
 # The fast tier scopes its test and UI legs to the packages that changed. The
@@ -1035,6 +1430,8 @@ case "$TIER" in
         fi
         gate_arch
         gate_public_terms
+        gate_timing_assertions
+        gate_offline_cargo
         if scripts_changed; then
             gate_script_suites
         else
@@ -1053,6 +1450,8 @@ case "$TIER" in
         gate_deny
         gate_arch
         gate_public_terms
+        gate_timing_assertions
+        gate_offline_cargo
         gate_script_suites
         gate_ui ui-typecheck typecheck
         gate_ui ui-test test
@@ -1064,13 +1463,11 @@ case "$TIER" in
         fi
         # Browser layout specs: full tier only, never fast (S-611).
         gate_ui_e2e
-        AFTER="$(compute_tree_id)"
-        if [ "$AFTER" != "$TREE_ID" ]; then
-            echo
-            echo "gate.sh: the tree changed while gating ($TREE_ID -> $AFTER)." >&2
-            echo "         The evidence describes a tree that no longer exists." >&2
-            GATES_FAILED="$GATES_FAILED tree-stability"
-        fi
+        check_tree_stable
+        ;;
+    ci)
+        gate_ci
+        check_tree_stable
         ;;
 esac
 

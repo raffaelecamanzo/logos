@@ -244,8 +244,8 @@ fn a_verbatim_path_ending_in_a_trimmed_character_is_not_corrupted() {
 /// **Every declared `[invocation_methods]` row is exercised.** The table is
 /// declarative data, so both typo classes fail SILENTLY: a mistyped key
 /// (`GetStrngAsync`) means those calls are never captured, and a mistyped value
-/// (`"GTE"`) is dropped by `is_http_method` — the behaviour `plugin.toml` and
-/// `PluginManifest::invocation_methods` both document and nothing asserted.
+/// (`"GTE"`) is dropped by `is_http_method` — the behaviour
+/// `extract::normalize_invocation_method` documents and nothing asserted.
 ///
 /// Driven off the loaded descriptor rather than a hardcoded list, so a row added
 /// without a fixture fails here rather than shipping untested.

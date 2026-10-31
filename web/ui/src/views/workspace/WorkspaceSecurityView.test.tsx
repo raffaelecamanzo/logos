@@ -175,20 +175,34 @@ describe("the member roll-up (FR-SC-16)", () => {
   });
 
   it("states the test-code remainder on the figure row, the payload's own sum, left out of every total (S-796)", async () => {
-    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 7 } }));
+    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 7, dev: 0, needs_review: 0 } }));
     const members = widgetTitled(document.body, "Members");
     expect(within(members).getByText("· 7 in test code, left out of every total above.")).toBeInTheDocument();
     // The totals line itself is unchanged: the remainder is its own line.
     expect(within(members).getByText(WORKSPACE_SECURITY_TEXT.totals(0, 1, 1, 0, 0, 0))).toBeInTheDocument();
   });
 
+  it("states the needs-review remainder on its own line, the payload's own sum, left out of every total (S-817)", async () => {
+    await mount(withSecurity({ excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 5 } }));
+    const members = widgetTitled(document.body, "Members");
+    expect(within(members).getByText("· 5 more need review, left out of every total above.")).toBeInTheDocument();
+    expect(within(members).getByText("· 0 in test code, left out of every total above.")).toBeInTheDocument();
+  });
+
+  it("states the dev-only remainder on its own line, the payload's own sum, left out of every total (S-810)", async () => {
+    await mount(withSecurity({ excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 60, needs_review: 0 } }));
+    const members = widgetTitled(document.body, "Members");
+    expect(within(members).getByText("· 60 more in dev-only dependencies, left out of every total above.")).toBeInTheDocument();
+    expect(within(members).getByText("· 0 in test code, left out of every total above.")).toBeInTheDocument();
+  });
+
   it("states a remainder of none as none, never as nothing said (S-796)", async () => {
-    await mount(withSecurity({ excluded: { not_fresh: 0, suppressed: 0, test: 0 } }));
+    await mount(withSecurity({ excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 0 } }));
     expect(within(widgetTitled(document.body, "Members")).getByText("· 0 in test code, left out of every total above.")).toBeInTheDocument();
   });
 
   it("puts each left-out figure in its own place, in the spelling the manual gives (S-760)", async () => {
-    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 0 } }));
+    await mount(withSecurity({ excluded: { not_fresh: 3, suppressed: 1, test: 0, dev: 0, needs_review: 0 } }));
     const members = widgetTitled(document.body, "Members");
     expect(within(members).getByText("Left out: 3 findings in files changed since the scan, and 1 suppressed.")).toBeInTheDocument();
   });

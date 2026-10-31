@@ -1,0 +1,11 @@
+// The same deadlines, scaled where they are built.
+fn from_start() {
+    let start = Instant::now();
+    let deadline = start + logos_core::perf::scaled(Duration::from_secs(5));
+    assert!(Instant::now() < deadline);
+}
+
+fn reversed() {
+    let deadline = logos_core::perf::scaled(Duration::from_secs(5)) + Instant::now();
+    assert!(Instant::now() < deadline);
+}

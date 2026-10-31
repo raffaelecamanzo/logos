@@ -48,15 +48,16 @@ use petgraph::Direction;
 use crate::engine::Engine;
 use crate::graph_store::{GraphStore, NodeRow};
 use crate::hydrate::{EdgeData, Granularity, GraphView, Vertex};
+use crate::model::dispatch::via_label;
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::runtime::Runtime;
 use crate::models::navigation::{
     AffectedFile, AffectedResult, CalleesResult, CallersResult, ContextBundle, ContextNode,
     EdgeDirection, EdgeSummary, EmptyPrecedent, EmptyPrecedentCode, ExploreResult,
-    ExploreSymbol, FileGroup,
+    ExploreSymbol, FileGroup, HeaderOwnership,
     GraphElementEdge, GraphElementNode, GraphElements, GraphGranularity, GraphLayer, ImpactEntry,
     ImpactIntersectionResult, ImpactResult, ImplementorsResult, IntersectionCoverage,
-    ItemIntersection, ItemPair, NodeDetail, NodeInfo, Precedent, PrecedentCoverage, PrecedentFacet,
+    ItemIntersection, ItemPair, LanguageResolution, NodeDetail, NodeInfo, Precedent, PrecedentCoverage, PrecedentFacet,
     PrecedentRank, PrecedentReason, PrecedentResult, PrecedentTargetKind, ReferencingDocsResult,
     ResolutionDenominator, SearchResult, SharedSymbol, StatusInfo, SymbolRef, TraceLink, UbiquitousAnchor,
     UnresolvedDeclaration, WorkItem, WorkItemImpact, MIN_SHARED_CALLEES,
@@ -1937,6 +1938,22 @@ pub(crate) fn referencing_docs(engine: &Engine, symbol: &str) -> Result<Referenc
 /// ([FR-NV-07]). Deliberately skips the auto-index prologue: the health
 /// probe must *report* an unindexed graph, not silently build one.
 pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
+    status_keeping(engine, false).map(|(status, _)| status)
+}
+
+/// [`status`], and the facts a workspace re-reads this graph's reference
+/// classes by (S-637) — classified in the same pass, never a second read.
+pub(crate) fn status_with_reference_facts(
+    engine: &Engine,
+) -> Result<(StatusInfo, crate::resolve::reference_classes::MemberReferenceFacts)> {
+    status_keeping(engine, true).map(|(status, facts)| (status, facts.unwrap_or_default()))
+}
+
+/// [`status`], keeping the reference facts when `keep_facts`.
+fn status_keeping(
+    engine: &Engine,
+    keep_facts: bool,
+) -> Result<(StatusInfo, Option<crate::resolve::reference_classes::MemberReferenceFacts>)> {
     let runtime = engine.nav_runtime_no_prologue()?;
     let counts = runtime.submit_read(|store| store.counts())?;
     let indexed = counts.files > 0 || counts.nodes > 0;
@@ -2075,8 +2092,29 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
     // the row one global `resolution_coverage` averages away. Three aggregate
     // reads on the RO pool, whose `query_only` connections make "persists
     // nothing" structural rather than a promise.
-    let mut resolution_by_language =
-        runtime.submit_read(|store| crate::resolve::coverage_by_language(store))?;
+    let (mut resolution_by_language, shared_headers) =
+        runtime.submit_read(|store| crate::resolve::coverage_and_shared_headers(store))?;
+
+    // The per-repository `.h` rule, disclosed on the row that reads the headers
+    // of a repository holding both C and C++ sources (FR-PL-07, S-572, S-582):
+    // the count is the graph's, the words are that language's descriptor
+    // `note`, so `logos languages` and `status` say it once. A registry-less
+    // engine has no note to state, so states no count either.
+    if let Some((language, headers)) = shared_headers {
+        let note = engine
+            .registry()
+            .and_then(|registry| registry.iter().find(|plugin| plugin.name() == language))
+            .and_then(|plugin| plugin.note());
+        if let (Some(note), Some(row)) = (
+            note,
+            resolution_by_language.iter_mut().find(|row| row.language == language),
+        ) {
+            row.header_ownership = Some(HeaderOwnership {
+                headers,
+                note: note.to_string(),
+            });
+        }
+    }
 
     // Why a package-shaped language's — or Rust's (S-589) — calls stay unbound,
     // by reason (FR-RS-10, S-468): a re-walk of the unbound rows under the
@@ -2110,7 +2148,10 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         }
     }
 
-    Ok(StatusInfo {
+    let crate::resolve::reference_classes::ClassifiedPopulation { classes, facts } =
+        reference_classes(engine, &mut resolution_by_language, keep_facts)?;
+
+    let status = StatusInfo {
         indexed,
         file_count: counts.files,
         node_count: counts.nodes,
@@ -2121,6 +2162,8 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         project_id,
         last_sync_at: mtime.map(|secs| secs.to_string()),
         graph_revision,
+        internal_resolution: classes.internal_resolution(),
+        doc_resolution: classes.doc_resolution(),
         refs_total: counts.refs_total,
         refs_resolved: counts.refs_resolved,
         refs_unresolved,
@@ -2132,7 +2175,48 @@ pub(crate) fn status(engine: &Engine) -> Result<StatusInfo> {
         persistence,
         freshness,
         warnings,
-    })
+    };
+    Ok((status, facts))
+}
+
+/// The reference classes of `status` ([FR-RS-49], S-635): every reported
+/// ledger row a doc reference, a provably external code reference or an
+/// internal candidate, with each of `rows`' classes given its provably-external
+/// count.
+///
+/// The name test reads one snapshot on the RO pool. The binder's
+/// `external-type` rows a name could still spell come from the residue already
+/// attached to `rows`, where a row has one; without it, the name test alone
+/// decides. With `keep_facts`, the rows either test counted provably external
+/// are kept for a workspace to re-read (S-637).
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+fn reference_classes(
+    engine: &Engine,
+    rows: &mut [LanguageResolution],
+    keep_facts: bool,
+) -> Result<crate::resolve::reference_classes::ClassifiedPopulation> {
+    let layout = engine
+        .registry()
+        .map(crate::resolve::package_key::PackageLayout::from_registry)
+        .unwrap_or_default();
+    let (population, universe) = engine.nav_runtime_no_prologue()?.submit_read(move |store| {
+        crate::resolve::reference_classes::read_population(store, &layout)
+    })?;
+    let residues = rows.iter().filter_map(|row| {
+        row.call_residue
+            .as_ref()
+            .map(|residue| (row.language.as_str(), &residue.external_type_targets))
+    });
+    let classified =
+        crate::resolve::reference_classes::classify_population(population, universe, residues, keep_facts);
+    let classes = &classified.classes;
+    for row in rows.iter_mut() {
+        let external = classes.external_of(&row.language);
+        row.calls.provably_external = Some(external.calls);
+        row.imports.provably_external = Some(external.imports);
+    }
+    Ok(classified)
 }
 
 /// `graph_elements` — a read-only, presentation-shaped nodes+edges snapshot of
@@ -2256,8 +2340,14 @@ pub(crate) fn graph_elements(
             }
         }
     };
-    let edge_allowed = |kind: Option<EdgeKind>| -> bool {
-        match (edge_types, kind) {
+    // A rollup pair reached only through a trait is no dependency (FR-QM-20): the
+    // module and file tiers drop it, as the DSM drawn from the same rollups does.
+    // The symbol tier keeps every call edge, dispatch included.
+    let edge_allowed = |edge: &EdgeData| -> bool {
+        if tier != GraphGranularity::Symbol && edge.is_dispatch() {
+            return false;
+        }
+        match (edge_types, edge.kind) {
             // No filter, or an aggregate edge with no filterable kind ⇒ allowed.
             (None, _) | (Some(_), None) => true,
             (Some(allowed), Some(k)) => allowed.contains(&k),
@@ -2320,7 +2410,7 @@ pub(crate) fn graph_elements(
             // file tiers, S-124) — which IS materialised at those tiers — so the two
             // counts stay consistent. (At the symbol/visualization tier every edge
             // carries a kind, so this is unchanged from S-122.)
-            edge_allowed(graph[e].kind)
+            edge_allowed(&graph[e])
                 && graph
                     .edge_endpoints(e)
                     .is_some_and(|(a, b)| in_scope_set.contains(&a) && in_scope_set.contains(&b))
@@ -2336,11 +2426,11 @@ pub(crate) fn graph_elements(
     let degree_of = |idx: NodeIndex| -> usize {
         graph
             .edges_directed(idx, Direction::Incoming)
-            .filter(|e| edge_allowed(e.weight().kind))
+            .filter(|e| edge_allowed(e.weight()))
             .count()
             + graph
                 .edges_directed(idx, Direction::Outgoing)
-                .filter(|e| edge_allowed(e.weight().kind))
+                .filter(|e| edge_allowed(e.weight()))
                 .count()
     };
 
@@ -2404,7 +2494,7 @@ pub(crate) fn graph_elements(
                 return None;
             }
             let kind = graph[e].kind;
-            if !edge_allowed(kind) {
+            if !edge_allowed(&graph[e]) {
                 return None;
             }
             Some(GraphElementEdge {
@@ -2519,7 +2609,7 @@ pub(crate) fn graph_elements(
                 continue;
             }
             let already_counted =
-                edge_allowed(kind) && in_scope_set.contains(&a) && in_scope_set.contains(&b);
+                edge_allowed(&graph[e]) && in_scope_set.contains(&a) && in_scope_set.contains(&b);
             if !already_counted {
                 total_edges += 1;
             }
@@ -2732,8 +2822,9 @@ pub(crate) fn affected(
 /// ([FR-CL-04] `--tests-only`): a `tests`/`test`/`__tests__`/`spec` path
 /// segment, or a filename matching the per-language test idioms (`*_test.*`,
 /// `test_*.py`, `*.test.*`/`*.spec.*`, `*Test(s).java`, Ruby RSpec `*_spec.rb`,
-/// a bare Rust `tests.rs`, or the snake_case Rust `*_tests.rs` suffix —
-/// [CR-075], the plural counterpart to `*Test(s).java`'s CamelCase plural).
+/// Scala `*Spec.scala`/`*Suite.scala` ([S-574]), a bare Rust `tests.rs`, or the
+/// snake_case Rust `*_tests.rs` suffix — [CR-075], the plural counterpart to
+/// `*Test(s).java`'s CamelCase plural).
 /// Neither marks a JVM source file beneath a production source root (first rule below).
 ///
 /// Four exactness rules keep production code out ([S-524], [CR-171], [HF-2], [HF-4]):
@@ -2765,6 +2856,7 @@ pub(crate) fn affected(
 /// [HF-2]: ../../../docs/planning/sprints/sprint-86.md
 /// [HF-4]: ../../../docs/planning/sprints/sprint-86.md
 /// [S-524]: ../../../docs/planning/journal.md#s-524-test-path-conventions-respect-production-source-roots-and-gradle-test-source-sets
+/// [S-574]: ../../../docs/planning/journal.md#s-574-scala-test-conventions-are-recognised
 pub(crate) fn is_test_path(path: &str) -> bool {
     let p = Path::new(path);
     let mut under_production_root = false;
@@ -2805,8 +2897,26 @@ pub(crate) fn is_test_path(path: &str) -> bool {
         || stem.ends_with("_spec")
         || stem.ends_with("Test")
         || stem.ends_with("Tests")
+        || is_scala_suite_file(name, stem)
         || (stem.starts_with("test_") && name.ends_with(".py"))
         || tag.is_some_and(|tag| tag == "test" || tag == "spec")
+}
+
+/// A Scala `*Spec.scala` / `*Suite.scala` file ([S-574], [CR-183]): the
+/// ScalaTest and MUnit file-naming idiom, as `*Test.scala` is JUnit's. Scala only
+/// — a Java `FooSuite.java` or a Kotlin `FooSpec.kt` keeps its own rules — and a
+/// real prefix is required, so a file that is just `Spec.scala` is no suite. A
+/// path-level rule, so it also scopes the file for security findings and the
+/// source/test line roll-up, not only `is_test`; a layout with no production
+/// root (Play's `app/`, Bazel) has nothing to override it.
+///
+/// [S-574]: ../../../docs/planning/journal.md#s-574-scala-test-conventions-are-recognised
+/// [CR-183]: ../../../docs/requests/CR-183-scala-resolves-imports-calls-and-relations.md
+fn is_scala_suite_file(name: &str, stem: &str) -> bool {
+    name.ends_with(".scala")
+        && ["Spec", "Suite"]
+            .iter()
+            .any(|suffix| stem.strip_suffix(suffix).is_some_and(|rest| !rest.is_empty()))
 }
 
 /// A JVM source file by extension (`.java`, `.kt`, `.kts`, `.scala`,
@@ -2938,11 +3048,29 @@ fn adjacency(
         };
         let total = adjacent.len() as u32;
         adjacent.truncate(limit);
+        // The `Calls` edge each row is reached by, caller first: a dispatch
+        // one labels its row `via` its trait method (S-712).
+        let pairs: Vec<(NodeId, NodeId)> = adjacent
+            .iter()
+            .map(|other| match kind {
+                AdjacencyKind::Callers => (other.id, row.id),
+                AdjacencyKind::Callees => (row.id, other.id),
+            })
+            .collect();
+        let via = store.dispatched_via(&pairs)?;
+        let rows = adjacent
+            .iter()
+            .zip(&pairs)
+            .map(|(other, pair)| SymbolRef {
+                via: via.get(pair).and_then(|method| via_label(method)),
+                ..symbol_ref(other)
+            })
+            .collect();
         Ok(AdjacencyPage {
             resolved: Some(symbol_ref(&row)),
             alternatives: passed_over.iter().map(symbol_ref).collect(),
             total,
-            rows: adjacent.iter().map(symbol_ref).collect(),
+            rows,
             suggestions: Vec::new(),
             note,
         })
@@ -3083,7 +3211,7 @@ fn resolve_identity(store: &dyn GraphStore, text: &str) -> Result<Option<NodeRow
 /// The exact rungs of every code-navigation resolver: the canonical symbol
 /// ([`resolve_exact`]), then the identity ([`resolve_identity`]) — both name
 /// one node, so neither passes anything over.
-fn resolve_exact_or_identity(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
+pub(crate) fn resolve_exact_or_identity(store: &dyn GraphStore, text: &str) -> Result<Option<(NodeRow, UpgradeNote)>> {
     if let Some(exact) = resolve_exact(store, text)? {
         return Ok(Some(exact));
     }
@@ -3283,13 +3411,17 @@ fn impact_entries(
         .filter_map(|(idx, _)| graph[*idx].node_id)
         .collect();
     let rows = fetch_rows(engine, &ids)?;
+    let via = dispatch_reached(engine, view, start, direction, &reached)?;
 
     let mut entries: Vec<ImpactEntry> = reached
         .into_iter()
         .filter_map(|(idx, dist)| {
             let row = rows.get(&graph[idx].node_id?)?;
             Some(ImpactEntry {
-                symbol: symbol_ref(row),
+                symbol: SymbolRef {
+                    via: via.get(&idx).cloned(),
+                    ..symbol_ref(row)
+                },
                 distance: dist,
             })
         })
@@ -3300,6 +3432,68 @@ fn impact_entries(
             .then_with(|| a.symbol.symbol.cmp(&b.symbol.symbol))
     });
     Ok(entries)
+}
+
+/// The `via` label of each vertex of `reached` that an [`impact_entries`]
+/// walk from `start` in `direction` reached **only by dispatch** (S-712,
+/// [CR-226]): every edge into it from a vertex one hop nearer is a single
+/// `Calls` edge a trait fan-out marked. The label is its trait method's,
+/// `"<Trait>::<method>"` — the smallest, should two trait methods reach it.
+/// A vertex any shortest path reaches by another edge — a direct call, a type
+/// use — is a dependency and carries none.
+///
+/// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+fn dispatch_reached(
+    engine: &Engine,
+    view: &GraphView,
+    start: NodeIndex,
+    direction: Direction,
+    reached: &[(NodeIndex, u32)],
+) -> Result<HashMap<NodeIndex, String>> {
+    let graph = view.graph();
+    let distance: HashMap<NodeIndex, u32> =
+        reached.iter().copied().chain(std::iter::once((start, 0))).collect();
+    // The caller-first endpoints of a vertex's edge from its parent: upstream
+    // walks callers (the vertex calls its parent), downstream callees.
+    let caller_first = |vertex: NodeIndex, parent: NodeIndex| match direction {
+        Direction::Incoming => (vertex, parent),
+        Direction::Outgoing => (parent, vertex),
+    };
+    // Each reached vertex's hops from one nearer, as `(caller, callee)` node
+    // pairs — `None` for a hop that is not a lone `Calls` edge.
+    type Hop = Option<(NodeId, NodeId)>;
+    let mut hops: Vec<(NodeIndex, Vec<Hop>)> = Vec::new();
+    for &(vertex, d) in reached {
+        let parents = graph
+            .neighbors_directed(vertex, direction.opposite())
+            .filter(|p| distance.get(p) == Some(&(d - 1)))
+            .collect::<BTreeSet<_>>();
+        let pairs = parents
+            .into_iter()
+            .map(|parent| {
+                let (a, b) = caller_first(vertex, parent);
+                let mut kinds = graph.edges_connecting(a, b).map(|e| e.weight().kind);
+                let lone_call = kinds.next() == Some(Some(EdgeKind::Calls)) && kinds.next().is_none();
+                lone_call.then_some((graph[a].node_id?, graph[b].node_id?))
+            })
+            .collect();
+        hops.push((vertex, pairs));
+    }
+    let wanted: Vec<(NodeId, NodeId)> = hops.iter().flat_map(|(_, p)| p.iter().flatten().copied()).collect();
+    if wanted.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let marked = engine.nav_runtime()?.submit_read(move |store| store.dispatched_via(&wanted))?;
+    Ok(hops
+        .into_iter()
+        .filter_map(|(vertex, pairs)| {
+            let labels: Option<BTreeSet<String>> = pairs
+                .iter()
+                .map(|pair| pair.and_then(|pair| marked.get(&pair)).and_then(|m| via_label(m)))
+                .collect();
+            labels.and_then(|labels| labels.into_iter().next()).map(|label| (vertex, label))
+        })
+        .collect())
 }
 
 /// One ranked entry in a `context` bundle, unifying code vertices (scored from
@@ -3566,6 +3760,7 @@ pub(crate) fn symbol_ref(row: &NodeRow) -> SymbolRef {
         kind: row.kind,
         file: row.file_path.clone(),
         line: line_u32(row.start_line),
+        via: None,
     }
 }
 

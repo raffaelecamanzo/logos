@@ -1,14 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import type { SecurityGateBand, SecuritySummary, StatusInfo } from "../../api/types.ts";
+import type {
+  DocResolution,
+  InternalResolution,
+  SecurityGateBand,
+  SecuritySummary,
+  StatusInfo,
+} from "../../api/types.ts";
 import {
   bandOf,
   fmtInt,
   freshnessStatement,
   gateStatement,
   humanizeAge,
+  devOnlyStatement,
+  docResolutionStatement,
+  internalPopulationStatement,
+  needsReviewStatement,
   newestScanStatement,
   pctBp,
+  resolutionHeadline,
   scannersFailedStatement,
   securityState,
   testCodeStatement,
@@ -163,7 +174,7 @@ const ZERO = { critical: 0, high: 0, medium: 0, low: 0, info: 0, unrated: 0, tot
 function summary(over: Partial<SecuritySummary> = {}): SecuritySummary {
   return {
     scan: "fresh",
-    tally: { counted: { ...ZERO, high: 2, total: 2 }, excluded: { not_fresh: 0, suppressed: 0, test: 0 } },
+    tally: { counted: { ...ZERO, high: 2, total: 2 }, excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 0 } },
     newest_scan_at: 1_000,
     scanners_failed: 0,
     scanners_total: 1,
@@ -246,10 +257,151 @@ describe("the Security widget's statements (S-789)", () => {
     expect(gateStatement(band({ passed: false, missing_scans: [miss, miss] }))).toBe("fails: 2 required scans missing");
   });
 
+  it("states how many more findings are on a dev-only dependency, in UAT-SC-14's fixed wording, and nothing when none are (S-810)", () => {
+    const tally = (dev: number) => ({ counted: { ...ZERO }, excluded: { not_fresh: 0, suppressed: 0, test: 9, dev, needs_review: 4 } });
+    expect(devOnlyStatement(tally(0))).toBeNull();
+    expect(devOnlyStatement(tally(1))).toBe("1 more in dev-only dependencies");
+    expect(devOnlyStatement(tally(60))).toBe("60 more in dev-only dependencies");
+    expect(devOnlyStatement(tally(1_234))).toBe("1,234 more in dev-only dependencies");
+    // The three left-out figures are stated apart; none trades with another.
+    expect(testCodeStatement(tally(5))).toBe("9 more in test code");
+    expect(needsReviewStatement(tally(5))).toBe("4 more need review");
+  });
+
+  it("states how many more findings need review, agreeing the verb, and nothing when none do (S-817)", () => {
+    const tally = (needsReview: number) => ({ counted: { ...ZERO }, excluded: { not_fresh: 0, suppressed: 0, test: 9, dev: 0, needs_review: needsReview } });
+    expect(needsReviewStatement(tally(0))).toBeNull();
+    expect(needsReviewStatement(tally(1))).toBe("1 more needs review");
+    expect(needsReviewStatement(tally(3))).toBe("3 more need review");
+    expect(needsReviewStatement(tally(1_234))).toBe("1,234 more need review");
+    // Test code is stated on its own line; the two never trade figures.
+    expect(testCodeStatement(tally(5))).toBe("9 more in test code");
+  });
+
   it("states how many more findings lie in test code, and nothing when none do", () => {
-    const tally = (test: number) => ({ counted: { ...ZERO }, excluded: { not_fresh: 0, suppressed: 0, test } });
+    const tally = (test: number) => ({ counted: { ...ZERO }, excluded: { not_fresh: 0, suppressed: 0, test, dev: 0, needs_review: 0 } });
     expect(testCodeStatement(tally(0))).toBeNull();
     expect(testCodeStatement(tally(3))).toBe("3 more in test code");
     expect(testCodeStatement(tally(1_234))).toBe("1,234 more in test code");
+  });
+});
+
+// ── The Graph widget's reference resolution (S-636, FR-RS-49) ────────────────
+
+/** The server's `internal_resolution` for a population: 6 of 8 internal
+ *  candidates resolved, 12 code references of which 4 are provably external. */
+const INTERNAL: InternalResolution = {
+  resolved: 6,
+  internal_candidates: 8,
+  provably_external: 4,
+  code_references: 12,
+  lower_bound: 0.75,
+  absence: null,
+};
+/** An absence's `cause` tag. The model reads the counts beside it, not the tag —
+ *  the tags are the server's closed lexicon, whose spellings the absence census
+ *  pins to the sites that own them — so a fixture carries a placeholder. */
+const ABSENT = { cause: "unread" };
+const DOCS: DocResolution = { references: 40, resolved: 34, ratio: 0.85, absence: null };
+
+describe("resolutionHeadline (S-636, FR-RS-49)", () => {
+  it("is the lower bound over internal candidates, never the deprecated whole-ledger ratio", () => {
+    // The deprecated fields disagree on purpose: 36% of the whole ledger.
+    const s = status({ internal_resolution: INTERNAL, resolution_coverage: 0.36, refs_resolved: 36, refs_total: 100 });
+    expect(resolutionHeadline(s)).toEqual({ kind: "share", share: "75.0%" });
+  });
+
+  it("states a zero lower bound as 0.0%, a measured figure, not an absence", () => {
+    const zero = { ...INTERNAL, resolved: 0, lower_bound: 0 };
+    expect(resolutionHeadline(status({ internal_resolution: zero }))).toEqual({ kind: "share", share: "0.0%" });
+  });
+
+  it("reads a graph with no code reference as absent, never 100% or 0%", () => {
+    const none: InternalResolution = {
+      resolved: 0, internal_candidates: 0, provably_external: 0, code_references: 0,
+      lower_bound: null, absence: ABSENT,
+    };
+    expect(resolutionHeadline(status({ internal_resolution: none }))).toEqual({ kind: "no_references" });
+  });
+
+  it("reads a graph whose every code reference is provably external as absent, with the count", () => {
+    const allExternal: InternalResolution = {
+      resolved: 0, internal_candidates: 0, provably_external: 9, code_references: 9,
+      lower_bound: null, absence: ABSENT,
+    };
+    expect(resolutionHeadline(status({ internal_resolution: allExternal }))).toEqual({
+      kind: "all_external",
+      provablyExternal: 9,
+    });
+  });
+
+  it("reads a server that did not report the figure as unreported, never as the deprecated ratio", () => {
+    expect(resolutionHeadline(status({ resolution_coverage: 1 }))).toEqual({ kind: "unreported" });
+  });
+
+  it("reads a null share whose counts fit no absence, or that names none, as unreported — never as a named absence", () => {
+    // A denominator the server says is empty while it counts internal candidates.
+    const inconsistent = { resolved: 0, internal_candidates: 3, provably_external: 2, code_references: 5, lower_bound: null };
+    expect(resolutionHeadline(status({ internal_resolution: { ...inconsistent, absence: ABSENT } }))).toEqual({
+      kind: "unreported",
+    });
+    const none = { resolved: 0, internal_candidates: 0, provably_external: 5, code_references: 5, lower_bound: null };
+    expect(resolutionHeadline(status({ internal_resolution: { ...none, absence: null } }))).toEqual({
+      kind: "unreported",
+    });
+  });
+});
+
+describe("internalPopulationStatement (S-636, FR-RS-49)", () => {
+  it("states x internal candidates of y code references, z provably external, with the resolved count", () => {
+    expect(internalPopulationStatement(status({ internal_resolution: INTERNAL }))).toBe(
+      "6 of 8 internal candidates resolved — 8 internal candidates of 12 code references, 4 provably external",
+    );
+  });
+
+  it("groups digits and agrees in number", () => {
+    const one: InternalResolution = {
+      resolved: 1, internal_candidates: 1, provably_external: 12_344, code_references: 12_345,
+      lower_bound: 1, absence: null,
+    };
+    expect(internalPopulationStatement(status({ internal_resolution: one }))).toBe(
+      "1 of 1 internal candidate resolved — 1 internal candidate of 12,345 code references, 12,344 provably external",
+    );
+  });
+
+  it("agrees in number on the code references too", () => {
+    const only: InternalResolution = {
+      resolved: 0, internal_candidates: 1, provably_external: 0, code_references: 1,
+      lower_bound: 0, absence: null,
+    };
+    expect(internalPopulationStatement(status({ internal_resolution: only }))).toBe(
+      "0 of 1 internal candidate resolved — 1 internal candidate of 1 code reference, 0 provably external",
+    );
+  });
+
+  it("is null when there is no population to state", () => {
+    expect(internalPopulationStatement(status({}))).toBeNull();
+    const none: InternalResolution = {
+      resolved: 0, internal_candidates: 0, provably_external: 0, code_references: 0,
+      lower_bound: null, absence: ABSENT,
+    };
+    expect(internalPopulationStatement(status({ internal_resolution: none }))).toBeNull();
+  });
+});
+
+describe("docResolutionStatement (S-636, FR-RS-49)", () => {
+  it("states the doc-reference figure apart from the code headline, with its denominator", () => {
+    expect(docResolutionStatement(status({ doc_resolution: DOCS }))).toBe(
+      "Documentation references: 85.0% resolved (34 of 40)",
+    );
+  });
+
+  it("names a graph with no doc reference instead of a ratio", () => {
+    const none: DocResolution = { references: 0, resolved: 0, ratio: null, absence: ABSENT };
+    expect(docResolutionStatement(status({ doc_resolution: none }))).toBe("No documentation references recorded.");
+  });
+
+  it("is null when the server did not report it", () => {
+    expect(docResolutionStatement(status({}))).toBeNull();
   });
 });

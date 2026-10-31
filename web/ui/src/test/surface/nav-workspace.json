@@ -8,7 +8,7 @@
   },
   {
     "id": "health",
-    "label": "Health",
+    "label": "Quality",
     "path": "/health",
     "group": "A",
     "scope": "member"
@@ -78,7 +78,7 @@
   },
   {
     "id": "workspace-health",
-    "label": "Health",
+    "label": "Quality",
     "path": "/workspace-health",
     "group": "A",
     "scope": "app"

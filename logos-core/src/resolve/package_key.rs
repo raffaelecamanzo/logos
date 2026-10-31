@@ -36,7 +36,10 @@
 //! package a file declares, or the fully-qualified name of a type it declares,
 //! asks [`PackageLayout::package_of`] / [`PackageLayout::type_fqn`] — never a
 //! second split of the path (the sprint-81 risk register names the divergence a
-//! re-derivation would cause), and never a second reading of a namespace.
+//! re-derivation would cause), and never a second reading of a namespace. A
+//! lexical constant's name (S-565) has no path to read: it is its enclosing
+//! constant joined to the name it is written with, and [`constant_fqn`] is the
+//! one place that join is made.
 //!
 //! [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
 //! [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
@@ -46,7 +49,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
-use crate::plugin::{CallTargets, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
+use crate::plugin::{BareSpecifiers, CallTargets, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -91,11 +94,87 @@ pub struct PackageLayout {
     ///
     /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
     interface_body_exts: HashSet<String>,
+    /// Normalised extensions whose language declares structural types: every
+    /// type relation it records relates its declaration (S-535, [FR-EX-17]).
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    structural_type_exts: HashSet<String>,
     /// Normalised extensions whose language declares that a namespace sees the
     /// types of its enclosing namespaces (S-595, [FR-RS-45]).
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     enclosing_namespace_exts: HashSet<String>,
+    /// Normalised extensions whose language tells a type apart from a
+    /// same-named one by its generic arity (S-602, [CR-199]).
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    type_arity_exts: HashSet<String>,
+    /// Normalised extensions whose language names its classes and modules by
+    /// lexical constants (S-565, [FR-RS-33]).
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    lexical_constant_exts: HashSet<String>,
+    /// Normalised extensions whose language declares that the files of one
+    /// directory declaring one `package` clause share one package scope
+    /// (S-528, [FR-RS-17]).
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    directory_package_exts: HashSet<String>,
+    /// Normalised extensions whose language declares that a bare call no
+    /// included declaration supplies binds across its link unit (S-584,
+    /// [FR-RS-40]).
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    link_unit_exts: HashSet<String>,
+    /// Project-relative path → the `package` clause that file declares — only
+    /// for a file of a [`directory_package_exts`](Self::directory_package_exts)
+    /// language whose clause was recorded (S-528).
+    package_clauses: HashMap<String, String>,
+    /// Normalised extensions whose language declares that a type and the
+    /// same-named singleton beside it are one name (S-573, [FR-RS-36]).
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    companion_object_exts: HashSet<String>,
+    /// Normalised extensions whose language declares that a file's top-level
+    /// functions are members of its declared namespace (S-573, [FR-RS-36]).
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    top_level_callable_exts: HashSet<String>,
+    /// Normalised extensions whose language declares that a wildcard import
+    /// outranks the namespace's other files (S-573, [FR-RS-36]).
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    wildcard_first_exts: HashSet<String>,
+    /// Normalised extensions whose language declares that a top-level function
+    /// with a receiver type is callable on a value (S-560, [FR-RS-31]).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    extension_function_exts: HashSet<String>,
+    /// Normalised extension → the suffix of the class another language reaches
+    /// a file's top-level functions through (S-560, [FR-RS-31]).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    file_facades: HashMap<String, String>,
+    /// Normalised extension → the name its language gives a type's anonymous
+    /// companion object (I4-INT, [FR-RS-31]).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    companion_names: HashMap<String, String>,
+    /// Normalised extensions whose language declares that an unqualified call
+    /// its namespace does not supply falls back to the global function (S-551,
+    /// [FR-RS-26]).
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    global_function_fallback_exts: HashSet<String>,
+    /// Normalised extension → its language's plugin name (S-560): what tells
+    /// two languages of one interop family apart.
+    languages: HashMap<String, String>,
+    /// Normalised extensions whose language binds its `#include` against the
+    /// including file's directory and the repository's include roots, and its
+    /// calls and type relations through what it includes (S-579, [FR-RS-38]).
+    ///
+    /// [FR-RS-38]: ../../../docs/specs/requirements/FR-RS-38.md
+    include_root_exts: HashSet<String>,
     /// Normalised extensions whose language explicitly declares
     /// `implicit_receiver = "none"`, so a bare call binds free callables only
     /// (S-590, [FR-RS-07]).
@@ -214,7 +293,21 @@ impl PackageLayout {
             .with_call_targets(registry.call_targets())
             .with_kind_following_supertypes(registry.supertype_kind_follows_target())
             .with_interface_bodies(registry.interface_body_inheriting_extensions())
+            .with_structural_types(registry.structural_type_extensions())
             .with_enclosing_namespaces(registry.enclosing_namespace_extensions())
+            .with_type_arity(registry.type_arity_extensions())
+            .with_lexical_constants(registry.lexical_constant_extensions())
+            .with_directory_packages(registry.directory_package_extensions())
+            .with_link_units(registry.link_unit_extensions())
+            .with_companion_objects(registry.companion_object_extensions())
+            .with_top_level_callables(registry.top_level_callable_extensions())
+            .with_wildcards_first(registry.wildcard_first_extensions())
+            .with_extension_functions(registry.extension_function_extensions())
+            .with_file_facades(registry.file_facades())
+            .with_companion_names(registry.companion_names())
+            .with_global_function_fallback(registry.global_function_fallback_extensions())
+            .with_languages(registry.languages())
+            .with_include_roots(registry.include_root_extensions())
             .with_free_only_bare_calls(registry.free_only_bare_call_extensions())
             .with_free_call_fallthrough(registry.free_call_fallthrough_extensions())
             .with_implicit_root_members(registry.implicit_root_members())
@@ -230,11 +323,7 @@ impl PackageLayout {
         mut self,
         declared: HashMap<String, BTreeMap<String, Vec<String>>>,
     ) -> Self {
-        self.wrapper_methods.extend(
-            declared
-                .into_iter()
-                .map(|(ext, w)| (ext.trim_start_matches('.').to_ascii_lowercase(), w)),
-        );
+        extend_normalised_map(&mut self.wrapper_methods, declared);
         self
     }
 
@@ -297,6 +386,107 @@ impl PackageLayout {
         self
     }
 
+    /// This layout, with the extensions whose types are told apart by their
+    /// generic arity (S-602; the set [`LanguageRegistry::type_arity_extensions`]
+    /// returns).
+    pub fn with_type_arity(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.type_arity_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose classes and modules are named by
+    /// lexical constants (S-565; the set
+    /// [`LanguageRegistry::lexical_constant_extensions`] returns).
+    pub fn with_lexical_constants(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.lexical_constant_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose files of one directory and one
+    /// `package` clause share one package scope (S-528; the set
+    /// [`LanguageRegistry::directory_package_extensions`] returns).
+    pub fn with_directory_packages(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.directory_package_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose bare call binds across its link
+    /// unit (S-584; the set [`LanguageRegistry::link_unit_extensions`]
+    /// returns).
+    pub fn with_link_units(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.link_unit_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose type and same-named singleton
+    /// are one name (S-573; the set
+    /// [`LanguageRegistry::companion_object_extensions`] returns).
+    pub fn with_companion_objects(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.companion_object_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose top-level functions are members
+    /// of the declared namespace (S-573; the set
+    /// [`LanguageRegistry::top_level_callable_extensions`] returns).
+    pub fn with_top_level_callables(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.top_level_callable_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose wildcard imports outrank the
+    /// namespace's other files (S-573; the set
+    /// [`LanguageRegistry::wildcard_first_extensions`] returns).
+    pub fn with_wildcards_first(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.wildcard_first_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose top-level functions with a
+    /// receiver type are callable on a value (S-560; the set
+    /// [`LanguageRegistry::extension_function_extensions`] returns).
+    pub fn with_extension_functions(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.extension_function_exts, exts);
+        self
+    }
+
+    /// This layout, with each extension's file-facade suffix (S-560; the map
+    /// [`LanguageRegistry::file_facades`] returns).
+    pub fn with_file_facades(mut self, facades: HashMap<String, String>) -> Self {
+        extend_normalised_map(&mut self.file_facades, facades);
+        self
+    }
+
+    /// This layout, with each extension's companion name (I4-INT; the map
+    /// [`LanguageRegistry::companion_names`] returns).
+    pub fn with_companion_names(mut self, names: HashMap<String, String>) -> Self {
+        extend_normalised_map(&mut self.companion_names, names);
+        self
+    }
+
+    /// This layout, with the extensions whose unqualified calls fall back to
+    /// the global function (S-551; the set
+    /// [`LanguageRegistry::global_function_fallback_extensions`] returns).
+    pub fn with_global_function_fallback(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.global_function_fallback_exts, exts);
+        self
+    }
+
+    /// This layout, with each extension's language (S-560; the map
+    /// [`LanguageRegistry::languages`] returns).
+    pub fn with_languages(mut self, languages: HashMap<String, String>) -> Self {
+        extend_normalised_map(&mut self.languages, languages);
+        self
+    }
+
+    /// This layout, with the extensions whose includes bind against include
+    /// roots (S-579; the set [`LanguageRegistry::include_root_extensions`]
+    /// returns).
+    pub fn with_include_roots(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.include_root_exts, exts);
+        self
+    }
+
     /// This layout, with each extension's path-model data (S-519; the shape
     /// [`LanguageRegistry::path_models`] returns). Import roots start at their
     /// declared candidates until [`with_detected_import_roots`](Self::with_detected_import_roots)
@@ -329,22 +519,14 @@ impl PackageLayout {
     /// This layout, with each extension's interop family (S-519; the shape
     /// [`LanguageRegistry::families`] returns).
     pub fn with_families(mut self, families: HashMap<String, String>) -> Self {
-        self.families.extend(
-            families
-                .into_iter()
-                .map(|(ext, family)| (ext.trim_start_matches('.').to_ascii_lowercase(), family)),
-        );
+        extend_normalised_map(&mut self.families, families);
         self
     }
 
     /// This layout, with each extension's call targets (S-521; the shape
     /// [`LanguageRegistry::call_targets`] returns).
     pub fn with_call_targets(mut self, targets: HashMap<String, CallTargets>) -> Self {
-        self.call_targets.extend(
-            targets
-                .into_iter()
-                .map(|(ext, t)| (ext.trim_start_matches('.').to_ascii_lowercase(), t)),
-        );
+        extend_normalised_map(&mut self.call_targets, targets);
         self
     }
 
@@ -361,6 +543,14 @@ impl PackageLayout {
     /// [`LanguageRegistry::interface_body_inheriting_extensions`] returns).
     pub fn with_interface_bodies(mut self, exts: impl IntoIterator<Item = String>) -> Self {
         extend_normalised(&mut self.interface_body_exts, exts);
+        self
+    }
+
+    /// This layout, with the extensions whose language declares structural
+    /// types (S-535; the set [`LanguageRegistry::structural_type_extensions`]
+    /// returns).
+    pub fn with_structural_types(mut self, exts: impl IntoIterator<Item = String>) -> Self {
+        extend_normalised(&mut self.structural_type_exts, exts);
         self
     }
 
@@ -517,6 +707,158 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.enclosing_namespace_exts.contains(&ext))
     }
 
+    /// Whether a type name written in the file at `path` binds only a type of
+    /// its own written arity in the own-namespace, enclosing-namespace and
+    /// namespace-wildcard rungs (S-602, [CR-199]): its language's declaration.
+    /// A reference of unknown arity admits any.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    pub fn matches_type_arity(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.type_arity_exts.contains(&ext))
+    }
+
+    /// Whether the classes and modules of the file at `path` are the constants
+    /// their nesting spells, and a constant its references name is read through
+    /// the lexical nesting outward, then the top level (S-565, [FR-RS-33]): its
+    /// language's declaration. The file's module key is unchanged.
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    pub fn resolves_lexical_constants(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.lexical_constant_exts.contains(&ext))
+    }
+
+    /// Whether the files of one directory that declare one `package` clause
+    /// share one package scope (S-528, [FR-RS-17]): the language of the file
+    /// at `path` declares it — Go's. The file's module key is unchanged.
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    pub fn declares_directory_packages(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.directory_package_exts.contains(&ext))
+    }
+
+    /// Whether the file at `path` is of a language whose files make one link
+    /// unit (S-584, [FR-RS-40]): a bare call written there that no included
+    /// declaration supplies binds the one non-`static` definition of the name
+    /// among those files, and a definition there is a candidate for one —
+    /// C's `.c` files, and its `.h` ones where the repository's headers are
+    /// read as C (S-582). The file's module key is unchanged.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    pub fn links_units(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.link_unit_exts.contains(&ext))
+    }
+
+    /// The directory package the file at `path` sits in (S-528,
+    /// [FR-RS-17]): its directory (`""` at the repository root) and the
+    /// `package` clause it declares — `None` when its language declares no
+    /// directory packages, or its clause was not recorded. `server/routes.go`
+    /// declaring `package server` is `("server", "server")`; a
+    /// `server/routes_test.go` declaring `package server_test` is another
+    /// package of the same directory.
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    pub fn directory_package<'p>(&'p self, path: &'p str) -> Option<(&'p str, &'p str)> {
+        let clause = self.package_clauses.get(path)?;
+        let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        Some((dir, clause.as_str()))
+    }
+
+    /// Whether a type of the file at `path` and the same-named singleton
+    /// declared beside it are one name (S-573, [FR-RS-36]): its language's
+    /// declaration. A call on the name binds among the singleton's callables.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn pairs_companion_objects(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.companion_object_exts.contains(&ext))
+    }
+
+    /// Whether the functions the file at `path` declares at its top level are
+    /// members of the namespace it declares (S-573, [FR-RS-36]): its
+    /// language's declaration.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn declares_top_level_callables(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.top_level_callable_exts.contains(&ext))
+    }
+
+    /// Whether a name a wildcard import of the file at `path` brings into view
+    /// outranks one its namespace declares in another file (S-573,
+    /// [FR-RS-36]): its language's declaration — Scala's precedence.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn reads_wildcards_first(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.wildcard_first_exts.contains(&ext))
+    }
+
+    /// Whether a top-level function with a receiver type, declared in the
+    /// language of the file at `path`, is callable on a value there (S-560,
+    /// [FR-RS-31]): its language's declaration.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn binds_extension_calls(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.extension_function_exts.contains(&ext))
+    }
+
+    /// The language of the file at `path` (S-560): its plugin's name, `None`
+    /// for an extension no code plugin claims.
+    pub fn language(&self, path: &str) -> Option<&str> {
+        self.languages.get(&extension(path)?).map(String::as_str)
+    }
+
+    /// Whether the language of the file at `path` declares file facades
+    /// (S-560, [FR-RS-31]) — and so never names one itself: Kotlin calls a
+    /// top-level function by its own name, never through `UtilsKt`.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn declares_file_facades(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.file_facades.contains_key(&ext))
+    }
+
+    /// The class another language of the family reaches the top-level
+    /// functions of the file at `path` through (S-560, [FR-RS-31]), `None`
+    /// when its language declares no facade: the file's stem, every character
+    /// that cannot spell a class name replaced by `_` and the first letter
+    /// upper-cased, then the declared suffix — `src/util/Utils.kt` →
+    /// `UtilsKt`, `date-utils.kt` → `Date_utilsKt`.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn file_facade(&self, path: &str) -> Option<String> {
+        let suffix = self.file_facades.get(&extension(path)?)?;
+        let stem = Path::new(path).file_stem()?.to_str()?;
+        let mut chars = stem.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' });
+        let first = chars.next()?;
+        Some(first.to_uppercase().chain(chars).chain(suffix.chars()).collect())
+    }
+
+    /// The name the language of the file at `path` gives a type's anonymous
+    /// companion object (I4-INT, [FR-RS-31]) — Kotlin's `Companion` — `None`
+    /// when its language declares no companions.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn companion_name(&self, path: &str) -> Option<&str> {
+        self.companion_names.get(&extension(path)?).map(String::as_str)
+    }
+
+    /// Whether an unqualified call of the file at `path` that its namespace
+    /// declares no function for binds to the global namespace's function
+    /// (S-551, [FR-RS-26]): its language's declaration — PHP's fallback.
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    pub fn falls_back_to_global_functions(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.global_function_fallback_exts.contains(&ext))
+    }
+
+    /// Whether the file at `path` binds its `#include` against its own
+    /// directory and the repository's include roots, and its calls and type
+    /// relations through the declarations its includes make visible (S-579,
+    /// [FR-RS-38]): its language's declaration. The file's module key is
+    /// unchanged.
+    ///
+    /// [FR-RS-38]: ../../../docs/specs/requirements/FR-RS-38.md
+    pub fn resolves_includes(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.include_root_exts.contains(&ext))
+    }
+
     /// Whether a bare call written in the file at `path` binds free callables
     /// only — never a member of a class-like container nor a callable with a
     /// recorded self type (S-590, [FR-RS-07]): its language declares
@@ -563,8 +905,7 @@ impl PackageLayout {
 
     /// Whether a call written in the file at `path` is filtered by its
     /// candidates' parameter ranges at all (S-592, [FR-RS-43]): `false` for a
-    /// language that enforces no arity — a JavaScript file the TypeScript
-    /// grammars parse.
+    /// language that enforces no arity — a JavaScript file.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub fn checks_arity(&self, path: &str) -> bool {
@@ -622,6 +963,18 @@ impl PackageLayout {
         extension(path).is_some_and(|ext| self.interface_body_exts.contains(&ext))
     }
 
+    /// Whether the file at `path`'s language declares structural types
+    /// (S-535, [FR-EX-17]): a type use or instantiation binds from any of its
+    /// declarations, a supertype clause binds any type-like declaration it
+    /// names, and a relation written through an import binds within what the
+    /// import binds to. A call on a proven receiver binds among its type's
+    /// members, required signatures included (S-537).
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    pub fn has_structural_types(&self, path: &str) -> bool {
+        extension(path).is_some_and(|ext| self.structural_type_exts.contains(&ext))
+    }
+
     fn path_model(&self, path: &str) -> Option<&PathModel> {
         self.path_models.get(&extension(path)?)
     }
@@ -662,7 +1015,10 @@ impl PackageLayout {
 
     /// This layout, given the namespace each file declares — `(path, name)`
     /// pairs, the name in [`namespace_text`] form (`""` for the global
-    /// namespace). A pair whose file is not of a declared-namespace language is
+    /// namespace). A file of a directory-package language records its
+    /// `package` clause in the same column (S-528), and its pair is taken as
+    /// that clause ([`directory_package`](Self::directory_package)), never as a
+    /// namespace: it re-keys nothing. A pair whose file is of neither kind is
     /// ignored, so a stray row can never re-key a Rust or Java file.
     pub fn with_declared_namespaces(
         mut self,
@@ -671,6 +1027,8 @@ impl PackageLayout {
         for (path, name) in declared {
             if self.declares_namespaces(&path) {
                 self.namespaces.insert(path, namespace_segments(&name));
+            } else if self.declares_directory_packages(&path) {
+                self.package_clauses.insert(path, name);
             }
         }
         self
@@ -679,8 +1037,9 @@ impl PackageLayout {
     /// The layout one plugin declares — [`from_registry`](Self::from_registry)
     /// narrowed to a single language, for the single-file
     /// [`extract`](crate::extract::extract) entry point, which is handed a
-    /// plugin and no registry. For every extension of that plugin it is the
-    /// registry's layout exactly.
+    /// plugin and no registry. For every extension the registry gives that
+    /// plugin it is the registry's layout exactly; a shared one (S-582: `.h`)
+    /// reads as this plugin's, as the plugin parses it.
     pub fn from_plugin(plugin: &dyn LanguagePlugin) -> Self {
         let semantics = plugin.semantics();
         let exts = || {
@@ -709,7 +1068,29 @@ impl PackageLayout {
                 exts().filter(|_| semantics.supertype_kind_follows_target),
             )
             .with_interface_bodies(exts().filter(|_| semantics.inherits_interface_bodies))
+            .with_structural_types(exts().filter(|_| semantics.structural_types))
             .with_enclosing_namespaces(exts().filter(|_| semantics.enclosing_namespaces))
+            .with_type_arity(exts().filter(|_| semantics.type_arity))
+            .with_lexical_constants(exts().filter(|_| semantics.lexical_constants))
+            .with_directory_packages(exts().filter(|_| semantics.directory_packages))
+            .with_link_units(exts().filter(|_| semantics.link_unit))
+            .with_companion_objects(exts().filter(|_| semantics.companion_objects))
+            .with_top_level_callables(exts().filter(|_| semantics.top_level_callables))
+            .with_wildcards_first(exts().filter(|_| semantics.wildcards_outrank_package))
+            .with_extension_functions(exts().filter(|_| semantics.extension_functions))
+            .with_file_facades(
+                exts()
+                    .filter_map(|ext| Some((ext, semantics.file_facade.clone()?)))
+                    .collect(),
+            )
+            .with_companion_names(
+                exts()
+                    .filter_map(|ext| Some((ext, semantics.companion_name.clone()?)))
+                    .collect(),
+            )
+            .with_global_function_fallback(exts().filter(|_| semantics.global_function_fallback))
+            .with_languages(exts().map(|ext| (ext, plugin.name().to_string())).collect())
+            .with_include_roots(exts().filter(|_| semantics.bare_specifiers == BareSpecifiers::IncludeRoots))
             .with_free_only_bare_calls(exts().filter(|_| semantics.bare_calls_free_only))
             .with_free_call_fallthrough(exts().filter(|_| semantics.implicit_call_falls_through))
             .with_implicit_root_members(
@@ -890,6 +1271,16 @@ fn extend_normalised(set: &mut HashSet<String>, exts: impl IntoIterator<Item = S
     set.extend(exts.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()));
 }
 
+/// [`extend_normalised`] for a map keyed by extension: each key normalised the
+/// same way, its value kept.
+fn extend_normalised_map<V>(map: &mut HashMap<String, V>, entries: HashMap<String, V>) {
+    map.extend(
+        entries
+            .into_iter()
+            .map(|(ext, value)| (ext.trim_start_matches('.').to_ascii_lowercase(), value)),
+    );
+}
+
 /// `path`'s extension, lower-cased — the key both models are declared under.
 fn extension(path: &str) -> Option<String> {
     Some(Path::new(path).extension()?.to_str()?.to_ascii_lowercase())
@@ -903,6 +1294,24 @@ pub fn namespace_segments(text: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+/// The fully-qualified name of a constant declared as `written` (`B`, or a
+/// compact `A::B`'s `[A, B]`) inside the declaration whose constant is
+/// `enclosing` (S-565, [FR-RS-33]) — Ruby's own naming: a declaration nested in
+/// `module A` is `A::B`, a compact `class A::B` at the top level is `A::B`, and
+/// a compact one headed by the fully-qualified head (`class ::A::B`, recorded
+/// [`FULLY_QUALIFIED_HEAD`](crate::resolve::FULLY_QUALIFIED_HEAD)) is read from
+/// the top level whatever encloses it. A compact name's scope is read under the
+/// enclosing constant, never looked up outward: a declaration names one
+/// constant, decided by where it is written.
+///
+/// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+pub fn constant_fqn(enclosing: &[String], written: &[String]) -> Vec<String> {
+    match written.split_first() {
+        Some((head, rest)) if head == crate::resolve::FULLY_QUALIFIED_HEAD => rest.to_vec(),
+        _ => enclosing.iter().chain(written).cloned().collect(),
+    }
 }
 
 /// The recorded text of a declared namespace: its segments joined by `.`,
@@ -1440,8 +1849,18 @@ mod path_model_tests {
 mod call_target_tests {
     use super::*;
 
+    /// The extensions the registry gives `plugin` — every one it claims, less
+    /// a shared one (S-582: C's `.h`) another plugin reads by default.
+    fn read_extensions<'p>(registry: &LanguageRegistry, plugin: &'p dyn LanguagePlugin) -> Vec<&'p String> {
+        plugin
+            .extensions()
+            .iter()
+            .filter(|ext| registry.for_extension(ext).is_some_and(|reader| reader.name() == plugin.name()))
+            .collect()
+    }
+
     /// [`PackageLayout::from_plugin`] is the registry's layout for every
-    /// extension of its plugin — call targets included — and at least one
+    /// extension the registry gives its plugin — call targets included — and at least one
     /// shipped plugin declares some, so the comparison is not over defaults.
     #[test]
     fn a_single_plugin_layout_carries_the_registrys_call_targets() {
@@ -1451,7 +1870,7 @@ mod call_target_tests {
         let mut declaring = 0;
         for plugin in registry.iter() {
             let own = PackageLayout::from_plugin(plugin);
-            for ext in plugin.extensions() {
+            for ext in read_extensions(&registry, plugin) {
                 let path = format!("dir/file.{}", ext.trim_start_matches('.'));
                 assert_eq!(own.call_targets(&path), full.call_targets(&path), "{path}");
                 declaring += usize::from(own.call_targets(&path).any());
@@ -1481,6 +1900,27 @@ mod call_target_tests {
         assert!(declaring > 0, "some shipped plugin declares the supertype key");
     }
 
+    /// The same parity for the structural-types key (S-535): the single-plugin
+    /// layout answers every extension as the registry's does, over a set some
+    /// shipped plugin is in.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_structural_types_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let mut declaring = 0;
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let structural = own.has_structural_types(&path);
+                assert_eq!(structural, full.has_structural_types(&path), "{path}");
+                declaring += usize::from(structural);
+            }
+        }
+        assert!(declaring > 0, "some shipped plugin declares the structural-types key");
+    }
+
     /// The same parity for the enclosing-namespace key (S-595): the
     /// single-plugin layout answers every extension as the registry's does,
     /// over a set some shipped plugin is in — and a plugin that does not
@@ -1503,6 +1943,94 @@ mod call_target_tests {
         }
         assert!(declaring > 0, "some shipped plugin declares the enclosing-namespace key");
         assert!(silent > 0, "a plugin that does not declare it binds as before");
+    }
+
+    /// The same parity for the type-arity key (S-602): the single-plugin
+    /// layout answers every extension as the registry's does, and only C#'s
+    /// `.cs` declares it — every other language binds as before.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_type_arity_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        let mut declaring: Vec<String> = Vec::new();
+        for plugin in registry.iter() {
+            let own = PackageLayout::from_plugin(plugin);
+            for ext in plugin.extensions() {
+                let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                let matches = own.matches_type_arity(&path);
+                assert_eq!(matches, full.matches_type_arity(&path), "{path}");
+                if matches {
+                    declaring.push(path);
+                }
+            }
+        }
+        let expected: Vec<String> = if cfg!(feature = "lang-c-sharp") { vec!["dir/file.cs".into()] } else { Vec::new() };
+        assert_eq!(declaring, expected);
+    }
+
+    /// The same parity for the companion-object, top-level-callable and
+    /// wildcard-precedence keys (S-573), the directory-package key (S-528),
+    /// the extension-function and file-facade keys (S-560), the
+    /// companion-name key (I4-INT) and the global-function-fallback key
+    /// (S-551): for each, the single-plugin layout
+    /// answers every extension as the registry's does, over a set some shipped
+    /// plugin is in, and a plugin that does not declare it is out of it.
+    #[test]
+    fn a_single_plugin_layout_carries_the_registrys_companion_and_top_level_keys() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let registry = LanguageRegistry::load(tmp.path()).expect("registry loads");
+        let full = PackageLayout::from_registry(&registry);
+        type Key = fn(&PackageLayout, &str) -> bool;
+        let keys: [(&str, Key); 8] = [
+            ("companion_objects", PackageLayout::pairs_companion_objects),
+            ("top_level_callables", PackageLayout::declares_top_level_callables),
+            ("wildcards_outrank_package", PackageLayout::reads_wildcards_first),
+            ("directory_packages", PackageLayout::declares_directory_packages),
+            // S-560's keys.
+            ("extension_functions", PackageLayout::binds_extension_calls),
+            ("file_facade", PackageLayout::declares_file_facades),
+            ("companion_name", |layout, path| layout.companion_name(path).is_some()),
+            // S-551's key.
+            ("global_function_fallback", PackageLayout::falls_back_to_global_functions),
+        ];
+        for (key, read) in keys {
+            let (mut declaring, mut silent) = (0, 0);
+            for plugin in registry.iter() {
+                let own = PackageLayout::from_plugin(plugin);
+                for ext in plugin.extensions() {
+                    let path = format!("dir/file.{}", ext.trim_start_matches('.'));
+                    let on = read(&own, &path);
+                    assert_eq!(on, read(&full, &path), "{key}: {path}");
+                    declaring += usize::from(on);
+                    silent += usize::from(!on);
+                }
+            }
+            assert!(declaring > 0, "some shipped plugin declares {key}");
+            assert!(silent > 0, "a plugin that does not declare {key} binds as before");
+            assert!(!read(&full, "Makefile"), "{key}: a path with no extension");
+        }
+    }
+
+    /// FR-RS-31 (S-560): a file's facade class is its stem, every character a
+    /// class name cannot spell replaced by `_` and the first letter
+    /// upper-cased, then the declared suffix — and a language that declares
+    /// none has no facade.
+    #[test]
+    fn a_files_facade_class_is_its_capitalised_stem_and_the_declared_suffix() {
+        let layout = PackageLayout::default().with_file_facades(HashMap::from([(".KT".to_string(), "Kt".to_string())]));
+        let cases = [
+            ("src/main/kotlin/mixit/util/Utils.kt", Some("UtilsKt")),
+            ("a/b/defaultContextExt.kt", Some("DefaultContextExtKt")),
+            ("a/date-utils.v2.kt", Some("Date_utils_v2Kt")),
+            ("a/_private.kt", Some("_privateKt")),
+            ("a/Utils.java", None),
+            ("Makefile", None),
+        ];
+        for (path, facade) in cases {
+            assert_eq!(layout.file_facade(path).as_deref(), facade, "{path}");
+            assert_eq!(layout.declares_file_facades(path), facade.is_some(), "{path}");
+        }
     }
 
     /// The same parity for the interface-body key (S-609): the single-plugin
@@ -1571,7 +2099,7 @@ mod call_target_tests {
         let mut held = [(0, 0); 4];
         for plugin in registry.iter() {
             let own = PackageLayout::from_plugin(plugin);
-            for ext in plugin.extensions() {
+            for ext in read_extensions(&registry, plugin) {
                 let path = format!("dir/file.{}", ext.trim_start_matches('.'));
                 for (key, (yes, no)) in keys.iter().zip(held.iter_mut()) {
                     let answer = key(&own, &path);
@@ -1632,5 +2160,58 @@ mod call_target_tests {
         assert!(!layout.peels_receivers("crates/a/src/lib.rsx"), "an extension one letter off");
         assert!(!layout.peels_receivers("src/main/java/a/A.java"));
         assert!(!layout.peels_receivers("Makefile"), "a path with no extension");
+    }
+}
+
+#[cfg(test)]
+mod constant_tests {
+    use super::{constant_fqn, PackageLayout};
+
+    /// A constant is its enclosing constant joined to the name it is written
+    /// with — a compact `A::B` included — and a fully-qualified head reads it
+    /// from the top level whatever encloses it (S-565). Only an extension that
+    /// declares lexical constants resolves them.
+    #[test]
+    fn a_constant_is_named_by_its_nesting_and_only_a_declaring_extension_reads_them() {
+        let v = |s: &str| -> Vec<String> { s.split("::").filter(|x| !x.is_empty()).map(str::to_string).collect() };
+        assert_eq!(constant_fqn(&[], &v("Keystore")), v("Keystore"));
+        assert_eq!(constant_fqn(&v("Rack"), &v("Request")), v("Rack::Request"));
+        assert_eq!(constant_fqn(&v("Rack::Auth"), &v("Abstract::Handler")), v("Rack::Auth::Abstract::Handler"));
+        let rooted = vec![crate::resolve::FULLY_QUALIFIED_HEAD.to_string(), "Top".to_string()];
+        assert_eq!(constant_fqn(&v("Rack"), &rooted), v("Top"));
+
+        let layout = PackageLayout::default().with_lexical_constants(["rb".to_string()]);
+        assert!(layout.resolves_lexical_constants("lib/rack/request.rb"));
+        assert!(layout.resolves_lexical_constants("lib/rack/REQUEST.RB"), "normalised as every extension is");
+        assert!(!layout.resolves_lexical_constants("lib/rack/request.rbx"), "an extension one letter off");
+        assert!(!layout.resolves_lexical_constants("Rakefile"), "a path with no extension");
+        assert!(!PackageLayout::default().resolves_lexical_constants("lib/a.rb"));
+    }
+
+    /// A directory-package file's recorded clause places it in its directory's
+    /// package (S-528, FR-RS-17), and re-keys nothing: its module key is its
+    /// path's. A pair for a file of any other language is ignored, and a
+    /// declared-namespace file's pair is still its namespace.
+    #[test]
+    fn a_recorded_package_clause_places_a_directory_package_file_and_rekeys_nothing() {
+        let plain = PackageLayout::default().with_directory_packages([".GO".to_string()]);
+        let layout = plain.clone().with_namespace_extensions(["cs".to_string()]).with_declared_namespaces([
+            ("server/routes.go".to_string(), "server".to_string()),
+            ("server/routes_test.go".to_string(), "server_test".to_string()),
+            ("main.go".to_string(), "main".to_string()),
+            ("src/lib.rs".to_string(), "lib".to_string()),
+            ("App/Order.cs".to_string(), "Shop.Domain".to_string()),
+        ]);
+        assert_eq!(layout.directory_package("server/routes.go"), Some(("server", "server")));
+        assert_eq!(layout.directory_package("server/routes_test.go"), Some(("server", "server_test")));
+        assert_eq!(layout.directory_package("main.go"), Some(("", "main")), "the repository root is a directory");
+        assert_eq!(layout.directory_package("server/images.go"), None, "no clause recorded");
+        assert_eq!(layout.directory_package("src/lib.rs"), None, "rust declares no directory packages");
+        assert_eq!(layout.directory_package("App/Order.cs"), None, "a namespace is never a clause");
+        assert_eq!(layout.package_of("App/Order.cs"), Some(vec!["Shop".to_string(), "Domain".to_string()]));
+        assert_eq!(layout.module_key("server/routes.go"), plain.module_key("server/routes.go"));
+        assert_eq!(layout.package_of("server/routes.go"), None, "a Go file takes no package rung");
+        assert!(layout.declares_directory_packages("x/a.go") && !layout.declares_directory_packages("x/a.gox"));
+        assert!(!PackageLayout::default().declares_directory_packages("x/a.go"));
     }
 }

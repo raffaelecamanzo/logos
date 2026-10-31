@@ -26,7 +26,16 @@ implicit_receiver = "none"
 # and a class of one name in one scope are two candidates, and stay unbound.
 class_call_instantiates = true
 
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
+
+# Python's queries capture `self.x` own-attribute access as Accesses edges
+# (`queries/references.scm`, `@ref.access`), bound to the Fields its classes
+# declare from their bodies and their methods' `self.x = …` writes
+# (`queries/symbols.scm`; S-543, FR-EX-20), so its classes' LCOM4 has its
+# shared-field links. A `.pyi` stub declares signatures and accesses nothing,
+# so its classes are not scored.
+member_access = true
+member_access_excluded_extensions = ["pyi"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Anonymous-token kinds in the Python grammar: branching keywords, loop
@@ -86,7 +95,8 @@ family = "python"
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across files
 # through the import-root module model (S-519), and so does a bare call to a name
-# a `from m import f` brought into view. Of the type relations, the
+# a `from m import f` brought into view, and a call through an imported module or
+# class (`curl.post()`, `Check.m()`; S-544). Of the type relations, the
 # `Instantiates` a call to an imported class records binds (S-521), and so does
 # a class's base (S-522).
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
@@ -107,6 +117,9 @@ frameworks = "queries/frameworks.scm"
 # static-literal decisions stay in the generic dispatch and
 # `resolve::http_client_call`.
 invocations = "queries/invocations.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` text → HTTP method (the declarative framework
 # contract, S-015). FastAPI decorator names map to their verb; Django URLconf
 # registrations (`path`/`re_path`) carry no verb, so they map to ANY.

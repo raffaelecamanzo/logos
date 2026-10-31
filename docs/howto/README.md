@@ -8,8 +8,8 @@ scripts, and an **MCP server** for AI coding agents such as Claude Code. It
 opens no network connection itself, writes outside the project's `.logos/`
 directory only for setup you ask for — the agent-integration files of
 `logos init -i`, the scanners `logos security install` downloads under your
-consent, and a coverage dev dependency you consent to adding — and supports twelve languages out of the box: Rust, Python,
-TypeScript/JavaScript, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, and PHP.
+consent, and a coverage dev dependency you consent to adding — and supports thirteen languages out of the box: Rust, Python,
+TypeScript, JavaScript, Go, Java, C, C++, C#, Kotlin, Scala, Ruby, and PHP.
 
 ## What it is primarily for: scoping work before you decompose it
 

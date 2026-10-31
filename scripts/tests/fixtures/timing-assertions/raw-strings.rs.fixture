@@ -1,0 +1,9 @@
+// Raw and byte strings with an odd number of inner quotes: a tokenizer that does
+// not know them swallows the assertion after them.
+fn raw_strings() {
+    let start = Instant::now();
+    let a = br#"x"y"#;
+    let b = r#"it's "quoted"#;
+    let c = cr#"p"q"#;
+    assert!(start.elapsed() < Duration::from_secs(1), "{a:?}{b}{c:?}");
+}

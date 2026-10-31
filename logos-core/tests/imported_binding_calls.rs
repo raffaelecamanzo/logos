@@ -250,11 +250,11 @@ fn a_same_named_export_in_two_modules_binds_only_to_the_one_imported() {
 }
 
 #[test]
-fn an_import_whose_module_does_not_define_the_name_stays_in_the_ledger() {
+fn a_barrel_re_export_binds_only_the_definition_it_names() {
     // A barrel: `components/index.ts` re-exports `helper` from one of two
-    // same-named definitions. The import binds (to the barrel), but the barrel
-    // defines no `helper` of its own, so nothing narrows the call to `a` or
-    // `b`: it stays unresolved rather than binding to either, or to both.
+    // same-named definitions. The import binds (to the barrel), and the call is
+    // followed through the re-export (S-534) to `a` — never to `b`, which the
+    // barrel does not name, and never to both.
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/components/a.ts", "export function helper() { return 1; }\n");
     write(tmp.path(), "src/components/b.ts", "export function helper() { return 2; }\n");
@@ -263,6 +263,27 @@ fn an_import_whose_module_does_not_define_the_name_stays_in_the_ledger() {
         "src/components/index.ts",
         "export { helper } from './a';\n",
     );
+    write(
+        tmp.path(),
+        "src/main.ts",
+        "import { helper } from './components';\nexport function main() { return helper(); }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(imported_files(rt, "src/main.ts"), ["src/components/index.ts"]);
+    assert_eq!(callers_of(rt, "src/components/a.ts:helper"), ["src/main.ts:main"]);
+    assert!(callers_of(rt, "src/components/b.ts:helper").is_empty());
+}
+
+#[test]
+fn an_import_whose_module_provides_no_such_name_stays_in_the_ledger() {
+    // The module the import binds to neither defines nor re-exports `helper`:
+    // the call stays unresolved rather than binding to either same-named
+    // definition elsewhere.
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/components/a.ts", "export function helper() { return 1; }\n");
+    write(tmp.path(), "src/components/b.ts", "export function helper() { return 2; }\n");
+    write(tmp.path(), "src/components/index.ts", "export function other() { return 0; }\n");
     write(
         tmp.path(),
         "src/main.ts",
@@ -334,6 +355,28 @@ fn a_go_package_qualified_call_binds_to_the_package_function() {
     );
     assert_eq!(callers_of(rt, "internal/admin/admin.go:Register"), ["cmd/server/main.go:main"]);
     assert_eq!(callers_of(rt, "internal/admin/routes.go:Routes"), ["cmd/server/main.go:main"]);
+}
+
+#[test]
+fn a_go_package_qualified_call_reaches_a_function_only() {
+    // The TypeScript family's value bindings joined the imported rung's
+    // candidates (S-534); a Go package qualifier still reaches only a `func`,
+    // never a package-level `var`, however that `var` is typed.
+    let tmp = go_fixture();
+    write(
+        tmp.path(),
+        "internal/admin/hooks.go",
+        "package admin\n\nvar Handler = func() int { return 1 }\n",
+    );
+    write(
+        tmp.path(),
+        "cmd/server/main.go",
+        "package main\n\nimport \"github.com/acme/desk-picker/internal/admin\"\n\nfunc main() {\n\tadmin.Handler()\n\tadmin.Register()\n}\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(callers_of(rt, "internal/admin/admin.go:Register"), ["cmd/server/main.go:main"]);
+    assert!(callers_of(rt, "internal/admin/hooks.go:Handler").is_empty());
 }
 
 #[test]
@@ -500,7 +543,8 @@ fn a_removed_definition_unbinds_the_cross_file_call_on_sync() {
 #[test]
 fn a_node_kind_the_rung_binds_is_a_function() {
     // Sanity for the fixtures above: the definitions they bind are functions
-    // (an exported arrow `const` included), the kind the rung accepts.
+    // (an exported arrow `const` included), a kind the rung accepts beside
+    // a top-level value binding (S-534).
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/k.ts", "export const k = () => 1;\n");
     write(
@@ -521,6 +565,41 @@ fn a_node_kind_the_rung_binds_is_a_function() {
         .unwrap();
     assert_eq!(kind, Some(NodeKind::Function));
     assert_eq!(callers_of(rt, "src/k.ts:k"), ["src/use.ts:use"]);
+}
+
+#[test]
+fn a_top_level_value_binding_the_rung_binds_is_a_variable_or_constant() {
+    // S-534: a TypeScript call through an import also reaches a top-level
+    // value binding — `export let handler = make()` (a Variable) and `export
+    // const run = make()` (a Constant) hold callables the file cannot name.
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/h.ts",
+        "function make() { return () => 1; }\nexport let handler = make();\nexport const run = make();\n",
+    );
+    write(
+        tmp.path(),
+        "src/use.ts",
+        "import { handler, run } from './h';\nexport function use() { return handler() + run(); }\n",
+    );
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let kinds = rt
+        .submit_read(|store| {
+            let mut kinds: Vec<(String, NodeKind)> = store
+                .all_nodes()?
+                .into_iter()
+                .filter(|n| n.name == "handler" || n.name == "run")
+                .map(|n| (n.name, n.kind))
+                .collect();
+            kinds.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(kinds)
+        })
+        .unwrap();
+    assert_eq!(kinds, [("handler".to_string(), NodeKind::Variable), ("run".to_string(), NodeKind::Constant)]);
+    assert_eq!(callers_of(rt, "src/h.ts:handler"), ["src/use.ts:use"]);
+    assert_eq!(callers_of(rt, "src/h.ts:run"), ["src/use.ts:use"]);
 }
 
 #[test]

@@ -1,0 +1,9 @@
+// A shell line is judged command by command, whichever one comes first.
+fn lines() {
+    sh("cargo metadata --no-deps && cargo tree --offline --target all");
+    sh("cargo tree --offline && cargo metadata --offline");
+    sh("cargo metadata --format-version 1
+cargo build --offline");
+    sh("/usr/bin/cargo +stable metadata --offline");
+    sh("$CARGO --offline tree");
+}

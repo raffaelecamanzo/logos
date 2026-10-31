@@ -1,0 +1,12 @@
+// The same spellings, each scaled through the helper.
+#[test]
+fn scaled_bounds_pass() {
+    let start = Instant::now();
+    let took = start.elapsed();
+    let budget = logos_core::perf::scaled_ms(500);
+    assert!(took.as_millis() < logos_core::perf::scaled_ms(500).as_millis());
+    assert!(took <= budget);
+    assert!(logos_core::perf::scaled(Duration::from_secs(1)) > took);
+    assert!(!(took > logos_core::perf::scaled(Duration::from_secs(1))));
+    assert!(took.as_secs_f64() / logos_core::perf::tolerance() < 1.0);
+}

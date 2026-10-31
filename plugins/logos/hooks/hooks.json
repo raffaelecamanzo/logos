@@ -3,7 +3,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__logos__bless_rules|mcp__plugin_logos_logos__bless_rules|mcp__logos__security_ingest|mcp__plugin_logos_logos__security_ingest",
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|mcp__logos__bless_rules|mcp__plugin_logos_logos__bless_rules|mcp__logos__security_ingest|mcp__plugin_logos_logos__security_ingest|mcp__logos__security_reconfirm|mcp__plugin_logos_logos__security_reconfirm",
         "hooks": [
           {
             "type": "command",

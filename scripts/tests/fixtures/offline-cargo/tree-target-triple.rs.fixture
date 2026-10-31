@@ -1,0 +1,6 @@
+fn one_platform() {
+    let a = cargo(&["tree", "--offline", "--target", "aarch64-apple-darwin"]);
+    let b = cargo(&["tree", "--offline", "--target=x86_64-unknown-linux-gnu"]);
+    // `all` is only the value of --target: another flag's `all` is not it.
+    let c = cargo(&["tree", "--offline", "--features", "all"]);
+}

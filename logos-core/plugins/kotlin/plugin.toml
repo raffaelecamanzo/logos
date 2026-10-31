@@ -22,13 +22,34 @@ module_separator = "."
 # tree-sitter-kotlin-ng 1.1 is generated against ABI 14.
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks", "invocations", "properties"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "properties", "locals"]
+
+# The optional member-access capability (S-562, CR-178, FR-EX-25, FR-QM-11,
+# ADR-39): Cohesion scores a class only in a language that declares it. Kotlin's
+# queries capture `this.x` and the bare forms — `count + x`, `repo.find(id)`,
+# `"${name}"` — as `Accesses` edges (`queries/references.scm`, `@ref.access` and
+# `@ref.access.bare`), and a class's primary-constructor `val`s are its
+# properties (`queries/symbols.scm`), so its classes' LCOM4 has its shared-field
+# links. Stated ceilings: a property a class inherits or an outer class declares
+# adds no link; a name any local of the method declares hides the property in
+# the whole method; the bodies of an `object : T { … }` and of an extension
+# function, and the trailing lambda of `x.apply { }`, `x.run { }` and
+# `with(x) { }`, are not read (any other receiver lambda is: a `T.() -> R`
+# parameter or builder DSL may name a receiver's property as the class's); a
+# `this.x` inside one of those bodies is still read, as a labelled `this@A.x` is
+# not; a property initialiser, `init` block and accessor are no method; a bare
+# call of a function-typed property (`onDone()`) is the call; a short `"$name"`
+# interpolation is string text to the grammar.
+member_access = true
 
 # How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
 # a class, interface or object is a call on the current instance — recorded with the
 # `self` receiver shape and bound among that type's own members only, never
-# to a same-named top-level function. Outside one it is a free call, bound by
-# the lexical scope (`queries/references.scm`, `@ref.receiver.implicit`).
+# to a same-named top-level function — unless the file shows no member can
+# answer it (S-560: the class declares no `m` and inherits nothing, and the
+# file binds no value `m`), when it is the free call. Outside one it is a free
+# call, bound by the lexical scope, the imports and the package
+# (`queries/references.scm`, `@ref.receiver.implicit`, `@ref.implicit.*`).
 implicit_receiver = "self"
 
 # Callables overload by name (S-592, FR-RS-43): a bare call binds only a
@@ -40,7 +61,10 @@ overloaded_calls = true
 # Kotlin's resolution tries each scope level for an applicable candidate: an
 # unqualified in-class call that no member of the class or its supertypes
 # admits goes on to the top-level functions and imports in scope (S-592,
-# FR-RS-43). C#, Java, Scala and C++ stop at the member that hides the name.
+# FR-RS-43). C#, Java, Scala and C++ stop at the member that hides the name. A
+# bare call no member of its class can hold — the file shows the class declares
+# none of the name and inherits nothing — is the free call itself (S-560,
+# `queries/references.scm`'s `@ref.implicit.*` marks).
 implicit_call_falls_through = true
 # Every class inherits `Any`'s members, which the graph never holds: a call of
 # one of these names may be `Any`'s, which a member beats a top-level function
@@ -51,7 +75,8 @@ implicit_root_members = ["equals", "hashCode", "toString"]
 # one candidate is a class records `Instantiates` to that class. A top-level
 # factory function and a class of one name are two candidates, and stay unbound.
 # A bare `Foo()` inside a class is a call on the current instance (above), so it
-# binds among that type's members and never reaches the class.
+# binds among that type's members and never reaches the class — unless it is the
+# free call, in a class that declares no `Foo` and inherits nothing (S-560).
 class_call_instantiates = true
 
 # A supertype's kind follows the type it binds (S-522, CR-170, FR-RS-15): the
@@ -100,8 +125,9 @@ export_convention = "all"
 test_convention = "kotlin-annotations"
 
 # The ratified v1 JVM framework set (FR-FW-03): Spring (MVC/Boot) — one package
-# prefix covers both, reused verbatim from the Java detector.
-framework_detectors = ["org::springframework"]
+# prefix covers both, reused verbatim from the Java detector — and Ktor (S-561),
+# whose `routing { }` DSL is Kotlin's own.
+framework_detectors = ["org::springframework", "io::ktor"]
 
 # Canonical reference prefixes gating outbound **HTTP client-call** capture
 # (S-342, CR-108, FR-WS-08): FR-WS-08's normative Kotlin row is the same JVM
@@ -147,20 +173,54 @@ http_client_detectors = [
 # types, so they share one interop family — the fully-qualified type index and
 # the namespace-files index reach only targets of the source's own family, and a
 # C# `using` never binds a PHP namespace of the same spelling.
+# A top-level `fun` is a member of its file's package (S-560, FR-RS-31), as the
+# package's types are: an import names it, `import a.b.*` brings it into view,
+# and a call from the same package reaches it.
+# An extension `fun String.toSlug()` is callable on a value (S-560): its
+# receiver type is its `@symbol.self_type` (`queries/symbols.scm`), and a
+# receiver call `title.toSlug()` binds the one extension of the name the file
+# imports, its package declares or a wildcard brings into view. Where no
+# receiver type is proven, a member of the name on any class of the family may
+# be the one called, and keeps the call unbound.
+# A receiver whose one binding in scope proves its type `T` (S-563, FR-RS-32;
+# `queries/references.scm`, "Receiver typing") — a class, object or companion
+# property, a constructor `val`/`var`, a parameter, a typed local, lambda,
+# `for`, `catch` or `when` variable, `val x = T()` — is recorded `T::find`
+# with the `other` shape: bound among `T`'s own members up its proven
+# supertypes, never among its companion's, which the written `T.find()`
+# reaches first because this descriptor declares `companion_name`; and, where
+# no level of `T` answers, to the extension as an untyped call is.
+# Java reaches a file's top-level functions through its facade class (S-560):
+# `Utils.kt`'s `f` is `UtilsKt.f()` to Java. Kotlin itself never names it.
+# A `companion object` is a node of its own, `C#Companion#` (S-559), and its
+# members are reached through its class (I4-INT): `C.make()` binds among the
+# companion's callables alone, and a bare `make()` inside `C` reaches them once
+# `C` and its supertypes hold no applicable `make`, then its superclasses'
+# companions. Only the anonymous companion's name is known; a `companion object
+# Factory` is read as a nested `object`, reached through `C.Factory`.
 [module_model]
 kind = "namespace"
 family = "jvm"
+top_level_callables = true
+extension_functions = true
+file_facade = "Kt"
+companion_name = "Companion"
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
-# files through the declared package (S-518); calls bind only inside the file
-# that wrote them. Of the type relations, the `Instantiates` a top-level `Foo()`
-# records binds across files (S-521), and so does a type's supertype (S-522).
+# files through the declared package (S-518). A call to a top-level `fun` or an
+# extension through an import, a wildcard or the package, a call on a class or
+# object (`Ticket.empty()`), and a bare call no member of its class answers bind
+# across files (S-560), and so does a call on a receiver whose type the file
+# proves (S-563); a call on any other receiver binds only through the caller's
+# own class. Of the type relations, the `Instantiates` a top-level
+# `Foo()` records binds across files (S-521), and so does a type's supertype
+# (S-522).
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports", "type_relations"]
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -180,8 +240,14 @@ invocations = "queries/invocations.scm"
 # binding substrate, and the demonstration that adding one costs no
 # `logos-core` edit (S-381 AC2).
 properties = "queries/properties.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` annotation name → HTTP method (S-055), identical
-# to the Java Spring mapping. `@RequestMapping` declares no single verb.
+# to the Java Spring mapping. `@RequestMapping` declares no single verb. The
+# `GET`/`POST`… rows are Spring's functional DSL and the `get`/`post`… rows
+# Ktor's routing DSL (S-561): the call names themselves, each a registration
+# only inside a router block (`queries/frameworks.scm`).
 [framework_methods]
 GetMapping = "GET"
 PostMapping = "POST"
@@ -189,6 +255,20 @@ PutMapping = "PUT"
 DeleteMapping = "DELETE"
 PatchMapping = "PATCH"
 RequestMapping = "ANY"
+GET = "GET"
+POST = "POST"
+PUT = "PUT"
+DELETE = "DELETE"
+PATCH = "PATCH"
+HEAD = "HEAD"
+OPTIONS = "OPTIONS"
+get = "GET"
+post = "POST"
+put = "PUT"
+delete = "DELETE"
+patch = "PATCH"
+head = "HEAD"
+options = "OPTIONS"
 
 # The configuration-BINDING vocabulary (S-381, CR-121, FR-WS-19, FR-PL-02).
 # Kotlin's Spring binding is annotation-compatible with Java's, so the

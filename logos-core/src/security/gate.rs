@@ -38,7 +38,7 @@ use crate::config::load_rules_from_root;
 use crate::engine::{today_utc, Engine};
 use crate::governance::security::{
     baseline_entries, check_security, missing_scans, read_checked_in, write_checked_in, BaselineSource, ScanFreshness,
-    ScannerFreshness, SecurityEvidence, SecuritySummary, SummaryFinding, CHECKED_IN_FILE_REL,
+    ScannerFreshness, SecurityEvidence, SecuritySummary, SummaryFinding, SummaryReporter, CHECKED_IN_FILE_REL,
 };
 use crate::history::security::{
     classify, label, project_location, read_baseline, read_latest, IgnoreFile, OwaspEdition,
@@ -116,6 +116,16 @@ impl SecurityGateEvidence<'_> {
                     short_commit: f.anchor.map(|a| a.short_commit),
                     path: f.path.or(f.report_path),
                     line: f.start_line,
+                    reporters: f
+                        .reporters
+                        .into_iter()
+                        .map(|r| SummaryReporter {
+                            scanner: r.scanner_name,
+                            fingerprint: r.fingerprint,
+                            legacy_fingerprints: r.legacy_fingerprints,
+                            rule_id: r.rule_id,
+                        })
+                        .collect(),
                     scanner: f.scanner_name,
                     fingerprint: f.fingerprint,
                     legacy_fingerprints: f.legacy_fingerprints,
@@ -239,7 +249,12 @@ impl SecurityGateEvidence<'_> {
     /// Each scanner's state as the gate reads it: never its version, since
     /// `check` runs on the Dashboard's reads as well as the CLI's, and never
     /// its counts, so no finding's code scope is asked of the graph: the gate
-    /// keeps test code as any other finding ([BR-98]).
+    /// keeps test code as any other finding ([BR-98]). The status read still
+    /// classifies each finding by its path and, for a lockfile finding, by the
+    /// lockfile ([FR-SC-30]), which parses each lockfile once; the verdict never
+    /// reads that, and a lockfile it cannot read classifies as production.
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
     ///
     /// [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
     fn gate_status(&self) -> Result<SecurityStatus> {

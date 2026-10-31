@@ -16,7 +16,7 @@ use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 use crate::models::quality::{FixUnit, FixUnitKind, MetricSnapshot, WhereToStart};
 
-use super::super::{compute, Thresholds};
+use super::super::{compute, ContainerLinks, Thresholds};
 use super::{
     group_identity, rank, upper_fence_eighths, where_to_start, Inputs, OUTLIER_MIN_UNITS,
     WHERE_TO_START_CAP,
@@ -57,6 +57,7 @@ fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 
@@ -71,6 +72,7 @@ fn row(id: i64) -> FunctionMetricRow {
         max_nesting_depth: Some(1),
         clone_group: None,
         has_body: Some(true),
+        unbound_accesses: Vec::new(),
     }
 }
 
@@ -80,6 +82,18 @@ fn row(id: i64) -> FunctionMetricRow {
 /// capability gate (pinned in `metrics/tests.rs`).
 fn member_access() -> HashSet<String> {
     HashSet::from(["rs".to_string()])
+}
+
+/// The thresholds the ranking runs under: the defaults with
+/// `cohesion_min_classes = 1`, because the fixtures hold one or two classes and
+/// the subject is the counterfactual. Below the default minimum Cohesion leaves
+/// the ranking — pinned by
+/// `no_class_is_ranked_for_cohesion_below_cohesion_min_classes`.
+fn thresholds() -> Thresholds {
+    Thresholds {
+        cohesion_min_classes: 1,
+        ..Thresholds::default()
+    }
 }
 
 /// One member's snapshot inputs.
@@ -99,9 +113,10 @@ impl Member {
             &view,
             &self.nodes,
             &self.edges,
+            &ContainerLinks::default(),
             &self.functions,
             &self.test_ids,
-            Thresholds::default(),
+            thresholds(),
             &member_access(),
         )
     }
@@ -110,10 +125,11 @@ impl Member {
         where_to_start(
             &self.nodes,
             &self.edges,
+            &ContainerLinks::default(),
             &self.functions,
             &self.test_ids,
             &self.duplicate_groups,
-            Thresholds::default(),
+            thresholds(),
             &member_access(),
             &self.compute(),
         )
@@ -260,19 +276,21 @@ fn a_class_of_an_undeclared_language_is_never_ranked_for_cohesion() {
         &view,
         &member.nodes,
         &member.edges,
+        &ContainerLinks::default(),
         &member.functions,
         &member.test_ids,
-        Thresholds::default(),
+        thresholds(),
         &undeclared,
     );
     assert!(current.cohesion.is_none(), "no class is scoreable, so the dimension drops out");
     let ranking = where_to_start(
         &member.nodes,
         &member.edges,
+        &ContainerLinks::default(),
         &member.functions,
         &member.test_ids,
         &member.duplicate_groups,
-        Thresholds::default(),
+        thresholds(),
         &undeclared,
         &current,
     );
@@ -284,6 +302,40 @@ fn a_class_of_an_undeclared_language_is_never_ranked_for_cohesion() {
     assert_eq!(unit(&ranking, FixUnitKind::Class, 40).dimensions, ["focus"], "Focus is not gated");
     // The declared run, for contrast, does rank Split for Cohesion.
     assert_eq!(unit(&member.rank(), FixUnitKind::Class, 20).dimensions, ["cohesion"]);
+}
+
+/// Below `cohesion_min_classes` (default 5) Cohesion is not in the signal, so
+/// no class is ranked for it ([CR-252], [FR-QM-17]): the two-class fixture's
+/// `Split` (LCOM4 2), ranked for Cohesion under a minimum of 1, is absent under
+/// the default, while the god-by-span `Huge` is still ranked for Focus.
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+/// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
+#[test]
+fn no_class_is_ranked_for_cohesion_below_cohesion_min_classes() {
+    let member = mixed();
+    let view = build_view(Granularity::ExcludeContains, &member.nodes, &member.edges);
+    let t = Thresholds::default();
+    let current = compute(&view, &member.nodes, &member.edges, &ContainerLinks::default(), &member.functions, &member.test_ids, t, &member_access());
+    assert!(current.cohesion.is_none(), "two classes, under a minimum of 5");
+    let ranking = where_to_start(
+        &member.nodes,
+        &member.edges,
+        &ContainerLinks::default(),
+        &member.functions,
+        &member.test_ids,
+        &member.duplicate_groups,
+        t,
+        &member_access(),
+        &current,
+    );
+    assert!(
+        ranking.units.iter().all(|u| !u.dimensions.contains(&"cohesion")),
+        "no unit is ranked for Cohesion: {:?}",
+        ranking.units
+    );
+    assert_eq!(unit(&ranking, FixUnitKind::Class, 40).dimensions, ["focus"], "Focus still ranks");
+    assert_eq!(unit(&member.rank(), FixUnitKind::Class, 20).dimensions, ["cohesion"], "the contrast run ranks Split");
 }
 
 /// A class unit, both ways a class offends: `Split`'s two methods made to share
@@ -438,7 +490,7 @@ fn renumbered(member: &Member, to: impl Fn(i64) -> i64) -> Member {
         edges: member
             .edges
             .iter()
-            .map(|e| EdgeRow { source: id(e.source), target: id(e.target), kind: e.kind })
+            .map(|e| EdgeRow { source: id(e.source), target: id(e.target), kind: e.kind, dispatch: e.dispatch })
             .collect(),
         functions: member
             .functions
@@ -577,6 +629,7 @@ fn the_ranking_is_capped_keeping_the_highest_points() {
     let inputs = Inputs::new(
         &member.nodes,
         &member.edges,
+        &ContainerLinks::default(),
         &member.functions,
         &member.test_ids,
         &member.duplicate_groups,
@@ -584,7 +637,7 @@ fn the_ranking_is_capped_keeping_the_highest_points() {
     );
     let all = rank(
         &inputs,
-        &Thresholds::default(),
+        &thresholds(),
         &current,
         i64::from(current.aggregate_signal.unwrap()),
         &HashSet::new(),

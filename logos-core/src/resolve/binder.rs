@@ -101,25 +101,51 @@
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use crate::config::BindingPolicy;
 use crate::extract::doc::heading_slug;
-use crate::graph_store::{EdgeRow, ImplBlockRow, NodeArity, NodeItemFacts, NodeRow, UnresolvedRefRow};
+use crate::graph_store::{EdgeRow, ImplBlockRow, LocalBindingRow, NodeArity, NodeItemFacts, NodeRow, UnresolvedRefRow};
 use crate::model::{
     ArtifactRelation, EdgeKind, NodeId, NodeKind, ParamRange, ReceiverMode, ReceiverShape, RefForm,
 };
 use crate::plugin::CallTargets;
 
 use super::go_module::GoModule;
-use super::package_key::{normalize_crate, ModuleKey, PackageLayout};
+use super::rel_path::{dir_segments, extension_of, fold_path, parent_of};
+use super::load_path::LoadPath;
+use includes::IncludeScope;
+use super::ts_config::TsResolution;
+use super::package_key::{constant_fqn, normalize_crate, ModuleKey, PackageLayout};
 use super::route_method::preferred_candidates;
 use super::route_template::route_key;
 use crate::extract::refs::is_relative_head;
+use crate::model::dispatch::dispatch_payload;
+
+/// The include scope of an include-roots language — C++'s `#include`s, and
+/// the calls, `using`s and base classes read through them (S-579). See its
+/// module docs.
+mod includes;
+
+/// The link-unit rung of a language whose files make one link unit — a C call
+/// across translation units (S-584). See its module docs.
+mod link_unit;
+
+/// A bare call a local binding shadows — through a local import, or a call
+/// through a local value (S-594). See its module docs.
+mod local_binding;
 
 /// A module's identity: `(crate name, module path segments)`.
 type ModKey = ModuleKey;
+
+/// A link-unit file's local bindings (S-584): `(file, name)` → each binding's
+/// `(line, scope first line, scope last line)` ([`Index::with_link_unit_locals`]).
+type LocalScopes = HashMap<(String, String), Vec<(u32, u32, u32)>>;
+
+/// Interop family → fully-qualified name → declarations, id-sorted: the shape
+/// of the lexical-constant index ([`Index::constants`], S-565).
+type FamilyConstants = HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>;
 
 /// `Contains` membership: scope → name → member nodes, each list id-sorted for
 /// a deterministic candidate order ([NFR-RA-06]).
@@ -179,7 +205,8 @@ pub(crate) enum Outcome {
     /// reference that names a *set*: a provable `dyn T` call fanning out to the
     /// trait method's impls (S-281), and a Go import path naming a package
     /// directory, which binds to every non-test `.go` file in it (S-439). Both
-    /// carry no payload.
+    /// carry no payload. The trait fan-out alone carries a [`Dispatch`]
+    /// (S-712): its implementor edges are marked, the trait method's is not.
     ///
     /// [FR-CG-08]: ../../../docs/specs/requirements/FR-CG-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -189,12 +216,63 @@ pub(crate) enum Outcome {
         targets: Vec<NodeId>,
         kind: EdgeKind,
         payload: Option<String>,
+        /// The dispatch marker of a trait fan-out ([`Ctx::fan_out`]); `None`
+        /// for every other set — a Terraform module call, a Go import path, a
+        /// namespace wildcard — and for a fan-out that reaches no
+        /// implementation.
+        dispatch: Option<Dispatch>,
     },
     /// Zero candidates anywhere, or an ambiguity — the ref stays in the
     /// ledger and is retried on the next sync ([FR-RS-03]).
     ///
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     Unbound,
+}
+
+/// Which edges of a trait fan-out are dispatch (S-712, [CR-226] BR-76): the
+/// ones to an implementation of the trait method, each stamped
+/// [`dispatch_payload`]`(method)`. The edge to the trait's own method — its
+/// default body — is the caller's dependency and stays unmarked.
+///
+/// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Dispatch {
+    /// The symbol of the trait method the call went through: its default
+    /// body's, or its required signature's ([`Index::trait_method_symbol`]).
+    pub(crate) method: String,
+    /// The targets reached as implementations, id-sorted: every target but the
+    /// trait's own method. Never empty.
+    pub(crate) implementors: Vec<NodeId>,
+}
+
+impl Dispatch {
+    /// The payload of the edge to `target`: the marker for an implementor,
+    /// `None` for the trait's own method.
+    pub(crate) fn payload_of(&self, target: NodeId) -> Option<String> {
+        self.implementors
+            .binary_search(&target)
+            .is_ok()
+            .then(|| dispatch_payload(&self.method))
+    }
+}
+
+/// A trait-typed call's fan-out ([`Ctx::fan_out`]): the set it binds, and
+/// which of it is dispatch.
+#[derive(Debug)]
+struct Fan {
+    targets: Vec<NodeId>,
+    dispatch: Option<Dispatch>,
+}
+
+impl Outcome {
+    /// The nodes a binding reached: its one target, its set, or none.
+    pub(crate) fn into_targets(self) -> Vec<NodeId> {
+        match self {
+            Outcome::Bound { target, .. } => vec![target],
+            Outcome::BoundMany { targets, .. } => targets,
+            Outcome::Unbound => Vec::new(),
+        }
+    }
 }
 
 /// An intermediate lookup result. `Ambiguous` is sticky: once a scope level
@@ -337,12 +415,18 @@ pub(crate) enum Residue {
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     NotACallable,
     /// No rung reaches a repository callable of the name (S-607, [FR-RS-47]): a
-    /// prelude or std function reached by a bare name (`drop`, `Some`), a
-    /// closure or a local, an item the file does not import, or a repository
-    /// module that declares no such item.
+    /// prelude or std function reached by a bare name (`drop`, `Some`), an
+    /// item the file does not import, or a repository module that declares no
+    /// such item. A closure or a local is [`Residue::LocalBinding`] (S-594).
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     NameNotInScope,
+    /// A bare call names a parameter or a variable the caller's body binds
+    /// where the call is (S-594, [FR-RS-44]): a call through a value, which
+    /// this graph does not follow ([`LOCAL_VALUE_ALIAS`]).
+    ///
+    /// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+    LocalBinding,
 }
 
 /// Which node kinds satisfy a lookup.
@@ -464,7 +548,11 @@ pub(crate) fn is_class_like(kind: NodeKind) -> bool {
 
 /// `true` for kinds whose associated items collapse to module scope (the
 /// `Type::func` rule — `impl` blocks are not captured scopes, S-007).
-fn is_type_like(kind: NodeKind) -> bool {
+///
+/// Shared with extraction, which records a generic arity on exactly these
+/// kinds (S-602, `NodeFact::type_arity`) — the kinds the namespace rungs read
+/// as types.
+pub(crate) fn is_type_like(kind: NodeKind) -> bool {
     matches!(
         kind,
         NodeKind::Struct
@@ -523,7 +611,8 @@ struct FileScope {
     alias_expansions: HashMap<String, Vec<Vec<String>>>,
     /// Glob-imported module paths (`use m::*` → `["m"]`), unresolved form. For a
     /// package-shaped file (CR-149) these are the non-static wildcards
-    /// (`import a.b.*`, `import a.b.C.*`, C#'s `using A.B;`), which bring
+    /// (`import a.b.*`, `import a.b.C.*`, C#'s `using A.B;` outside every
+    /// namespace block), which bring
     /// **types** into scope only — the file's own, then the global ones in force
     /// over it ([`Index::apply_global_globs`], S-518).
     globs: Vec<Vec<String>>,
@@ -536,11 +625,19 @@ struct FileScope {
     /// recorded with the alias `*`, [`STATIC_WILDCARD_ALIAS`]): every static
     /// member of the named type comes into scope, methods and fields included.
     static_globs: Vec<Vec<String>>,
+    /// A declared-namespace file's namespace wildcards written inside a
+    /// namespace block (S-603, [`block_wildcard_alias`]), by the block's
+    /// namespace, each list in ledger order. Never among
+    /// [`globs`](FileScope::globs): a block's `using`s are read at its
+    /// namespace's level of the walk, after that namespace's types and before
+    /// the next level out ([`Ctx::resolve_package_name`]).
+    block_globs: HashMap<Vec<String>, Vec<Vec<String>>>,
 }
 
 /// The alias a static wildcard import's `Glob` row carries — "every static
 /// member name of the type" (CR-149; C#'s `using static`, S-518). A non-static
-/// wildcard carries none, and a global one [`GLOBAL_WILDCARD_ALIAS`].
+/// wildcard carries none, a global one [`GLOBAL_WILDCARD_ALIAS`], and one
+/// written inside a namespace block its block ([`block_wildcard_alias`]).
 pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
 
 /// The alias a **global** namespace wildcard's `Glob` row carries — C#'s
@@ -554,6 +651,41 @@ pub(crate) const STATIC_WILDCARD_ALIAS: &str = "*";
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 pub(crate) const GLOBAL_WILDCARD_ALIAS: &str = "global";
+
+/// `true` when a global wildcard declared in directory `dir` (`""` at the
+/// root) reaches the file at `path`: the file sits beneath it. The one
+/// definition of a global `using`'s reach — the binder's scope and the
+/// framework pass's candidacy ([`resolve::framework`](super::framework),
+/// S-554) both ask it — whose extension half each caller adds.
+pub(crate) fn global_wildcard_governs(dir: &str, path: &str) -> bool {
+    dir.is_empty() || path.starts_with(&format!("{dir}/"))
+}
+
+/// The alias a namespace wildcard written **inside a namespace block** carries
+/// (S-603, [CR-199], [FR-RS-45]): the block's namespace, braced — `{Acme.Sub}`
+/// for the `using X;` of `namespace Acme.Sub { … }` or of a `namespace Acme.Sub;`
+/// it follows, `{A}` for one of `namespace A { … }` around a nested
+/// `namespace B`. Recorded only for a language that declares
+/// `enclosing_namespaces`, where it is read at that namespace's level of the
+/// walk ([`FileScope::block_globs`]) — recorded only for a block enclosing every
+/// declaration of its file, whose `using`s apply to each. One in a block
+/// enclosing none of them carries the empty block, `{}`, and is read nowhere;
+/// one in a block enclosing only some, and a file-level wildcard, carry none.
+/// No namespace spells a brace, so it is never [`STATIC_WILDCARD_ALIAS`] or
+/// [`GLOBAL_WILDCARD_ALIAS`] (a global `using` is never inside a block).
+///
+/// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+/// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
+pub(crate) fn block_wildcard_alias(block: &[String]) -> String {
+    format!("{{{}}}", super::package_key::namespace_text(block))
+}
+
+/// The namespace block a wildcard's alias names ([`block_wildcard_alias`]), as
+/// segments; `None` for every other alias.
+fn wildcard_block(alias: &str) -> Option<Vec<String>> {
+    let block = alias.strip_prefix('{')?.strip_suffix('}')?;
+    Some(super::package_key::namespace_segments(block))
+}
 
 /// The head of a call through the caller's own type, `Self::m` (S-493,
 /// [FR-RS-11]): what a written `Self::m()` records, and what extraction records
@@ -581,6 +713,94 @@ pub(crate) const FULLY_QUALIFIED_HEAD: &str = "\\";
 /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
 pub(crate) const TRAIT_USE_ALIAS: &str = "use";
 
+/// The alias a Ruby `prepend M`'s `Implements` row carries (S-568,
+/// [FR-RS-35]): the module precedes the class among its ancestors, so a call
+/// on the instance reads it before the class's own methods
+/// ([`Ctx::ancestor_walk`]). An `include M` row carries no alias.
+///
+/// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+pub(crate) const MIXIN_PREPEND_ALIAS: &str = "prepend";
+
+/// The alias a Ruby `extend M`'s `Implements` row carries (S-568,
+/// [FR-RS-35]): the module's methods become the object's own singleton
+/// methods, so they are no level of its instances' ancestor chain.
+///
+/// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+pub(crate) const MIXIN_EXTEND_ALIAS: &str = "extend";
+
+/// The name a TypeScript-family module's default export is imported and
+/// re-exported under (S-534, [FR-RS-19]): a default import `import App from
+/// './app'` is a call through `<module>::default`, and `export default App`
+/// records `App` as the module's `default`. `export *` never re-exports it.
+///
+/// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+pub(crate) const DEFAULT_EXPORT: &str = "default";
+
+/// The name a CommonJS module's export object is recorded under (S-540,
+/// [FR-RS-22]): `module.exports = X` and `const X = module.exports` record `X`
+/// aliased `module.exports`, which no identifier can spell. The object's
+/// members are the module's names, and the object is its `default`
+/// ([`Index::exported_definitions`]).
+///
+/// [FR-RS-22]: ../../../docs/specs/requirements/FR-RS-22.md
+pub(crate) const COMMONJS_EXPORTS: &str = "module.exports";
+
+/// The reads one [`Index::exported_definitions`] walk has made: per
+/// `(module, name)`, the most hops it was read with and what it found.
+type ExportReads = HashMap<(NodeId, String), (u8, Vec<NodeId>)>;
+
+/// What one TypeScript-family module exports beyond its own declarations
+/// (S-534, [FR-RS-19]), from its `Imports` rows marked exported
+/// (`extract::ts_export_rows`). The specifiers are the rows' module targets,
+/// whose file roots the module's own entry in [`Index::imported`] holds.
+///
+/// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+#[derive(Debug, Default)]
+struct ModuleExports {
+    /// The module's file id, which keys its specifiers' bindings.
+    file_id: i64,
+    /// Exported name → the local names it exports (`export default App`,
+    /// `export { a as b }`): one for valid code, and two decide nothing.
+    local: HashMap<String, Vec<String>>,
+    /// Exported name → `(specifier, name it is exported from there)` of each
+    /// `export { a as b } from 's'`.
+    named: HashMap<String, Vec<(String, String)>>,
+    /// The specifier of each `export * from 's'`, every name but `default`.
+    star: Vec<String>,
+}
+
+/// The alias a C# `partial` type declaration's own `Extends` row carries (S-557,
+/// [FR-RS-29]): the declaration is one part of a type, and the parts sharing
+/// one fully-qualified name are one logical type ([`build_partial_types`]). The
+/// row names the declaration itself; a later part's binds to the first-declared
+/// part, by file path order, and the first part's own stays unbound. Its edge
+/// carries the payload [`PARTIAL_TYPE_ALIAS`] too, which is how the metrics
+/// tell the link from a supertype ([`GraphStore::partial_type_links`]).
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+/// [`GraphStore::partial_type_links`]: crate::graph_store::GraphStore::partial_type_links
+pub(crate) const PARTIAL_TYPE_ALIAS: &str = "partial";
+
+/// The alias a bare call to a **local value** carries (S-594, [FR-RS-44]): a
+/// parameter or a variable the caller's body binds is in force at the call
+/// (`extract::local_shadow`), so it calls whatever value the name holds — data
+/// flow this graph does not follow. It binds nothing and is counted
+/// [`Residue::LocalBinding`]; it never falls through to a member or a
+/// same-named module function. No identifier spells it.
+///
+/// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+pub(crate) const LOCAL_VALUE_ALIAS: &str = "local-value";
+
+/// The alias a bare call to a **local import** carries (S-594, [FR-RS-44]): a
+/// local `from m import f`, a block-scope `using ns::f` or a block `use` binds
+/// the name, so the call resolves through that import alone
+/// ([`Ctx::resolve_local_import_call`]), never the lexical scope that reaches
+/// the caller itself or a same-named function the import hides. No identifier
+/// spells it.
+///
+/// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+pub(crate) const LOCAL_IMPORT_ALIAS: &str = "local-import";
+
 /// One node's binding-relevant facts.
 #[derive(Debug)]
 struct NodeInfo {
@@ -597,10 +817,12 @@ struct NodeInfo {
 
 /// The nodes and edges a binding run resolves against (S-606, [CR-202] F3):
 /// every node but a **required signature** — a trait's bodyless
-/// `fn m(&self);` — and every edge but those touching one (its `Contains` from
-/// its trait). A signature is recorded so the lookup of [FR-RS-47] can read it,
+/// `fn m(&self);`, or a C-family prototype its own file defines (S-577) — and
+/// every edge but those touching one (its `Contains` from its container). A signature is recorded so the lookup of [FR-RS-47] can read it,
 /// and until that lookup says how a call reaches one it enters no candidate
-/// set: a `self.m()` in a trait's default body, a name-unique fallback and a
+/// set — save a call on a proven receiver of a structural-types language
+/// (S-537), which reads an abstract class's or an interface's bodyless method
+/// through [`Index::declared_signatures`] alone: a `self.m()` in a trait's default body, a name-unique fallback and a
 /// documentation name bind exactly what they bound before the signature was a
 /// node. Borrowed unchanged when the graph holds no signature.
 ///
@@ -674,7 +896,8 @@ pub(crate) struct Index {
     /// The reverse of `modules`, for "what module am I in" walks.
     module_key: HashMap<NodeId, ModKey>,
     /// name → every node carrying it, sorted by `NodeId` (the unique-match
-    /// fallback universe).
+    /// fallback universe) — the parts of a partial type as its first-declared
+    /// part alone (S-557, [`Index::partials`]).
     by_name: HashMap<String, Vec<NodeId>>,
     /// file path → every node defined in that file, sorted by `NodeId` — the
     /// universe a doc link/path reference resolves against (S-035).
@@ -706,7 +929,9 @@ pub(crate) struct Index {
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     file_roots_by_stem: HashMap<String, Vec<NodeId>>,
     /// directory → the `(file path, file-root module)` pairs directly in it,
-    /// id-sorted — the package a Go import path names (S-439).
+    /// id-sorted — the package a Go import path names (S-439), and the files a
+    /// Go bare name reads the ones of its own `package` clause among (S-528,
+    /// [`Ctx::directory_package_name`]).
     file_roots_by_dir: HashMap<String, Vec<(String, NodeId)>>,
     /// The extensions of the files whose import specifiers are **paths**, each
     /// mapped to the extensions a relative specifier in such a file may resolve
@@ -720,6 +945,20 @@ pub(crate) struct Index {
     /// The Go modules the tree declares (S-439, [`super::go_module`]). Empty unless the run was given the tree root
     /// ([`Index::with_path_specifiers`]).
     go_modules: Vec<GoModule>,
+    /// The `tsconfig.json`/`jsconfig.json` and workspace packages a bare
+    /// TypeScript/JavaScript specifier binds through (S-531,
+    /// [`super::ts_config`]). Empty unless the run was given the tree root
+    /// ([`Index::with_ts_resolution`]).
+    ts: TsResolution,
+    /// The load roots a bare Ruby `require` binds against (S-566,
+    /// [`super::load_path`]). Empty unless the run was given the tree root
+    /// ([`Index::with_load_path`]).
+    load_path: LoadPath,
+    /// What the include-roots languages' files include and see through it
+    /// (S-579, [`includes`]): read off the graph's files and `#include` rows
+    /// when the index is built, before the supertype hierarchy, whose C++
+    /// bases are declared in the headers a class's file includes.
+    includes: IncludeScope,
     /// file id → scope facts from its import rows.
     file_scopes: HashMap<i64, FileScope>,
     /// file id → specifier target of each of the file's path-grammar `Imports`
@@ -727,6 +966,14 @@ pub(crate) struct Index {
     /// binds nothing) — the **imported** scope a path-grammar call binds within
     /// (S-440, [`Index::with_imported_bindings`]). Empty until that is called.
     imported: HashMap<i64, HashMap<String, Vec<NodeId>>>,
+    /// file-root module → what the module exports under another name or
+    /// re-exports (S-534, [FR-RS-19]): read off its exported path-grammar
+    /// `Imports` rows ([`Index::with_imported_bindings`]), and followed by the
+    /// imported rung ([`Index::exported_definitions`]). Empty until that is
+    /// called, and for a module that only exports its own declarations.
+    ///
+    /// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+    exports: HashMap<NodeId, ModuleExports>,
     /// Normalised crate names present in the graph.
     crates: HashSet<String>,
     /// How every file is keyed: by its package ([CR-149]), by the namespace it
@@ -742,7 +989,8 @@ pub(crate) struct Index {
     /// a package-shaped file, id-sorted — the universe a Java import, a
     /// same-package name and a wildcard resolve against ([CR-149]). Two entries
     /// under one name (a `src/main` and a `src/test` declaration) are an
-    /// ambiguity, never a pick ([NFR-RA-05]).
+    /// ambiguity, never a pick ([NFR-RA-05]) — but the parts of one partial
+    /// type are one entry, its first-declared part (S-557, [`Index::partials`]).
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
@@ -753,6 +1001,22 @@ pub(crate) struct Index {
     /// fully-qualified spelling, while Java and Kotlin — one `jvm` family —
     /// still name each other's.
     types_by_fqn: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
+    /// Fully-qualified name → the top-level functions declared under it, by
+    /// interop family (S-573, [`build_top_level_callables`]): Scala 3's
+    /// top-level `def`s, read only by a source whose language declares them
+    /// ([`Ctx::top_level_callables`]).
+    callables_by_fqn: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
+    /// Bare name → the top-level functions of the files whose namespace is not
+    /// known, by interop family (S-551, [`build_unplaced_callables`]): PHP's
+    /// file declaring `namespace { … }` beside `namespace Foo { … }`. Any one
+    /// may be a global function, so each is a rival of a global function of its
+    /// name ([`Ctx::namespace_callables`]).
+    unplaced_callables: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
+    /// Facade class → the file-root modules whose top-level functions it holds,
+    /// by interop family (S-560, [`build_file_facades`]): Kotlin's `UtilsKt`,
+    /// read only by a source whose language declares no facade itself
+    /// ([`Ctx::reads_facades`]) — Java's `UtilsKt.f()`.
+    facades_by_fqn: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
     /// Declared namespace → the file-root module nodes of the declared-namespace
     /// files declaring it, id-sorted (S-518, [FR-RS-13]) — what a namespace
     /// wildcard (C#'s `using N;`, Kotlin's `import n.*`) binds to: a namespace
@@ -763,6 +1027,19 @@ pub(crate) struct Index {
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     files_by_namespace: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
+    /// The lexical-constant index (S-565, [FR-RS-33]): a constant's
+    /// fully-qualified name → every class and module declaring it, id-sorted,
+    /// for each language that names its classes and modules by lexical
+    /// constants ([`PackageLayout::resolves_lexical_constants`]: Ruby) —
+    /// partitioned by interop family as [`types_by_fqn`](Index::types_by_fqn)
+    /// is. A reopened class is one key with several declarations
+    /// ([`build_constants`]).
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    constants: FamilyConstants,
+    /// Each declaration of [`constants`](Index::constants) → the constant it
+    /// declares: the lexical levels a reference inside it reads (S-565).
+    constant_of: HashMap<NodeId, Vec<String>>,
     /// `(trait node, method name)` → the concrete workspace impl method nodes of
     /// that trait method, id-sorted and deduplicated — the fan-out universe for a
     /// `dyn T` method call (S-281, [CR-073], [FR-RS-08]) and every other
@@ -773,6 +1050,25 @@ pub(crate) struct Index {
     /// [CR-073]: ../../../docs/requests/CR-073-trait-object-dynamic-dispatch-reachability.md
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     impls_by_trait_method: HashMap<(NodeId, String), Vec<NodeId>>,
+    /// `(trait node, method name)` → the symbol of the trait's own method of
+    /// that name: its default body's, or its required signature's (S-712) —
+    /// what a trait fan-out's [`Dispatch`] names. Built from the bindable
+    /// nodes, the signatures added by [`Index::with_trait_signatures`], which
+    /// [`bindable`] keeps out of the index.
+    trait_methods: HashMap<(NodeId, String), String>,
+    /// The parts of every partial type (S-557, [FR-RS-29];
+    /// [`build_partial_types`]): the declarations of one fully-qualified name
+    /// its plugin marks partial ([`PARTIAL_TYPE_ALIAS`]), which are one logical
+    /// type. Member lookup reads the union of the parts' members
+    /// ([`Index::members_named`]), the type's name names its first-declared
+    /// part ([`types_by_fqn`](Index::types_by_fqn) and
+    /// [`by_name`](Index::by_name) hold that part alone), and every part has
+    /// the union of the parts' supertypes ([`PartialTypes::unite_hierarchy`]).
+    /// Each part keeps its own node. Empty for every language without partial
+    /// types.
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    partials: PartialTypes,
     /// A type → the in-repository types its `Extends` rows bind to as
     /// `Extends`, id-sorted (S-468, [CR-150] §3.2 B; S-522 for every language
     /// whose types record one): one superclass for a class (each base of a
@@ -811,6 +1107,40 @@ pub(crate) struct Index {
     ///
     /// [FR-RS-48]: ../../../docs/specs/requirements/FR-RS-48.md
     uninherited: HashSet<NodeId>,
+    /// Every unexported function (S-584, [FR-RS-40]); the link-unit rung reads
+    /// only a link-unit file's — a C `static`, its own file's alone. `None`
+    /// until the run is given the store's linkage facts
+    /// ([`Index::with_file_local`]) — and with none known, the rung binds
+    /// nothing rather than offer a `static` to another file.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    file_local: Option<HashSet<NodeId>>,
+    /// A link-unit file's local bindings (S-584, S-593 facts): `(file, name)`
+    /// → each binding's `(line, scope first line, scope last line)`. A call
+    /// whose name one binds at the call's line — a function-pointer parameter
+    /// or local — calls through it, never a function the rung could bind.
+    /// Empty until the run is given them ([`Index::with_link_unit_locals`]).
+    link_unit_locals: LocalScopes,
+    /// Each type's generic arity (S-602, [CR-199]): the type-parameter count
+    /// recorded for a type of a language that tells types apart by it
+    /// ([`PackageLayout::matches_type_arity`]). What the own-namespace,
+    /// enclosing-namespace and namespace-wildcard rungs match a written arity
+    /// against ([`Ctx::admits_arity`]); a type absent from it admits any. Empty
+    /// unless the run was given the store's facts ([`Index::with_type_arities`]).
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    type_arities: HashMap<NodeId, u32>,
+    /// `(type node, name)` → the required signatures of that name the type
+    /// declares, id-sorted (S-537, [FR-RS-21]): an abstract class's bodyless
+    /// method and an interface's, of a language of structural types
+    /// (TypeScript). Kept out of every other lookup ([`bindable`]); only a call
+    /// on a proven receiver of the type reads them
+    /// ([`Ctx::resolve_structural_receiver_call`]), which binds the declared
+    /// method, never an implementation. Empty unless the run was given them
+    /// ([`Index::with_declared_signatures`]).
+    ///
+    /// [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+    declared_signatures: HashMap<(NodeId, String), Vec<NodeId>>,
     /// The name tokens of the type hierarchy: every hierarchy `Extends` row's
     /// target, bound or not (S-468), and every `Implements` row's of a
     /// language that inherits interface member bodies (S-609). A sync
@@ -856,6 +1186,11 @@ pub(crate) struct Index {
     /// type of the crate, which is what lets a candidate outside the caller's
     /// module be that type's method.
     type_names: HashMap<(String, String), usize>,
+    /// `(crate, name)` → the class-like nodes ([`is_class_like`]) of that name
+    /// the crate declares, id-sorted, for each name a recorded self type spells
+    /// — the type whose fields a receiver read binds among in a language whose
+    /// methods sit at module level (Go, S-529; [`Ctx::self_type_class`]).
+    self_type_classes: HashMap<(String, String), Vec<NodeId>>,
     /// `(type node, name)` → the functions of every recorded `impl` block whose
     /// self type **resolves** to that type node, id-sorted (S-607, [FR-RS-47];
     /// the `impl_blocks` table of migration 34) — the one universe
@@ -910,7 +1245,11 @@ pub(crate) struct Index {
     file_ids: HashMap<String, i64>,
     /// The callables recorded as **not** taking `self` (S-604, [CR-200]; the
     /// `nodes.takes_self` column, false) — a Rust associated function such as
-    /// `fn new() -> Self`, which a method call `x.m()` can never invoke. A
+    /// `fn new() -> Self`, which a method call `x.m()` can never invoke, and a
+    /// Ruby callable of the class or module object, the only ones a call on a
+    /// constant binds (S-565, [`Ctx::resolve_constant_row`]), and a Scala
+    /// `object`'s callable, the only ones a call on a companion pair binds
+    /// (S-573, [`Ctx::companion_members`]). A
     /// method-syntax lookup ([`Ctx::lookup`], S-607) drops them before any
     /// rank; a callable whose fact is unknown is not here, so it is never
     /// dropped. Empty unless the run was given the store's facts
@@ -935,6 +1274,20 @@ pub(crate) struct Index {
     /// may sit there, so an implicit-receiver call whose class walk crossed one
     /// never goes on to a free function ([`Ctx::resolve_self_receiver`]).
     open_types: HashSet<NodeId>,
+    /// A Ruby class or module → the modules it mixes into its instances'
+    /// ancestors (S-568, [FR-RS-35]): its bound `include`s and `prepend`s, and
+    /// whether one of either names no single module the graph holds. What
+    /// [`Ctx::ancestor_walk`] reads beside the class's superclass
+    /// ([`Index::supertypes`]). Empty for every other language.
+    ///
+    /// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+    mixins: HashMap<NodeId, Mixins>,
+    /// Whether a structural-types type (S-535) names a supertype through an
+    /// import (`<import target>::<name>`, [`Index::with_structural_supertypes`]):
+    /// its place in the hierarchy then moves with that import's binding, which
+    /// a module descriptor (`tsconfig.json`, `package.json`) can move while
+    /// spelling no token ([`hierarchy_moved_by_descriptor`](Index::hierarchy_moved_by_descriptor)).
+    imported_supertypes: bool,
 }
 
 impl Index {
@@ -991,16 +1344,29 @@ impl Index {
         let dir_modules = build_directory_modules(nodes, &parent, &layout);
 
         let info = build_node_info(nodes, &parent, &module_key, &layout);
-        let types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
+        let mut types_by_fqn = build_package_types(nodes, &parent, &members, &node_by_id, &layout);
+        let callables_by_fqn = build_top_level_callables(nodes, &parent, &members, &node_by_id, &layout);
+        let unplaced_callables = build_unplaced_callables(nodes, &parent, &members, &node_by_id, &layout);
+        let facades_by_fqn = build_file_facades(nodes, &parent, &layout);
         let files_by_namespace = build_namespace_files(nodes, &parent, &layout);
         let by_symbol = build_by_symbol(nodes);
-        let by_name = build_by_name(nodes);
+        let ConstantIndex {
+            constants,
+            constant_of,
+        } = build_constants(nodes, &parent, &by_symbol, refs, &layout);
+        let mut by_name = build_by_name(nodes);
+        // The parts of a partial type are one type (S-557): its name names the
+        // first-declared part, wherever the parts sit.
+        let partials = build_partial_types(refs, &by_symbol, &parent, &members, &types_by_fqn, &node_by_id);
+        partials.collapse(types_by_fqn.values_mut().flat_map(HashMap::values_mut));
+        partials.collapse(by_name.values_mut());
         let by_file_path = build_by_file_path(nodes);
         let (file_roots_by_stem, file_roots_by_dir) = build_file_roots(nodes, &parent);
         let routes_by_template = build_routes_by_template(nodes);
         let file_scopes = build_file_scopes(refs);
         let impls_by_trait_method =
             build_impls_by_trait_method(refs, &by_symbol, &by_name, &info, &layout);
+        let trait_methods = build_trait_methods(nodes, edges, &info);
 
         let mut index = Index {
             by_symbol,
@@ -1016,24 +1382,40 @@ impl Index {
             file_roots_by_dir,
             specifier_targets: HashMap::new(),
             go_modules: Vec::new(),
+            ts: TsResolution::default(),
+            load_path: LoadPath::default(),
+            includes: IncludeScope::default(),
             routes_by_template,
             file_scopes,
             imported: HashMap::new(),
+            exports: HashMap::new(),
             crates,
             layout,
             types_by_fqn,
+            callables_by_fqn,
+            unplaced_callables,
+            facades_by_fqn,
             files_by_namespace,
+            constants,
+            constant_of,
             impls_by_trait_method,
+            trait_methods,
+            partials,
             supertypes: HashMap::new(),
             interfaces: HashMap::new(),
             unseen_bases: HashSet::new(),
             uninherited: HashSet::new(),
+            file_local: None,
+            link_unit_locals: HashMap::new(),
+            type_arities: HashMap::new(),
+            declared_signatures: HashMap::new(),
             hierarchy_tokens: HashSet::new(),
             hierarchy_families: HashSet::new(),
             trait_users: HashSet::new(),
             self_types: HashMap::new(),
             methods_by_self_type: HashMap::new(),
             type_names: HashMap::new(),
+            self_type_classes: HashMap::new(),
             assoc_items: HashMap::new(),
             assoc_owner: HashMap::new(),
             impl_headers: Vec::new(),
@@ -1046,15 +1428,13 @@ impl Index {
             without_self: HashSet::new(),
             arities: HashMap::new(),
             open_types: HashSet::new(),
+            mixins: HashMap::new(),
+            imported_supertypes: false,
         };
-        let hierarchy = build_supertypes(refs, &index);
-        index.supertypes = hierarchy.supertypes;
-        index.interfaces = hierarchy.interfaces;
-        index.unseen_bases = hierarchy.unseen_bases;
-        index.hierarchy_tokens = hierarchy.tokens;
-        index.hierarchy_families = hierarchy.families;
-        index.trait_users = hierarchy.trait_users;
-        index.open_types = hierarchy.open;
+        index.includes = IncludeScope::build(nodes, refs, &index);
+        let mut hierarchy = build_supertypes(refs, &index);
+        index.partials.unite_hierarchy(&mut hierarchy, &node_by_id);
+        index.install_hierarchy(hierarchy, &HashSet::new());
         // A capture-before-delete row (`Symbol`) is filed under its *target's*
         // file while its source sits in another (ADR-10): it never says which
         // file its source's path is, or a sync would read that file's scope
@@ -1109,8 +1489,7 @@ impl Index {
             }
             let ext = extension_of(path);
             for (dir, glob_ext, glob) in &declared {
-                let under = dir.is_empty() || path.starts_with(&format!("{dir}/"));
-                if !under || *glob_ext != ext {
+                if !global_wildcard_governs(dir, path) || *glob_ext != ext {
                     continue;
                 }
                 // A file importing nothing of its own has no scope yet.
@@ -1131,6 +1510,23 @@ impl Index {
     ) -> Index {
         self.specifier_targets = specifier_targets;
         self.go_modules = go_modules;
+        self
+    }
+
+    /// Declare the configs and workspace packages a bare specifier of the
+    /// TypeScript family binds through (S-531). Call before
+    /// [`Index::with_imported_bindings`], whose scope reads the import rows'
+    /// outcomes.
+    pub(crate) fn with_ts_resolution(mut self, ts: TsResolution) -> Index {
+        self.ts = ts;
+        self
+    }
+
+    /// Declare the load roots a bare specifier of a load-path language binds
+    /// against (S-566). Call before [`Index::with_imported_bindings`], whose
+    /// scope reads the import rows' outcomes.
+    pub(crate) fn with_load_path(mut self, load_path: LoadPath) -> Index {
+        self.load_path = load_path;
         self
     }
 
@@ -1166,6 +1562,141 @@ impl Index {
     /// [`GraphStore::uninherited_members`]: crate::graph_store::GraphStore::uninherited_members
     pub(crate) fn with_uninherited(mut self, ids: impl IntoIterator<Item = NodeId>) -> Index {
         self.uninherited = ids.into_iter().collect();
+        self
+    }
+
+    /// Give the index the unexported functions (S-584, [FR-RS-40];
+    /// [`GraphStore::unexported_functions`]): a link-unit file's are what the
+    /// link-unit rung never offers another file. `None` — a store recording no
+    /// linkage, or a run whose languages make no link unit — leaves the rung
+    /// reading nothing.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    /// [`GraphStore::unexported_functions`]: crate::graph_store::GraphStore::unexported_functions
+    pub(crate) fn with_file_local(mut self, ids: Option<Vec<NodeId>>) -> Index {
+        self.file_local = ids.map(|ids| ids.into_iter().collect());
+        self
+    }
+
+    /// Give the index the link-unit files' local bindings (S-584; the S-593
+    /// facts [`GraphStore::local_bindings_with_extensions`] reads): a name one
+    /// binds at a call's line shadows every function the rung could bind.
+    ///
+    /// [`GraphStore::local_bindings_with_extensions`]: crate::graph_store::GraphStore::local_bindings_with_extensions
+    pub(crate) fn with_link_unit_locals(mut self, rows: Vec<LocalBindingRow>) -> Index {
+        for b in rows {
+            let scope = (b.line, b.scope_start_line, b.scope_end_line);
+            self.link_unit_locals.entry((b.file_path, b.name)).or_default().push(scope);
+        }
+        self
+    }
+
+    /// Give the index each type's generic arity (S-602, [CR-199];
+    /// [`GraphStore::type_arities`]): what the namespace rungs match a written
+    /// type's arity against ([`Ctx::admits_arity`]). An index given none (the
+    /// framework pass) admits every type of a name, as before.
+    ///
+    /// The supertype walk is then read again for every type of a language that
+    /// tells types apart by arity ([`PackageLayout::matches_type_arity`]), from
+    /// `refs`' supertype rows: the [`Hierarchy`]
+    /// [`build_with_layout`](Index::build_with_layout) installed bound them
+    /// with no arity known, so `class Plain : Result` would climb to the
+    /// `Result<T>` its `Extends` edge does not name. Each such type's entries
+    /// are replaced whole — partial parts united again, `nodes` naming their
+    /// kinds — as [`with_structural_supertypes`](Index::with_structural_supertypes)
+    /// replaces a structural type's, so every other language's hierarchy is
+    /// untouched. Read once the file scopes are complete, the walk binds each
+    /// supertype as its edge does, through the global namespace wildcards too.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    /// [`GraphStore::type_arities`]: crate::graph_store::GraphStore::type_arities
+    pub(crate) fn with_type_arities(
+        mut self,
+        arities: impl IntoIterator<Item = (NodeId, u32)>,
+        nodes: &[NodeRow],
+        refs: &[UnresolvedRefRow],
+    ) -> Index {
+        self.type_arities = arities.into_iter().collect();
+        if self.type_arities.is_empty() {
+            return self;
+        }
+        let matches = |id: &NodeId| {
+            let path = self.info.get(id).and_then(|i| i.file_path.as_deref());
+            path.is_some_and(|p| self.layout.matches_type_arity(p))
+        };
+        let replacing: HashSet<NodeId> = self.info.keys().copied().filter(matches).collect();
+        let rows: Vec<UnresolvedRefRow> = refs
+            .iter()
+            .filter(|r| matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements))
+            .filter(|r| self.by_symbol.get(&r.source_symbol).is_some_and(|id| replacing.contains(id)))
+            .cloned()
+            .collect();
+        let node_by_id: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
+        let mut hierarchy = build_supertypes(&rows, &self);
+        self.partials.unite_hierarchy(&mut hierarchy, &node_by_id);
+        self.install_hierarchy(hierarchy, &replacing);
+        self
+    }
+
+    /// Give the index the required signatures a type of a structural-types
+    /// language declares (S-537, [FR-RS-21]; [`Index::declared_signatures`]):
+    /// each signature among `signatures` that a `Contains` edge of `edges`
+    /// places under a type-like node of the index whose file has structural
+    /// types. `nodes` and `edges` are the whole snapshot's, signatures
+    /// included — the index itself holds none ([`bindable`]).
+    ///
+    /// [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+    pub(crate) fn with_declared_signatures(
+        mut self,
+        nodes: &[NodeRow],
+        edges: &[EdgeRow],
+        signatures: &HashSet<NodeId>,
+    ) -> Index {
+        if signatures.is_empty() {
+            return self;
+        }
+        let names: HashMap<NodeId, &str> = nodes
+            .iter()
+            .filter(|n| signatures.contains(&n.id))
+            .map(|n| (n.id, n.name.as_str()))
+            .collect();
+        let mut declared: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
+        for e in edges.iter().filter(|e| e.kind == EdgeKind::Contains) {
+            let Some(name) = names.get(&e.target) else { continue };
+            let structural_type = self.info.get(&e.source).is_some_and(|i| {
+                is_type_like(i.kind) && i.file_path.as_deref().is_some_and(|p| self.layout.has_structural_types(p))
+            });
+            if structural_type {
+                declared.entry((e.source, (*name).to_string())).or_default().push(e.target);
+            }
+        }
+        for ids in declared.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
+        }
+        self.declared_signatures = declared;
+        self
+    }
+
+    /// Give the index the trait methods that are **required signatures**
+    /// (S-712; [`Index::trait_methods`]): each signature among `signatures`
+    /// that a `Contains` edge of `edges` places under a trait of the index.
+    /// `nodes` and `edges` are the whole snapshot's, signatures included — the
+    /// index itself holds none ([`bindable`]). A trait fan-out through such a
+    /// method names it in its [`Dispatch`]; it is never a target.
+    pub(crate) fn with_trait_signatures(
+        mut self,
+        nodes: &[NodeRow],
+        edges: &[EdgeRow],
+        signatures: &HashSet<NodeId>,
+    ) -> Index {
+        if signatures.is_empty() {
+            return self;
+        }
+        let signature_nodes: Vec<NodeRow> = nodes.iter().filter(|n| signatures.contains(&n.id)).cloned().collect();
+        for (key, symbol) in build_trait_methods(&signature_nodes, edges, &self.info) {
+            self.trait_methods.entry(key).or_insert(symbol);
+        }
         self
     }
 
@@ -1208,9 +1739,20 @@ impl Index {
                 .entry((info.crate_name.clone(), info.name.clone()))
                 .or_default() += 1;
         }
+        let spelt: HashSet<&String> = self_types.iter().map(|(_, t)| t).collect();
+        let mut classes: HashMap<(String, String), Vec<NodeId>> = HashMap::new();
+        for (id, info) in &self.info {
+            if is_class_like(info.kind) && spelt.contains(&info.name) {
+                classes.entry((info.crate_name.clone(), info.name.clone())).or_default().push(*id);
+            }
+        }
+        for ids in classes.values_mut() {
+            ids.sort_unstable();
+        }
         self.self_types = self_types.into_iter().collect();
         self.methods_by_self_type = by_type;
         self.type_names = type_names;
+        self.self_type_classes = classes;
         self
     }
 
@@ -1269,7 +1811,8 @@ impl Index {
     /// Read only for the files of an impl-block language
     /// ([`PackageLayout::looks_up_impl_blocks`]). Reads no arity fact: the
     /// facts [`with_arities`](Index::with_arities) gives only sharpen the
-    /// bind-time filters, which an index given none (the framework pass) skips.
+    /// bind-time filters, which an index given none skips. The resolution and
+    /// framework passes both give them (the framework pass since S-567).
     ///
     /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
@@ -1426,37 +1969,61 @@ impl Index {
     ///
     /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
+    ///
+    /// A row marked exported (S-534, [FR-RS-19]) is also recorded in its
+    /// module's [`ModuleExports`]: a re-export's specifier is part of the
+    /// imported scope like any import's, keyed by the module it names, and a
+    /// local export alias binds no scope.
+    ///
+    /// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
     pub(crate) fn with_imported_bindings(
         mut self,
         refs: &[UnresolvedRefRow],
         policy: BindingPolicy,
     ) -> Index {
         let mut imported: HashMap<i64, HashMap<String, Vec<NodeId>>> = HashMap::new();
+        let mut exports: HashMap<NodeId, ModuleExports> = HashMap::new();
         for r in refs {
             if r.kind != EdgeKind::Imports {
                 continue;
             }
             let Some(file_id) = r.file_id else { continue };
+            let Some(&source) = self.by_symbol.get(&r.source_symbol) else { continue };
             let path_grammar = self
-                .by_symbol
-                .get(&r.source_symbol)
-                .and_then(|id| self.info.get(id))
+                .info
+                .get(&source)
                 .and_then(|i| i.file_path.as_deref())
                 .is_some_and(|p| self.is_path_specifier_file(p));
             if !path_grammar {
                 continue;
+            }
+            let export = ts_export_of(r);
+            if let Some(export) = &export {
+                let module = exports.entry(self.file_root_of(source)).or_default();
+                module.file_id = file_id;
+                match export {
+                    TsExport::Local { local, exported } => {
+                        module.local.entry(exported.to_string()).or_default().push(local.to_string());
+                        continue;
+                    }
+                    TsExport::Named { module: spec, name, exported } => module
+                        .named
+                        .entry(exported.to_string())
+                        .or_default()
+                        .push((spec.to_string(), name.to_string())),
+                    TsExport::Star { module: spec } => module.star.push(spec.to_string()),
+                }
             }
             let targets = match bind(r, &self, policy) {
                 Outcome::Bound { target, .. } => vec![target],
                 Outcome::BoundMany { targets, .. } => targets,
                 Outcome::Unbound => Vec::new(),
             };
-            imported
-                .entry(file_id)
-                .or_default()
-                .entry(r.target.clone())
-                .or_default()
-                .extend(targets);
+            let key = match &export {
+                Some(TsExport::Named { module, .. } | TsExport::Star { module }) => module.to_string(),
+                _ => r.target.clone(),
+            };
+            imported.entry(file_id).or_default().entry(key).or_default().extend(targets);
         }
         for by_target in imported.values_mut() {
             for targets in by_target.values_mut() {
@@ -1464,8 +2031,234 @@ impl Index {
                 targets.dedup();
             }
         }
+        for module in exports.values_mut() {
+            for list in module.named.values_mut() {
+                list.sort();
+                list.dedup();
+            }
+            for list in module.local.values_mut() {
+                list.sort();
+                list.dedup();
+            }
+            module.star.sort();
+            module.star.dedup();
+        }
         self.imported = imported;
+        self.exports = exports;
+        self.with_structural_supertypes(refs)
+    }
+
+    /// This index, with the supertypes of every structural-types file's types
+    /// (S-535, TypeScript) read again now that the imported scope is known
+    /// ([`with_imported_bindings`](Index::with_imported_bindings)). Its
+    /// supertype is usually named through an import, `<import target>::<name>`
+    /// ([`Ctx::resolve_imported_type`]), which the [`Hierarchy`]
+    /// [`build_with_layout`](Index::build_with_layout) reads cannot bind yet:
+    /// without this, `super.m()` would climb a chain the `Extends` edge proves
+    /// and the walk never sees. Each such type's hierarchy entries are replaced
+    /// whole — a type's are read off its own rows alone ([`build_supertypes`])
+    /// — so every other language's hierarchy is untouched.
+    fn with_structural_supertypes(mut self, refs: &[UnresolvedRefRow]) -> Index {
+        let source_of = |r: &UnresolvedRefRow| {
+            let id = *self.by_symbol.get(&r.source_symbol)?;
+            let path = self.info.get(&id)?.file_path.as_deref()?;
+            self.layout.has_structural_types(path).then_some(id)
+        };
+        let rows: Vec<UnresolvedRefRow> = refs
+            .iter()
+            .filter(|r| matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements))
+            .filter(|r| source_of(r).is_some())
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            return self;
+        }
+        let imported = rows.iter().any(|r| r.form == RefForm::Path && r.target.contains("::"));
+        let sources: HashSet<NodeId> = rows.iter().filter_map(source_of).collect();
+        let hierarchy = build_supertypes(&rows, &self);
+        self.install_hierarchy(hierarchy, &sources);
+        self.imported_supertypes = imported;
         self
+    }
+
+    /// Put `hierarchy` into this index — the one place a [`Hierarchy`] is
+    /// taken apart, so a field added to it cannot be kept by one installer and
+    /// dropped by the other. The per-type entries of every type in `replacing`
+    /// go first, so its entries are `hierarchy`'s alone
+    /// ([`with_structural_supertypes`](Index::with_structural_supertypes));
+    /// [`build_with_layout`](Index::build_with_layout) installs into an empty
+    /// index and replaces nothing.
+    fn install_hierarchy(&mut self, hierarchy: Hierarchy, replacing: &HashSet<NodeId>) {
+        let Hierarchy {
+            supertypes,
+            interfaces,
+            unseen_bases,
+            tokens,
+            families,
+            trait_users,
+            open,
+            mixins,
+        } = hierarchy;
+        for source in replacing {
+            self.supertypes.remove(source);
+            self.interfaces.remove(source);
+            self.unseen_bases.remove(source);
+            self.trait_users.remove(source);
+            self.open_types.remove(source);
+            self.mixins.remove(source);
+        }
+        self.supertypes.extend(supertypes);
+        self.interfaces.extend(interfaces);
+        self.unseen_bases.extend(unseen_bases);
+        self.hierarchy_tokens.extend(tokens);
+        self.hierarchy_families.extend(families);
+        self.trait_users.extend(trait_users);
+        self.open_types.extend(open);
+        self.mixins.extend(mixins);
+    }
+
+    /// The file root of the file at the project-relative `path`, matched whole
+    /// — extension included ([`file_roots_by_dir`](Index::file_roots_by_dir)):
+    /// the file an include names (S-579's `#include`, S-551's PHP `require`).
+    fn file_root_at(&self, path: &str) -> Res {
+        let candidates: Vec<NodeId> = self
+            .file_roots_by_dir
+            .get(parent_of(path))
+            .into_iter()
+            .flatten()
+            .filter(|(file, _)| file == path)
+            .map(|&(_, id)| id)
+            .collect();
+        exactly_one(&candidates)
+    }
+
+    /// The file-root module of `node`: its outermost ancestor in the same file
+    /// (itself for a file's module).
+    fn file_root_of(&self, node: NodeId) -> NodeId {
+        let file = self.info.get(&node).and_then(|i| i.file_path.as_deref());
+        let mut root = node;
+        while let Some(&parent) = self.parent.get(&root) {
+            if self.info.get(&parent).and_then(|i| i.file_path.as_deref()) != file {
+                break;
+            }
+            root = parent;
+        }
+        root
+    }
+
+    /// Every definition the module `root` provides under `name` (S-534,
+    /// [FR-RS-19]), unsorted and possibly repeated, of any kind — what the
+    /// imported rungs read their candidates from ([`Ctx::imported_definitions`]):
+    ///
+    /// - the module's own top-level declaration of that name — unless the
+    ///   module exports something else under it: then the local name it
+    ///   exports (`export default App`), or what each `export { a as name }
+    ///   from 's'` reaches in `s`, read the same way. The `default` symbol of
+    ///   either statement (S-532) is that export, never its rival;
+    /// - only for a name the module neither exports nor declares itself, what
+    ///   each `export * from 's'` reaches — an explicit export shadows a
+    ///   star's (ECMAScript) even when it reaches nothing a call can name (an
+    ///   external package's, a class), and a star never re-exports `default`.
+    ///
+    /// Re-exports are followed `hops` deep at most ([`MAX_ALIAS_DEPTH`]).
+    /// `seen` holds, per `(module, name)`, the most hops it was read with and
+    /// what that read found: a module reached again is answered from it, and
+    /// read again only from a route that can reach further, so the answer
+    /// never depends on which route — which file name — came first, and a
+    /// cycle ends and adds nothing. Which kinds are candidates is the reader's
+    /// to say: a value for a call, a type for a type relation (S-535).
+    ///
+    /// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+    fn exported_definitions(
+        &self,
+        root: NodeId,
+        name: &str,
+        hops: u8,
+        seen: &mut ExportReads,
+    ) -> Vec<NodeId> {
+        let key = (root, name.to_string());
+        if let Some((read, found)) = seen.get(&key) {
+            if *read >= hops {
+                return found.clone();
+            }
+        }
+        // A cycle back to this read, at fewer hops, reads nothing.
+        seen.insert(key.clone(), (hops, Vec::new()));
+        let found = self.module_definitions(root, name, hops, seen);
+        seen.insert(key, (hops, found.clone()));
+        found
+    }
+
+    /// One read of [`exported_definitions`](Index::exported_definitions): what
+    /// `root` provides under `name`, its re-exports followed `hops` deep.
+    fn module_definitions(&self, root: NodeId, name: &str, hops: u8, seen: &mut ExportReads) -> Vec<NodeId> {
+        let exports = self.exports.get(&root);
+        // An export entry of `name` is what the module exports under it: the
+        // `default` symbol of `export default App` or of `export default b`
+        // re-exporting an import is the same export, never a rival.
+        let own: Vec<&str> = match (
+            exports.and_then(|e| e.local.get(name)),
+            exports.is_some_and(|e| e.named.contains_key(name)),
+        ) {
+            (Some(locals), _) => locals.iter().map(String::as_str).collect(),
+            (None, true) => Vec::new(),
+            (None, false) => vec![name],
+        };
+        let mut found: Vec<NodeId> = own
+            .into_iter()
+            .flat_map(|local| self.members_named(root, local, Want::Any))
+            .collect();
+        found.extend(self.export_object_definitions(root, exports, name));
+        let (Some(exports), true) = (exports, hops > 0) else {
+            return found;
+        };
+        let reached = |spec: &str| -> &[NodeId] {
+            self.imported
+                .get(&exports.file_id)
+                .and_then(|by_target| by_target.get(spec))
+                .map_or(&[], Vec::as_slice)
+        };
+        for (spec, from) in exports.named.get(name).into_iter().flatten() {
+            for &next in reached(spec) {
+                found.extend(self.exported_definitions(next, from, hops - 1, seen));
+            }
+        }
+        // A star is read only for a name the module neither exports nor
+        // declares itself, whatever that export or declaration turned out to
+        // be: an external package's, a class, or one this call already read.
+        let explicit = exports.local.contains_key(name)
+            || exports.named.contains_key(name)
+            || !self.members_named(root, name, Want::Any).is_empty();
+        if !explicit && name != DEFAULT_EXPORT {
+            for spec in &exports.star {
+                for &next in reached(spec) {
+                    found.extend(self.exported_definitions(next, name, hops - 1, seen));
+                }
+            }
+        }
+        found
+    }
+
+    /// What a CommonJS module's export object provides under `name` (S-540,
+    /// [FR-RS-22]): each declaration `root` records as its export object
+    /// ([`COMMONJS_EXPORTS`]) for `default`, and its members named `name` for
+    /// any other name — `exists` of `const User = module.exports; User.exists
+    /// = …` is the module's `exists`. Empty for a module that records none,
+    /// every TypeScript one included, and for one that records two: which
+    /// object `module.exports` holds when it is required is then not one the
+    /// tree names ([NFR-RA-05]).
+    ///
+    /// [FR-RS-22]: ../../../docs/specs/requirements/FR-RS-22.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn export_object_definitions(&self, root: NodeId, exports: Option<&ModuleExports>, name: &str) -> Vec<NodeId> {
+        let Some([object]) = exports.and_then(|e| e.local.get(COMMONJS_EXPORTS)).map(Vec::as_slice) else {
+            return Vec::new();
+        };
+        let objects = self.members_named(root, object, Want::Any).into_iter();
+        match name {
+            DEFAULT_EXPORT => objects.collect(),
+            _ => objects.flat_map(|object| self.members_named(object, name, Want::Any)).collect(),
+        }
     }
 
     /// Whether a file at `path` writes its import specifiers as paths (S-439) —
@@ -1518,6 +2311,25 @@ impl Index {
     /// of its names, so the incremental run re-binds every call that can walk
     /// it ([`walks_hierarchy`](Index::walks_hierarchy)) when this holds
     /// (`resolve::is_affected`).
+    /// Whether a sync that dirtied `dirty` and changed the paths `changed` can
+    /// move the type hierarchy a supertype walk climbs (`resolve::run`): it
+    /// touched a hierarchy type ([`hierarchy_touched`](Index::hierarchy_touched)),
+    /// or it moved the hierarchy while dirtying none of its tokens
+    /// ([`hierarchy_moved_by_descriptor`](Index::hierarchy_moved_by_descriptor)).
+    pub(crate) fn hierarchy_moved(&self, dirty: &HashSet<String>, changed: &HashSet<String>) -> bool {
+        self.hierarchy_touched(dirty) || self.hierarchy_moved_by_descriptor(changed)
+    }
+
+    /// Whether a sync that changed `changed` can move the type hierarchy while
+    /// dirtying none of its tokens (S-535): a structural-types type names its
+    /// supertype through an import ([`Index::imported_supertypes`]), and a
+    /// module descriptor changed — a `tsconfig.json` `paths` retarget rebinds
+    /// that import, and with it the base a `super.m()` climbs, though the
+    /// config spells nothing the `Extends` row names.
+    fn hierarchy_moved_by_descriptor(&self, changed: &HashSet<String>) -> bool {
+        self.imported_supertypes && changed.iter().any(|p| super::is_module_descriptor(p))
+    }
+
     pub(crate) fn hierarchy_touched(&self, dirty: &HashSet<String>) -> bool {
         self.hierarchy_tokens.iter().any(|t| dirty.contains(t))
     }
@@ -1544,6 +2356,19 @@ impl Index {
     /// Whether the file at `path` is keyed under import roots (S-519).
     pub(crate) fn has_import_roots(&self, path: &str) -> bool {
         self.layout.has_import_roots(path)
+    }
+
+    /// Whether the classes and modules of the file at `path` are named by
+    /// lexical constants (S-565) — its multi-segment calls are calls on a
+    /// constant, bound by the constant rung alone.
+    pub(crate) fn resolves_lexical_constants(&self, path: &str) -> bool {
+        self.layout.resolves_lexical_constants(path)
+    }
+
+    /// Whether the file at `path`'s language declares structural types (S-535,
+    /// [`PackageLayout::has_structural_types`]).
+    pub(crate) fn has_structural_types(&self, path: &str) -> bool {
+        self.layout.has_structural_types(path)
     }
 
     /// Whether the file at `path` is keyed by its package ([CR-149]).
@@ -1595,6 +2420,13 @@ impl Index {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The symbol of trait `trait_node`'s own method `name` — its default
+    /// body's or its required signature's ([`Index::trait_methods`]) — or
+    /// `None` when the graph holds neither.
+    fn trait_method_symbol(&self, trait_node: NodeId, name: &str) -> Option<&str> {
+        self.trait_methods.get(&(trait_node, name.to_string())).map(String::as_str)
+    }
+
     /// Whether the `impl` block `at` declares a function `name` — overriding
     /// its trait's default of that name (S-608).
     fn block_overrides(&self, at: usize, name: &str) -> bool {
@@ -1604,18 +2436,31 @@ impl Index {
             .any(|f| self.info.get(f).is_some_and(|i| i.name == name))
     }
 
-    /// Members of `scope` named `name`, filtered by `want`.
+    /// Members of `scope` named `name`, filtered by `want`, id-sorted.
+    ///
+    /// The members of a partial type's part are those of every part (S-557,
+    /// [FR-RS-29]), and a member that is itself a part of a partial type is
+    /// read as its first-declared part ([`Index::partials`]).
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
     fn members_named(&self, scope: NodeId, name: &str, want: Want) -> Vec<NodeId> {
-        self.members
-            .get(&scope)
-            .and_then(|m| m.get(name))
-            .map(|ids| {
-                ids.iter()
-                    .copied()
-                    .filter(|id| self.info.get(id).is_some_and(|i| want.admits(i.kind)))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let admitted = |id: &NodeId| self.info.get(id).is_some_and(|i| want.admits(i.kind));
+        let named = |scope: &NodeId| self.members.get(scope).and_then(|m| m.get(name));
+        if self.partials.first.is_empty() {
+            return named(&scope).map(|ids| ids.iter().copied().filter(admitted).collect()).unwrap_or_default();
+        }
+        let mut ids: Vec<NodeId> = self
+            .partials
+            .parts_of(&scope)
+            .iter()
+            .filter_map(named)
+            .flatten()
+            .map(|&id| self.partials.first_of(id))
+            .filter(admitted)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
     }
 
     /// The module key of the nearest enclosing module of `node` (itself
@@ -1656,6 +2501,153 @@ impl Index {
     /// in an impl-block language, so are it and a `self.m()` row when a token
     /// of its caller's impl header is (S-607, [`Ctx::self_type_call`]).
     ///
+    /// A call through a TypeScript-family import followed through re-exports
+    /// or a default-export alias (S-534, [`Index::exported_definitions`])
+    /// needs no clause here: it is a `<import target>::<name>` row of a
+    /// path-specifier file, which `resolve::is_affected` re-selects on every
+    /// non-empty delta before this is asked, as it does every `Imports` row
+    /// — the export rows included — so a barrel, an alias or a definition
+    /// behind them changing in another file re-binds it. A call through an
+    /// imported class, `<import target>::<Class>::<method>` (S-536,
+    /// [`Ctx::imported_class_members`]), is such a row too: a method added to
+    /// or removed from the class in another file re-binds it.
+    ///
+    /// A row sourced inside a partial type's part (S-557) is also affected when
+    /// a token of that type's name is dirty ([`inside_dirty_partial`](Index::inside_dirty_partial)):
+    /// it binds through the other parts, which its target need not spell.
+    ///
+    /// A lexical-constant row (S-565, [`Ctx::resolve_constant_row`]) needs no
+    /// clause of its own: the constant rung reads the declarations its target
+    /// spells — each level's `Foo`, the member `bar` — and the source's own
+    /// nesting, which lives in the source's file. A nearer `Foo`, a reopening,
+    /// a compact `class A::Foo`, or `def self.bar` turning into `def bar`, each
+    /// dirties a token the target spells.
+    ///
+    /// A Ruby call along its class's ancestors (S-568, [`Ctx::ancestor_walk`])
+    /// spells the method it reaches; what else the walk reads is the type
+    /// hierarchy, which `resolve::is_affected` re-selects every Ruby call for
+    /// once a sync dirties one of its tokens ([`Index::hierarchy_moved`]) —
+    /// every superclass's and mixed-in module's name, and the name of every
+    /// class or module that records either. A reopening in another file that
+    /// takes away the caller's class's last superclass or mixin dirties that
+    /// class's name, which the hierarchy no longer holds, so the call is also
+    /// affected when a token of a class or module enclosing its caller is dirty
+    /// ([`inside_dirty_constant`](Index::inside_dirty_constant)). A superclass
+    /// or mixin row itself spells the constant it binds through the constant
+    /// index, as every constant row does.
+    ///
+    /// Nor does a qualified call of an import-root file (S-544,
+    /// [`Ctx::resolve_module_qualified_call`]): an extracted row's qualifier is
+    /// the import path it spells, read down the module tree segment by segment
+    /// and among its parent's members by its last segment, and a written one
+    /// (a framework handler's `views::add`) goes through the file's imports,
+    /// which the alias chase below re-selects; its member is looked up by the
+    /// name the target ends in, among the members of the module or class it
+    /// reached. A module or member renamed, added or removed, or a class turned
+    /// into a function, dirties a token the target spells.
+    ///
+    /// Nor does a Go call bound within its directory package (S-528,
+    /// [`Ctx::directory_package_name`]): the rung reads the declarations of the
+    /// name the target spells among the files of the source's directory that
+    /// share its `package` clause. A declaration of the name added, removed or
+    /// duplicated in another file, and a file of the directory changing its
+    /// clause — the sync dirties every node name of a file it re-extracts,
+    /// before and after, and the clause itself — each dirties a token the
+    /// target spells; a change to the source's own clause re-extracts the
+    /// source's file, whose rows are re-bound whatever they spell.
+    ///
+    /// Nor do Scala's companion pairs and top-level `def`s (S-573,
+    /// [`Ctx::walk_from_companions`], [`build_top_level_callables`]): a row through a
+    /// pair spells the pair's name and the member it reaches, and one reaching a
+    /// top-level `def` spells the `def`'s name. A companion object added or
+    /// removed, a member moved between the class and the object, or a `def`
+    /// added at the top level, each dirties a token the target spells. So does
+    /// what a supertype row reads of a pair (S-575, [`Ctx::pair_supertype`]):
+    /// the trait and its object are declared in one file under the name the row
+    /// spells, so a sync that adds, removes or re-kinds either dirties it.
+    ///
+    /// Nor do Kotlin's calls (S-560): a free call to a top-level function, an
+    /// extension call and a call on a class each spell the name they bind, and
+    /// a member of that name that rules an extension out spells it too. A Java
+    /// row through a file facade (`mixit::util::UtilsKt`, or `UtilsKt::f`
+    /// beside that import) names the class after its file, which no node
+    /// spells — but its path spells the file's declared package, which a sync
+    /// that extracts or deletes the file dirties (S-518), and its member the
+    /// function's own name.
+    ///
+    /// Nor do Kotlin's companion members (I4-INT, [`Ctx::companion_of`]): a
+    /// call on a class (`Ticket::empty`) and a bare call inside it each spell
+    /// the member they reach, and a companion is declared in its class's file,
+    /// whose node names a sync dirties before and after — the companion added
+    /// or removed, a member moved between it and the class. A supertype in
+    /// another file gaining the name, which a bare call reads before the
+    /// companion, spells that name too, and so does a superclass's companion,
+    /// declared in that superclass's file.
+    ///
+    /// Nor does a TypeScript call on a proven receiver (S-537,
+    /// [`Ctx::resolve_structural_receiver_call`]) need a rule here: its target
+    /// spells `::`, so `resolve::is_import_scoped` re-selects it on every sync
+    /// — whatever moves its type's import, its members, its required
+    /// signatures or its `Extends` chain.
+    ///
+    /// Nor does a Python call on a proven receiver (S-546,
+    /// [`Ctx::resolve_import_root_receiver_call`]): its `T::m` is read as a
+    /// written qualifier is, so the alias chase below re-selects it when an
+    /// import of `T` moves; `T` declared, renamed or re-kinded — in the
+    /// caller's own file too, where an import of `T` beside it makes the row
+    /// ambiguous — and `m` added or removed on `T` or a base, as a method or as
+    /// an attribute that hides one, each dirties a token the target spells;
+    /// and a base gained or lost moves the hierarchy, which re-selects every
+    /// Python call (`resolve::is_affected`'s hierarchy rule).
+    ///
+    /// Nor does a Kotlin call on a proven receiver (S-563,
+    /// [`Ctx::resolve_companion_language_receiver_call`]): its `T::m` spells
+    /// both names, so `T` declared, renamed, re-kinded or imported elsewhere
+    /// — through the alias chase and wildcard rule below, Kotlin being
+    /// package-shaped — and a top-level function `T` added or removed
+    /// ([`Ctx::factory_named`]) each dirty a token it spells; `m` added or
+    /// removed on `T` or a base, and an extension `m` the fallback reaches
+    /// ([`Ctx::resolve_extension_call`]), dirty `m`; and a supertype gained or
+    /// lost moves the hierarchy (`resolve::is_affected`'s hierarchy rule).
+    ///
+    /// Nor do PHP's global functions (S-551, [`Ctx::global_function`]): a bare
+    /// call from a file of the global namespace, and one from a namespaced file
+    /// its namespace declares no function for, each spell the function's name,
+    /// so a global function added, removed or declared twice in another file
+    /// (a file of unknown namespace declaring it included, [`Ctx::namespace_callables`]),
+    /// a file gaining or dropping its `namespace` — the sync dirties every node
+    /// name of a file it re-extracts, before and after — and the namespace
+    /// gaining a function of the name, each dirties a token the target spells;
+    /// a change to the caller's own namespace re-extracts the caller's file.
+    /// Nor does a PHP include (`require 'lib/a.php'`, recorded `.::lib::a.php`),
+    /// which binds the file it names whole: the file's module is named its
+    /// stem, a token the target spells, which the sync dirties when the file is
+    /// added or removed.
+    ///
+    /// Nor does the arity filter of the namespace rungs (S-602,
+    /// [`Ctx::admits_arity`]): a row spells the name of the type it writes,
+    /// and a type of that name gaining, losing or changing its type
+    /// parameters is re-extracted in its own file, whose node names the sync
+    /// dirties before and after; a row's own written arity changes only with
+    /// its file, whose rows are re-bound whatever they spell.
+    ///
+    /// A namespace block's wildcards (S-603, [`FileScope::block_globs`]) join
+    /// the file's wildcards below: a row reads them at their level as it reads
+    /// the file's after every level, so a sync dirtying a token one spells
+    /// selects it. A `using` moved into or out of a block changes only its own
+    /// file, whose rows are re-bound whatever they spell.
+    ///
+    /// A row of an include-roots language (S-579,
+    /// [`Index::reads_include_scope`]) is always affected: an `#include` reads
+    /// the include roots and the files beside it, a call, a `using` or a base
+    /// class reads every file the includes reach, transitively, and a `this->`
+    /// call or an access reads the hierarchy those bases make — a header two
+    /// includes away gaining a declaration, or an include another file gains,
+    /// moves it under no name its target spells. C's link-unit rung (S-584,
+    /// `link_unit`) needs no rule of its own for the same reason: a C row is an
+    /// include-roots row, so a definition gained, lost or made `static` in any
+    /// file re-binds it.
+    ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub(crate) fn ref_affected(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
         if super::tokens(&r.target).iter().any(|t| dirty.contains(t)) {
@@ -1666,8 +2658,10 @@ impl Index {
         // an impl-block language, what its caller's impl header resolves to
         // (S-607): the header's self type and trait, which a `self.m()` left
         // unrewritten spells no more than `Self::m` does.
+        // A receiver read (S-529) reads it too: the type its field binds among.
         let through_self = r.target.split_once("::").is_some_and(|(head, _)| head == SELF_TYPE_HEAD)
-            || (r.form == RefForm::Method && r.receiver == Some(ReceiverShape::SelfInstance));
+            || (r.form == RefForm::Method && r.receiver == Some(ReceiverShape::SelfInstance))
+            || r.kind == EdgeKind::Accesses;
         if through_self {
             let source = self.by_symbol.get(&r.source_symbol);
             let self_type = source.and_then(|id| self.self_types.get(id));
@@ -1682,6 +2676,12 @@ impl Index {
                 return true;
             }
         }
+        if self.inside_dirty_partial(r, dirty) || self.inside_dirty_constant(r, dirty) {
+            return true;
+        }
+        if self.reads_include_scope(r) {
+            return true;
+        }
         let Some(file_id) = r.file_id else {
             return false;
         };
@@ -1695,11 +2695,13 @@ impl Index {
                 .and_then(|i| i.file_path.as_deref())
                 .is_some_and(|p| self.layout.is_package_shaped(p))
         };
-        if !(scope.globs.is_empty() && scope.static_globs.is_empty())
+        // A block's wildcards (S-603) are read as the file's are, at a level.
+        if !(scope.globs.is_empty() && scope.static_globs.is_empty() && scope.block_globs.is_empty())
             && scope
                 .globs
                 .iter()
                 .chain(&scope.static_globs)
+                .chain(scope.block_globs.values().flatten())
                 .flatten()
                 .flat_map(|seg| super::tokens(seg))
                 .any(|t| dirty.contains(&t))
@@ -1709,7 +2711,8 @@ impl Index {
         }
         // A package-shaped row reads every expansion of its head, not only the
         // first (`FileScope::alias_expansions`), so each must be able to select
-        // it — and so does an import-root file's row (S-519).
+        // it — and so does an import-root file's row (S-519), and a call through
+        // a local import in any language (S-594, `Ctx::resolve_local_import_call`).
         let first = r.target.split("::").next().unwrap_or_default();
         let import_root = || {
             self.by_symbol
@@ -1727,7 +2730,7 @@ impl Index {
                 .flatten()
                 .flat_map(|seg| super::tokens(seg))
                 .any(|t| dirty.contains(&t))
-            && (package_shaped() || import_root())
+            && (package_shaped() || import_root() || r.alias.as_deref() == Some(LOCAL_IMPORT_ALIAS))
         {
             return true;
         }
@@ -1749,6 +2752,60 @@ impl Index {
                 return false;
             };
             head = next.clone();
+        }
+        false
+    }
+
+    /// Whether `r` is sourced inside a declaration its plugin marks partial
+    /// (S-557, [`PartialTypes::marked`]), itself included, whose name a token of
+    /// `dirty` spells. What a row inside a part binds reads the type's other
+    /// parts — their members, their supertypes, which part is first — and a
+    /// change to any part spells the type's name, since every part declares
+    /// it, while the row's own target need not: a call to a method of another
+    /// part names the method alone.
+    fn inside_dirty_partial(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
+        if self.partials.marked.is_empty() {
+            return false;
+        }
+        let mut cursor = self.by_symbol.get(&r.source_symbol).copied();
+        for _ in 0..MAX_CONTAINS_DEPTH {
+            let Some(id) = cursor else {
+                return false;
+            };
+            if self.partials.marked.contains_key(&id)
+                && self.info.get(&id).is_some_and(|i| super::tokens(&i.name).iter().any(|t| dirty.contains(t)))
+            {
+                return true;
+            }
+            cursor = self.parent.get(&id).copied();
+        }
+        false
+    }
+
+    /// Whether `r` is a call on the instance in a lexical-constant file (Ruby,
+    /// S-568) whose caller sits in a class or module whose name a token of
+    /// `dirty` spells — a sync re-extracting any declaration of it, whose
+    /// superclass and mixins the [`Ctx::ancestor_walk`] pools, dirties that
+    /// name, before and after.
+    fn inside_dirty_constant(&self, r: &UnresolvedRefRow, dirty: &HashSet<String>) -> bool {
+        if r.kind != EdgeKind::Calls || !matches!(r.receiver, Some(ReceiverShape::SelfInstance | ReceiverShape::Super)) {
+            return false;
+        }
+        let mut cursor = self.by_symbol.get(&r.source_symbol).copied();
+        let path = cursor.and_then(|id| self.info.get(&id)).and_then(|i| i.file_path.as_deref());
+        if !path.is_some_and(|p| self.layout.resolves_lexical_constants(p)) {
+            return false;
+        }
+        for _ in 0..MAX_CONTAINS_DEPTH {
+            let Some(id) = cursor else {
+                return false;
+            };
+            if self.info.get(&id).is_some_and(|i| {
+                matches!(i.kind, NodeKind::Class | NodeKind::Module) && super::tokens(&i.name).iter().any(|t| dirty.contains(t))
+            }) {
+                return true;
+            }
+            cursor = self.parent.get(&id).copied();
         }
         false
     }
@@ -2192,23 +3249,41 @@ fn build_package_types(
     node_by_id: &HashMap<NodeId, &NodeRow>,
     layout: &PackageLayout,
 ) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    let admits = |path: &str, kind: NodeKind| layout.is_package_shaped(path) && is_type_like(kind);
+    build_package_index(nodes, parent, members, node_by_id, layout, admits, |path, name| layout.type_fqn(path, name))
+}
+
+/// The index of every file-root module's top-level children that `admits`
+/// takes (`admits(path, kind)`, by the file's path and the child's kind),
+/// keyed by `key(path, name)` — [`PackageLayout::type_fqn`] for
+/// [`build_package_types`] and [`build_top_level_callables`] (S-573), the bare
+/// name for [`build_unplaced_callables`] (S-551) — and partitioned by the
+/// declaring file's interop family. A child `key` names nothing is left out.
+/// Every list is id-sorted ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_package_index(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    node_by_id: &HashMap<NodeId, &NodeRow>,
+    layout: &PackageLayout,
+    admits: impl Fn(&str, NodeKind) -> bool,
+    key: impl Fn(&str, &str) -> Option<Vec<String>>,
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
     let mut by_family: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> = HashMap::new();
     for root in nodes {
         if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
             continue;
         }
         let Some(path) = &root.file_path else { continue };
-        if !layout.is_package_shaped(path) {
-            continue;
-        }
         let Some(family) = layout.family(path) else { continue };
-        let by_fqn = by_family.entry(family).or_default();
         for (name, id) in sorted_children(members, root.id) {
-            if !node_by_id.get(&id).is_some_and(|n| is_type_like(n.kind)) {
+            if !node_by_id.get(&id).is_some_and(|n| admits(path, n.kind)) {
                 continue;
             }
-            if let Some(fqn) = layout.type_fqn(path, name) {
-                by_fqn.entry(fqn).or_default().push(id);
+            if let Some(fqn) = key(path, name) {
+                by_family.entry(family.clone()).or_default().entry(fqn).or_default().push(id);
             }
         }
     }
@@ -2217,6 +3292,46 @@ fn build_package_types(
         list.dedup();
     }
     by_family
+}
+
+/// The top-level functions of every file whose language declares them members
+/// of its namespace (S-573, [`PackageLayout::declares_top_level_callables`]:
+/// Scala 3's top-level `def`), keyed by fully-qualified name as
+/// [`build_package_types`] keys types, and partitioned the same way. A map of
+/// its own, never the type index: a type and a function may share one name (a
+/// class `Foo` and a factory `def Foo`), and a source whose language declares
+/// no top-level functions — a Kotlin or Java file of the same `jvm` family —
+/// never reaches one ([`Ctx::top_level_callables`]).
+fn build_top_level_callables(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    node_by_id: &HashMap<NodeId, &NodeRow>,
+    layout: &PackageLayout,
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    let admits = |path: &str, kind: NodeKind| layout.declares_top_level_callables(path) && Want::Callable.admits(kind);
+    build_package_index(nodes, parent, members, node_by_id, layout, admits, |path, name| layout.type_fqn(path, name))
+}
+
+/// The top-level functions of every file whose namespace is not known — its
+/// top-level declarations sit in two namespaces, so no package keys it
+/// ([`PackageLayout::package_of`]) — in a language whose unqualified calls
+/// fall back to the global function (S-551,
+/// [`PackageLayout::falls_back_to_global_functions`]: PHP), keyed by bare name
+/// and partitioned as [`build_top_level_callables`] partitions. Such a function
+/// may be a global one, so the global namespace is not known in full where
+/// one shares the name ([`Ctx::namespace_callables`]).
+fn build_unplaced_callables(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    node_by_id: &HashMap<NodeId, &NodeRow>,
+    layout: &PackageLayout,
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    let admits = |path: &str, kind: NodeKind| {
+        layout.falls_back_to_global_functions(path) && layout.package_of(path).is_none() && Want::Callable.admits(kind)
+    };
+    build_package_index(nodes, parent, members, node_by_id, layout, admits, |_, name| Some(vec![name.to_string()]))
 }
 
 /// The directory modules of every import-root file (S-519,
@@ -2248,30 +3363,432 @@ fn build_namespace_files(
     parent: &HashMap<NodeId, NodeId>,
     layout: &PackageLayout,
 ) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    build_file_index(nodes, parent, layout, |path| {
+        layout.declares_namespaces(path).then(|| layout.package_of(path)).flatten()
+    })
+}
+
+/// Facade class → the file-root modules whose top-level functions it holds
+/// (S-560, [`Index::facades_by_fqn`]): every parentless `Module` node whose
+/// language declares a file facade, keyed by its declared namespace plus its
+/// facade's name ([`PackageLayout::file_facade`]) — `mixit.util.UtilsKt` for
+/// `mixit/util/Utils.kt` — id-sorted ([NFR-RA-06]). Empty under a layout that
+/// declares no facade.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_file_facades(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    layout: &PackageLayout,
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
+    build_file_index(nodes, parent, layout, |path| {
+        let mut fqn = layout.package_of(path)?;
+        fqn.push(layout.file_facade(path)?);
+        Some(fqn)
+    })
+}
+
+/// The file-root modules `key` names a key for (`key(path)`, by the file's
+/// path), partitioned by the file's interop family and id-sorted
+/// ([NFR-RA-06]) — what [`build_namespace_files`] and [`build_file_facades`]
+/// each read off one keying.
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_file_index(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    layout: &PackageLayout,
+    key: impl Fn(&str) -> Option<Vec<String>>,
+) -> HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> {
     let mut by_family: HashMap<String, HashMap<Vec<String>, Vec<NodeId>>> = HashMap::new();
     for root in nodes {
         if root.kind != NodeKind::Module || parent.contains_key(&root.id) {
             continue;
         }
         let Some(path) = root.file_path.as_deref() else { continue };
-        if !layout.declares_namespaces(path) {
-            continue;
-        }
-        let (Some(family), Some(namespace)) = (layout.family(path), layout.package_of(path)) else {
+        let (Some(family), Some(key)) = (layout.family(path), key(path)) else {
             continue;
         };
-        by_family
-            .entry(family)
-            .or_default()
-            .entry(namespace)
-            .or_default()
-            .push(root.id);
+        by_family.entry(family).or_default().entry(key).or_default().push(root.id);
     }
     for list in by_family.values_mut().flat_map(HashMap::values_mut) {
         list.sort();
         list.dedup();
     }
     by_family
+}
+
+/// What [`build_constants`] derives (S-565): the fields of [`Index`] of the same
+/// names.
+struct ConstantIndex {
+    constants: FamilyConstants,
+    constant_of: HashMap<NodeId, Vec<String>>,
+}
+
+/// The lexical-constant index (S-565, [FR-RS-33], [`Index::constants`]): every
+/// `Class` or `Module` node of a lexical-constant file but its file root, keyed
+/// by the constant it declares — the constant of its enclosing class or module
+/// (none at the top level) joined to the name it is written with
+/// ([`constant_fqn`]). A compact `class A::B` is written `A::B`: its scope is
+/// the `TypeUses` row its header records (the one row of that kind such a
+/// declaration's own first line carries, `references.scm`). Returns the index,
+/// partitioned by family and id-sorted ([NFR-RA-06]), and each declaration's
+/// constant.
+///
+/// A compact declaration's node spans its whole body (S-564), so its members
+/// are its own — a node nested in it reads the constant it declares — and what
+/// follows its `end` is the scope's, as for any other declaration.
+///
+/// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_constants(
+    nodes: &[NodeRow],
+    parent: &HashMap<NodeId, NodeId>,
+    by_symbol: &HashMap<String, NodeId>,
+    refs: &[UnresolvedRefRow],
+    layout: &PackageLayout,
+) -> ConstantIndex {
+    let declarations: HashMap<NodeId, &NodeRow> = nodes
+        .iter()
+        .filter(|n| matches!(n.kind, NodeKind::Class | NodeKind::Module) && parent.contains_key(&n.id))
+        .filter(|n| n.file_path.as_deref().is_some_and(|p| layout.resolves_lexical_constants(p)))
+        .map(|n| (n.id, n))
+        .collect();
+    if declarations.is_empty() {
+        return ConstantIndex {
+            constants: HashMap::new(),
+            constant_of: HashMap::new(),
+        };
+    }
+    let scopes: HashMap<NodeId, Vec<String>> = refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::TypeUses && r.form == RefForm::Path)
+        .filter_map(|r| {
+            let id = *by_symbol.get(&r.source_symbol)?;
+            let n = declarations.get(&id)?;
+            (r.line.is_some() && r.line == n.start_line).then(|| (id, split(&r.target)))
+        })
+        .collect();
+    let written = |id: NodeId| -> Vec<String> {
+        let mut path = scopes.get(&id).cloned().unwrap_or_default();
+        path.push(declarations[&id].name.clone());
+        path
+    };
+    let mut constant_of: HashMap<NodeId, Vec<String>> = HashMap::new();
+    let mut by_family: FamilyConstants = HashMap::new();
+    for (&id, n) in &declarations {
+        // The declarations enclosing this one, innermost first, up to the file
+        // root or the first enclosing node that is no class or module.
+        let mut chain = vec![id];
+        let mut at = id;
+        while let Some(&up) = parent.get(&at).filter(|p| declarations.contains_key(p)) {
+            chain.push(up);
+            at = up;
+        }
+        let fqn = chain
+            .iter()
+            .rev()
+            .fold(Vec::new(), |enclosing, &c| constant_fqn(&enclosing, &written(c)));
+        let Some(family) = n.file_path.as_deref().and_then(|p| layout.family(p)) else { continue };
+        by_family.entry(family).or_default().entry(fqn.clone()).or_default().push(id);
+        constant_of.insert(id, fqn);
+    }
+    for list in by_family.values_mut().flat_map(HashMap::values_mut) {
+        list.sort();
+    }
+    ConstantIndex {
+        constants: by_family,
+        constant_of,
+    }
+}
+
+/// The parts of the partial types (S-557, [FR-RS-29], [`Index::partials`]).
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+#[derive(Debug, Default)]
+struct PartialTypes {
+    /// Each part of a partial type → its first-declared part, the type's
+    /// canonical node; the first part maps to itself.
+    first: HashMap<NodeId, NodeId>,
+    /// Each first-declared part → every part of its type, in declaration order
+    /// (file path, then line).
+    parts: HashMap<NodeId, Vec<NodeId>>,
+    /// Every type declaration its plugin marks partial, a part of a type or
+    /// not ([`PARTIAL_TYPE_ALIAS`]) → its arity, the type-parameter count its
+    /// row records — what a sync re-selects the rows inside of
+    /// ([`Index::ref_affected`]).
+    marked: HashMap<NodeId, u32>,
+}
+
+impl PartialTypes {
+    /// The first-declared part of `id`'s type, or `id` itself when it is no
+    /// part.
+    fn first_of(&self, id: NodeId) -> NodeId {
+        self.first.get(&id).copied().unwrap_or(id)
+    }
+
+    /// Every part of `id`'s type, or `id` alone when it is no part.
+    fn parts_of<'a>(&'a self, id: &'a NodeId) -> &'a [NodeId] {
+        self.first
+            .get(id)
+            .and_then(|first| self.parts.get(first))
+            .map_or(std::slice::from_ref(id), Vec::as_slice)
+    }
+
+    /// Record the declarations `ids` of one name as the parts of the types
+    /// they are (S-557), one type per directory tree ([`directory_trees`]):
+    /// a C# type's parts belong to one project, and the directory stands in for
+    /// the project, whose `.csproj` is not read — the [`GLOBAL_WILDCARD_ALIAS`]
+    /// precedent. Two projects' `partial class Program` are two types, as they
+    /// are to the compiler — and so are `Box` and `Box<T>`, so a tree's parts
+    /// are one type per arity. A declaration not marked partial in a tree makes
+    /// none of its declarations a part: its arity is unrecorded.
+    fn unite(&mut self, ids: &[NodeId], node_by_id: &HashMap<NodeId, &NodeRow>) {
+        for tree in directory_trees(ids, node_by_id) {
+            if !tree.iter().all(|id| self.marked.contains_key(id)) {
+                continue;
+            }
+            let mut by_arity: BTreeMap<u32, Vec<NodeId>> = BTreeMap::new();
+            for id in tree {
+                by_arity.entry(self.marked[&id]).or_default().push(id);
+            }
+            for parts in by_arity.values() {
+                self.unite_tree(parts, node_by_id);
+            }
+        }
+    }
+
+    /// Record `ids`, the declarations of one name in one directory tree, as the
+    /// parts of one type when they are (S-557): two or more declarations,
+    /// every one marked partial and all of one kind — a `partial` declaration
+    /// beside a plain one of the same name is two types, an ambiguity never a
+    /// union ([NFR-RA-05]). The parts are ordered by file path, then line, so
+    /// the first-declared part a cold index and a sync pick is the same
+    /// ([NFR-RA-06]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    fn unite_tree(&mut self, ids: &[NodeId], node_by_id: &HashMap<NodeId, &NodeRow>) {
+        if ids.len() < 2 || !ids.iter().all(|id| self.marked.contains_key(id)) {
+            return;
+        }
+        let kinds: HashSet<NodeKind> = ids.iter().filter_map(|id| node_by_id.get(id).map(|n| n.kind)).collect();
+        if kinds.len() != 1 {
+            return;
+        }
+        let mut parts = ids.to_vec();
+        parts.sort_by_key(|id| {
+            let n = node_by_id.get(id);
+            (n.and_then(|n| n.file_path.clone()), n.and_then(|n| n.start_line), *id)
+        });
+        parts.dedup();
+        let first = parts[0];
+        for &part in &parts {
+            self.first.insert(part, first);
+        }
+        self.parts.insert(first, parts);
+    }
+
+    /// Read each list of `lists` with every part replaced by its type's
+    /// first-declared part, sorted and deduplicated: a name the parts of one
+    /// type share names that one type ([FR-RS-29]).
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    fn collapse<'a>(&self, lists: impl Iterator<Item = &'a mut Vec<NodeId>>) {
+        for list in lists.filter(|list| list.iter().any(|id| self.first.contains_key(id))) {
+            for id in list.iter_mut() {
+                *id = self.first_of(*id);
+            }
+            list.sort_unstable();
+            list.dedup();
+        }
+    }
+
+    /// Give every part of each partial type the union of its parts' supertypes
+    /// (S-557, [FR-RS-29]): a base list on one part is the whole type's, as are
+    /// the interfaces any part implements. A part is never its own type's
+    /// supertype. A class whose parts name two base classes has several bases
+    /// ([`build_supertypes`]): none is a supertype, and the type is open with
+    /// its bases unseen, as one declaration naming two would be.
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    fn unite_hierarchy(&self, hierarchy: &mut Hierarchy, node_by_id: &HashMap<NodeId, &NodeRow>) {
+        for parts in self.parts.values() {
+            UnitedHierarchy::of(parts, hierarchy, node_by_id).give(parts, hierarchy);
+        }
+    }
+}
+
+/// What every part of one partial type has in the walk's [`Hierarchy`] (S-557,
+/// [`PartialTypes::unite_hierarchy`]): the union of the parts' supertypes and
+/// interfaces, none of them a part, and whether any part is open, has unseen
+/// bases or uses a trait.
+struct UnitedHierarchy {
+    supertypes: Vec<NodeId>,
+    interfaces: Vec<NodeId>,
+    open: bool,
+    unseen: bool,
+    traits: bool,
+}
+
+impl UnitedHierarchy {
+    /// Unite the facts `hierarchy` holds for `parts`, the first-declared part
+    /// first. A class whose parts name two base classes has several bases.
+    fn of(parts: &[NodeId], hierarchy: &Hierarchy, node_by_id: &HashMap<NodeId, &NodeRow>) -> Self {
+        let union = |map: &HashMap<NodeId, Vec<NodeId>>| {
+            let mut ids: Vec<NodeId> = parts
+                .iter()
+                .filter_map(|p| map.get(p))
+                .flatten()
+                .copied()
+                .filter(|id| !parts.contains(id))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let any = |set: &HashSet<NodeId>| parts.iter().any(|p| set.contains(p));
+        let mut united = UnitedHierarchy {
+            supertypes: union(&hierarchy.supertypes),
+            interfaces: union(&hierarchy.interfaces),
+            open: any(&hierarchy.open),
+            unseen: any(&hierarchy.unseen_bases),
+            traits: any(&hierarchy.trait_users),
+        };
+        let class = node_by_id.get(&parts[0]).is_some_and(|n| n.kind != NodeKind::Interface);
+        if class && united.supertypes.len() > 1 {
+            united.supertypes.clear();
+            united.open = true;
+            united.unseen = true;
+        }
+        united
+    }
+
+    /// Record these facts for every part of `parts` in `hierarchy`.
+    fn give(&self, parts: &[NodeId], hierarchy: &mut Hierarchy) {
+        let assign = |map: &mut HashMap<NodeId, Vec<NodeId>>, part: NodeId, ids: &Vec<NodeId>| {
+            if ids.is_empty() {
+                map.remove(&part);
+            } else {
+                map.insert(part, ids.clone());
+            }
+        };
+        for &part in parts {
+            assign(&mut hierarchy.supertypes, part, &self.supertypes);
+            assign(&mut hierarchy.interfaces, part, &self.interfaces);
+            let sets = [
+                (&mut hierarchy.open, self.open),
+                (&mut hierarchy.unseen_bases, self.unseen),
+                (&mut hierarchy.trait_users, self.traits),
+            ];
+            for (set, _) in sets.into_iter().filter(|(_, member)| *member) {
+                set.insert(part);
+            }
+        }
+    }
+}
+
+/// `ids` split by the directory tree their files lie in (S-557,
+/// [`PartialTypes::unite`]): each tree is rooted at the directory of one of
+/// them that no other's directory encloses, and holds every declaration in or
+/// below it. `Models/Foo.cs` and `Models/Generated/Foo.g.cs` are one tree;
+/// `Catalog/Program.cs` and `Ordering/Program.cs` are two. A declaration with
+/// no file is in none. Each tree keeps the order of `ids`.
+fn directory_trees(ids: &[NodeId], node_by_id: &HashMap<NodeId, &NodeRow>) -> Vec<Vec<NodeId>> {
+    let dir_of = |id: &NodeId| {
+        let path = node_by_id.get(id)?.file_path.as_deref()?;
+        Some(path.rsplit_once('/').map_or("", |(dir, _)| dir))
+    };
+    let within = |dir: &str, root: &str| {
+        root.is_empty() || dir == root || dir.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+    };
+    let dirs: BTreeSet<&str> = ids.iter().filter_map(dir_of).collect();
+    dirs.iter()
+        .filter(|&&dir| !dirs.iter().any(|&other| other != dir && within(dir, other)))
+        .map(|&root| ids.iter().copied().filter(|id| dir_of(id).is_some_and(|dir| within(dir, root))).collect())
+        .collect()
+}
+
+/// The partial types of the graph (S-557, [FR-RS-29]): the type declarations
+/// whose own `Extends` row is aliased [`PARTIAL_TYPE_ALIAS`], united where they
+/// declare one fully-qualified name ([`PartialTypes::unite`]).
+///
+/// A top-level part is keyed by its fully-qualified name, the
+/// [`types_by_fqn`](Index::types_by_fqn) entry — across the files of one
+/// directory tree ([`directory_trees`]), as C# unites a type's parts across
+/// one project. A nested part is keyed by its enclosing
+/// type — the first-declared part of that type, when it is partial itself — and
+/// its name, so the parts of `Outer.Inner` written in the two parts of `Outer`
+/// are one type too. Nested parts are read outermost first, so an enclosing
+/// type's parts are united before its members are.
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+fn build_partial_types(
+    refs: &[UnresolvedRefRow],
+    by_symbol: &HashMap<String, NodeId>,
+    parent: &HashMap<NodeId, NodeId>,
+    members: &Members,
+    types_by_fqn: &HashMap<String, HashMap<Vec<String>, Vec<NodeId>>>,
+    node_by_id: &HashMap<NodeId, &NodeRow>,
+) -> PartialTypes {
+    let mut partials = PartialTypes::default();
+    for r in refs {
+        if r.kind != EdgeKind::Extends || r.alias.as_deref() != Some(PARTIAL_TYPE_ALIAS) {
+            continue;
+        }
+        let Some(n) = by_symbol.get(&r.source_symbol).and_then(|id| node_by_id.get(id)) else {
+            continue;
+        };
+        if is_type_like(n.kind) {
+            partials.marked.insert(n.id, r.arg_count.unwrap_or(0));
+        }
+    }
+    if partials.marked.is_empty() {
+        return partials;
+    }
+    for ids in types_by_fqn.values().flat_map(HashMap::values) {
+        partials.unite(ids, node_by_id);
+    }
+    let is_type = |id: &NodeId| node_by_id.get(id).is_some_and(|n| is_type_like(n.kind));
+    let depth = |mut id: NodeId| {
+        let mut depth = 0u32;
+        while let Some(up) = parent.get(&id).copied().filter(is_type) {
+            depth += 1;
+            id = up;
+            if depth >= MAX_CONTAINS_DEPTH {
+                break;
+            }
+        }
+        depth
+    };
+    let mut nested: Vec<(u32, NodeId)> = partials
+        .marked
+        .keys()
+        .filter(|id| parent.get(id).is_some_and(is_type))
+        .map(|&id| (depth(id), id))
+        .collect();
+    nested.sort_unstable();
+    let mut seen: HashSet<(NodeId, String)> = HashSet::new();
+    for (_, id) in nested {
+        let (Some(&scope), Some(name)) = (parent.get(&id), node_by_id.get(&id).map(|n| n.name.clone())) else {
+            continue;
+        };
+        let scope = partials.first_of(scope);
+        if !seen.insert((scope, name.clone())) {
+            continue;
+        }
+        let mut ids: Vec<NodeId> = partials
+            .parts_of(&scope)
+            .iter()
+            .filter_map(|part| members.get(part).and_then(|m| m.get(&name)))
+            .flatten()
+            .copied()
+            .filter(is_type)
+            .collect();
+        ids.sort_unstable();
+        partials.unite(&ids, node_by_id);
+    }
+    partials
 }
 
 /// Canonical symbol → node. First-wins on a (model-prohibited) duplicate
@@ -2398,12 +3915,18 @@ fn build_file_scopes(refs: &[UnresolvedRefRow]) -> HashMap<i64, FileScope> {
             RefForm::Glob if r.alias.as_deref() == Some(STATIC_WILDCARD_ALIAS) => {
                 scope.static_globs.push(path)
             }
-            RefForm::Glob => {
-                if r.exported == Some(true) {
-                    scope.exported_globs.push(path.clone());
+            RefForm::Glob => match r.alias.as_deref().and_then(wildcard_block) {
+                // A block enclosing none of the file's declarations (`{}`):
+                // its `using`s reach none of them (S-603).
+                Some(block) if block.is_empty() => {}
+                Some(block) => scope.block_globs.entry(block).or_default().push(path),
+                None => {
+                    if r.exported == Some(true) {
+                        scope.exported_globs.push(path.clone());
+                    }
+                    scope.globs.push(path);
                 }
-                scope.globs.push(path);
-            }
+            },
             _ => {
                 if let Some(alias) = &r.alias {
                     // An identical import is one expansion, not a rival
@@ -2480,6 +4003,31 @@ fn build_impls_by_trait_method(
     map
 }
 
+/// `(trait node, method name)` → the symbol of each callable of `nodes` that a
+/// `Contains` edge of `edges` places directly under a trait of `info`
+/// ([`Index::trait_methods`], S-712). The first edge of a name wins, and the
+/// snapshot's edges are read in their stored order, so the map is
+/// deterministic ([NFR-RA-06]).
+///
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+fn build_trait_methods(
+    nodes: &[NodeRow],
+    edges: &[EdgeRow],
+    info: &HashMap<NodeId, NodeInfo>,
+) -> HashMap<(NodeId, String), String> {
+    let callables: HashMap<NodeId, &NodeRow> =
+        nodes.iter().filter(|n| Want::Callable.admits(n.kind)).map(|n| (n.id, n)).collect();
+    let mut map: HashMap<(NodeId, String), String> = HashMap::new();
+    for e in edges.iter().filter(|e| e.kind == EdgeKind::Contains) {
+        let Some(method) = callables.get(&e.target) else { continue };
+        if info.get(&e.source).is_some_and(|i| i.kind == NodeKind::Trait) {
+            map.entry((e.source, method.name.clone()))
+                .or_insert_with(|| method.symbol.as_str().to_string());
+        }
+    }
+    map
+}
+
 /// The type hierarchy (S-468, [CR-150] §3.2 B; S-522): each type's
 /// in-repository supertypes, the name tokens a sync must watch to keep a walk
 /// over it fresh, and the families whose rows it holds ([`Index::supertypes`],
@@ -2492,6 +4040,24 @@ struct Hierarchy {
     families: HashSet<String>,
     trait_users: HashSet<NodeId>,
     open: HashSet<NodeId>,
+    mixins: HashMap<NodeId, Mixins>,
+}
+
+/// The modules one Ruby class or module mixes into its instances' ancestors
+/// (S-568, [FR-RS-35]; [`Index::mixins`]), each list id-sorted.
+///
+/// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+#[derive(Debug, Default)]
+struct Mixins {
+    /// The modules its `include`s bind to: read after the class's own methods.
+    includes: Vec<NodeId>,
+    /// The modules its `prepend`s bind to: read before them.
+    prepends: Vec<NodeId>,
+    /// An `include` binds no single module the graph holds — an external one
+    /// (`include Comparable`), or a constant of several declarations.
+    unseen_includes: bool,
+    /// A `prepend` binds none.
+    unseen_prepends: bool,
 }
 
 /// Build the [`Hierarchy`] from the `Extends` rows the type-relation arm binds
@@ -2539,6 +4105,12 @@ struct Hierarchy {
 /// with several bases. Every other language records no interface, so its
 /// walks are exactly as before.
 ///
+/// A Ruby class's superclass is an `Extends` like any other (S-568), and its
+/// mixins are filed apart ([`add_mixin`], [`Index::mixins`]): an `include` or
+/// a `prepend` is no supertype of single inheritance, and the walk that reads
+/// them is Ruby's own ([`Ctx::ancestor_walk`]). Both join the tokens, with
+/// the source's own name.
+///
 /// Only the subtype's own rows count. A capture-before-delete `Symbol` row
 /// ([ADR-10]) is filed under the **supertype's** file and outlives the
 /// subtype's `extends` clause until that file is re-extracted, so reading it
@@ -2560,10 +4132,17 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
         families: HashSet::new(),
         trait_users: HashSet::new(),
         open: HashSet::new(),
+        mixins: HashMap::new(),
     };
     let mut bases: HashMap<NodeId, usize> = HashMap::new();
     for r in refs {
         if r.form == RefForm::Symbol || !matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements) {
+            continue;
+        }
+        // A partial type part's own row names its type, never a supertype
+        // (S-557): the parts' supertypes are united once the walk's map is
+        // built ([`PartialTypes::unite_hierarchy`]).
+        if r.alias.as_deref() == Some(PARTIAL_TYPE_ALIAS) {
             continue;
         }
         let Some(&source_id) = ix.by_symbol.get(&r.source_symbol) else {
@@ -2574,6 +4153,19 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
             continue;
         };
         let path = source.and_then(|i| i.file_path.as_deref());
+        // A Ruby class or module (S-568) is watched under its own name too:
+        // its reopenings in other files pool their ancestry, which a sync
+        // re-extracting one of them moves under that name alone.
+        let constants = path.is_some_and(|p| ix.layout.resolves_lexical_constants(p));
+        if constants {
+            hierarchy.tokens.extend(source.into_iter().flat_map(|i| super::tokens(&i.name)));
+        }
+        if constants && r.kind == EdgeKind::Implements {
+            hierarchy.tokens.extend(super::tokens(&r.target));
+            hierarchy.families.extend(path.and_then(|p| ix.layout.family(p)));
+            add_mixin(&mut hierarchy.mixins, source_id, r, ix);
+            continue;
+        }
         // Whether the source's language inherits interface member bodies
         // (S-609): only then is an interface a level the walk visits.
         let inherits = path.is_some_and(|p| ix.layout.inherits_interface_bodies(p));
@@ -2624,11 +4216,33 @@ fn build_supertypes(refs: &[UnresolvedRefRow], ix: &Index) -> Hierarchy {
         hierarchy.open.insert(id);
         hierarchy.unseen_bases.insert(id);
     }
-    for ids in hierarchy.supertypes.values_mut().chain(hierarchy.interfaces.values_mut()) {
+    let mixins = hierarchy.mixins.values_mut().flat_map(|m| [&mut m.includes, &mut m.prepends]);
+    for ids in hierarchy.supertypes.values_mut().chain(hierarchy.interfaces.values_mut()).chain(mixins) {
         ids.sort_unstable();
         ids.dedup();
     }
     hierarchy
+}
+
+/// File the Ruby mixin row `r` of the class or module `source` (S-568,
+/// [FR-RS-35]): an `include`'s or a `prepend`'s module, bound by [`bind`]
+/// through the constant index, among its `mixins` — or, bound to none, the
+/// mark that a module the walk cannot see sits there. An `extend` is no level
+/// of the instances' ancestors and is filed nowhere.
+///
+/// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+fn add_mixin(mixins: &mut HashMap<NodeId, Mixins>, source: NodeId, r: &UnresolvedRefRow, ix: &Index) {
+    let prepend = match r.alias.as_deref() {
+        Some(MIXIN_EXTEND_ALIAS) => return,
+        alias => alias == Some(MIXIN_PREPEND_ALIAS),
+    };
+    let entry = mixins.entry(source).or_default();
+    match bind(r, ix, BindingPolicy::Strict) {
+        Outcome::Bound { target, .. } if prepend => entry.prepends.push(target),
+        Outcome::Bound { target, .. } => entry.includes.push(target),
+        _ if prepend => entry.unseen_prepends = true,
+        _ => entry.unseen_includes = true,
+    }
 }
 
 /// The one workspace [`NodeKind::Trait`] node named `name`, or `None` when zero
@@ -2669,17 +4283,26 @@ fn unique_trait(
 ///   language declares — the package rungs, a declared namespace, or the path
 ///   modules of [FR-RS-14].
 ///
+/// - in a language of structural types (`structural`, TypeScript, S-535,
+///   [FR-EX-17]), every relation, from any declaration: a function's parameter
+///   type, a module-level variable's, a `new` in a method.
+///
 /// `Extends` relates like to like, so it reads the source's own kind: an
 /// interface's binds an interface, a class's a class — or, where its language
 /// leaves the kind unsaid (`kind_follows_target`, C# and Kotlin), a class, an
 /// interface or a trait, its edge kind following the target
-/// ([`relation_edge_kind`]). `Implements` binds an interface or a trait.
+/// ([`relation_edge_kind`]). `Implements` binds an interface or a trait. In a
+/// structural language an interface's `Extends` and every `Implements` bind any
+/// type-like declaration ([`Want::Type`]): TypeScript implements an abstract
+/// class and extends a class into an interface; a class's `Extends` still
+/// binds a class.
 ///
 /// Every other row gets `None` and keeps the arm it had. That includes Rust's
 /// `Implements`, which is sourced at an impl **method**, so the S-281 trait bind
 /// and its `dyn` fan-out are untouched.
 ///
 /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+/// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
 /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
 /// [FR-RS-15]: ../../../docs/specs/requirements/FR-RS-15.md
 fn type_relation_want(
@@ -2687,16 +4310,22 @@ fn type_relation_want(
     source_kind: Option<NodeKind>,
     package_shaped: bool,
     kind_follows_target: bool,
+    structural: bool,
 ) -> Option<Want> {
     if !matches!(r.form, RefForm::Path | RefForm::Symbol) {
         return None;
     }
     let from_type = source_kind.is_some_and(is_class_like);
     let supertype = from_type && matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements);
-    if !package_shaped && !supertype {
+    if !package_shaped && !supertype && !structural {
         return None;
     }
     match r.kind {
+        EdgeKind::Extends | EdgeKind::Implements
+            if structural && (r.kind == EdgeKind::Implements || source_kind == Some(NodeKind::Interface)) =>
+        {
+            Some(Want::Type)
+        }
         EdgeKind::Extends if source_kind == Some(NodeKind::Interface) => Some(Want::Interface),
         EdgeKind::Extends if from_type && kind_follows_target => Some(Want::Supertype),
         EdgeKind::Extends | EdgeKind::Instantiates => Some(Want::Class),
@@ -2715,12 +4344,36 @@ fn relation_want_of(
     layout: &PackageLayout,
 ) -> Option<Want> {
     let path = source.and_then(|i| i.file_path.as_deref());
+    if path.is_some_and(|p| layout.resolves_lexical_constants(p)) {
+        if let Some(want) = ancestry_want(r, source.map(|i| i.kind)) {
+            return Some(want);
+        }
+    }
     type_relation_want(
         r,
         source.map(|i| i.kind),
         path.is_some_and(|p| layout.is_package_shaped(p)),
         path.is_some_and(|p| layout.supertype_kind_follows_target(p)),
+        path.is_some_and(|p| layout.has_structural_types(p)),
     )
+}
+
+/// The kind a Ruby ancestry row binds (S-568, [FR-RS-35]), or `None` when `r`
+/// is none: a class's superclass (`Extends`) binds a class, and a class's or
+/// module's mixin (`Implements`: `include`, `prepend`, `extend`) a module —
+/// Ruby mixes in nothing else. Read through the constant index
+/// ([`Ctx::constant_relation`]).
+///
+/// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+fn ancestry_want(r: &UnresolvedRefRow, source_kind: Option<NodeKind>) -> Option<Want> {
+    if !matches!(r.form, RefForm::Path | RefForm::Symbol) {
+        return None;
+    }
+    match (r.kind, source_kind?) {
+        (EdgeKind::Extends, NodeKind::Class) => Some(Want::Class),
+        (EdgeKind::Implements, NodeKind::Class | NodeKind::Module) => Some(Want::Module),
+        _ => None,
+    }
 }
 
 /// The edge a type relation looked up with `want` records once it binds a node
@@ -2734,6 +4387,66 @@ fn relation_edge_kind(row_kind: EdgeKind, want: Want, target: Option<NodeKind>) 
     match (want, target) {
         (Want::Supertype, Some(NodeKind::Interface | NodeKind::Trait)) => EdgeKind::Implements,
         _ => row_kind,
+    }
+}
+
+/// What one exported `Imports` row of a path-grammar file says (S-534,
+/// [FR-RS-19]; `extract::ts_export_rows`).
+///
+/// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+enum TsExport<'r> {
+    /// `export { local as exported }`, `export default local`: a
+    /// single-segment target, the file's own declaration.
+    Local { local: &'r str, exported: &'r str },
+    /// `export { name as exported } from 'module'`: `<module>::<name>`.
+    Named { module: &'r str, name: &'r str, exported: &'r str },
+    /// `export * from 'module'`: a `Glob` row.
+    Star { module: &'r str },
+}
+
+/// The export `r` records, or `None` for a row not marked exported — every
+/// import, and every row of a language that marks none. Read only for a
+/// path-grammar file's row: a Rust `pub use` is followed by its own rungs.
+fn ts_export_of(r: &UnresolvedRefRow) -> Option<TsExport<'_>> {
+    if r.kind != EdgeKind::Imports || r.exported != Some(true) {
+        return None;
+    }
+    match r.form {
+        RefForm::Glob => Some(TsExport::Star { module: &r.target }),
+        RefForm::Path => Some(match r.target.rsplit_once("::") {
+            Some((module, name)) => TsExport::Named {
+                module,
+                name,
+                exported: r.alias.as_deref().unwrap_or(name),
+            },
+            None => TsExport::Local {
+                local: &r.target,
+                exported: r.alias.as_deref()?,
+            },
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a node of `kind` is what a call through an import can name
+/// (S-440, S-534): a top-level function — an arrow-bound `const` and a wrapped
+/// component included — or a top-level value binding, such as the `default`
+/// symbol of `export default registerAs(…)` or `const Dialog =
+/// Primitive.Root`. A class is reached through `new` or its members, never
+/// called.
+fn is_imported_call_target(kind: NodeKind) -> bool {
+    matches!(kind, NodeKind::Function | NodeKind::Constant | NodeKind::Variable)
+}
+
+/// `path` with its trailing extension removed when it is one of `targets` —
+/// the extensions that name the imported file itself (`src/index.ts`, a Ruby
+/// `require 'rack/lint.rb'`); any other extension is kept.
+fn strip_target_extension(path: String, targets: &HashSet<String>) -> String {
+    match path.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() && !ext.contains('/') && targets.contains(&ext.to_ascii_lowercase()) => {
+            stem.to_string()
+        }
+        _ => path,
     }
 }
 
@@ -2754,6 +4467,25 @@ pub(crate) fn bind(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -> O
     bind_traced(r, ix, policy).0
 }
 
+/// The instance method `action` of the class the constant `constant` names,
+/// read from the top level, as seen from `source` — a route's `controller#action`
+/// handler (S-567, [FR-FW-03]; [`Ctx::constant_action`]). `None` outside a
+/// lexical-constant language, and wherever exactly one method is not proven
+/// ([NFR-RA-05]).
+///
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) fn bind_constant_action(
+    ix: &Index,
+    source: NodeId,
+    constant: &[String],
+    action: &str,
+    policy: BindingPolicy,
+) -> Option<NodeId> {
+    let ctx = Ctx::at(ix, source, None, policy, action);
+    ctx.lexical_constants.then(|| ctx.constant_action(constant, action)).flatten()
+}
+
 #[cfg(test)]
 thread_local! {
     /// [`Ctx::resolve_path`] entries on this thread, which the binder's own
@@ -2772,8 +4504,9 @@ pub(crate) fn bind_counting_path_visits(r: &UnresolvedRefRow, ix: &Index, policy
 
 /// Why `r` — a `Calls` row from a package-shaped source or an impl-block
 /// language (every one of its rows, S-607), or in any other language a
-/// `Self::m` call through the caller's recorded self type (S-493) or a
-/// receiver call bound by its shape (S-514) — stays unbound (S-468, [CR-150]
+/// `Self::m` call through the caller's recorded self type (S-493), a
+/// receiver call bound by its shape (S-514) or a call through a local binding
+/// (S-594) — stays unbound (S-468, [CR-150]
 /// §3.2 C), or `None` when it is no such row, or when it binds
 /// now: a capture-before-delete `Symbol` row, or a row the ledger holds unbound
 /// that this binder binds (a graph bound by an older binary, or a sync that did
@@ -2807,8 +4540,9 @@ pub(crate) fn residue(r: &UnresolvedRefRow, ix: &Index, policy: BindingPolicy) -
     if !ix.layout.is_package_shaped(source_file) {
         // Outside a package-shaped language only a call through the caller's
         // recorded self type (S-493, Go's S-509,
-        // [`Ctx::resolve_recorded_self_type_call`]) and a receiver call
-        // (S-514, the `RefForm::Method` arm) record a reason.
+        // [`Ctx::resolve_recorded_self_type_call`]), a receiver call (S-514,
+        // the `RefForm::Method` arm) and a call through a local binding
+        // (S-594, [`Ctx::resolve_local_binding_call`]) record a reason.
         return miss;
     }
     Some(miss.unwrap_or(match r.form {
@@ -2845,11 +4579,12 @@ fn bind_traced(
     let ctx = Ctx::for_row(r, ix, source, policy);
     ctx.scope_only.set(relation.is_some() || is_proven_receiver_call(r));
     let outcome = match (bind_in(&ctx, r, relation), ctx.fanned.take()) {
-        (Outcome::Unbound, Some(targets)) => Outcome::BoundMany {
+        (Outcome::Unbound, Some(Fan { targets, dispatch })) => Outcome::BoundMany {
             source,
             targets,
             kind: EdgeKind::Calls,
             payload: None,
+            dispatch,
         },
         (outcome, _) => outcome,
     };
@@ -2858,7 +4593,7 @@ fn bind_traced(
 
 /// The argument count `r`'s candidates are filtered by (S-592, [FR-RS-43]), or
 /// `None` when the row is filtered by none: its count, or its file's language's
-/// arity, is unknown — a JavaScript file the TypeScript grammars parse enforces
+/// arity, is unknown — a JavaScript file enforces
 /// none ([`PackageLayout::checks_arity`]) — or it takes no arm that chooses
 /// among same-named callables by their arguments.
 ///
@@ -2890,12 +4625,25 @@ fn filtered_count(r: &UnresolvedRefRow, source_file: Option<&str>, layout: &Pack
         .flatten()
 }
 
-/// `true` for a Rust call retyped from its proven receiver (S-587): the
-/// Path-form `T::m` of shape `other`, which nothing else records — a written
-/// `T::m()` has no receiver shape. Bound among `T`'s methods alone (S-588,
-/// [`Ctx::resolve_proven_receiver_call`]), and `T` is read by scope and module
-/// model only ([`Ctx::scope_only`]): a same-named type the file does not import
-/// is not the type it proved.
+/// `true` for a row naming a type as written — a supertype, a `new`, a type
+/// use — whose `arg_count` records the written type's arity where its
+/// language tells types apart by it (S-602, [`Ctx::type_arity`]).
+fn is_type_relation(kind: EdgeKind) -> bool {
+    matches!(kind, EdgeKind::Extends | EdgeKind::Implements | EdgeKind::Instantiates | EdgeKind::TypeUses)
+}
+
+/// `true` for a call retyped from its proven receiver — a Rust one (S-587),
+/// a TypeScript one (S-537), a Python one (S-546) or a Kotlin one (S-563):
+/// the Path-form `T::m` of shape `other`, which nothing else records — a
+/// written `T::m()` has no receiver shape. A Rust call is bound among `T`'s
+/// methods alone (S-588, [`Ctx::resolve_proven_receiver_call`]), a TypeScript
+/// one among `T`'s members up its proven `Extends`
+/// ([`Ctx::resolve_structural_receiver_call`]), a Python one among its
+/// class's methods up that chain ([`Ctx::resolve_import_root_receiver_call`]),
+/// and a Kotlin one among `T`'s own members, never its companion's
+/// ([`Ctx::resolve_companion_language_receiver_call`]);
+/// `T` is read by scope and module model only ([`Ctx::scope_only`]): a
+/// same-named type the file does not import is not the type it proved.
 pub(crate) fn is_proven_receiver_call(r: &UnresolvedRefRow) -> bool {
     r.kind == EdgeKind::Calls && r.form == RefForm::Path && r.receiver == Some(ReceiverShape::Other)
 }
@@ -2934,6 +4682,7 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
         };
     }
 
+
     // A type relation (S-466, CR-149 §3.2 B, FR-EX-10; S-522, FR-RS-15): any
     // relation from a package-shaped source, and in every language a type's
     // `Extends` or `Implements` ([`type_relation_want`]). Bound only to the one
@@ -2943,16 +4692,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
     // widened beyond Rust `Trait` targets: a type's `Implements` binds an
     // `Interface` or a `Trait`, and never reaches the trait rule below. A
     // supertype whose syntax was silent takes its edge kind from the target.
+    // A partial type part's own row binds here too ([`Ctx::bind_type_relation`]).
     if let Some(want) = relation {
-        return match ctx.resolve_type_relation(r, want) {
-            Res::Found(target) => Outcome::Bound {
-                source,
-                target,
-                kind: relation_edge_kind(r.kind, want, ix.info.get(&target).map(|i| i.kind)),
-                payload: r.payload.clone(),
-            },
-            _ => Outcome::Unbound,
-        };
+        return ctx.bind_type_relation(r, want);
     }
 
     // A trait-implementation fact (S-281, CR-073, FR-RS-08): an `impl T for X`
@@ -2970,6 +4712,30 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             Some(target) => bound(target),
             None => Outcome::Unbound,
         };
+    }
+
+    // A bare call a local binding in force shadows (S-594, [FR-RS-44]): a
+    // local value binds nothing, a local import resolves through it alone —
+    // first, before the include scope and the lexical walk, which would read
+    // past it ([`Ctx::resolve_local_binding_call`]).
+    //
+    // A row of an include-roots language (S-579, [FR-RS-38]): an `#include`,
+    // a `using`, a Path-form call — bound through the including file's scopes
+    // and the declarations its includes make visible, never through the module
+    // tree or a workspace guess ([`Ctx::resolve_include_row`]). Then a
+    // path-grammar re-export or export alias (S-534) — an `export * from 's'`
+    // `Glob` row or an exported `Path` row — is decided by what it names
+    // ([`Ctx::resolve_export_row`]), before either form's own arm. The two never
+    // both answer: a C++ file records no TypeScript export.
+    //
+    // [FR-RS-38]: ../../../docs/specs/requirements/FR-RS-38.md
+    // [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+    if let Some(outcome) = ctx
+        .resolve_local_binding_call(r)
+        .or_else(|| ctx.resolve_include_row(r))
+        .or_else(|| ctx.resolve_export_row(r))
+    {
+        return outcome;
     }
 
     match r.form {
@@ -3024,13 +4790,45 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
                     return outcome;
                 }
             }
+            // A constant of a lexical-constant language (S-565, [FR-RS-33]):
+            // a call on it (`Foo::bar`, never a single segment — a bare call
+            // outside a class is the free call it always was), the class
+            // `.new` instantiates, and the scope a compact declaration names
+            // bind by the constant rung alone — never through the module tree,
+            // whose keys are paths, nor a workspace guess
+            // ([`Ctx::resolve_constant_row`]). A superclass written as a path
+            // (`< ActiveRecord::Base`, a framework fingerprint) reaches the rung
+            // as a call too: there it could bind only a `def self.Base` of
+            // `ActiveRecord`, never the class `Base` itself.
+            //
+            // [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+            let on_constant = match r.kind {
+                EdgeKind::Calls => r.target.contains("::"),
+                EdgeKind::Instantiates | EdgeKind::TypeUses => true,
+                _ => false,
+            };
+            if ctx.lexical_constants && on_constant {
+                return match ctx.resolve_constant_row(r) {
+                    Res::Found(target) => bound(target),
+                    _ => Outcome::Unbound,
+                };
+            }
             // A Rust call on a receiver whose declared type the file proves
             // (S-587, [FR-RS-42]): `x.m()` retyped to `T::m`, its `other` shape
             // kept. It is not a written `T::m()` — it is method syntax — so it
             // binds through the one lookup with method syntax (S-607,
-            // [`Ctx::resolve_proven_receiver_call`]), never through a scope.
+            // [`Ctx::resolve_proven_receiver_call`]), never through a scope. A
+            // TypeScript one (S-537, [FR-RS-21]) binds among its type's members
+            // ([`Ctx::resolve_structural_receiver_call`]), a Python one
+            // (S-546, [FR-RS-24]) among its class's methods
+            // ([`Ctx::resolve_import_root_receiver_call`]), and a Kotlin one
+            // (S-563, [FR-RS-32]) or a Scala one (S-576) among its type's own
+            // members ([`Ctx::resolve_proven_receiver_call`]).
             //
             // [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
+            // [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+            // [FR-RS-24]: ../../../docs/specs/requirements/FR-RS-24.md
+            // [FR-RS-32]: ../../../docs/specs/requirements/FR-RS-32.md
             if is_proven_receiver_call(r) {
                 return match ctx.resolve_proven_receiver_call(r) {
                     Res::Found(target) => bound(target),
@@ -3063,12 +4861,21 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // member-path hierarchy, whose workspace fallback would read a
             // specifier path as names.
             if r.kind == EdgeKind::Calls {
-                if let Some(resolved) = ctx.resolve_imported_call(&r.target) {
+                if let Some(resolved) = ctx.resolve_imported_call(r) {
                     return match resolved {
                         Res::Found(target) => bound(target),
                         _ => Outcome::Unbound,
                     };
                 }
+            }
+            // A call through an import-root file's imported module or class
+            // (S-544, [FR-RS-23]): bound within what the qualifier's import
+            // names, never through the module tree's `Type::func` collapse nor
+            // a workspace guess. A class it binds is constructed.
+            //
+            // [FR-RS-23]: ../../../docs/specs/requirements/FR-RS-23.md
+            if let Some(outcome) = ctx.resolve_module_qualified_call(r) {
+                return outcome;
             }
             let want = if r.kind == EdgeKind::Calls {
                 ctx.call_want()
@@ -3087,13 +4894,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             let resolved = ctx.resolve_path(&segs, want, MAX_ALIAS_DEPTH);
             ctx.bare_path_call.set(false);
             match resolved {
-                // An instance member a bare call of its language cannot reach
-                // (S-590, [FR-RS-07]), whichever rung found it: a `use` or glob
-                // import naming an associated function, the package or the
-                // workspace fallback. The scope walk already passed over one
-                // ([`Ctx::prefer_free_functions`]), to reach a free function
-                // further out.
-                Res::Found(target) if bare && ctx.is_unreachable_member(target) => Outcome::Unbound,
+                // A declaration a bare call cannot reach, whichever rung found
+                // it ([`Ctx::bare_call_cannot_reach`]).
+                Res::Found(target) if bare && ctx.bare_call_cannot_reach(target, want) => Outcome::Unbound,
                 // A class a declared call constructs (S-521, [FR-RS-16]) —
                 // unless a factory function of its name rivals it.
                 Res::Found(target) if ctx.constructs(want, target) => {
@@ -3155,7 +4958,9 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             // A receiver call (`x.f()` → `f`): extraction records the bare
             // method name and its receiver's SHAPE, never its type ([FR-EX-13];
             // a typed receiver is a `RefForm::Path` row bound above — a Rust
-            // one among its proven type's methods, S-588). The shape decides
+            // one among its proven type's methods, S-588, a TypeScript one
+            // among its type's members, S-537, a Python one among its class's
+            // methods, S-546). The shape decides
             // where `f` may be found ([FR-RS-12]):
             //
             // - `self` — among the caller's own class's members, then up its
@@ -3171,20 +4976,20 @@ fn bind_in(ctx: &Ctx<'_>, r: &UnresolvedRefRow, relation: Option<Want>) -> Outco
             //   itself, so `other.m()` inside `m` bound to `m` ([CR-169],
             //   correcting [CR-066]'s "same-scope evidence"). The row stays in
             //   `unresolved_refs` as `no-receiver-evidence` and retries on sync
-            //   ([FR-RS-03], [FR-RS-06], [NFR-RA-05]).
+            //   ([FR-RS-03], [FR-RS-06], [NFR-RA-05]) — unless its language
+            //   declares extension functions, and exactly one of the name is
+            //   in scope ([`Ctx::resolve_extension_call`], S-560, [FR-RS-31]).
             //
             // [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
             // [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
             // [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+            // [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
             // [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
             // [CR-169]: ../../../docs/requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md
             let resolved = match r.receiver {
                 Some(ReceiverShape::SelfInstance) => ctx.resolve_self_receiver(&r.target),
                 Some(ReceiverShape::Super) => ctx.resolve_super_receiver(&r.target),
-                Some(ReceiverShape::Other) | None => {
-                    ctx.note(Want::Callable, || Residue::NoReceiverEvidence);
-                    Res::NotFound
-                }
+                Some(ReceiverShape::Other) | None => ctx.resolve_other_receiver(&r.target),
             };
             match resolved {
                 Res::Found(target) => bound(target),
@@ -3243,49 +5048,6 @@ fn split_anchor(target: &str) -> (&str, Option<String>) {
     }
 }
 
-/// Fold a link `path_part`'s `.`/`..`/leading-`/` against `base_dir` (the
-/// directory segments to resolve relative to) into a normalised
-/// project-relative path, or `None` if it escapes the repository root.
-///
-/// Pure and deterministic — the link and its target agree because both sides
-/// share this normalisation and [`heading_slug`].
-fn fold_path(base_dir: &[&str], path_part: &str) -> Option<String> {
-    // A leading `/` is repo-root-relative; otherwise resolve against `base_dir`.
-    let mut segs: Vec<&str> = if path_part.starts_with('/') {
-        Vec::new()
-    } else {
-        base_dir.to_vec()
-    };
-    for seg in path_part.split('/').filter(|s| !s.is_empty()) {
-        match seg {
-            "." => {}
-            ".." => {
-                // An escape above the repo root is not a resolvable target.
-                segs.pop()?;
-            }
-            other => segs.push(other),
-        }
-    }
-    Some(segs.join("/"))
-}
-
-/// The lower-cased extension of `path` (`""` when it has none) — the key the
-/// path-specifier maps are built on ([`crate::plugin::LanguageRegistry::specifier_target_extensions`]).
-fn extension_of(path: &str) -> String {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default()
-}
-
-/// The directory segments of `file` (the path with its file name dropped).
-fn dir_segments(file: &str) -> Vec<&str> {
-    let mut dir: Vec<&str> = file.split('/').collect();
-    dir.pop(); // drop the file name, keep the directory
-    dir.into_iter().filter(|s| !s.is_empty()).collect()
-}
-
 fn split(target: &str) -> Vec<String> {
     target
         .split("::")
@@ -3321,6 +5083,37 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     enclosing_namespaces: bool,
+    /// Whether the source's language names its classes and modules by lexical
+    /// constants ([`PackageLayout::resolves_lexical_constants`], S-565,
+    /// [FR-RS-33]) — what routes its calls, instantiations and type uses to
+    /// the constant rung ([`resolve_constant_row`](Ctx::resolve_constant_row)).
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    lexical_constants: bool,
+    /// Whether the source's language declares its files' top-level functions
+    /// members of their namespace ([`PackageLayout::declares_top_level_callables`],
+    /// S-573) — what lets its rungs read [`Index::callables_by_fqn`].
+    top_level_callables: bool,
+    /// Whether a bare call of the source's language that its namespace
+    /// declares no function for reaches the global namespace's function
+    /// ([`PackageLayout::falls_back_to_global_functions`], S-551: PHP;
+    /// [`global_function`](Ctx::global_function)).
+    global_function_fallback: bool,
+    /// Whether a wildcard import of the source's file outranks its namespace's
+    /// other files ([`PackageLayout::reads_wildcards_first`], S-573: Scala) —
+    /// the order [`resolve_package_name`](Ctx::resolve_package_name) and
+    /// [`resolve_package_path`](Ctx::resolve_package_path) read their rungs in.
+    wildcards_first: bool,
+    /// Whether a receiver call of the source's language no receiver type
+    /// proves may bind an extension function
+    /// ([`PackageLayout::binds_extension_calls`], S-560: Kotlin;
+    /// [`resolve_extension_call`](Ctx::resolve_extension_call)).
+    extension_calls: bool,
+    /// Whether the source's language names other languages' file facades
+    /// (S-560, [`Index::facades_by_fqn`]): a source of a language that declares
+    /// none itself ([`PackageLayout::declares_file_facades`]) — Java naming
+    /// Kotlin's `UtilsKt`.
+    reads_facades: bool,
     /// Whether the source's language declares `implicit_receiver = "none"`
     /// explicitly ([`PackageLayout::bare_calls_free_only`], S-590, [FR-RS-07]):
     /// its bare call reaches no instance member, so
@@ -3344,6 +5137,15 @@ struct Ctx<'a> {
     /// syntax-aware arity filter ([`lookup`](Ctx::lookup), S-607) — `None`
     /// when unknown, or when the source's language enforces no arity.
     call_args: Option<u32>,
+    /// The generic arity of the type a type-relation row names as written
+    /// (S-602, [CR-199]; the row's `arg_count`), when the source's language
+    /// tells types apart by it ([`PackageLayout::matches_type_arity`]) — what
+    /// [`admits_arity`](Ctx::admits_arity) filters the namespace rungs'
+    /// candidates by. `None` for every other row, and for a written type of
+    /// unknown arity, which admits any.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    type_arity: Option<u32>,
     /// Whether the source's language decides a call to a type's method by the
     /// one associated-item lookup over recorded `impl` blocks
     /// ([`PackageLayout::looks_up_impl_blocks`], S-607, [FR-RS-47]).
@@ -3387,6 +5189,19 @@ struct Ctx<'a> {
     ///
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     bare_path_call: Cell<bool>,
+    /// Pool a type's required signatures with its members at each level of a
+    /// supertype walk ([`Index::declared_signatures`]). Set **only** while a
+    /// call on a proven receiver of a structural-types language binds among its
+    /// type's members ([`resolve_structural_receiver_call`](Ctx::resolve_structural_receiver_call),
+    /// S-537): every other lookup binds no signature. A Kotlin proven receiver
+    /// (S-563) takes the same lookup, and its types hold none.
+    reads_signatures: Cell<bool>,
+    /// Read a companion pair's instance callables in place of its singleton's
+    /// ([`companion_members`](Ctx::companion_members)). Set **only** while a
+    /// call on a proven receiver of a companion-pair language binds
+    /// ([`resolve_companion_pair_receiver_call`](Ctx::resolve_companion_pair_receiver_call),
+    /// S-576): an instance of `T` answers `T`'s methods, never its `object`'s.
+    instance_receiver: Cell<bool>,
     /// Bind by scope and module model only: set for a type relation (S-466,
     /// [CR-149]; S-522 for every language), whose target must be the one
     /// in-repository type its source's lexical scope, imports, package,
@@ -3430,7 +5245,7 @@ struct Ctx<'a> {
     /// [`Outcome::BoundMany`] — the one place a fan-out becomes edges.
     ///
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
-    fanned: RefCell<Option<Vec<NodeId>>>,
+    fanned: RefCell<Option<Fan>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -3446,10 +5261,17 @@ impl<'a> Ctx<'a> {
             source_package: source_file.and_then(|p| ix.layout.package_of(p)),
             source_family: source_file.and_then(|p| ix.layout.family(p)),
             enclosing_namespaces: source_file.is_some_and(|p| ix.layout.sees_enclosing_namespaces(p)),
+            lexical_constants: source_file.is_some_and(|p| ix.layout.resolves_lexical_constants(p)),
+            top_level_callables: source_file.is_some_and(|p| ix.layout.declares_top_level_callables(p)),
+            global_function_fallback: source_file.is_some_and(|p| ix.layout.falls_back_to_global_functions(p)),
+            wildcards_first: source_file.is_some_and(|p| ix.layout.reads_wildcards_first(p)),
+            extension_calls: source_file.is_some_and(|p| ix.layout.binds_extension_calls(p)),
+            reads_facades: source_file.is_some_and(|p| !ix.layout.declares_file_facades(p)),
             bare_calls_free_only: source_file.is_some_and(|p| ix.layout.bare_calls_free_only(p)),
             falls_through: source_file.is_some_and(|p| ix.layout.falls_through_to_free_calls(p, target)),
             arg_count: None,
             call_args: None,
+            type_arity: None,
             impl_blocks: source_file.is_some_and(|p| ix.layout.looks_up_impl_blocks(p)),
             type_reached: Cell::new(false),
             passed_over: Cell::new(false),
@@ -3457,6 +5279,8 @@ impl<'a> Ctx<'a> {
             in_glob_resolution: Cell::new(false),
             in_rival_expansion: Cell::new(false),
             bare_path_call: Cell::new(false),
+            reads_signatures: Cell::new(false),
+            instance_receiver: Cell::new(false),
             scope_only: Cell::new(false),
             lexical_start: Cell::new(source),
             miss: RefCell::new(None),
@@ -3473,6 +5297,9 @@ impl<'a> Ctx<'a> {
         ctx.call_args = r
             .arg_count
             .filter(|_| r.kind == EdgeKind::Calls && source_file.is_some_and(|p| ix.layout.checks_arity(p)));
+        ctx.type_arity = r
+            .arg_count
+            .filter(|_| is_type_relation(r.kind) && source_file.is_some_and(|p| ix.layout.matches_type_arity(p)));
         ctx
     }
 
@@ -3521,11 +5348,17 @@ impl Ctx<'_> {
             return candidates;
         };
         let named = !candidates.is_empty();
-        candidates.retain(|id| self.ix.arities.get(id).is_none_or(|range| range.admits(count)));
+        candidates.retain(|id| self.admits_count(*id, count));
         if named && candidates.is_empty() {
             self.passed_over.set(true);
         }
         candidates
+    }
+
+    /// Whether `id`'s recorded parameter range admits `count` arguments — an
+    /// unknown range admits any ([`applicable`](Ctx::applicable)'s one test).
+    fn admits_count(&self, id: NodeId, count: u32) -> bool {
+        self.ix.arities.get(&id).is_none_or(|range| range.admits(count))
     }
 
     /// `true` for the declaration whose header is being read (S-522): a
@@ -3833,6 +5666,124 @@ impl Ctx<'_> {
         (self.ix.layout.is_package_file(file) && !own).then_some(module)
     }
 
+    /// The **qualified-call** rung of an import-root file (S-544, [FR-RS-23]),
+    /// or `None` for any other row or source. A class the call binds is
+    /// constructed: it records `Instantiates` (S-521).
+    ///
+    /// Extraction records a Python call through an imported module or class
+    /// (`curl.post()` after `from hc.lib import curl`) as the import's path
+    /// plus the name, `hc::lib::curl::post`, aliased by the local name it went
+    /// through (`extract::ImportBindings`); a framework handler written
+    /// `views.add` arrives as `views::add`, unaliased. Its `@ref.call` captures
+    /// are plain identifiers, so every multi-segment call such a file records
+    /// is one of these, and each is decided here, `Some`:
+    ///
+    /// - An aliased row's qualifier (all but the last segment) is an import
+    ///   path, read as Python reads one ([`resolve_import_path`](Ctx::resolve_import_path)):
+    ///   never through the file's alias table, whose plain `import a.b` is
+    ///   keyed `b` where Python binds `a`, nor through a workspace guess.
+    /// - An unaliased row's qualifier is written as the file names it: a single
+    ///   name the file imports is read through those imports first — a bare name
+    ///   in Python names a module only through an import — and any other path
+    ///   as the file's own import of it resolves.
+    /// - A **module** qualifier binds the one member of the name the call can
+    ///   target — a function, or a class the call constructs.
+    /// - A **class** qualifier binds the one method of the name the class
+    ///   itself declares. The module tree's `Type::func` collapse
+    ///   ([`descend`](Ctx::descend)) is never taken: it would reach a module
+    ///   function beside the class.
+    /// - Anything else — a qualifier that names nothing here (an external
+    ///   `os`), or names a function — is decided **unbound**, and never
+    ///   reaches the workspace suffix match, which would read `os::getcwd` as a
+    ///   workspace `os.py`'s.
+    ///
+    /// [FR-RS-23]: ../../../docs/specs/requirements/FR-RS-23.md
+    fn resolve_module_qualified_call(&self, r: &UnresolvedRefRow) -> Option<Outcome> {
+        if r.kind != EdgeKind::Calls || !r.target.contains("::") {
+            return None;
+        }
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.layout.has_import_roots(source_file) {
+            return None;
+        }
+        let segs = split(&r.target);
+        let (name, qualifier) = segs.split_last()?;
+        let scope = match r.alias {
+            Some(_) => self.resolve_import_path(qualifier),
+            None => self.resolve_written_qualifier(qualifier),
+        };
+        let want = self.call_want();
+        let candidates = match scope {
+            Res::Found(scope) => match self.ix.info.get(&scope).map(|i| i.kind) {
+                Some(NodeKind::Module) => self.ix.members_named(scope, name, want),
+                Some(NodeKind::Class) => self.ix.members_named(scope, name, Want::Callable),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let Res::Found(target) = exactly_one(&candidates) else {
+            return Some(Outcome::Unbound);
+        };
+        let kind = if self.constructs(want, target) { EdgeKind::Instantiates } else { r.kind };
+        Some(Outcome::Bound {
+            source: self.source,
+            target,
+            kind,
+            payload: r.payload.clone(),
+        })
+    }
+
+    /// The module or class an import `path` names, read as Python reads `import`
+    /// (S-544): a relative level from the source's package, any other path from
+    /// the root of the source's family crate. The last segment is a submodule,
+    /// or a name its parent module declares — and when both exist (`from pkg
+    /// import sub` beside a `pkg/__init__.py` declaring `sub` and a
+    /// `pkg/sub.py`), which one the import gives depends on what else was
+    /// imported first, so it names neither ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_import_path(&self, path: &[String]) -> Res {
+        let Some((last, parent)) = path.split_last() else {
+            return Res::NotFound;
+        };
+        let declared = match self.import_module(parent) {
+            Res::Found(module) => self.ix.members_named(module, last, Want::Any),
+            _ => Vec::new(),
+        };
+        match (self.import_module(path), declared.as_slice()) {
+            (Res::Found(module), []) => Res::Found(module),
+            (Res::NotFound, [one]) => Res::Found(*one),
+            _ => Res::NotFound,
+        }
+    }
+
+    /// The module an import `path` names ([`resolve_import_path`](Ctx::resolve_import_path)).
+    fn import_module(&self, path: &[String]) -> Res {
+        if path.first().is_some_and(|h| is_relative_head(h)) {
+            return self.resolve_relative(path, Want::Module).unwrap_or(Res::NotFound);
+        }
+        match self.source_module() {
+            Some((krate, _)) if !path.is_empty() => self.descend(&krate, &[], path, Want::Module),
+            _ => Res::NotFound,
+        }
+    }
+
+    /// The module or class a written `qualifier` names
+    /// ([`resolve_module_qualified_call`](Ctx::resolve_module_qualified_call)):
+    /// a single name the file imports through its imports — every one of them,
+    /// exactly-one — and any other path as the file's own import of it resolves.
+    fn resolve_written_qualifier(&self, qualifier: &[String]) -> Res {
+        if let [head] = qualifier {
+            if let Some(rivals) = self.rival_expansions(head) {
+                return self.resolve_expansions(rivals, &[], Want::Any, MAX_ALIAS_DEPTH);
+            }
+            if let Some(path) = self.scope().and_then(|s| s.aliases.get(head)) {
+                return self.resolve_path(path, Want::Any, MAX_ALIAS_DEPTH - 1);
+            }
+        }
+        self.resolve_path(qualifier, Want::Any, MAX_ALIAS_DEPTH)
+    }
+
     /// Resolve a type relation (S-466, [CR-149] §3.2 B, [FR-EX-10]; S-522,
     /// [FR-RS-15]) to the one type of a kind `want` admits.
     ///
@@ -3876,6 +5827,51 @@ impl Ctx<'_> {
     /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+    /// Bind the type-relation row `r`, looked up with `want` ([`bind_in`]'s
+    /// type-relation arm): to the one type [`resolve_type_relation`](Ctx::resolve_type_relation)
+    /// reaches, its edge kind following the target ([`relation_edge_kind`]).
+    ///
+    /// A partial type part's own row (S-557, [FR-RS-29], [`PARTIAL_TYPE_ALIAS`])
+    /// binds by its type instead: a later part extends its type's first-declared
+    /// part, the canonical node, and the edge says it is that link. The first
+    /// part, and a declaration marked partial that unites with nothing, bind
+    /// nothing — never a supertype read off the name the row spells.
+    ///
+    /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+    fn bind_type_relation(&self, r: &UnresolvedRefRow, want: Want) -> Outcome {
+        let (source, ix) = (self.source, self.ix);
+        if r.kind == EdgeKind::Extends && r.alias.as_deref() == Some(PARTIAL_TYPE_ALIAS) {
+            return match ix.partials.first_of(source) {
+                first if first == source => Outcome::Unbound,
+                first => Outcome::Bound {
+                    source,
+                    target: first,
+                    kind: EdgeKind::Extends,
+                    payload: Some(PARTIAL_TYPE_ALIAS.to_string()),
+                },
+            };
+        }
+        match self.resolve_type_relation(r, want) {
+            // A later part's `Extends` to its own first part is the partial link
+            // whichever row binds it — a capture-before-delete row too (ADR-10),
+            // which carries no alias and no payload — so the edge says so either
+            // way, and a sync's insert order cannot cost it its payload.
+            Res::Found(target) if target != source && ix.partials.first_of(source) == target => Outcome::Bound {
+                source,
+                target,
+                kind: EdgeKind::Extends,
+                payload: Some(PARTIAL_TYPE_ALIAS.to_string()),
+            },
+            Res::Found(target) => Outcome::Bound {
+                source,
+                target,
+                kind: relation_edge_kind(r.kind, want, ix.info.get(&target).map(|i| i.kind)),
+                payload: r.payload.clone(),
+            },
+            _ => Outcome::Unbound,
+        }
+    }
+
     fn resolve_type_relation(&self, r: &UnresolvedRefRow, want: Want) -> Res {
         if r.form == RefForm::Symbol {
             return match self.ix.by_symbol.get(&r.target) {
@@ -3885,7 +5881,17 @@ impl Ctx<'_> {
                 _ => Res::NotFound,
             };
         }
+        if self.lexical_constants {
+            return self.constant_relation(r, want);
+        }
+        if let Some(imported) = self.resolve_imported_type(&r.target, want) {
+            return imported;
+        }
         let segs = split(&r.target);
+        // An include-roots language's base reads its includes (S-579).
+        if let Some(res) = self.resolve_included_type(&segs, want) {
+            return res;
+        }
         if segs.first().map(String::as_str) == Some(FULLY_QUALIFIED_HEAD) {
             return self.resolve_fqn(&segs[1..], want);
         }
@@ -4506,7 +6512,17 @@ impl Ctx<'_> {
 
     /// Resolve a Rust call retyped from its proven receiver (S-587) — `x.m()`
     /// recorded as `T::m` of shape `other`, with the wrappers peeled to reach
-    /// `T` — among `T`'s own methods (S-588, [FR-RS-42]).
+    /// `T` — among `T`'s own methods (S-588, [FR-RS-42]). A call from a file of
+    /// structural types (TypeScript, S-537) is bound among its type's members
+    /// instead ([`resolve_structural_receiver_call`](Ctx::resolve_structural_receiver_call)),
+    /// and so is one from a file whose types lend their name to a companion
+    /// (Kotlin, S-563,
+    /// [`resolve_companion_language_receiver_call`](Ctx::resolve_companion_language_receiver_call))
+    /// and one from a file whose types pair with a same-named singleton
+    /// (Scala, S-576,
+    /// [`resolve_companion_pair_receiver_call`](Ctx::resolve_companion_pair_receiver_call)),
+    /// and one from an import-root file (Python, S-546,
+    /// [`resolve_import_root_receiver_call`](Ctx::resolve_import_root_receiver_call)).
     ///
     /// 1. **A wrapper's own method binds nothing.** When a peeled wrapper
     ///    provides `m` itself ([`PackageLayout::wrapper_provides`], the list
@@ -4541,6 +6557,18 @@ impl Ctx<'_> {
             .get(&self.source)
             .and_then(|i| i.file_path.as_deref())
             .unwrap_or_default();
+        if self.ix.layout.has_structural_types(source_file) {
+            return self.resolve_structural_receiver_call(type_path, name);
+        }
+        if self.ix.layout.companion_name(source_file).is_some() {
+            return self.resolve_companion_language_receiver_call(type_path, name);
+        }
+        if self.ix.layout.pairs_companion_objects(source_file) {
+            return self.resolve_companion_pair_receiver_call(&segs);
+        }
+        if self.ix.layout.has_import_roots(source_file) {
+            return self.resolve_import_root_receiver_call(type_path, name);
+        }
         let through_wrapper = r.peeled.as_deref().unwrap_or_default().split(' ').any(|wrapper| {
             self.ix.layout.wrapper_provides(source_file, wrapper, name)
         });
@@ -4559,6 +6587,208 @@ impl Ctx<'_> {
                 Res::NotFound
             }
         }
+    }
+
+    /// Resolve a call on a proven receiver of a structural-types language
+    /// (S-537, [FR-RS-21]; TypeScript) — `this.users.find()` recorded as
+    /// `<import target>::UsersService::find`, or `Mailer::send` for a type no
+    /// named import brings in — among its type's members.
+    ///
+    /// 1. **`T` is the one type the file names**: through the named import the
+    ///    path's head records, the one definition that import provides
+    ///    ([`resolve_imported_type`](Ctx::resolve_imported_type), S-535); a bare
+    ///    `T`, in the file's own scope, never by a workspace guess
+    ///    ([`scope_only`](Ctx::scope_only)). An import that reaches no
+    ///    repository type (`@nestjs/common`'s `Logger`) is
+    ///    [`Residue::ExternalType`]; two candidates are
+    ///    [`Residue::TypeAmbiguous`].
+    /// 2. **`m` is exactly one callable of `T`, or of the nearest level of its
+    ///    proven `Extends` chain holding one** ([`type_member`](Ctx::type_member)),
+    ///    a required signature pooled with the members at each level
+    ///    ([`reads_signatures`](Ctx::reads_signatures)): a call on an abstract
+    ///    class or an interface binds its declared method, never an
+    ///    implementation.
+    ///
+    /// [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+    fn resolve_structural_receiver_call(&self, type_path: &[String], name: &str) -> Res {
+        let ty = self
+            .resolve_imported_type(&type_path.join("::"), Want::Type)
+            .unwrap_or_else(|| self.resolve_path(type_path, Want::Type, MAX_ALIAS_DEPTH));
+        match ty {
+            Res::Found(ty) => {
+                self.reads_signatures.set(true);
+                let found = self.type_member(ty, name);
+                self.reads_signatures.set(false);
+                found
+            }
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                Res::Ambiguous
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::ExternalType { candidates: Vec::new() });
+                Res::NotFound
+            }
+        }
+    }
+
+    /// Resolve a call on a proven receiver of a file whose types lend their
+    /// name to a companion (S-563, [FR-RS-32]; Kotlin) — `repo.find()` after
+    /// `repo: Repo`, recorded as `Repo::find` — among `T`'s own members, never
+    /// its companion's, which only a call on the class reaches (I4-INT).
+    ///
+    /// `T` and `m` are read as a structural-types file reads them
+    /// ([`resolve_structural_receiver_call`](Ctx::resolve_structural_receiver_call)):
+    /// the one type the file's scope, imports, package and wildcards name,
+    /// then exactly one callable of `T`, or of the nearest level of its proven
+    /// supertypes holding one. A call no level answers — `T` is no repository
+    /// type (`String`), or none of its levels declares `m` — is the extension
+    /// call a receiver of unproven type makes
+    /// ([`resolve_extension_call`](Ctx::resolve_extension_call), S-560): typing
+    /// a receiver never takes away a binding its untyped call had. Where that
+    /// rung decides — two extensions in scope — its reason is the row's, not
+    /// the type's miss before it.
+    ///
+    /// A one-segment `T` that a top-level function of its name also spells
+    /// ([`factory_named`](Ctx::factory_named)) proves nothing:
+    /// [`Residue::TypeAmbiguous`].
+    ///
+    /// [FR-RS-32]: ../../../docs/specs/requirements/FR-RS-32.md
+    fn resolve_companion_language_receiver_call(&self, type_path: &[String], name: &str) -> Res {
+        if let [ty] = type_path {
+            if self.factory_named(ty) {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
+        }
+        match self.resolve_structural_receiver_call(type_path, name) {
+            Res::NotFound => {
+                let typed_miss = self.miss.take();
+                self.resolve_extension_call(name).unwrap_or_else(|| {
+                    *self.miss.borrow_mut() = typed_miss;
+                    Res::NotFound
+                })
+            }
+            decided => decided,
+        }
+    }
+
+    /// Resolve a call on a proven receiver of a file whose types pair with a
+    /// same-named singleton (S-576, [FR-RS-37]; Scala) — `order.ship()` after
+    /// `order: Order`, recorded as `Order::ship` — among `T`'s own members,
+    /// never its companion `object`'s, which only a call on the name reaches
+    /// (S-573).
+    ///
+    /// The path is read as the written `Order.ship()` is, through the file's
+    /// scope, imports, package and wildcards, and a `T` with no companion binds
+    /// its callable, or its nearest proven supertype's, as that call does
+    /// ([`walk_from`](Ctx::walk_from)). Where `T` names a companion pair, the
+    /// pair's callables that take an instance receiver are read in place of
+    /// the singleton's ([`instance_receiver`](Ctx::instance_receiver)): exactly
+    /// one decides, and the pair's supertypes are not climbed. No extension
+    /// rung follows: the language declares none.
+    ///
+    /// [FR-RS-37]: ../../../docs/specs/requirements/FR-RS-37.md
+    fn resolve_companion_pair_receiver_call(&self, segs: &[String]) -> Res {
+        let want = self.call_want();
+        self.instance_receiver.set(true);
+        let found = self.resolve_path(segs, want, MAX_ALIAS_DEPTH);
+        self.instance_receiver.set(false);
+        if found == Res::NotFound && self.passed_over.get() {
+            self.note(want, || Residue::NoApplicableOverload);
+        }
+        found
+    }
+
+    /// Resolve a call on a proven receiver of an import-root file (S-546,
+    /// [FR-RS-24]; Python) — `svc.run()` after `svc: Service`, recorded as
+    /// `Service::run` — among its type's methods.
+    ///
+    /// 1. **`T` is the one class the file names**, read as a written qualifier
+    ///    is (S-544, [`resolve_written_qualifier`](Ctx::resolve_written_qualifier)):
+    ///    through every import of the name, else the file's own scope, never
+    ///    by a workspace guess ([`scope_only`](Ctx::scope_only)). A name that
+    ///    reaches no repository declaration (`str`, `requests`' `Session`) is
+    ///    [`Residue::ExternalType`]; two are [`Residue::TypeAmbiguous`], and so
+    ///    is a name the file both imports and declares at its top level
+    ///    (`class Service(Service)`), which the statements' order decides; a
+    ///    declaration that is no class — `x = Factory()` where `Factory` is a
+    ///    function — proved nothing: [`Residue::NoReceiverEvidence`].
+    /// 2. **`m` is exactly one callable of `T`, or of the nearest level of its
+    ///    proven `Extends` chain holding one** ([`type_member`](Ctx::type_member)).
+    ///    An attribute of the name at or below that level — `run = other`,
+    ///    `self.run = callback` — is what the call reaches instead, whatever
+    ///    it holds: [`Residue::NoReceiverEvidence`] ([`attribute_hides`](Ctx::attribute_hides)).
+    ///
+    /// [FR-RS-24]: ../../../docs/specs/requirements/FR-RS-24.md
+    fn resolve_import_root_receiver_call(&self, type_path: &[String], name: &str) -> Res {
+        if let [head] = type_path {
+            if self.imports_and_declares(head) {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                return Res::Ambiguous;
+            }
+        }
+        match self.resolve_written_qualifier(type_path) {
+            Res::Found(ty) if self.ix.info.get(&ty).is_some_and(|i| i.kind == NodeKind::Class) => {
+                if self.attribute_hides(ty, name) {
+                    self.note(Want::Callable, || Residue::NoReceiverEvidence);
+                    return Res::NotFound;
+                }
+                self.type_member(ty, name)
+            }
+            Res::Found(_) => {
+                self.note(Want::Callable, || Residue::NoReceiverEvidence);
+                Res::NotFound
+            }
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::TypeAmbiguous);
+                Res::Ambiguous
+            }
+            Res::NotFound => {
+                self.note(Want::Callable, || Residue::ExternalType { candidates: Vec::new() });
+                Res::NotFound
+            }
+        }
+    }
+
+    /// Whether the source's file imports `name` and also declares it among its
+    /// own top-level members (S-546): `from m import Service` beside `class
+    /// Service(Service)`, where which one a use names is the statements'
+    /// order, not the file's scope.
+    fn imports_and_declares(&self, name: &str) -> bool {
+        let imported = self.scope().is_some_and(|s| s.aliases.contains_key(name) || s.alias_expansions.contains_key(name));
+        let mut cursor = Some(self.source);
+        while let Some(id) = cursor {
+            if self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Module) {
+                return imported && !self.ix.members_named(id, name, Want::Any).is_empty();
+            }
+            cursor = self.ix.parent.get(&id).copied();
+        }
+        false
+    }
+
+    /// Whether a Field named `name` stands on the `Extends` chain of `ty` at
+    /// or below the first level declaring a callable of that name — the
+    /// levels [`type_member`](Ctx::type_member) climbs (S-546). In Python one
+    /// namespace holds attributes and methods, so such an attribute hides the
+    /// method above it.
+    fn attribute_hides(&self, ty: NodeId, name: &str) -> bool {
+        let mut level = vec![ty];
+        let mut seen = HashSet::from([ty]);
+        for _ in 0..MAX_SUPERTYPE_DEPTH {
+            if level.iter().any(|&t| !self.ix.members_named(t, name, Want::Field).is_empty()) {
+                return true;
+            }
+            if level.is_empty() || level.iter().any(|&t| !self.ix.members_named(t, name, Want::Callable).is_empty()) {
+                return false;
+            }
+            level = level
+                .iter()
+                .flat_map(|&t| self.ix.supertypes_of(t).iter().copied())
+                .filter(|s| seen.insert(*s))
+                .collect();
+        }
+        false
     }
 
     /// The one in-repository type a proven receiver's type path names (S-588):
@@ -4801,21 +7031,82 @@ impl Ctx<'_> {
     /// Resolve a member-access fact to the one `Field` of the source method's
     /// own class-like container named `field` (CR-005, [FR-EX-08]).
     ///
-    /// The container is the caller's own class ([`caller_class`](Ctx::caller_class));
-    /// the field binds iff that container directly contains **exactly one**
-    /// `Field` of that name — the same single acceptance rule every binder level
-    /// shares ([NFR-RA-05]). A language whose methods are not lexically nested
-    /// under their type (so no class-like ancestor is found) or whose fields are
-    /// not extracted as nodes yields no candidate, so the access stays honestly
-    /// unresolved and retries on sync — never fabricated.
+    /// The container is the caller's own class ([`caller_class`](Ctx::caller_class)),
+    /// else, for a method not lexically nested under its type (Go), the type
+    /// its recorded self type names ([`self_type_class`](Ctx::self_type_class),
+    /// S-529); the field binds iff that container directly contains **exactly
+    /// one** `Field` of that name — the same single acceptance rule every
+    /// binder level shares ([NFR-RA-05]). A caller with neither, or a language
+    /// whose fields are not extracted as nodes, yields no candidate, so the
+    /// access stays honestly unresolved and retries on sync — never fabricated.
     ///
     /// [FR-EX-08]: ../../../docs/specs/requirements/FR-EX-08.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
     fn resolve_member_access(&self, field: &str) -> Res {
-        match self.caller_class() {
+        if self.module_before_class() {
+            return Res::NotFound;
+        }
+        match self.caller_class().or_else(|| self.self_type_class()) {
             Some(class) => exactly_one(&self.ix.members_named(class, field, Want::Field)),
             None => Res::NotFound,
         }
+    }
+
+    /// The class-like type the caller's recorded self type names (S-529,
+    /// [FR-RS-18]) — the container of a receiver read in a language whose
+    /// methods sit at module level, where the `Contains` ancestry holds no
+    /// class (Go's `func (c *ioCore) Write()` beside `type ioCore struct`): the
+    /// one class-like node of that name declared in the caller's own directory
+    /// — a Go package, whichever of its files declares the type. A method's
+    /// receiver type is its own package's, so a same-named type of another
+    /// directory is never a candidate, however few the crate holds. `None` when
+    /// the caller records no self type, or when its directory does not hold
+    /// exactly one ([NFR-RA-05]).
+    ///
+    /// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn self_type_class(&self) -> Option<NodeId> {
+        let self_type = self.ix.self_types.get(&self.source)?;
+        let caller = self.ix.info.get(&self.source)?;
+        fn dir(info: &NodeInfo) -> Option<&str> {
+            info.file_path.as_deref().map(super::dir_of)
+        }
+        let own = dir(caller)?;
+        let local: Vec<NodeId> = self
+            .ix
+            .self_type_classes
+            .get(&(caller.crate_name.clone(), self_type.clone()))?
+            .iter()
+            .copied()
+            .filter(|c| self.ix.info.get(c).and_then(dir) == Some(own))
+            .collect();
+        match local[..] {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// Whether a `Module` lies between the source and the class
+    /// [`caller_class`](Ctx::caller_class) would name (S-569): a Ruby mixin
+    /// nested in a class (a concern's `ClassMethods`) has `self` of whatever
+    /// includes it, never the class around it, so its member access is no
+    /// access of that class's Fields. `false` when no class bears the module
+    /// at all — a method under its file's module (Go's receiver methods), which
+    /// [`resolve_member_access`](Ctx::resolve_member_access) leaves to its own
+    /// fallback.
+    fn module_before_class(&self) -> bool {
+        let mut cursor = Some(self.source);
+        let mut inside_module = false;
+        for _ in 0..MAX_CONTAINS_DEPTH {
+            let Some(id) = cursor else { return false };
+            match self.ix.info.get(&id).map(|i| i.kind) {
+                Some(kind) if is_class_like(kind) => return inside_module,
+                Some(NodeKind::Module) => inside_module = true,
+                _ => {}
+            }
+            cursor = self.ix.parent.get(&id).copied();
+        }
+        false
     }
 
     /// The caller's own class: the nearest class-bearing container
@@ -4840,7 +7131,11 @@ impl Ctx<'_> {
     /// the nearest level of its proven `Extends` chain holding exactly one
     /// ([`type_member`](Ctx::type_member), the [FR-RS-10] walk). A free function
     /// or a module-level sibling is never a candidate: only the class's own
-    /// `Contains` children are.
+    /// `Contains` children are — and, once the class and every supertype it
+    /// has are seen to hold no applicable `name`, the members of its companion
+    /// and then of its superclasses' companions (I4-INT,
+    /// [`then_companion`](Ctx::then_companion)), the implicit receivers Kotlin
+    /// reads next.
     ///
     /// A caller that is a function of a recorded `impl` block (Rust) binds
     /// through its block's self type, by the one lookup with method syntax —
@@ -4871,6 +7166,9 @@ impl Ctx<'_> {
     /// call reaches. Nothing applicable anywhere is
     /// [`Residue::NoApplicableOverload`].
     ///
+    /// A class of a lexical-constant language (Ruby, S-568) binds along its
+    /// ancestors instead ([`ancestor_walk`](Ctx::ancestor_walk)).
+    ///
     /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
@@ -4887,7 +7185,12 @@ impl Ctx<'_> {
             self.note(Want::Callable, || Residue::NoReceiverEvidence);
             return Res::NotFound;
         };
-        let climb = self.supertype_walk(vec![class], HashSet::from([class]), name);
+        if self.lexical_constants {
+            let climb = self.ancestor_walk(class, name, false);
+            self.note_climb(&climb);
+            return climb.res;
+        }
+        let climb = self.then_companion(self.supertype_walk(vec![class], HashSet::from([class]), name), class, name);
         if climb.res == Res::NotFound && climb.inapplicable && climb.closed && self.falls_through {
             match self.free_call(name) {
                 Res::NotFound => {}
@@ -4900,6 +7203,41 @@ impl Ctx<'_> {
         }
         self.note_climb(&climb);
         climb.res
+    }
+
+    /// `climb`, the walk of `name` from `class` up, continued into the
+    /// companions of `class` and of each superclass above it, nearest first
+    /// (I4-INT, [`companion_climb`](Ctx::companion_climb)) — the implicit
+    /// receivers Kotlin reads after the instance, a superclass's companion
+    /// scope being linked into its subclasses — when it decided nothing and saw
+    /// every supertype: a base the graph does not hold may declare the name,
+    /// which would come first. The first companion that decides ends the walk.
+    /// Some level holding the name with no applicable callable stays recorded
+    /// across them all.
+    fn then_companion(&self, climb: Climb, class: NodeId, name: &str) -> Climb {
+        if climb.res != Res::NotFound || !climb.closed {
+            return climb;
+        }
+        let mut inapplicable = climb.inapplicable;
+        let mut seen = HashSet::from([class]);
+        let mut level = vec![class];
+        for _ in 0..MAX_SUPERTYPE_DEPTH {
+            for up in level.iter().filter_map(|&ty| self.companion_climb(ty, name)) {
+                inapplicable |= up.inapplicable;
+                if up.res != Res::NotFound {
+                    return Climb { inapplicable, ..up };
+                }
+            }
+            level = level
+                .iter()
+                .flat_map(|&ty| self.ix.supertypes_of(ty).iter().copied())
+                .filter(|ty| seen.insert(*ty))
+                .collect();
+            if level.is_empty() {
+                break;
+            }
+        }
+        Climb { inapplicable, ..climb }
     }
 
     /// `name` resolved as the unqualified free call the language makes once no
@@ -4920,12 +7258,138 @@ impl Ctx<'_> {
         res
     }
 
+    /// Bind a receiver call of shape `other`, or of none: nowhere
+    /// ([`Residue::NoReceiverEvidence`]), unless it is an extension call
+    /// ([`resolve_extension_call`](Ctx::resolve_extension_call), S-560).
+    fn resolve_other_receiver(&self, name: &str) -> Res {
+        self.resolve_extension_call(name).unwrap_or_else(|| {
+            self.note(Want::Callable, || Residue::NoReceiverEvidence);
+            Res::NotFound
+        })
+    }
+
+    /// Bind a receiver call `x.name()` no receiver type proves to the one
+    /// **extension function** `name` in scope (S-560, [FR-RS-31]): a top-level
+    /// function with a recorded self type, its receiver type
+    /// ([`Index::self_types`]) — Kotlin's `fun String.toSlug()`. `None`, so
+    /// the row stays `no-receiver-evidence`, when the source's language
+    /// declares no extension functions ([`extension_calls`](Ctx::extension_calls)),
+    /// when none is in scope, and when a member of the name could be the one
+    /// called: a member wins over an extension, and the receiver's type is not
+    /// known, so a callable member `name` of any class of the source's family
+    /// ([`member_named`](Ctx::member_named)) rules the extension out.
+    ///
+    /// The scopes are read in the language's order, and the first holding an
+    /// extension of the name decides:
+    /// 1. the file's imports of `name` — final: an import of a library's
+    ///    extension (`kotlinx.coroutines.flow.map`) is the one in force, so a
+    ///    same-package extension is never reached past it;
+    /// 2. the source's own package ([`package_callables`](Ctx::package_callables));
+    /// 3. the file's wildcards ([`glob_members`](Ctx::glob_members)).
+    ///
+    /// Each keeps the extensions the call's written argument count admits
+    /// ([`call_args`](Ctx::call_args)). Two at one scope bind neither
+    /// ([`Residue::OverloadAmbiguous`]): two receiver types the graph cannot
+    /// tell the receiver apart from ([NFR-RA-05]).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_extension_call(&self, name: &str) -> Option<Res> {
+        if !self.extension_calls || self.member_named(name) {
+            return None;
+        }
+        // A receiver call carries no filtered count ([`filtered_count`]): its
+        // written arguments are read here, as an extension's receiver is not
+        // one of its parameters.
+        let found = self.top_level_callables(name, |id| {
+            self.ix.self_types.contains_key(&id) && self.call_args.is_none_or(|count| self.admits_count(id, count))
+        })?;
+        match exactly_one(&found) {
+            Res::NotFound => None,
+            Res::Ambiguous => {
+                self.note(Want::Callable, || Residue::OverloadAmbiguous);
+                Some(Res::Ambiguous)
+            }
+            found => Some(found),
+        }
+    }
+
+    /// The top-level callables named `name` that `keep` admits, from the first
+    /// scope the source's language reads that holds one (S-560, [FR-RS-31]):
+    /// the file's imports of `name` — final, so nothing past an import is
+    /// reached — else the source's own package, else its wildcards. Sorted and
+    /// deduplicated; `None` for a source of no package.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    fn top_level_callables(&self, name: &str, keep: impl Fn(NodeId) -> bool) -> Option<Vec<NodeId>> {
+        let kept = |found: Vec<NodeId>| {
+            let mut found: Vec<NodeId> = found.into_iter().filter(|&id| keep(id)).collect();
+            found.sort_unstable();
+            found.dedup();
+            found
+        };
+        Some(match self.scope().and_then(|s| s.alias_expansions.get(name)) {
+            Some(imports) => kept(
+                imports
+                    .iter()
+                    .flat_map(|path| self.package_callables(path, Want::Callable))
+                    .collect(),
+            ),
+            None => {
+                let mut fqn = self.source_package.clone()?;
+                fqn.push(name.to_string());
+                let own = kept(self.package_callables(&fqn, Want::Callable));
+                if own.is_empty() {
+                    kept(self.glob_members(name, Want::Callable, false, None).unwrap_or_default())
+                } else {
+                    own
+                }
+            }
+        })
+    }
+
+    /// Whether a top-level function named `ty` — no extension — is in the
+    /// source's scope (S-563): `fun Repo(): Other`, which a call `Repo()`
+    /// reaches before the class's constructor, so a receiver `val r = Repo()`
+    /// is not proven a `Repo`. A row does not say which proof typed it, so a
+    /// receiver declared `Repo` refuses too.
+    fn factory_named(&self, ty: &str) -> bool {
+        self.top_level_callables(ty, |id| {
+            !self.ix.self_types.contains_key(&id)
+                && self.ix.info.get(&id).is_some_and(|i| matches!(i.kind, NodeKind::Function | NodeKind::Method))
+        })
+        .is_some_and(|found| !found.is_empty())
+    }
+
+    /// Whether a callable named `name` is a member of some class-like
+    /// declaration of the source's interop family (S-560) — a member a receiver
+    /// call of that name may reach, which an extension of the name never
+    /// outranks ([`resolve_extension_call`](Ctx::resolve_extension_call)).
+    fn member_named(&self, name: &str) -> bool {
+        let family = self.source_family.as_deref();
+        self.ix.by_name.get(name).into_iter().flatten().any(|id| {
+            let Some(info) = self.ix.info.get(id) else {
+                return false;
+            };
+            Want::Callable.admits(info.kind)
+                && self
+                    .ix
+                    .parent
+                    .get(id)
+                    .and_then(|p| self.ix.info.get(p))
+                    .is_some_and(|p| is_class_like(p.kind))
+                && info.file_path.as_deref().and_then(|p| self.ix.layout.family(p)).as_deref() == family
+        })
+    }
+
     /// Bind a receiver call `super.name()` — shape `super` (S-514,
     /// [FR-RS-12]): only through a proven `Extends` of the caller's own class,
     /// to exactly one callable at the nearest supertype level holding one. The
     /// caller's own class is never a level, so it never binds the caller's own
     /// method. No proven `Extends` — an external base, or a language whose
-    /// plugin records none — is [`Residue::SupertypeUnreached`].
+    /// plugin records none — is [`Residue::SupertypeUnreached`]. In Ruby
+    /// (S-568) the levels are the class's ancestors past the class itself —
+    /// its included modules, then its superclass's ([`ancestor_walk`](Ctx::ancestor_walk)).
     ///
     /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
     fn resolve_super_receiver(&self, name: &str) -> Res {
@@ -4933,6 +7397,12 @@ impl Ctx<'_> {
             self.note(Want::Callable, || Residue::NoReceiverEvidence);
             return Res::NotFound;
         };
+        // Ruby's `super` goes on along the class's ancestors (S-568).
+        if self.lexical_constants {
+            let climb = self.ancestor_walk(class, name, true);
+            self.note_climb(&climb);
+            return climb.res;
+        }
         // A class whose own `Extends` binds to itself (`interface I extends I`,
         // which parses) is never its own base level.
         let bases: Vec<NodeId> = self
@@ -4979,21 +7449,21 @@ impl Ctx<'_> {
             return Res::NotFound;
         };
         let (mut unplaced, mut undecided) = (false, false);
-        let mut providers: Vec<Vec<NodeId>> = Vec::new();
+        let mut providers: Vec<Fan> = Vec::new();
         for bound in head.split('+') {
             match self.bound_trait(bound) {
                 Res::Found(tr) => {
-                    let set = self.fan_out(tr, method);
-                    if !set.is_empty() {
-                        providers.push(set);
+                    let fan = self.fan_out(tr, method);
+                    if !fan.targets.is_empty() {
+                        providers.push(fan);
                     }
                 }
                 Res::NotFound => unplaced = true,
                 Res::Ambiguous => undecided = true,
             }
         }
-        match <[Vec<NodeId>; 1]>::try_from(providers) {
-            Ok([set]) if !undecided => self.fan_out_to(set),
+        match <[Fan; 1]>::try_from(providers) {
+            Ok([fan]) if !undecided => self.fan_out_to(fan),
             Err(providers) if providers.is_empty() && undecided => {
                 self.note(Want::Callable, || Residue::TypeAmbiguous);
                 Res::Ambiguous
@@ -5062,16 +7532,32 @@ impl Ctx<'_> {
     /// ([`bindable`]). Id-sorted and deduped for a deterministic edge order
     /// ([NFR-RA-06]).
     ///
+    /// Each impl is reached by dispatch, the default is the trait's own method
+    /// (S-712, [CR-226] BR-76): the set's [`Dispatch`] marks the impls, named
+    /// by the trait method's symbol, and leaves the default unmarked. A set
+    /// whose trait method the graph does not hold carries none.
+    ///
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
     /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    fn fan_out(&self, tr: NodeId, name: &str) -> Vec<NodeId> {
+    /// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+    fn fan_out(&self, tr: NodeId, name: &str) -> Fan {
+        let own = self.ix.members_named(tr, name, Want::Callable);
         let mut targets = self.ix.impls_of(tr, name).to_vec();
-        targets.extend(self.ix.members_named(tr, name, Want::Callable));
+        targets.extend(&own);
         targets.sort_unstable();
         targets.dedup();
-        targets
+        let implementors: Vec<NodeId> = targets.iter().copied().filter(|t| !own.contains(t)).collect();
+        let dispatch = self
+            .ix
+            .trait_method_symbol(tr, name)
+            .filter(|_| !implementors.is_empty())
+            .map(|method| Dispatch {
+                method: method.to_string(),
+                implementors,
+            });
+        Fan { targets, dispatch }
     }
 
     /// A call through the trait `tr` — a trait body's `self.m()` / `Self::m()`,
@@ -5082,18 +7568,18 @@ impl Ctx<'_> {
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     fn trait_call(&self, tr: NodeId, name: &str) -> Res {
-        let set = self.fan_out(tr, name);
-        if set.is_empty() {
+        let fan = self.fan_out(tr, name);
+        if fan.targets.is_empty() {
             self.note(Want::Callable, || Residue::SupertypeUnreached);
             return Res::NotFound;
         }
-        self.fan_out_to(set)
+        self.fan_out_to(fan)
     }
 
-    /// Record `targets` as the row's fan-out ([`fanned`](Ctx::fanned)), which
+    /// Record `fan` as the row's fan-out ([`fanned`](Ctx::fanned)), which
     /// [`bind_traced`] binds, and answer [`Res::NotFound`] to the rung.
-    fn fan_out_to(&self, targets: Vec<NodeId>) -> Res {
-        *self.fanned.borrow_mut() = Some(targets);
+    fn fan_out_to(&self, fan: Fan) -> Res {
+        *self.fanned.borrow_mut() = Some(fan);
         Res::NotFound
     }
 
@@ -5249,6 +7735,7 @@ impl Ctx<'_> {
                     targets,
                     kind: EdgeKind::ArtifactRef,
                     payload,
+                    dispatch: None,
                 };
             }
         }
@@ -5262,16 +7749,22 @@ impl Ctx<'_> {
     ///
     /// - A **relative** specifier (target headed by `.`/`..`, which only
     ///   `extract::refs::specifier_segments` produces) is always decided here:
-    ///   [`resolve_relative_specifier`](Ctx::resolve_relative_specifier).
-    /// - Any other specifier from a path-grammar file is decided here too: a Go
+    ///   [`resolve_relative_specifier`](Ctx::resolve_relative_specifier) — or,
+    ///   from a name-grammar file, whose only relative rows are its file
+    ///   includes (S-551, PHP's `require 'lib/a.php'`), the one file the path
+    ///   names whole ([`Index::file_root_at`]).
+    /// - Any other specifier from a path-grammar file is decided here too: a
+    ///   load-path language's (Ruby's `require`) against its load roots by
+    ///   [`resolve_load_path`](Ctx::resolve_load_path) (S-566), a Go
     ///   import path under a declared module by
-    ///   [`resolve_go_package`](Ctx::resolve_go_package), and everything else —
-    ///   a bare package specifier (`react`, `next/link`) — **unbound**. A bare
-    ///   specifier names a package, never a workspace file, so the member-path
+    ///   [`resolve_go_package`](Ctx::resolve_go_package), a TypeScript-family
+    ///   one through its `tsconfig`/`jsconfig` aliases and the workspace
+    ///   packages by [`resolve_ts_bare`](Ctx::resolve_ts_bare) ([FR-RS-02],
+    ///   S-531), and everything else — an external package specifier (`react`,
+    ///   `next/link`) — **unbound**. A bare specifier those rules do not
+    ///   rewrite names a package, never a workspace file, so the member-path
     ///   hierarchy (which would read `react` as a name and bind it to a
     ///   workspace `react.ts`) is never consulted for one ([NFR-RA-05]).
-    ///   `tsconfig` path aliases, the one way a bare specifier can name a
-    ///   workspace file, are [FR-RS-02] and not this rung.
     ///
     /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
     /// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
@@ -5287,30 +7780,117 @@ impl Ctx<'_> {
         if targets.is_none() && self.ix.layout.has_import_roots(source_file) {
             return None;
         }
+        let import = |resolved: Res| match resolved {
+            Res::Found(target) => Outcome::Bound {
+                source: self.source,
+                target,
+                kind: EdgeKind::Imports,
+                payload: None,
+            },
+            _ => Outcome::Unbound,
+        };
         if segs.first().is_some_and(|h| is_relative_head(h)) {
-            let resolved = targets.map_or(Res::NotFound, |targets| {
-                self.resolve_relative_specifier(source_file, &segs, targets)
-            });
-            return Some(match resolved {
-                Res::Found(target) => Outcome::Bound {
-                    source: self.source,
-                    target,
-                    kind: EdgeKind::Imports,
-                    payload: None,
-                },
-                _ => Outcome::Unbound,
-            });
+            return Some(import(match targets {
+                Some(targets) => self.resolve_relative_specifier(source_file, &segs, targets),
+                // A name-grammar file's include (S-551, PHP's `require`): the
+                // one file its path names whole beside the includer.
+                None => fold_path(&dir_segments(source_file), &segs.join("/"))
+                    .map_or(Res::NotFound, |path| self.ix.file_root_at(&path)),
+            }));
         }
-        targets?;
+        let targets = targets?;
+        // A bare specifier of a load-path language binds against its load
+        // roots (S-566, [`resolve_load_path`](Ctx::resolve_load_path)).
+        if let Some(roots) = self.ix.load_path.roots_for(source_file) {
+            return Some(import(self.resolve_load_path(roots, &segs, targets)));
+        }
         // Only a Go file can name a Go package: a TypeScript `import 'shared'`
         // beside a `go.mod` declaring `module shared` is a package specifier,
         // never a path into the Go tree.
-        let go_package = if extension_of(source_file) == "go" {
-            self.resolve_go_package(source_file, &segs)
-        } else {
-            None
-        };
-        Some(go_package.unwrap_or(Outcome::Unbound))
+        if extension_of(source_file) == "go" {
+            if let Some(package) = self.resolve_go_package(source_file, &segs) {
+                return Some(package);
+            }
+        }
+        Some(import(self.resolve_ts_bare(source_file, &segs, targets)))
+    }
+
+    /// An `Imports` row of a path-grammar file marked exported (S-534,
+    /// [FR-RS-19], [`ts_export_of`]), or `None` for any other row:
+    ///
+    /// - a re-export (`export * from 's'`, `export { a as b } from 's'`) binds
+    ///   exactly as an import of `s` does ([`resolve_specifier`](Ctx::resolve_specifier)),
+    ///   so the barrel's edge reaches the module it re-exports;
+    /// - a local export alias (`export default App`) binds to the one
+    ///   top-level declaration of its file it names — an `Imports` edge within
+    ///   the file, as a Rust `pub use` of an inline module's item has — a value
+    ///   before a type of the same name, and stays unbound on none or several.
+    ///
+    /// [FR-RS-19]: ../../../docs/specs/requirements/FR-RS-19.md
+    fn resolve_export_row(&self, r: &UnresolvedRefRow) -> Option<Outcome> {
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.is_path_specifier_file(source_file) {
+            return None;
+        }
+        match ts_export_of(r)? {
+            TsExport::Named { module, .. } | TsExport::Star { module } => {
+                Some(self.resolve_specifier(module).unwrap_or(Outcome::Unbound))
+            }
+            TsExport::Local { local, .. } => {
+                let root = self.ix.file_root_of(self.source);
+                // `type Button = …` beside `const Button = …` is TypeScript's
+                // one name in two declaration spaces: the value is the export
+                // a call reaches, and a type alone is exported only when no
+                // value of the name is declared.
+                let declared = self.ix.members_named(root, local, Want::Any);
+                let is_type = |id: &NodeId| {
+                    self.ix
+                        .info
+                        .get(id)
+                        .is_some_and(|i| matches!(i.kind, NodeKind::TypeAlias | NodeKind::Interface))
+                };
+                let values: Vec<NodeId> = declared.iter().copied().filter(|id| !is_type(id)).collect();
+                let candidates = if values.is_empty() { declared } else { values };
+                Some(match exactly_one(&candidates) {
+                    Res::Found(target) => Outcome::Bound {
+                        source: self.source,
+                        target,
+                        kind: EdgeKind::Imports,
+                        payload: None,
+                    },
+                    _ => Outcome::Unbound,
+                })
+            }
+        }
+    }
+
+    /// A bare TypeScript-family specifier, bound through the importing file's
+    /// nearest `tsconfig.json`/`jsconfig.json` and the workspace packages
+    /// (S-531, [FR-RS-02], [`super::ts_config`]). Not found when the importing
+    /// file is of no opted-in language.
+    ///
+    /// Each candidate path the config and packages rewrite the specifier into
+    /// is tried in order exactly as a relative specifier's path is
+    /// ([`resolve_file_path`](Ctx::resolve_file_path)); the first that names
+    /// anything decides, so an ambiguous one (`ui.ts` beside `ui.tsx`) leaves
+    /// the import unbound rather than trying the next ([NFR-RA-05]). A
+    /// specifier with no candidate — an external package — is not found.
+    ///
+    /// [FR-RS-02]: ../../../docs/specs/requirements/FR-RS-02.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_ts_bare(&self, source_file: &str, segs: &[String], targets: &HashSet<String>) -> Res {
+        let candidates = self.ix.ts.candidates(source_file, &segs.join("/"));
+        for candidate in candidates.into_iter().flatten() {
+            let Some(path) = fold_path(&[], &candidate) else { continue };
+            // A candidate spells its file whole (`src/index.ts`, an entry's
+            // `dist/index.js`); its stem is what the file roots are keyed by.
+            let path = strip_target_extension(path, targets);
+            match self.resolve_file_path(&path, targets) {
+                Res::NotFound => {}
+                decided => return decided,
+            }
+        }
+        Res::NotFound
     }
 
     /// The **imported** rung for a path-grammar file (S-440, [CR-142] D2,
@@ -5319,14 +7899,23 @@ impl Ctx<'_> {
     /// before).
     ///
     /// `target` is `<import target>::<name>`, the form extraction records for a
-    /// call through a named import or through an imported module's qualifier
-    /// (`extract::ImportBindings`). It is the **only** multi-segment call a
+    /// call through a named import or through an imported module's qualifier,
+    /// or `<import target>::<Class>::<method>` for a member call on a named
+    /// import (S-536) (`extract::ImportBindings`). It is the **only** multi-segment call a
     /// path-grammar file records — its `@ref.call` captures are plain
     /// identifiers — so every such row is decided here, `Some`, including one
-    /// whose prefix names no import of the file: no candidate, unbound. The candidates are the top-level
-    /// [`NodeKind::Function`]s named `name` in the file-root modules the file's
+    /// whose prefix names no import of the file: no candidate, unbound. The
+    /// exception is a lexical-constant language (Ruby, S-566): its `Foo::bar`
+    /// is a call on a constant, decided by the constant rung before this one
+    /// ([`resolve_constant_row`](Ctx::resolve_constant_row)), so it never
+    /// arrives here. The candidates are what each file-root module the file's
     /// `Imports` row for `<import target>` **bound** to
-    /// ([`Index::with_imported_bindings`]); exactly one binds ([NFR-RA-05]).
+    /// ([`Index::with_imported_bindings`]) provides under `name`
+    /// ([`Index::exported_definitions`], S-534): its own top-level function or
+    /// value binding of that name or of the local name it exports under it
+    /// (`export default App` for a default import's `default`), else what its
+    /// re-exports reach, transitively; exactly one binds ([NFR-RA-05]), so a
+    /// cycle or a name two modules provide stays unbound.
     ///
     /// Why this is not the Rust alias step, and its own over-binding reasoning:
     ///
@@ -5335,14 +7924,24 @@ impl Ctx<'_> {
     ///   never a candidate — `helper` imported from `./a` never reaches `./b`'s
     ///   `helper`, and never both.
     /// - An import that binds nothing (an external package: `react`,
-    ///   `github.com/lib/pq`), or a module that defines no such function (a
-    ///   barrel re-exporting it), decides the call **unbound** — `Some`, not
-    ///   `None` — so it never falls through to the workspace suffix match,
-    ///   which would bind `pq.Open` to a workspace `pq/pq.go`.
-    /// - Only a `Function` is a candidate: what a package or module qualifier
-    ///   reaches is a top-level function. A method is reached through a value,
-    ///   whose type the call does not state, and stays under the [FR-RS-06]
-    ///   receiver discipline as a bare method name.
+    ///   `github.com/lib/pq`), or a module that provides no such definition,
+    ///   decides the call **unbound** — `Some`, not `None` — so it never falls
+    ///   through to the workspace suffix match, which would bind `pq.Open` to a
+    ///   workspace `pq/pq.go`.
+    /// - Only a top-level function or, in the TypeScript family, value
+    ///   binding is a candidate ([`is_imported_call_target`]): what a package
+    ///   or module qualifier reaches is a top-level declaration; a Go package
+    ///   qualifier reaches a function only. A method is reached through a
+    ///   value, whose type the call does not state, and stays under the
+    ///   [FR-RS-06] receiver discipline as a bare method name — except
+    ///   through an imported class (S-536, [FR-RS-20]): a TypeScript member
+    ///   call on a named import, `<import target>::<Class>::<method>`, names
+    ///   its receiver as the row's `alias`, and reads **only** as a member of
+    ///   the class its import provides
+    ///   ([`imported_class_members`](Ctx::imported_class_members)). A bare
+    ///   call through `<import target>/<Class>` spells the same target and
+    ///   names no alias, so each is decided by its own reading, never the
+    ///   other's.
     /// - The [FR-RS-07] tie-break and the [FR-RS-08] trait fan-out are not
     ///   consulted: there is no associated method to break a tie with among
     ///   top-level functions, and no trait object in either language.
@@ -5352,29 +7951,106 @@ impl Ctx<'_> {
     /// [FR-RS-06]: ../../../docs/specs/requirements/FR-RS-06.md
     /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
     /// [FR-RS-08]: ../../../docs/specs/requirements/FR-RS-08.md
+    /// [FR-RS-20]: ../../../docs/specs/requirements/FR-RS-20.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn resolve_imported_call(&self, target: &str) -> Option<Res> {
-        let (module, name) = target.rsplit_once("::")?;
+    fn resolve_imported_call(&self, r: &UnresolvedRefRow) -> Option<Res> {
+        let (module, name) = r.target.rsplit_once("::")?;
         let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
         if !self.ix.is_path_specifier_file(source_file) {
             return None;
         }
+        // A member call on a named import names its receiver (S-536).
+        if r.alias.is_some() {
+            return Some(self.imported_class_members(module, name));
+        }
+        // A Go package qualifier reaches a function, as it did before the
+        // TypeScript family's value bindings joined the candidates (S-534,
+        // [FR-RS-19] is the TypeScript family's).
+        let function_only = extension_of(source_file) == "go";
+        let candidates = self.imported_definitions(module, name, |kind| {
+            is_imported_call_target(kind) && (!function_only || kind == NodeKind::Function)
+        });
+        Some(exactly_one(&candidates))
+    }
+
+    /// The callable `name` of the class `qualified` names, read as
+    /// `<import target>::<Class>` (S-536, [FR-RS-20]) — the reading of a
+    /// member call on a named import, and its only one: the one `Class` the
+    /// file's import of `<import target>` provides under `<Class>`
+    /// ([`imported_definitions`](Ctx::imported_definitions)) — a named, aliased
+    /// or default import (`<import target>::default`) alike — and among its own
+    /// members exactly one function or method of that name, static or not, as
+    /// a Python class qualifier binds
+    /// ([`resolve_module_qualified_call`](Ctx::resolve_module_qualified_call)).
+    /// A name that reaches two classes, or a class declaring the name twice,
+    /// is `Ambiguous`; no class — an external package's, a function, a value —
+    /// is `NotFound` ([NFR-RA-05]).
+    ///
+    /// [FR-RS-20]: ../../../docs/specs/requirements/FR-RS-20.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn imported_class_members(&self, qualified: &str, name: &str) -> Res {
+        let Some((module, class)) = qualified.rsplit_once("::") else {
+            return Res::NotFound;
+        };
+        match exactly_one(&self.imported_definitions(module, class, |kind| kind == NodeKind::Class)) {
+            Res::Found(class) => exactly_one(&self.ix.members_named(class, name, Want::Callable)),
+            other => other,
+        }
+    }
+
+    /// The definitions the file's import of `module` provides under `name`
+    /// whose kind `admits` accepts, id-sorted and deduplicated: what each file
+    /// root that file's `Imports` row for `module` bound to
+    /// ([`Index::with_imported_bindings`]) exports under it, re-exports
+    /// followed ([`Index::exported_definitions`]). Empty when the file holds no
+    /// bound import of `module` — an external package's, or none at all. The
+    /// candidates of both imported rungs: a call's
+    /// ([`resolve_imported_call`](Ctx::resolve_imported_call)) and a type
+    /// relation's ([`resolve_imported_type`](Ctx::resolve_imported_type)).
+    fn imported_definitions(&self, module: &str, name: &str, admits: impl Fn(NodeKind) -> bool) -> Vec<NodeId> {
         let roots = self
             .file_id
             .and_then(|f| self.ix.imported.get(&f))
             .and_then(|by_target| by_target.get(module));
-        let candidates: Vec<NodeId> = roots
+        let mut seen = ExportReads::new();
+        let mut candidates: Vec<NodeId> = roots
             .into_iter()
             .flatten()
-            .flat_map(|&root| self.ix.members_named(root, name, Want::Callable))
-            .filter(|id| {
-                self.ix
-                    .info
-                    .get(id)
-                    .is_some_and(|i| i.kind == NodeKind::Function)
-            })
+            .flat_map(|&root| self.ix.exported_definitions(root, name, MAX_ALIAS_DEPTH, &mut seen))
+            .filter(|id| self.ix.info.get(id).is_some_and(|i| admits(i.kind)))
             .collect();
-        Some(exactly_one(&candidates))
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
+    }
+
+    /// The **imported** rung of a type relation in a language of structural
+    /// types (S-535, [FR-EX-17]; TypeScript), or `None` for a single-segment
+    /// target or a file of any other language, whose row takes the scope it
+    /// always took.
+    ///
+    /// Extraction records a type named through a named or default import as
+    /// `<import target>::<name>`, as it records a call through one
+    /// (`extract::ImportBindings`), and every other multi-segment type it
+    /// records — `ns.Dto` through a namespace import, `React.Component` — is
+    /// a member of a value, never a path of modules. So every such row is
+    /// decided here, `Some`: it binds the one definition of a kind `want`
+    /// admits that its import provides under `name`
+    /// ([`imported_definitions`](Ctx::imported_definitions)) — `interface
+    /// User` and not a `const User` beside it — and a prefix that is no bound
+    /// import of the file (an external package, an unread namespace) binds
+    /// nothing, rather than reaching the member-path hierarchy, which would
+    /// read the specifier as names ([NFR-RA-05]).
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_imported_type(&self, target: &str, want: Want) -> Option<Res> {
+        let (module, name) = target.rsplit_once("::")?;
+        let source_file = self.ix.info.get(&self.source)?.file_path.as_deref()?;
+        if !self.ix.is_path_specifier_file(source_file) || !self.ix.layout.has_structural_types(source_file) {
+            return None;
+        }
+        Some(exactly_one(&self.imported_definitions(module, name, |kind| want.admits(kind))))
     }
 
     /// A relative specifier, resolved against the importing file's directory by
@@ -5395,36 +8071,84 @@ impl Ctx<'_> {
         let Some(path) = fold_path(&dir_segments(source_file), &segs.join("/")) else {
             return Res::NotFound;
         };
-        // Only a file of an extension the importing language resolves to is a
-        // candidate: a `helper.py` beside `helper.ts` neither answers `./helper`
-        // nor makes it ambiguous.
-        let at_stem = |stem: &str| {
-            let candidates: Vec<NodeId> = self
-                .ix
-                .file_roots_by_stem
-                .get(stem)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|id| {
-                    self.ix
-                        .info
-                        .get(id)
-                        .and_then(|i| i.file_path.as_deref())
-                        .is_some_and(|p| targets.contains(&extension_of(p)))
-                })
-                .collect();
-            exactly_one(&candidates)
-        };
-        match at_stem(&path) {
+        // A load-path language loads the file its relative specifier names,
+        // never a directory's `index` file (S-566): `require_relative 'auth'`
+        // is `auth.rb` or nothing.
+        if self.ix.load_path.roots_for(source_file).is_some() {
+            return self.file_at_stem(&path, targets);
+        }
+        self.resolve_file_path(&path, targets)
+    }
+
+    /// A bare specifier of a load-path language (S-566, [FR-RS-34]), bound to
+    /// the one file whose extension-less path under one of the load `roots`
+    /// ([`super::load_path`]) it names — `require 'rack/lint'` reaching
+    /// `lib/rack/lint.rb` under the gem's `lib/`; a trailing `.rb` names the
+    /// file itself. Exactly one across every root ([NFR-RA-05]): a specifier two
+    /// roots hold a file for stays unbound rather than taking the one the
+    /// runtime's load order would reach first, which the tree does not state.
+    /// One no root holds a file for — `require 'json'`, an external gem — is
+    /// not found.
+    ///
+    /// [FR-RS-34]: ../../../docs/specs/requirements/FR-RS-34.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_load_path(&self, roots: &[String], segs: &[String], targets: &HashSet<String>) -> Res {
+        let spec = strip_target_extension(segs.join("/"), targets);
+        let mut found: Vec<NodeId> = Vec::new();
+        for root in roots {
+            let base: Vec<&str> = root.split('/').filter(|s| !s.is_empty()).collect();
+            let Some(path) = fold_path(&base, &spec) else { continue };
+            match self.file_at_stem(&path, targets) {
+                Res::Found(target) => found.push(target),
+                Res::NotFound => {}
+                Res::Ambiguous => return Res::Ambiguous,
+            }
+        }
+        found.sort();
+        found.dedup();
+        exactly_one(&found)
+    }
+
+    /// The one file-root module whose extension-less root-relative `path` it
+    /// is, else that directory's `index` file — the order a
+    /// TypeScript/JavaScript resolver tries them, shared by a relative
+    /// specifier and a `tsconfig`/workspace candidate (S-531).
+    /// Exactly-one-or-nothing at each step ([NFR-RA-05]).
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_file_path(&self, path: &str, targets: &HashSet<String>) -> Res {
+        match self.file_at_stem(path, targets) {
             Res::NotFound => {}
             decided => return decided,
         }
         if path.is_empty() {
-            at_stem("index")
+            self.file_at_stem("index", targets)
         } else {
-            at_stem(&format!("{path}/index"))
+            self.file_at_stem(&format!("{path}/index"), targets)
         }
+    }
+
+    /// The one file-root module at the extension-less root-relative `stem`.
+    /// Only a file of an extension the importing language resolves to is a
+    /// candidate: a `helper.py` beside `helper.ts` neither answers `./helper`
+    /// nor makes it ambiguous.
+    fn file_at_stem(&self, stem: &str, targets: &HashSet<String>) -> Res {
+        let candidates: Vec<NodeId> = self
+            .ix
+            .file_roots_by_stem
+            .get(stem)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| {
+                self.ix
+                    .info
+                    .get(id)
+                    .and_then(|i| i.file_path.as_deref())
+                    .is_some_and(|p| targets.contains(&extension_of(p)))
+            })
+            .collect();
+        exactly_one(&candidates)
     }
 
     /// A Go import path, bound to the **package** it names — every non-test
@@ -5507,6 +8231,7 @@ impl Ctx<'_> {
             targets,
             kind: EdgeKind::Imports,
             payload: None,
+            dispatch: None,
         })
     }
 
@@ -5762,6 +8487,86 @@ impl Ctx<'_> {
                 .is_some_and(|p| is_class_like(p.kind))
     }
 
+    /// Whether a bare call cannot reach `target`, whichever rung found it — a
+    /// `use` or glob import, the package, the workspace fallback:
+    /// - an instance member a bare call of its language never reaches (S-590,
+    ///   [FR-RS-07], [`is_unreachable_member`](Ctx::is_unreachable_member));
+    ///   the scope walk already passed over one
+    ///   ([`prefer_free_functions`](Ctx::prefer_free_functions)), to reach a
+    ///   free function further out;
+    /// - an extension it cannot be shown to reach, or one a member of the
+    ///   enclosing extension's receiver hides (S-560, [FR-RS-31];
+    ///   [`is_unreachable_extension`](Ctx::is_unreachable_extension),
+    ///   [`hidden_by_receiver_member`](Ctx::hidden_by_receiver_member)) — which
+    ///   records [`Residue::NoReceiverEvidence`].
+    ///
+    /// [FR-RS-07]: ../../../docs/specs/requirements/FR-RS-07.md
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    fn bare_call_cannot_reach(&self, target: NodeId, want: Want) -> bool {
+        if self.is_unreachable_member(target) {
+            return true;
+        }
+        let hidden = self.is_unreachable_extension(target) || self.hidden_by_receiver_member(target);
+        if hidden {
+            self.note(want, || Residue::NoReceiverEvidence);
+        }
+        hidden
+    }
+
+    /// Whether `id` is an extension function (S-560, [FR-RS-31]: a top-level
+    /// function with a recorded self type) that a bare call of a language
+    /// declaring them cannot be shown to reach. A bare `f()` reaches an
+    /// extension only through an implicit receiver, which the graph sees in one
+    /// place: the body of an extension, its own callable or one enclosing it —
+    /// koin's `single { X(get()) }` calls the lambda receiver's `Scope.get()`,
+    /// never a same-package `KoinTest.get()`. Even there a member of the name
+    /// wins ([`member_named`](Ctx::member_named)), as for a receiver call.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    fn is_unreachable_extension(&self, id: NodeId) -> bool {
+        if !self.extension_calls || !self.ix.self_types.contains_key(&id) {
+            return false;
+        }
+        self.extension_receiver().is_none() || self.ix.info.get(&id).is_some_and(|i| self.member_named(&i.name))
+    }
+
+    /// Whether a member of the receiver of the extension the source sits in
+    /// hides `target` from a bare call (S-560, [FR-RS-12]): inside `fun
+    /// Box.twice() = size()` the implicit `this` is a `Box`, whose own `size`
+    /// Kotlin reads before any top-level `size`. Decided only where the
+    /// receiver names a class-like type of the source's family declaring a
+    /// callable of `target`'s name that `target` is not; a library receiver
+    /// (`String`) is not read here.
+    fn hidden_by_receiver_member(&self, target: NodeId) -> bool {
+        if !self.extension_calls {
+            return false;
+        }
+        let (Some(receiver), Some(name)) = (self.extension_receiver(), self.ix.info.get(&target).map(|i| &i.name)) else {
+            return false;
+        };
+        let family = self.source_family.as_deref();
+        self.ix.by_name.get(receiver).into_iter().flatten().any(|&ty| {
+            self.ix.info.get(&ty).is_some_and(|i| {
+                is_class_like(i.kind) && i.file_path.as_deref().and_then(|p| self.ix.layout.family(p)).as_deref() == family
+            }) && self.ix.members_named(ty, name, Want::Callable).iter().any(|&m| m != target)
+        })
+    }
+
+    /// The receiver type of the extension whose body the source is in (S-560):
+    /// the self type of the source or of the nearest callable enclosing it,
+    /// `None` outside every extension.
+    fn extension_receiver(&self) -> Option<&str> {
+        let mut cursor = Some(self.source);
+        for _ in 0..MAX_CONTAINS_DEPTH {
+            let at = cursor.filter(|at| self.ix.info.get(at).is_some_and(|i| Want::Callable.admits(i.kind)))?;
+            if let Some(receiver) = self.ix.self_types.get(&at) {
+                return Some(receiver);
+            }
+            cursor = self.ix.parent.get(&at).copied();
+        }
+        None
+    }
+
     /// Resolve a bare name by the scope hierarchy (function-local outward).
     ///
     /// Reached only for a **single-segment** name (multi-segment paths route
@@ -5776,11 +8581,15 @@ impl Ctx<'_> {
         //    file module.
         //    A scope whose callables of the name admit none of the call's
         //    arguments is passed over (S-592, [`applicable`](Ctx::applicable)).
+        //    A class's companion is in scope right after the class (I4-INT,
+        //    [`companion_of`](Ctx::companion_of)). Only a type of the written
+        //    arity (S-602, [`admits_arity`](Ctx::admits_arity)): a `Result<T>`
+        //    beside the source in its own file is not the `Result` it writes.
         let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
-            let mut members =
-                self.prefer_free_functions(self.applicable(self.ix.members_named(scope, name, want)));
-            members.retain(|&id| !self.is_own_header(id));
+            let mut members = self.scope_members(scope, name, want);
+            members.retain(|&id| !self.is_own_header(id) && self.admits_arity(id));
+            let members = self.narrow_pair(members, want);
             match exactly_one(&members) {
                 Res::NotFound => {}
                 decided => return decided, // found — or a *known* ambiguity
@@ -5837,13 +8646,82 @@ impl Ctx<'_> {
             Res::NotFound => {}
             decided => return decided,
         }
-        // 5) Workspace unique-name fallback — aggressive only for bare names,
+        // 5) The other files of the source's directory package (S-528, Go).
+        match self.directory_package_name(name, want) {
+            Res::NotFound => {}
+            decided => return decided,
+        }
+        // 6) Workspace unique-name fallback — aggressive only for bare names,
         //    never for a type relation ([`scope_only`](Ctx::scope_only)). A
         //    receiver-method call never reaches here (S-514, CR-066).
         if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
         }
         Res::NotFound
+    }
+
+    /// The members of `scope` named `name` that one level of
+    /// [`resolve_name`](Ctx::resolve_name)'s lexical chain offers: those the
+    /// call's arguments admit ([`applicable`](Ctx::applicable)), free functions
+    /// preferred ([`prefer_free_functions`](Ctx::prefer_free_functions)) — else,
+    /// for a class with a companion, the companion's (I4-INT,
+    /// [`companion_of`](Ctx::companion_of)), the scope Kotlin reads next.
+    fn scope_members(&self, scope: NodeId, name: &str, want: Want) -> Vec<NodeId> {
+        let read = |at: NodeId| self.prefer_free_functions(self.applicable(self.ix.members_named(at, name, want)));
+        let members = read(scope);
+        if !members.is_empty() {
+            return members;
+        }
+        self.companion_of(scope).map(read).unwrap_or(members)
+    }
+
+    /// A bare name from a directory-package source (S-528, [FR-RS-17]: Go)
+    /// that its own file, its imports and its dot-imports do not supply: the
+    /// exactly-one top-level declaration of the name among the **other** files
+    /// of the source's package — the files of its directory that declare its
+    /// `package` clause ([`PackageLayout::directory_package`], read off
+    /// [`Index::file_roots_by_dir`]). Their
+    /// declarations are read as the lexical rung reads the source's own file —
+    /// the argument filter ([`applicable`](Ctx::applicable)) and the
+    /// free-function tie-break ([`prefer_free_functions`](Ctx::prefer_free_functions)),
+    /// so a method that only shares the name is never one.
+    ///
+    /// Two are a known ambiguity that stops the walk ([NFR-RA-05]): a name a
+    /// build-tag variant declares again (`f_linux.go` and `f_windows.go`) binds
+    /// neither, nor reaches the workspace fallback. None passes on. A `package
+    /// foo_test` file declares another clause, so it is a package of its own
+    /// and never reaches `foo`'s names, nor they its. A directory holding a
+    /// file of the language whose clause is not recorded — a store not yet
+    /// re-extracted since clauses were, file by file — is no known package:
+    /// the rung reads nothing there, so a build-tag variant it cannot see is
+    /// never outvoted by the one it can. Open to a type relation: the package
+    /// is the scope the name is written in.
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn directory_package_name(&self, name: &str, want: Want) -> Res {
+        let layout = &self.ix.layout;
+        let Some(path) = self.ix.file_of(self.source) else {
+            return Res::NotFound;
+        };
+        let Some((dir, clause)) = layout.directory_package(path) else {
+            return Res::NotFound;
+        };
+        let mut found: Vec<NodeId> = Vec::new();
+        for (sibling, root) in self.ix.file_roots_by_dir.get(dir).into_iter().flatten() {
+            if sibling == path || !layout.declares_directory_packages(sibling) {
+                continue;
+            }
+            match layout.directory_package(sibling) {
+                Some((_, c)) if c == clause => found.extend(self.ix.members_named(*root, name, want)),
+                Some(_) => {}
+                // A file whose clause is not recorded (not re-extracted since
+                // clauses were, or a damaged parse) may be of the package and
+                // declare the name: the package is not known in full.
+                None => return Res::NotFound,
+            }
+        }
+        exactly_one(&self.prefer_free_functions(self.applicable(found)))
     }
 
     /// A bare name from a package-shaped source, after the lexical chain
@@ -5858,15 +8736,33 @@ impl Ctx<'_> {
     ///    that binds nothing here leaves the name unresolved rather than
     ///    reaching a same-package or wildcard type of that name (S-466 review);
     /// 2. **same package** — a top-level type of the source's own package,
-    ///    visible without an import;
+    ///    visible without an import, or a top-level function of it in a
+    ///    language that declares them namespace members (S-573; PHP's global
+    ///    functions, S-551, are the empty package's);
     /// 3. **enclosing namespaces** — only for a language that declares them
     ///    (S-595, [FR-RS-45]): a top-level type of each namespace enclosing the
     ///    source's own, nearest first ([`enclosing_levels`](Ctx::enclosing_levels)),
     ///    exactly one per level — two at one level are
-    ///    [`Residue::TypeAmbiguous`] and stop the walk, none passes outward;
+    ///    [`Residue::TypeAmbiguous`] and stop the walk, none passes outward.
+    ///    Each level's types — the source's own namespace's in rung 2 too — are
+    ///    followed by the wildcards written inside that namespace's block
+    ///    (S-603, [CR-199]: C#'s `namespace A { using X; … }`,
+    ///    [`FileScope::block_globs`]), exactly one again, two
+    ///    [`Residue::TypeAmbiguous`] and stopping the walk, before the next
+    ///    level out;
     /// 4. **on-demand** — a member of a type, or a type of a package, the file
-    ///    imports with a wildcard ([`glob_members`](Ctx::glob_members));
-    /// 5. the policy-gated workspace name fallback, as for every other
+    ///    imports with a wildcard written outside every namespace block
+    ///    ([`glob_members`](Ctx::glob_members)) — read
+    ///    before rungs 2 and 3 in a language whose wildcards outrank the
+    ///    package's other files ([`wildcards_first`](Ctx::wildcards_first),
+    ///    S-573: Scala; the file's own declarations came first, lexically);
+    /// 5. **the global function** — only for a call, in a language whose
+    ///    unqualified function names fall back to the global namespace (S-551,
+    ///    [FR-RS-26]: PHP's), from a namespaced file
+    ///    ([`global_function`](Ctx::global_function)). A file of the global
+    ///    namespace reads the global functions as its rung 2: its package is
+    ///    the empty one;
+    /// 6. the policy-gated workspace name fallback, as for every other
     ///    language — except for a type relation, which binds by scope and
     ///    package key only ([`scope_only`](Ctx::scope_only)).
     ///
@@ -5877,11 +8773,23 @@ impl Ctx<'_> {
     ///
     /// Each rung is exactly-one; a known ambiguity stops the walk ([NFR-RA-05]).
     ///
+    /// For a language that tells types apart by their arity (S-602, [CR-199]:
+    /// C#'s `Result` and `Result<T>`), rungs 2, 3 and 4 — and the lexical
+    /// chain before them ([`resolve_name`](Ctx::resolve_name)), which holds the
+    /// source's own file — admit only a type of the arity the row writes
+    /// ([`admits_arity`](Ctx::admits_arity)) before their exactly-one test: a level holding only the other arity passes the
+    /// name on, and ambiguity is judged among the types of the written arity
+    /// ([FR-RS-46]). A row of unknown arity — a call through a type name —
+    /// admits any, as before.
+    ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    /// [FR-RS-46]: ../../../docs/specs/requirements/FR-RS-46.md
     /// [CR-066]: ../../../docs/requests/CR-066-receiver-method-overbinding.md
     /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
     /// [FR-RS-03]: ../../../docs/specs/requirements/FR-RS-03.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
     fn resolve_package_name(&self, package: &[String], name: &str, want: Want, depth: u8) -> Res {
         if let Some(expansions) = self.scope().and_then(|s| s.alias_expansions.get(name)) {
             let mut imported: Vec<NodeId> = Vec::new();
@@ -5901,15 +8809,28 @@ impl Ctx<'_> {
             }
             return decided;
         }
-        let same_package: Vec<NodeId> = self
-            .package_type(package, name)
-            .iter()
-            .copied()
-            .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
-            .collect();
+        // Scala reads its wildcards before the package's other files (S-573).
+        if self.wildcards_first {
+            if let Some(decided) = self.wildcard_name(name, want, None) {
+                return decided;
+            }
+        }
+        let mut same_package = self.admitted_types(self.package_type(package, name), want);
+        // Only a type of the written arity (S-602).
+        same_package.retain(|&id| self.admits_arity(id));
+        // Only a function the call's arguments admit (S-592), as the lexical
+        // rungs require (S-560).
+        same_package.extend(self.applicable(self.namespace_callables(package, name, want)));
         match exactly_one(&same_package) {
             Res::NotFound => {}
             decided => return decided,
+        }
+        // The `using`s of the source's own namespace block (S-603), read at its
+        // level as the path rung reads them.
+        if self.enclosing_namespaces {
+            if let Some(decided) = self.wildcard_name(name, want, Some(package)) {
+                return decided;
+            }
         }
         for level in self.enclosing_levels(package) {
             let found: Vec<NodeId> = self
@@ -5917,6 +8838,7 @@ impl Ctx<'_> {
                 .iter()
                 .copied()
                 .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
+                .filter(|&id| self.admits_arity(id))
                 .collect();
             match exactly_one(&found) {
                 Res::NotFound => {}
@@ -5928,23 +8850,18 @@ impl Ctx<'_> {
                 }
                 decided => return decided,
             }
-        }
-        match self.glob_members(name, want, false) {
-            Some(found) => match exactly_one(&found) {
-                Res::NotFound => {}
-                Res::Ambiguous => {
-                    // Two wildcards each supply a callable of this name.
-                    self.note(want, || Residue::OverloadAmbiguous);
-                    return Res::Ambiguous;
-                }
-                decided => return decided,
-            },
-            None => {
-                // A wildcard's type is declared twice, and one declaration
-                // could supply the name.
-                self.note(want, || Residue::TypeAmbiguous);
-                return Res::Ambiguous;
+            // Then that level's own block's `using`s, before the next level out.
+            if let Some(decided) = self.wildcard_name(name, want, Some(level)) {
+                return decided;
             }
+        }
+        if !self.wildcards_first {
+            if let Some(decided) = self.wildcard_name(name, want, None) {
+                return decided;
+            }
+        }
+        if let Some(decided) = self.global_function(package, name, want) {
+            return decided;
         }
         if self.policy == BindingPolicy::Aggressive && !self.scope_only.get() {
             return self.unique_by_name(name, want);
@@ -5952,11 +8869,124 @@ impl Ctx<'_> {
         Res::NotFound
     }
 
+    /// [`resolve_package_name`](Ctx::resolve_package_name)'s **global function**
+    /// rung (S-551, [FR-RS-26]): a call from a namespaced file of a language
+    /// whose unqualified function names fall back to the global namespace
+    /// (PHP's, [`global_function_fallback`](Ctx::global_function_fallback)) —
+    /// the one top-level function of the name the files declaring no namespace
+    /// declare ([`namespace_callables`](Ctx::namespace_callables) under the
+    /// empty package, a file of unknown namespace a rival), once its own
+    /// namespace declared none. Exactly one, as the same-package rung reads it
+    /// (through [`applicable`](Ctx::applicable), which narrows nothing for a
+    /// bare PHP call: it carries no filtered argument count): two are a known
+    /// ambiguity and stop the walk ([NFR-RA-05]).
+    ///
+    /// `None` — the next rung decides — for any lookup but a call (a class name
+    /// never falls back), for a file declaring no namespace (its same-package
+    /// rung read the global namespace already), and when no global function
+    /// has the name. Policy-free, as every scope rung is.
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn global_function(&self, package: &[String], name: &str, want: Want) -> Option<Res> {
+        if !self.global_function_fallback || package.is_empty() || !want.is_call() {
+            return None;
+        }
+        match exactly_one(&self.applicable(self.namespace_callables(&[], name, want))) {
+            Res::NotFound => None,
+            decided => Some(decided),
+        }
+    }
+
+    /// The top-level functions named `name` that `package` holds and `want`
+    /// admits ([`package_callables`](Ctx::package_callables)) — with, for the
+    /// global namespace of a language whose unqualified calls fall back to it
+    /// (S-551, [`global_function_fallback`](Ctx::global_function_fallback)),
+    /// every function of the name a file of unknown namespace declares
+    /// ([`Index::unplaced_callables`]), once one is found. That file may
+    /// declare it in the global namespace, so a name it shares is not known
+    /// there in full and binds neither ([NFR-RA-05]). Alone, such a function
+    /// is no candidate: its namespace is not known.
+    ///
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn namespace_callables(&self, package: &[String], name: &str, want: Want) -> Vec<NodeId> {
+        let mut found = self.package_callables(&[package, &[name.to_string()]].concat(), want);
+        if found.is_empty() || !package.is_empty() || !self.global_function_fallback {
+            return found;
+        }
+        let unplaced = self
+            .ix
+            .unplaced_callables
+            .get(self.source_family.as_deref().unwrap_or_default())
+            .and_then(|by_name| by_name.get(&[name.to_string()][..]));
+        found.extend(
+            unplaced
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind))),
+        );
+        found
+    }
+
+    /// [`resolve_package_name`](Ctx::resolve_package_name)'s on-demand rung:
+    /// the one member the file's wildcards bring into view under `name`
+    /// ([`glob_members`](Ctx::glob_members)) of the written arity
+    /// ([`admits_arity`](Ctx::admits_arity), S-602) — `None` when they bring
+    /// none, so the next rung decides. `block` names the namespace whose block's
+    /// wildcards are read (S-603) — the file's own when `None`. Two types the
+    /// `using`s of one block supply are [`Residue::TypeAmbiguous`], as two types
+    /// of one enclosing level are: the walk stops there.
+    fn wildcard_name(&self, name: &str, want: Want, block: Option<&[String]>) -> Option<Res> {
+        let Some(mut found) = self.glob_members(name, want, false, block) else {
+            // A wildcard's type is declared twice, and one declaration
+            // could supply the name.
+            self.note(want, || Residue::TypeAmbiguous);
+            return Some(Res::Ambiguous);
+        };
+        found.retain(|&id| self.admits_arity(id));
+        match exactly_one(&found) {
+            Res::NotFound => None,
+            Res::Ambiguous if block.is_some() => {
+                self.note(want, || Residue::TypeAmbiguous);
+                Some(Res::Ambiguous)
+            }
+            Res::Ambiguous => {
+                // Two wildcards each supply a callable of this name.
+                self.note(want, || Residue::OverloadAmbiguous);
+                Some(Res::Ambiguous)
+            }
+            decided => Some(decided),
+        }
+    }
+
+    /// Whether `id` may be what the written type names (S-602, [CR-199]): a
+    /// type of the row's written arity ([`type_arity`](Ctx::type_arity)), or
+    /// any node when that arity, or `id`'s own ([`Index::type_arities`]), is
+    /// unknown — a non-type node records none. The filter of the lexical chain
+    /// of [`resolve_name`](Ctx::resolve_name) and of the own-namespace,
+    /// enclosing-namespace and namespace-wildcard rungs of
+    /// [`resolve_package_name`](Ctx::resolve_package_name), applied before
+    /// each rung's exactly-one test: `Result` and `Result<T>` in one namespace
+    /// are no ambiguity ([FR-RS-46]), and a level holding only the other
+    /// arity passes the name outward.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    /// [FR-RS-46]: ../../../docs/specs/requirements/FR-RS-46.md
+    fn admits_arity(&self, id: NodeId) -> bool {
+        match (self.type_arity, self.ix.type_arities.get(&id)) {
+            (Some(written), Some(&declared)) => written == declared,
+            _ => true,
+        }
+    }
+
     /// A multi-segment path from a package-shaped source ([CR-149]), its head
     /// read in the language's order for a simple type name (JLS §6.5.5): a
     /// member type in lexical scope (`Inner.Deep` inside `Outer`); else the
     /// file's single-type imports of it — **final**, as in
-    /// [`resolve_package_name`](Ctx::resolve_package_name), so `Map.Entry`
+    /// [`resolve_package_name`](Ctx::resolve_package_name) (and, as there, a
+    /// wildcard before the package where the language reads it first, S-573),
+    /// so `Map.Entry`
     /// under `import java.util.Map` never reaches a same-package `Map`. Every
     /// distinct import of the head's name is read
     /// ([`resolve_expansions`](Ctx::resolve_expansions), S-599): they bind where
@@ -5969,11 +8999,15 @@ impl Ctx<'_> {
     /// ([`resolve_fqn_under`](Ctx::resolve_fqn_under)) — two types at one level
     /// are [`Res::Ambiguous`], never a pick of an outer level, and a level
     /// whose type has no such member ends that walk but not the rungs below it;
-    /// else one a
+    /// a level that names no type reads its namespace block's wildcards
+    /// before the next level out (S-603, as
+    /// [`resolve_package_name`](Ctx::resolve_package_name) does);
+    /// else one a file-level
     /// wildcard brings into view; else the whole path read as a fully-qualified
     /// name ([`resolve_fqn`](Ctx::resolve_fqn)). The first rung whose head names a
     /// type decides — a simple type name obscures a package of the same
-    /// spelling, as the language rules it.
+    /// spelling, as the language rules it. A path headed [`FULLY_QUALIFIED_HEAD`]
+    /// (a PHP `\App\Foo::bar()`, S-547) takes the last rung alone.
     ///
     /// [`in_rival_expansion`]: Ctx::in_rival_expansion
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
@@ -5982,6 +9016,11 @@ impl Ctx<'_> {
         let Some((head, rest)) = segs.split_first() else {
             return Res::NotFound;
         };
+        // A path written fully qualified (PHP's `\App\Foo::bar()`, S-547) is read
+        // from the global namespace alone, as a type relation's is.
+        if head == FULLY_QUALIFIED_HEAD {
+            return self.resolve_fqn(rest, want);
+        }
         let mut cursor = Some(self.lexical_start.get());
         while let Some(scope) = cursor {
             let mut heads = self.member_types(scope, head);
@@ -6011,6 +9050,11 @@ impl Ctx<'_> {
             }
             return decided;
         }
+        if self.wildcards_first {
+            if let Some(decided) = self.wildcard_head(head, rest, want, None) {
+                return decided;
+            }
+        }
         if let Some(decided) = self.walk_from(self.package_type(package, head), rest, want) {
             return decided;
         }
@@ -6028,16 +9072,15 @@ impl Ctx<'_> {
                 Some(Res::NotFound) => break,
                 Some(decided) => return decided,
             }
-        }
-        match self.glob_members(head, Want::Any, true) {
-            Some(found) => {
-                if let Some(decided) = self.walk_from(&found, rest, want) {
-                    return decided;
-                }
+            // Then the level's own block's `using`s, before the next level out
+            // (S-603).
+            if let Some(decided) = self.wildcard_head(head, rest, want, Some(level)) {
+                return decided;
             }
-            None => {
-                self.note(want, || Residue::TypeAmbiguous);
-                return Res::Ambiguous;
+        }
+        if !self.wildcards_first {
+            if let Some(decided) = self.wildcard_head(head, rest, want, None) {
+                return decided;
             }
         }
         let resolved = self.resolve_fqn(segs, want);
@@ -6052,11 +9095,27 @@ impl Ctx<'_> {
         resolved
     }
 
+    /// [`resolve_package_path`](Ctx::resolve_package_path)'s on-demand rung:
+    /// `rest` walked from the one type the file's wildcards bring into view
+    /// under `head` — `None` when they bring none, so the next rung decides.
+    /// `block` names the namespace whose block's wildcards are read (S-603) —
+    /// the file's own when `None`.
+    fn wildcard_head(&self, head: &str, rest: &[String], want: Want, block: Option<&[String]>) -> Option<Res> {
+        match self.glob_members(head, Want::Any, true, block) {
+            Some(found) => self.walk_from(&found, rest, want),
+            None => {
+                self.note(want, || Residue::TypeAmbiguous);
+                Some(Res::Ambiguous)
+            }
+        }
+    }
+
     /// The fully-qualified names the type of a call `segs` (the receiver type
     /// segments, then the member) could be, in the order the source's scope
     /// reads them: the source's own package, each enclosing namespace of it for
-    /// a language that declares them (S-595), each non-static wildcard, then the
-    /// path as written when it is qualified. Its single-type import never
+    /// a language that declares them (S-595) — each level followed by the
+    /// wildcards of its namespace block (S-603) — each non-static wildcard of
+    /// the file, then the path as written when it is qualified. Its single-type import never
     /// appears here — an imported head is expanded and resolved as the path
     /// written. A simple name as written would name a type of the default
     /// package, which a file in a named package cannot see (JLS §7.5); a
@@ -6073,14 +9132,15 @@ impl Ctx<'_> {
                 candidates.push(fqn);
             }
         };
-        push(package);
-        for level in self.enclosing_levels(package) {
+        let scope = self.scope();
+        for level in std::iter::once(package).chain(self.enclosing_levels(package)) {
             push(level);
-        }
-        if let Some(scope) = self.scope() {
-            for glob in &scope.globs {
+            for glob in scope.and_then(|s| s.block_globs.get(level)).into_iter().flatten() {
                 push(glob);
             }
+        }
+        for glob in scope.into_iter().flat_map(|s| &s.globs) {
+            push(glob);
         }
         if ty.len() > 1 {
             push(&[]);
@@ -6111,15 +9171,76 @@ impl Ctx<'_> {
     /// so the caller's next rung decides; else the walk's result, where two
     /// types under the prefix are [`Res::Ambiguous`].
     fn resolve_fqn_under(&self, prefix: &[String], segs: &[String], want: Want) -> Option<Res> {
-        let family_types = self.family_types()?;
+        let family_types = self.family_types();
         let mut fqn = prefix.to_vec();
         fqn.extend_from_slice(segs);
         for split_at in (prefix.len() + 1..=fqn.len()).rev() {
-            if let Some(types) = family_types.get(&fqn[..split_at]) {
+            if let Some(types) = family_types.and_then(|types| types.get(&fqn[..split_at])) {
                 return self.walk_from(types, &fqn[split_at..], want);
+            }
+            // The whole name may be a top-level function (S-573) — read after
+            // a type of the name, which an import of it names first.
+            let callables = self.applicable(self.package_callables(&fqn[..split_at], want));
+            if split_at == fqn.len() && !callables.is_empty() {
+                return Some(exactly_one(&callables));
+            }
+            // Or another language's file facade (S-560): Java's `a.b.UtilsKt`.
+            if let Some(decided) = self.walk_facade(&fqn[..split_at], &fqn[split_at..], want) {
+                return Some(decided);
             }
         }
         None
+    }
+
+    /// `rest` read from the file facade `facade` names (S-560, [FR-RS-31];
+    /// [`Index::facades_by_fqn`]) — `None` when it names none of the source's
+    /// family, or the source's language declares facades itself
+    /// ([`reads_facades`](Ctx::reads_facades)), so the caller's next rung
+    /// decides. The facade alone is its file's module (`import a.b.UtilsKt`);
+    /// one segment more is among the file's top-level functions, exactly one
+    /// of which the call's arguments admit — an extension's receiver is its
+    /// first argument there, so it takes one more than the extension declares.
+    /// Functions of the name that admit none are [`Residue::NoApplicableOverload`],
+    /// as on every arity-filtered arm. A facade holds no type: a longer path
+    /// reaches nothing. Two files of one facade class are [`Res::Ambiguous`].
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    fn walk_facade(&self, facade: &[String], rest: &[String], want: Want) -> Option<Res> {
+        if !self.reads_facades {
+            return None;
+        }
+        let files = self.ix.facades_by_fqn.get(self.source_family.as_deref()?)?.get(facade)?;
+        let file = match exactly_one(files) {
+            Res::Found(file) => file,
+            decided => {
+                self.note(want, || Residue::TypeAmbiguous);
+                return Some(decided);
+            }
+        };
+        let mut inapplicable = false;
+        let decided = match rest {
+            [] if self.ix.info.get(&file).is_some_and(|i| want.admits(i.kind)) => Res::Found(file),
+            [name] => {
+                let mut found = self.ix.members_named(file, name, Want::Callable);
+                let named = !found.is_empty();
+                if let Some(count) = self.arg_count {
+                    found.retain(|&id| {
+                        let declared = if self.ix.self_types.contains_key(&id) { count.checked_sub(1) } else { Some(count) };
+                        declared.is_some_and(|c| self.admits_count(id, c))
+                    });
+                }
+                inapplicable = named && found.is_empty();
+                exactly_one(&found)
+            }
+            _ => Res::NotFound,
+        };
+        match decided {
+            Res::Found(_) => {}
+            Res::Ambiguous => self.note(want, || Residue::OverloadAmbiguous),
+            Res::NotFound if inapplicable => self.note(want, || Residue::NoApplicableOverload),
+            Res::NotFound => self.note(want, || Residue::SupertypeUnreached),
+        }
+        Some(decided)
     }
 
     /// The namespaces enclosing the source's own `package`, nearest first
@@ -6169,7 +9290,216 @@ impl Ctx<'_> {
             targets,
             kind: EdgeKind::Imports,
             payload: None,
+            dispatch: None,
         })
+    }
+
+    /// A row of a lexical-constant language (S-565, [FR-RS-33]), bound through
+    /// the constant index ([`Index::constants`]) alone:
+    ///
+    /// - a **call** `Foo::bar` (Ruby's `Foo.bar`) — `Foo` read as a constant
+    ///   ([`constant`](Ctx::constant)), then `bar` among the callables every
+    ///   declaration of it holds that are called on the class or module object
+    ///   itself: recorded as not taking `self` (`def self.bar`, a
+    ///   `class << self` method, a `module_function`; [`Index::without_self`]).
+    ///   Its instance methods are no candidate, and neither is an inherited
+    ///   class method, which the graph does not walk to. Exactly one, after the
+    ///   argument count where the language filters by one
+    ///   ([`applicable`](Ctx::applicable); Ruby, which overloads nothing, does
+    ///   not);
+    /// - an **instantiation** `Foo` — the one class the constant declares;
+    /// - a compact declaration's **scope** `A` (a `TypeUses` from the
+    ///   declaration's header) — the one class or module it names, read from
+    ///   the scope enclosing the declaration.
+    ///
+    /// A reopened class or module is one constant: its declarations pool
+    /// their methods. An edge to the constant itself needs one node, so a
+    /// constant declared more than once binds no instantiation or scope. A
+    /// constant some file declares a class and another a module is two
+    /// declarations and binds nothing ([NFR-RA-05]).
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn resolve_constant_row(&self, r: &UnresolvedRefRow) -> Res {
+        let segs = split(&r.target);
+        let header = r.kind == EdgeKind::TypeUses && self.ix.constant_of.contains_key(&self.source);
+        let start = if header {
+            self.ix.parent.get(&self.source).copied().unwrap_or(self.source)
+        } else {
+            self.source
+        };
+        if r.kind != EdgeKind::Calls {
+            return self.constant_node(&segs, start, |kind| match r.kind {
+                EdgeKind::Instantiates => kind == NodeKind::Class,
+                _ => matches!(kind, NodeKind::Class | NodeKind::Module),
+            });
+        }
+        let want = Want::Callable;
+        let Some((name, path)) = segs.split_last() else {
+            return Res::NotFound;
+        };
+        let declarations = match self.constant(path, start) {
+            Ok(declarations) => declarations,
+            Err(res) => {
+                self.note(want, || match res {
+                    Res::Ambiguous => Residue::TypeAmbiguous,
+                    _ => Residue::ExternalType {
+                        candidates: self.constant_candidates(path, start),
+                    },
+                });
+                return res;
+            }
+        };
+        let mut candidates: Vec<NodeId> = declarations
+            .iter()
+            .flat_map(|&d| self.ix.members_named(d, name, want))
+            .filter(|id| self.ix.without_self.contains(id))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.is_empty() {
+            self.note(want, || Residue::SupertypeUnreached);
+            return Res::NotFound;
+        }
+        let candidates = self.applicable(candidates);
+        let decided = exactly_one(&candidates);
+        match decided {
+            Res::NotFound => self.note(want, || Residue::NoApplicableOverload),
+            Res::Ambiguous => self.note(want, || Residue::OverloadAmbiguous),
+            Res::Found(_) => {}
+        }
+        decided
+    }
+
+    /// The one class or module the constant `segs` names from the scope
+    /// `start`, of a kind `admits` (S-565): an edge to a constant needs one
+    /// node, so a constant declared more than once is [`Res::Ambiguous`], as
+    /// is one some file declares a class and another a module.
+    fn constant_node(&self, segs: &[String], start: NodeId, admits: impl Fn(NodeKind) -> bool) -> Res {
+        match self.constant(segs, start) {
+            Ok([one]) if self.ix.info.get(one).is_some_and(|i| admits(i.kind)) => Res::Found(*one),
+            Ok([_]) | Err(Res::NotFound) => Res::NotFound,
+            Ok(_) | Err(_) => Res::Ambiguous,
+        }
+    }
+
+    /// The one instance method `action` of the class `constant` names from the
+    /// top level (S-567, [`bind_constant_action`]): the constant's declarations
+    /// must all be classes — a reopened class pools its methods — and among
+    /// their callables of that name, those recorded as not taking `self` (`def
+    /// self.index`, [`Index::without_self`]) are no action. An action the class
+    /// inherits is not walked to.
+    fn constant_action(&self, constant: &[String], action: &str) -> Option<NodeId> {
+        let fqn: Vec<String> = std::iter::once(FULLY_QUALIFIED_HEAD.to_string())
+            .chain(constant.iter().cloned())
+            .collect();
+        let declarations = self.constant(&fqn, self.source).ok()?;
+        let classes = declarations
+            .iter()
+            .all(|id| self.ix.info.get(id).is_some_and(|i| i.kind == NodeKind::Class));
+        if !classes {
+            return None;
+        }
+        let mut candidates: Vec<NodeId> = declarations
+            .iter()
+            .flat_map(|&d| self.ix.members_named(d, action, Want::Callable))
+            .filter(|id| !self.ix.without_self.contains(id))
+            .collect();
+        candidates.sort();
+        candidates.dedup();
+        match exactly_one(&candidates) {
+            Res::Found(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// A Ruby superclass or mixin row (S-568, [FR-RS-35]), bound through the
+    /// constant index to the one node of the constant it names that `want`
+    /// admits ([`ancestry_want`]). A superclass is read where Ruby evaluates
+    /// it, from the scope enclosing the class — `class A < B` inside `module M`
+    /// reads `M::B`, then `B` — and a mixin from inside the class or module
+    /// body, its own constant first. A class is never its own superclass.
+    ///
+    /// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+    fn constant_relation(&self, r: &UnresolvedRefRow, want: Want) -> Res {
+        let start = match r.kind {
+            EdgeKind::Extends => self.ix.parent.get(&self.source).copied().unwrap_or(self.source),
+            _ => self.source,
+        };
+        match self.constant_node(&split(&r.target), start, |kind| want.admits(kind)) {
+            Res::Found(target) if target == self.source => Res::NotFound,
+            res => res,
+        }
+    }
+
+    /// The declarations of the constant `segs` names from the scope `start`
+    /// (S-565, [FR-RS-33]), read as Ruby reads it: the head is looked up in
+    /// the constant of each class or module enclosing `start` (itself
+    /// included), innermost first, then at the top level — the first level
+    /// declaring it decides, and the rest of the path is read under it alone. A
+    /// path headed [`FULLY_QUALIFIED_HEAD`] (`::Foo`) is read from the top level
+    /// only. `Err(NotFound)` when no level declares the head, or the decided
+    /// level does not declare the whole path; `Err(Ambiguous)` when the
+    /// constant's declarations are a class and a module.
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    fn constant(&self, segs: &[String], start: NodeId) -> Result<&[NodeId], Res> {
+        let constants = self
+            .source_family
+            .as_deref()
+            .and_then(|family| self.ix.constants.get(family))
+            .ok_or(Res::NotFound)?;
+        let Some((head, _)) = segs.split_first() else {
+            return Err(Res::NotFound);
+        };
+        let fqn = if head == FULLY_QUALIFIED_HEAD {
+            constant_fqn(&[], segs)
+        } else {
+            let level = self
+                .constant_levels(start)
+                .into_iter()
+                .find(|level| constants.contains_key(&constant_fqn(level, &segs[..1])))
+                .ok_or(Res::NotFound)?;
+            constant_fqn(level, segs)
+        };
+        let declarations = constants.get(&fqn).ok_or(Res::NotFound)?;
+        let kinds: HashSet<NodeKind> = declarations
+            .iter()
+            .filter_map(|id| self.ix.info.get(id).map(|i| i.kind))
+            .collect();
+        if kinds.len() > 1 {
+            return Err(Res::Ambiguous);
+        }
+        Ok(declarations)
+    }
+
+    /// The constants enclosing `start`, innermost first, then the top level
+    /// (empty) — the lexical levels a constant is looked up at (S-565).
+    fn constant_levels(&self, start: NodeId) -> Vec<&[String]> {
+        let mut levels: Vec<&[String]> = Vec::new();
+        let mut at = Some(start);
+        while let Some(id) = at {
+            if let Some(fqn) = self.ix.constant_of.get(&id) {
+                levels.push(fqn);
+            }
+            at = self.ix.parent.get(&id).copied();
+        }
+        levels.push(&[]);
+        levels
+    }
+
+    /// The fully-qualified names the constant `segs` could have been from
+    /// `start`, in lookup order — the residue of a call on a constant no level
+    /// declares (S-565).
+    fn constant_candidates(&self, segs: &[String], start: NodeId) -> Vec<Vec<String>> {
+        let mut candidates: Vec<Vec<String>> = self
+            .constant_levels(start)
+            .into_iter()
+            .map(|level| constant_fqn(level, segs))
+            .collect();
+        // A fully-qualified path names one constant from every level.
+        candidates.dedup();
+        candidates
     }
 
     /// The top-level types named `name` in `package`, id-sorted — of the
@@ -6182,6 +9512,34 @@ impl Ctx<'_> {
             .map_or(&[], Vec::as_slice)
     }
 
+    /// The top-level functions declared under the fully-qualified name `fqn`
+    /// that `want` admits, id-sorted (S-573, [`Index::callables_by_fqn`]) — of
+    /// the source's own interop family and its own language, and empty unless
+    /// the source's language declares top-level functions members of their
+    /// namespace. Two languages of one family that both declare them do not
+    /// name each other's by their package (S-560): Kotlin reaches a Scala 3
+    /// top-level `def` through its `package` object, and Scala a Kotlin `fun`
+    /// through its file facade.
+    fn package_callables(&self, fqn: &[String], want: Want) -> Vec<NodeId> {
+        if !self.top_level_callables {
+            return Vec::new();
+        }
+        let language = |id: &NodeId| {
+            let path = self.ix.info.get(id).and_then(|i| i.file_path.as_deref());
+            path.and_then(|p| self.ix.layout.language(p))
+        };
+        let own = language(&self.source);
+        self.ix
+            .callables_by_fqn
+            .get(self.source_family.as_deref().unwrap_or_default())
+            .and_then(|callables| callables.get(fqn))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)) && language(id) == own)
+            .collect()
+    }
+
     /// The fully-qualified type index of the source's interop family (S-519,
     /// [`Index::types_by_fqn`]); `None` when no file of that family declares a
     /// type, or the source has no file.
@@ -6191,18 +9549,28 @@ impl Ctx<'_> {
 
     /// Walk `rest` down from the one type in `candidates`: `None` when there is
     /// none (the caller's next rung decides), else the walk's result — sticky
-    /// [`Res::Ambiguous`] for two candidates. Every segment but the last must
-    /// name exactly one nested type; the last names a member admitted by
-    /// `want`, and an empty `rest` is the type itself.
+    /// [`Res::Ambiguous`] for two candidates — unless the two are one companion
+    /// pair and `rest` goes on past them (S-573,
+    /// [`walk_from_companions`](Ctx::walk_from_companions)). Every segment but
+    /// the last must name exactly one nested type; the last names a member
+    /// admitted by `want`, and an empty `rest` is the type itself.
     ///
     /// A **call** ([`Want::is_call`]) takes its last segment through
     /// [`type_member`](Ctx::type_member): the type's own callable, else its
-    /// in-repository supertypes' (S-468). Every other lookup reads the type's
-    /// own members only, as before.
+    /// in-repository supertypes' (S-468) — unless the type has a companion
+    /// (I4-INT, [`companion_climb`](Ctx::companion_climb)), which then decides
+    /// alone. Every other lookup reads the type's own members only, as before.
     fn walk_from(&self, candidates: &[NodeId], rest: &[String], want: Want) -> Option<Res> {
         let mut cursor = match exactly_one(candidates) {
             Res::NotFound => return None,
             Res::Ambiguous => {
+                if let Some(pair) = self.companion_pair(candidates).filter(|_| !rest.is_empty()) {
+                    return Some(self.walk_from_companions(pair, rest, want));
+                }
+                // `rest` is empty here: a supertype names the pair's trait.
+                if let Some(supertype) = self.companion_pair(candidates).and_then(|pair| self.pair_supertype(pair, want)) {
+                    return Some(Res::Found(supertype));
+                }
                 self.note(want, || Residue::TypeAmbiguous);
                 return Some(Res::Ambiguous);
             }
@@ -6229,9 +9597,179 @@ impl Ctx<'_> {
             }
         }
         if want.is_call() {
+            // A type with a companion lends it its name (I4-INT): `C.make()`
+            // calls the companion's `make`, never an instance member of `C`,
+            // which a call on the class cannot reach.
+            if let Some(climb) = self.companion_climb(cursor, last) {
+                self.note_climb(&climb);
+                return Some(climb.res);
+            }
             return Some(self.type_member(cursor, last));
         }
-        Some(exactly_one(&self.ix.members_named(cursor, last, want)))
+        Some(exactly_one(&self.narrow_pair(self.ix.members_named(cursor, last, want), want)))
+    }
+
+    /// The **companion** of `ty` (I4-INT, [FR-RS-31]): its one nested type
+    /// named what the language of `ty`'s file calls an anonymous companion
+    /// object ([`PackageLayout::companion_name`], Kotlin's `Companion`, the
+    /// node S-559 nests its members under). `None` when `ty` is no class-like
+    /// type ([`is_class_like`]) — a file, a function or a namespace holding a
+    /// top-level type of that name lends it no companion — when its language
+    /// declares none, or when `ty` has none, or two, which no lookup picks
+    /// between.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    /// [`PackageLayout::companion_name`]: crate::resolve::package_key::PackageLayout::companion_name
+    fn companion_of(&self, ty: NodeId) -> Option<NodeId> {
+        let info = self.ix.info.get(&ty).filter(|i| is_class_like(i.kind))?;
+        let file = info.file_path.as_deref()?;
+        let companion_name = self.ix.layout.companion_name(file)?;
+        match exactly_one(&self.member_types(ty, companion_name)) {
+            Res::Found(companion) => Some(companion),
+            _ => None,
+        }
+    }
+
+    /// The [`supertype_walk`](Ctx::supertype_walk) for `name` from the
+    /// companion of `ty` ([`companion_of`](Ctx::companion_of)); `None` when
+    /// `ty` has none.
+    fn companion_climb(&self, ty: NodeId, name: &str) -> Option<Climb> {
+        let companion = self.companion_of(ty)?;
+        Some(self.supertype_walk(vec![companion], HashSet::from([companion]), name))
+    }
+
+    /// The two declarations of `candidates` when they are one **companion
+    /// pair** (S-573, [FR-RS-36]): a type and the same-named singleton
+    /// declared beside it — the same file, the same parent — in a language
+    /// that pairs them ([`PackageLayout::pairs_companion_objects`], Scala's
+    /// `class Chain` and `object Chain`). Two such declarations of one name are
+    /// legal only as a pair. `None` for any other set.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    /// [`PackageLayout::pairs_companion_objects`]: crate::resolve::package_key::PackageLayout::pairs_companion_objects
+    fn companion_pair(&self, candidates: &[NodeId]) -> Option<[NodeId; 2]> {
+        let &[a, b] = candidates else {
+            return None;
+        };
+        let (x, y) = (self.ix.info.get(&a)?, self.ix.info.get(&b)?);
+        let file = x.file_path.as_deref()?;
+        let paired = is_type_like(x.kind)
+            && is_type_like(y.kind)
+            && x.name == y.name
+            && y.file_path.as_deref() == Some(file)
+            && self.ix.parent.get(&a) == self.ix.parent.get(&b)
+            && self.ix.layout.pairs_companion_objects(file);
+        paired.then_some([a, b])
+    }
+
+    /// The types of `types` — one name's declarations in one package — that
+    /// `want` admits; or, when they are one companion pair (S-573), both of
+    /// them, whatever `want` admits: the name names the pair, and a lookup by
+    /// kind must not pick the object out of it (`new T {}` instantiates the
+    /// trait, never `object T`). Two candidates are the exactly-one test's
+    /// [`Res::Ambiguous`].
+    fn admitted_types(&self, types: &[NodeId], want: Want) -> Vec<NodeId> {
+        if let Some(pair) = self.companion_pair(types) {
+            return match self.pair_supertype(pair, want) {
+                Some(supertype) => vec![supertype],
+                None => types.to_vec(),
+            };
+        }
+        types
+            .iter()
+            .copied()
+            .filter(|id| self.ix.info.get(id).is_some_and(|i| want.admits(i.kind)))
+            .collect()
+    }
+
+    /// The trait of a companion `pair` that a supertype lookup (`want`
+    /// [`Want::Supertype`], Scala's `extends A with B`) names (S-575,
+    /// [FR-EX-28]): an `object` is never a supertype, and it is never a trait,
+    /// so of a `trait AccountService` and its `object AccountService` the trait
+    /// is the one the clause names. `None` for any other lookup, and for a
+    /// `class` and its `object`, which are both classes here: nothing in the
+    /// graph tells the object out, so that name stays ambiguous ([NFR-RA-05]).
+    ///
+    /// [FR-EX-28]: ../../../docs/specs/requirements/FR-EX-28.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn pair_supertype(&self, pair: [NodeId; 2], want: Want) -> Option<NodeId> {
+        if want != Want::Supertype {
+            return None;
+        }
+        let is_trait = |id: &NodeId| self.ix.info.get(id).is_some_and(|i| i.kind == NodeKind::Trait);
+        match pair.iter().filter(|id| is_trait(id)).collect::<Vec<_>>().as_slice() {
+            [only] => Some(**only),
+            _ => None,
+        }
+    }
+
+    /// `ids` as a lookup by `want` reads them: a companion pair narrowed to the
+    /// trait a supertype names ([`pair_supertype`](Ctx::pair_supertype)), any
+    /// other set as it is — the one narrowing every rung a supertype row
+    /// climbs applies: the lexical scopes, a type's members and a wildcard's.
+    fn narrow_pair(&self, ids: Vec<NodeId>, want: Want) -> Vec<NodeId> {
+        match self.companion_pair(&ids).and_then(|pair| self.pair_supertype(pair, want)) {
+            Some(supertype) => vec![supertype],
+            None => ids,
+        }
+    }
+
+    /// The members of a companion pair named `name` that `want` admits (S-573):
+    /// what the name reaches through a path. A callable is the singleton's
+    /// only — one recorded as taking no instance receiver
+    /// ([`Index::without_self`]): `Chain.empty()` calls the object's `empty`,
+    /// never an instance method of the class. On a proven receiver
+    /// ([`instance_receiver`](Ctx::instance_receiver), S-576) it is the
+    /// class's only — every other one: `chain.size()` on a `Chain` never calls
+    /// the object's. Any other member is read from both. Narrowed to the
+    /// callables the call's arguments admit.
+    fn companion_members(&self, pair: [NodeId; 2], name: &str, want: Want) -> Vec<NodeId> {
+        let on_instance = self.instance_receiver.get();
+        let mut found: Vec<NodeId> = pair
+            .iter()
+            .flat_map(|&ty| self.ix.members_named(ty, name, want))
+            .filter(|id| {
+                self.ix.info.get(id).is_some_and(|i| {
+                    !Want::Callable.admits(i.kind) || self.ix.without_self.contains(id) != on_instance
+                })
+            })
+            .collect();
+        found.sort_unstable();
+        found.dedup();
+        self.applicable(found)
+    }
+
+    /// [`walk_from`](Ctx::walk_from) from a companion pair (S-573): the next
+    /// segment is read among both declarations' members — a nested type to go
+    /// on from, or the last segment's member ([`companion_members`](Ctx::companion_members)).
+    /// Exactly one decides; the pair's supertypes are not climbed. `rest` is
+    /// not empty: the name alone still names two declarations.
+    fn walk_from_companions(&self, pair: [NodeId; 2], rest: &[String], want: Want) -> Res {
+        let Some((next, after)) = rest.split_first() else {
+            return Res::Ambiguous;
+        };
+        if after.is_empty() {
+            let decided = exactly_one(&self.companion_members(pair, next, want));
+            // Why it gave up, as `note_climb` records a supertype walk's: the
+            // object held the name and admitted no call of it, or held none.
+            match decided {
+                Res::Found(_) => {}
+                Res::Ambiguous => self.note(want, || Residue::OverloadAmbiguous),
+                Res::NotFound if self.passed_over.get() => self.note(want, || Residue::NoApplicableOverload),
+                Res::NotFound => self.note(want, || Residue::SupertypeUnreached),
+            }
+            return decided;
+        }
+        let nested: Vec<NodeId> = pair.iter().flat_map(|&ty| self.member_types(ty, next)).collect();
+        match self.walk_from(&nested, after, want) {
+            Some(decided) => decided,
+            None => {
+                self.note(want, || Residue::ExternalType {
+                    candidates: Vec::new(),
+                });
+                Res::NotFound
+            }
+        }
     }
 
     /// The one callable `name` of type `ty` (S-468, [CR-150] §3.2 B, [FR-RS-10]):
@@ -6355,6 +9893,7 @@ impl Ctx<'_> {
             let mut named: Vec<NodeId> = level
                 .iter()
                 .flat_map(|&t| self.ix.members_named(t, name, Want::Callable))
+                .chain(level.iter().flat_map(|&t| self.declared_signatures(t, name).iter().copied()))
                 .collect();
             named.sort_unstable();
             named.dedup();
@@ -6392,6 +9931,206 @@ impl Ctx<'_> {
         false
     }
 
+    /// The walk of a call on a Ruby instance (S-568, [FR-RS-35]) — `name()`,
+    /// `self.name()`, or a bare `name` no local binds — from the caller's
+    /// class `class` along its ancestors, in Ruby's order. For each class, from
+    /// the caller's up its superclasses ([`Index::supertypes`]):
+    ///
+    /// 1. the modules it prepends;
+    /// 2. the class itself — every declaration of its constant, since a
+    ///    reopened class is one class ([`Index::constants`]);
+    /// 3. the modules it includes — less those its superclasses already mix
+    ///    in, which Ruby leaves where the superclass put them
+    ///    ([`inherited_mixins`](Ctx::inherited_mixins)).
+    ///
+    /// Exactly one callable at the first level holding the name decides
+    /// ([NFR-RA-05]). The modules mixed in at one place are one level, with
+    /// every module those mix in in turn: Ruby orders them by when each was
+    /// mixed in, which a reopening in another file makes unreadable, so two of
+    /// them defining the name decide nothing rather than pick. A callable of
+    /// the class or module object itself (`def self.x`, a `module_function`;
+    /// [`Index::without_self`]) is no candidate: an instance does not answer
+    /// it. The walk stops, deciding nothing, at a level it cannot see —
+    /// a prepended or included module the graph does not hold, which may
+    /// define the name — and where the superclass leaves the graph or is not
+    /// one class. `past_own` starts past the caller's class itself, its
+    /// prepends included — where a `super` goes on from.
+    ///
+    /// [FR-RS-35]: ../../../docs/specs/requirements/FR-RS-35.md
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    fn ancestor_walk(&self, class: NodeId, name: &str, past_own: bool) -> Climb {
+        let mut climb = Climb {
+            res: Res::NotFound,
+            inapplicable: false,
+            closed: true,
+        };
+        let mixins = |of: &[NodeId]| of.iter().filter_map(|t| self.ix.mixins.get(t)).collect::<Vec<_>>();
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        let mut class = self.declarations_of(class);
+        let mut skip_own = past_own;
+        let none = HashSet::new();
+        for _ in 0..MAX_SUPERTYPE_DEPTH {
+            if !class.iter().all(|&c| seen.insert(c)) {
+                break;
+            }
+            let of_class = mixins(&class);
+            // This class's levels in order; `None` is one the graph cannot see.
+            let mut levels = Vec::with_capacity(3);
+            if !skip_own {
+                let prepends = of_class.iter().flat_map(|m| m.prepends.iter().copied()).collect();
+                let unseen = of_class.iter().any(|m| m.unseen_prepends);
+                levels.push(self.mixin_closure(prepends, unseen, &mut seen, &none));
+                levels.push(Some(class.clone()));
+            }
+            skip_own = false;
+            let includes: Vec<NodeId> = of_class.iter().flat_map(|m| m.includes.iter().copied()).collect();
+            let unseen = of_class.iter().any(|m| m.unseen_includes);
+            let inherited = if includes.is_empty() { HashSet::new() } else { self.inherited_mixins(&class) };
+            levels.push(self.mixin_closure(includes, unseen, &mut seen, &inherited));
+            for level in levels {
+                let Some(level) = level else {
+                    climb.closed = false;
+                    return climb;
+                };
+                if self.ancestor_level(&level, name, &mut climb) {
+                    return climb;
+                }
+            }
+            match self.superclasses(&class)[..] {
+                [] => return climb,
+                [one] => class = self.declarations_of(one),
+                _ => break,
+            }
+        }
+        // A cycle, several superclasses, or the depth bound: unseen beyond.
+        climb.closed = false;
+        climb
+    }
+
+    /// The superclasses the declarations `class` of one Ruby class name,
+    /// id-sorted: none, the one, or — a contradiction the walk reads as an
+    /// unseen level — several.
+    fn superclasses(&self, class: &[NodeId]) -> Vec<NodeId> {
+        let mut supers: Vec<NodeId> = class.iter().flat_map(|&c| self.ix.supertypes_of(c).iter().copied()).collect();
+        supers.sort_unstable();
+        supers.dedup();
+        supers
+    }
+
+    /// Every module the superclasses above `class` mix in, transitively —
+    /// which an `include` in `class` itself skips, as Ruby skips including a
+    /// module the superclass's ancestors already hold: the module stays where
+    /// the superclass put it, after the superclass's own methods.
+    fn inherited_mixins(&self, class: &[NodeId]) -> HashSet<NodeId> {
+        let (mut inherited, mut crossed, none) = (HashSet::new(), HashSet::new(), HashSet::new());
+        let mut level = self.superclasses(class);
+        for _ in 0..MAX_SUPERTYPE_DEPTH {
+            let [one] = level[..] else {
+                break;
+            };
+            let decls = self.declarations_of(one);
+            if !decls.iter().all(|&c| crossed.insert(c)) {
+                break;
+            }
+            let roots = decls
+                .iter()
+                .filter_map(|t| self.ix.mixins.get(t))
+                .flat_map(|m| m.prepends.iter().chain(&m.includes).copied())
+                .collect();
+            let mut closure = HashSet::new();
+            if let Some(modules) = self.mixin_closure(roots, false, &mut closure, &none) {
+                inherited.extend(modules);
+            }
+            level = self.superclasses(&decls);
+        }
+        inherited
+    }
+
+    /// One level of an [`ancestor_walk`](Ctx::ancestor_walk): `true` when it
+    /// holds an instance callable named `name`, which decides the walk — the
+    /// exactly-one of those the call's argument count admits, recorded in
+    /// `climb`.
+    fn ancestor_level(&self, level: &[NodeId], name: &str, climb: &mut Climb) -> bool {
+        let mut named: Vec<NodeId> = level
+            .iter()
+            .flat_map(|&t| self.ix.members_named(t, name, Want::Callable))
+            .filter(|id| !self.ix.without_self.contains(id))
+            .collect();
+        if named.is_empty() {
+            return false;
+        }
+        named.sort_unstable();
+        named.dedup();
+        let found = self.applicable(named);
+        climb.inapplicable |= found.is_empty();
+        climb.res = exactly_one(&found);
+        true
+    }
+
+    /// The modules `roots` with every module they mix in, transitively, not in
+    /// `seen` nor in `skip` — one level of an [`ancestor_walk`](Ctx::ancestor_walk),
+    /// id-sorted — or `None` when the graph cannot see all of it: `unseen` says
+    /// one of the roots binds no module, or one of the modules mixes in one that
+    /// binds none. A module in `skip` is left out with everything it mixes in.
+    fn mixin_closure(
+        &self,
+        roots: Vec<NodeId>,
+        unseen: bool,
+        seen: &mut HashSet<NodeId>,
+        skip: &HashSet<NodeId>,
+    ) -> Option<Vec<NodeId>> {
+        let mut level = Vec::new();
+        let mut unseen = unseen;
+        let mut next = roots;
+        while !next.is_empty() {
+            next.retain(|&m| !skip.contains(&m) && seen.insert(m));
+            let modules: Vec<&Mixins> = next.iter().filter_map(|m| self.ix.mixins.get(m)).collect();
+            unseen |= modules.iter().any(|m| m.unseen_includes || m.unseen_prepends);
+            level.append(&mut next);
+            next = modules
+                .iter()
+                .flat_map(|m| m.prepends.iter().chain(&m.includes).copied())
+                .collect();
+        }
+        if unseen {
+            return None;
+        }
+        level.sort_unstable();
+        Some(level)
+    }
+
+    /// Every declaration of the constant the Ruby class or module `ty`
+    /// declares, of `ty`'s kind, id-sorted — `ty` alone when it has no
+    /// constant (S-568).
+    fn declarations_of(&self, ty: NodeId) -> Vec<NodeId> {
+        let kind = self.ix.info.get(&ty).map(|i| i.kind);
+        let declarations = self
+            .ix
+            .constant_of
+            .get(&ty)
+            .and_then(|fqn| self.ix.constants.get(self.source_family.as_deref()?)?.get(fqn));
+        match declarations {
+            Some(ids) => ids
+                .iter()
+                .copied()
+                .filter(|id| self.ix.info.get(id).map(|i| i.kind) == kind)
+                .collect(),
+            None => vec![ty],
+        }
+    }
+
+    /// The required signatures named `name` the type `ty` declares, while a
+    /// walk [`reads_signatures`](Ctx::reads_signatures) (S-537); none otherwise.
+    fn declared_signatures(&self, ty: NodeId, name: &str) -> &[NodeId] {
+        if !self.reads_signatures.get() {
+            return &[];
+        }
+        self.ix
+            .declared_signatures
+            .get(&(ty, name.to_string()))
+            .map_or(&[], Vec::as_slice)
+    }
+
     /// The type-like members of `scope` named `name`.
     fn member_types(&self, scope: NodeId, name: &str) -> Vec<NodeId> {
         self.ix
@@ -6405,8 +10144,14 @@ impl Ctx<'_> {
     /// for a glob naming a type, `C`'s members named `name` — every static
     /// member for `import static a.b.C.*`, member types only for
     /// `import a.b.C.*`; for one naming a package (`import a.b.*`), the
-    /// package's top-level types named `name`. `types_only` keeps type-like
-    /// candidates alone — a path head must be a type. Deduplicated and id-sorted across
+    /// package's top-level types named `name` — and, for a source whose
+    /// language declares them, its top-level functions (S-573,
+    /// [`package_callables`](Ctx::package_callables)); for one naming a companion pair
+    /// (S-573), the pair's members ([`companion_members`](Ctx::companion_members)).
+    /// `types_only` keeps type-like
+    /// candidates alone — a path head must be a type. `block` reads the
+    /// wildcards of that namespace's block instead of the file's (S-603,
+    /// [`FileScope::block_globs`]). Deduplicated and id-sorted across
     /// every glob, so the caller's exactly-one test is over the union; `None`
     /// when a glob's own type name is ambiguous and one of its declarations
     /// has a member named `name` — an ambiguity no wider rung may overrule
@@ -6419,17 +10164,26 @@ impl Ctx<'_> {
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    fn glob_members(&self, name: &str, want: Want, types_only: bool) -> Option<Vec<NodeId>> {
+    fn glob_members(&self, name: &str, want: Want, types_only: bool, block: Option<&[String]>) -> Option<Vec<NodeId>> {
         let Some(scope) = self.scope() else {
             return Some(Vec::new());
         };
+        // The file's wildcards, or the non-static ones of one namespace block
+        // (S-603, `block`), which a block records no other kind of.
+        let (globs, static_globs) = match block {
+            None => (scope.globs.as_slice(), scope.static_globs.as_slice()),
+            Some(level) => (scope.block_globs.get(level).map_or(&[][..], Vec::as_slice), &[][..]),
+        };
         // A non-static wildcard imports types only — a static one, every static
         // member — so a method is only ever reached through `import static`.
-        let globs = scope
-            .globs
+        let globs = globs
             .iter()
             .map(|g| (g, true))
-            .chain(scope.static_globs.iter().map(|g| (g, types_only)));
+            .chain(static_globs.iter().map(|g| (g, types_only)));
+        // A package's top-level functions (S-573, S-560) are its members as
+        // its types are: any wildcard of the package brings them into view,
+        // unless the lookup wants a type (a path head).
+        let callables_wanted = !types_only;
         let mut found: Vec<NodeId> = Vec::new();
         for (glob, types_only) in globs {
             let admits = |id: &NodeId| {
@@ -6440,7 +10194,7 @@ impl Ctx<'_> {
             match self.resolve_fqn(glob, Want::Any) {
                 Res::Found(ty) if self.ix.info.get(&ty).is_some_and(|i| is_type_like(i.kind)) => {
                     let members = self.ix.members_named(ty, name, want).into_iter().filter(admits);
-                    found.extend(self.applicable(members.collect()));
+                    found.extend(self.applicable(self.narrow_pair(members.collect(), want)));
                 }
                 Res::Found(_) => {}
                 // Two declarations of the wildcard's type: `name` is ambiguous
@@ -6448,6 +10202,12 @@ impl Ctx<'_> {
                 // — an unrelated import's head, say — never came from this
                 // wildcard, so it must not be blocked by it.
                 Res::Ambiguous => {
+                    // A wildcard of a companion pair (S-573) imports the pair's
+                    // members, as one of a type imports that type's.
+                    if let Some(pair) = self.glob_pair(glob) {
+                        found.extend(self.companion_members(pair, name, want).into_iter().filter(admits));
+                        continue;
+                    }
                     let could_supply = self
                         .family_types()
                         .and_then(|types| types.get(glob.as_slice()))
@@ -6462,13 +10222,31 @@ impl Ctx<'_> {
                     }
                 }
                 Res::NotFound => {
-                    found.extend(self.package_type(glob, name).iter().copied().filter(admits));
+                    // A companion pair stays whole, whatever kind is wanted
+                    // (S-573) — but a supertype names its trait (S-575):
+                    // [`admitted_types`](Ctx::admitted_types) owns that rule.
+                    let declared = self.package_type(glob, name);
+                    found.extend(self.admitted_types(declared, want).into_iter().filter(|id| {
+                        !types_only || self.ix.info.get(id).is_some_and(|i| is_type_like(i.kind))
+                    }));
+                    let fqn = [glob.as_slice(), &[name.to_string()]].concat();
+                    if callables_wanted {
+                        found.extend(self.applicable(self.package_callables(&fqn, want)));
+                    }
                 }
             }
         }
         found.sort();
         found.dedup();
         Some(found)
+    }
+
+    /// The companion pair a wildcard's own path names, read as a
+    /// fully-qualified name (S-573, [`companion_pair`](Ctx::companion_pair)).
+    fn glob_pair(&self, glob: &[String]) -> Option<[NodeId; 2]> {
+        self.family_types()
+            .and_then(|types| types.get(glob))
+            .and_then(|types| self.companion_pair(types))
     }
 
     /// Resolve `segs` as members reached through each of the file's glob

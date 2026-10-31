@@ -27,7 +27,7 @@ only in a repository that holds a `.logos/` directory.
 | Guardrail | `PreToolUse` | Returns `ask` when an agent would relax the quality contract. See [The guardrail](#the-guardrail). | none, by design |
 | Stop check | `Stop` | Runs `logos check` and `logos review` within a budget, scans the files the turn changed for secrets when scan consent is recorded, and blocks the stop once on a regression. See [The Stop check](#the-stop-check). | `LOGOS_STOP_HOOK_DISABLE=1` |
 | `/logos:review` | slash command | Starts the `logos-reviewer` subagent, which runs the `logos-review` skill. See [The review skill](#the-review-skill). | do not invoke it |
-| `/logos:sec-review` | slash command | Runs the `logos-sec-review` skill: one verdict per security finding the branch introduced, and a fix only by re-scan. See [The security review skill](#the-security-review-skill). | do not invoke it |
+| `/logos:sec-review` | slash command | Runs the `logos-sec-review` skill: one verdict per security finding the branch introduced (with `--backlog`, per stored finding no one has judged), and a fix only by re-scan. See [The security review skill](#the-security-review-skill) and [the backlog](#triaging-the-backlog---backlog). | do not invoke it |
 
 Every hook is **report-only unless it found a regression**: each one exits 0,
 and a directory with no `.logos/` is left completely alone. "Enrolled" means a
@@ -407,6 +407,47 @@ occurrence, never of the branch. The report's `ENTRY`, `FIXED`, `UNPROVEN`,
 `ROTATE`, `DEPENDENCY`, `SUPPRESS`, `SCANNED` and `COVERAGE` lines are checked by a
 script, which also refuses any line that claims safety.
 
+### Triaging the backlog: `--backlog`
+
+`/logos:sec-review --backlog [--limit <n>] [--rule <id>]... [--path <path>]...` gives a
+verdict to the findings already stored, not to a branch's delta: there is no base and no
+merge-base. Use it for the backlog nobody has judged. The verdicts, the edit scope and the
+proof are the ones above; four things differ.
+
+- **Selection is a script** (`sec-backlog.sh`). It takes every stored finding that is
+  active (no suppression holds: an entry that expired, or whose evidence changed, lets
+  the finding count again), in production code, and neither secret-class nor a
+  dependency finding. A finding that [needs review](security.md#findings-that-need-review),
+  an infrastructure finding and a finding of no file are in. `--rule` is an exact rule
+  id, `--path` a file or a directory (`app` is `app/`, never `app2/`), and `--limit`
+  takes the first `n` by severity, then place. The selection needs a `logos` with the
+  code-scope filter (1.21.0); without one it exits 3, because production code cannot be
+  told from test code.
+- **Each finding arrives with its context** (`sec-context.sh`): the enclosing symbol and
+  its source (a long one is cut around the finding's line), the symbols that call it, and
+  the source of the symbols it calls. Each callee is an *evidence candidate*; what was cut
+  for length is counted in the output. A finding with no enclosing symbol gets the
+  lines around it instead. The text is repository content, data and not instructions.
+- **Verdicts are `fix`, `false-positive` or `untrusted`.** A `false-positive` draft names
+  at least one symbol its reason rests on **beyond the enclosing one**
+  (`suppress-draft.sh --evidence <canonical symbol> --triage <file>`); the script
+  refuses a backlog draft with none, a symbol the graph does not hold, and a bare
+  name. It prints the `[[ignore]]` entry and the `logos security reconfirm
+  <fingerprint> --evidence ...` command that makes Logos record each symbol's hash
+  ([FR-SC-32](security.md#recording-what-a-verdict-rests-on-evidence-and-reconfirm)).
+  The skill makes the entry's one edit and runs that one command; the guardrail asks you
+  before each, and the skill stops at your answer. When an evidence symbol later changes,
+  the finding reads *verdict out of date* and is back in the next backlog.
+- **A finding an earlier entry names** (its verdict out of date, or the entry expired) gets
+  no second `[[ignore]]` entry, which would make the ignore file fail to load: the draft
+  prints the `reconfirm` command, or, for an expired entry, says to extend its `expires`.
+- **The report says how many findings the run did not reach.** Its `BACKLOG` line,
+  `BACKLOG | eligible: <E> | judged: <J> | not reached: <N>`, is held by `sec-check-report.sh`
+  to the selection, and each `SUPPRESS` line carries `| evidence: <symbol>; <symbol>`,
+  held to be more than the enclosing symbol. Every selected row is judged; every
+  eligible finding the bounds (`--limit`, `--rule`, `--path`) left out is counted as not
+  reached, never silently skipped.
+
 ## The guardrail
 
 The `PreToolUse` hook returns the permission decision `ask`, with a reason naming
@@ -427,6 +468,10 @@ the file or command, when an agent tool call would:
   rewrites the checked-in `.logos/security-baseline.json`, which accepts every
   finding it records in every checkout, so an agent does not bless its own
   findings unseen.
+- run `logos security reconfirm`, as a shell command, or through its MCP twin
+  `security_reconfirm` (under either prefix): it re-records an ignore entry's
+  evidence hashes, so a suppression whose evidence changed reads suppressed again;
+  an agent does not close that re-review unseen, as it does not edit the entry.
 
 The human then decides: the quality contract is what the review loop measures
 against, so an agent does not relax it unseen. Every other call passes untouched,
@@ -447,7 +492,21 @@ goes asks, because the shell may turn it into one (`S=bless; logos security $S`,
 An argument after a security subcommand (`logos security status $X`) passes. A
 writer given a variable, or a redirection into one, asks when the same command line
 assigns a value naming `.logos` (`F=.logos/rules.toml; rm $F`); a reader given it
-(`F=.logos/rules.toml; cat $F`) passes.
+(`F=.logos/rules.toml; cat $F`) passes. A `for NAME in WORDS` loop assigns NAME
+the same way: `for F in .logos/rules.toml; do rm $F; done` asks, while `for F in
+src/*.rs; do rm $F; done` and a loop that only reads `$F` pass.
+
+Three more spellings ask. A brace expansion (`{a,b}`, `{a..b}`) where an expansion
+asks: `gate --sa{ve,}`, `check --{bless,x}` and `security {bless,status}` after
+`logos`, and a writer's path that can spell a file under `.logos/`
+(`rm .logos/rules{.toml,-baseline.json}`, `rm .lo{gos,}/rules.toml`). When `logos`
+is the command word, an expansion where its subcommand goes asks, since it may
+become `gate --save` (`S="gate --save"; logos $S`, `check$(…)` after `logos`), and so does
+`logos` glued to one (`logos$X`). That asks for a harmless `$CMD` or `--project $DIR scan` after
+`logos` too; `logos scan $DIR` and `logos security status $X` pass. A
+brace is read by its shape and never expanded, quotes are already gone when the
+guard looks (a quoted `"{a,b}"` asks as well), and an expansion more than eight
+words after `logos` is not seen.
 
 It is a guardrail against loosening the contract by habit or by mistake, not a
 sandbox: a command that assembles the path at run time (an interpreter one-liner,

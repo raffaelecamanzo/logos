@@ -38,10 +38,13 @@
 #     misspelled the same way in both documents is not caught: nothing outside the
 #     documents says what the labels are. Likewise an exit code is checked against
 #     the set the header documents, not against what that case does;
+#   - the howto's release flow lists `bash scripts/gate.sh ci` before
+#     `bash scripts/publish-sprint.sh --sprint N --push` (S-807);
 #   - `bash scripts/publish-sprint.sh --help` exits 2 and prints `--sprint`;
 #   - the run was not vacuous: links, anchors, paths, bash targets, flags, jobs,
-#     labels, forms, elements and exit codes each counted at least one check (an
-#     exit-code floor of three: the header, one restated code, the `--help` claim).
+#     labels, forms, elements, exit codes and the release-flow order each counted
+#     at least one check (an exit-code floor of three: the header, one restated
+#     code, the `--help` claim).
 #
 # The suite has no negative fixtures of its own: its ability to fail was shown by
 # editing a tree and running it (the optional ROOT argument names any tree).
@@ -357,6 +360,14 @@ check("exits", "the howto's exit code for `--help` is the one the script returns
       bool(claim) and help_rc is not None and int(claim.group(1)) == help_rc,
       "claims %s, script returns %s" % (claim.group(1) if claim else None, help_rc))
 
+# the release flow runs the Linux leg before it publishes (S-807): publish-sprint.sh --push
+# refuses without that evidence, so the howto lists `gate.sh ci` first
+flow = TEXT[HOWTO]
+gate_at = flow.find("bash scripts/gate.sh ci")
+push_at = flow.find("bash scripts/publish-sprint.sh --sprint N --push")
+check("flow", "the howto's release flow lists `bash scripts/gate.sh ci` before `publish-sprint.sh --push`",
+      0 <= gate_at < push_at, "gate.sh ci at %d, publish-sprint.sh --push at %d" % (gate_at, push_at))
+
 # --- labels: the howto's table is the set -----------------------------------------------
 sec = re.search(r"^## Status labels\n(.*?)(?=^## |\Z)", TEXT[HOWTO], re.S | re.M)
 table = {s for s in spans(sec.group(1)) if LABEL.fullmatch(s)} if sec else set()
@@ -376,7 +387,7 @@ if help_rc is not None:
 
 # --- a run that checked nothing proves nothing -------------------------------------------------
 FLOOR = {"links": 1, "anchors": 1, "paths": 1, "bash": 1, "flags": 1, "jobs": 1, "labels": 1,
-         "forms": 1, "elements": 1, "exits": 3, "help": 1}
+         "forms": 1, "elements": 1, "exits": 3, "help": 1, "flow": 1}
 for cat, floor in FLOOR.items():
     check("vacuity", "the run counted at least %d %s check(s)" % (floor, cat), cats.get(cat, 0) >= floor)
 print()

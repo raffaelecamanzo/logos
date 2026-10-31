@@ -154,13 +154,23 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// where-to-start tables and their flag column), 37 (S-676, the offender
 /// value columns, the uncapped offender table and their flag column), 38
 /// (S-523, the graph-dimension flags and cross-module count), 39 (S-755,
-/// the baseline's re-bless record) and 40 (S-761, the where-to-start rows'
-/// identity — its rebuilt tables go with migration 36's) after it; the next
-/// [`Engine::start`] re-applies all seventeen, as a real upgrade does.
+/// the baseline's re-bless record), 40 (S-761, the where-to-start rows'
+/// identity — its rebuilt tables go with migration 36's), 41 (S-593, the
+/// local-binding table), 42 (S-602, the `nodes.type_arity` column), 43
+/// (S-712, the dispatch re-bind) and 44 (S-571, the `files.parse_damaged`
+/// column and the snapshot entries' `partial_parse` flags) after it; the next [`Engine::start`] re-applies all twenty-one,
+/// as a real upgrade
+/// does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "DELETE FROM schema_versions WHERE version = 40; \
+        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
+         ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
+         DELETE FROM schema_versions WHERE version = 43; \
+         ALTER TABLE nodes DROP COLUMN type_arity; DELETE FROM schema_versions WHERE version = 42; \
+         DROP TABLE local_bindings; DELETE FROM schema_versions WHERE version = 41; \
+         DELETE FROM schema_versions WHERE version = 40; \
          ALTER TABLE baseline DROP COLUMN attribution; ALTER TABLE baseline DROP COLUMN reason; \
          DELETE FROM schema_versions WHERE version = 39; \
          ALTER TABLE metric_snapshots DROP COLUMN cross_module_edges; ALTER TABLE metric_snapshots DROP COLUMN depth_applicable; \
@@ -249,7 +259,7 @@ fn indexing_a_member_records_its_source_and_avro_types_with_their_provenance() {
             ("svc/src/main/avro/events.avsc".into(), "com.x.events.Status".into(), "enum".into(), None),
             ("svc/src/main/java/com/x/mail/MailPort.java".into(), "com.x.mail.MailPort".into(), "interface".into(), Some("main".into())),
             ("svc/src/main/java/com/x/mail/MailService.java".into(), "com.x.mail.MailService".into(), "class".into(), Some("main".into())),
-            ("svc/src/main/kotlin/com/x/mail/Channels.kt".into(), "com.x.mail.Channel".into(), "class".into(), Some("main".into())),
+            ("svc/src/main/kotlin/com/x/mail/Channels.kt".into(), "com.x.mail.Channel".into(), "enum".into(), Some("main".into())),
             ("svc/src/main/kotlin/com/x/mail/Channels.kt".into(), "com.x.mail.Defaults".into(), "class".into(), Some("main".into())),
             ("svc/src/test/java/com/x/mail/MailServiceTest.java".into(), "com.x.mail.MailServiceTest".into(), "class".into(), Some("test".into())),
         ],

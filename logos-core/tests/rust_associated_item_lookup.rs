@@ -434,9 +434,9 @@ pub fn outside(q: &Q) { q.go(); }
 // ── Every unbound call has a reason ────────────────────────────────────────
 
 /// `not-a-callable` (an enum variant, a tuple-struct constructor, `Self(..)`),
-/// `name-not-in-scope` (a prelude function, a local closure, a module that
-/// declares no such item) and `external-type` (a std path) — and nothing is
-/// unclassified.
+/// `name-not-in-scope` (a prelude function, a module that declares no such
+/// item), `local-binding` (a local closure, S-594) and `external-type` (a std
+/// path) — and nothing is unclassified.
 #[test]
 fn every_unbound_rust_call_carries_a_reason() {
     let tmp = tree(&[(
@@ -457,7 +457,7 @@ pub fn std_path() { std::mem::take(&mut 0u8); }
     let engine = index(tmp.path());
     assert_eq!(
         residue(&engine),
-        reasons(&[(R::NotACallable, 3), (R::NameNotInScope, 3), (R::ExternalType, 1)])
+        reasons(&[(R::NotACallable, 3), (R::NameNotInScope, 2), (R::LocalBinding, 1), (R::ExternalType, 1)])
     );
 }
 

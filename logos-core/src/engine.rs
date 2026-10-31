@@ -571,6 +571,7 @@ impl Engine {
         // just-seeded worktree store migrates here too, so the diff reconcile
         // below re-extracts under the coordinate the seed now carries.
         engine.migrate_symbol_coordinate();
+        engine.route_shared_extensions();
 
         // Finish the worktree bootstrap: reconcile only the main↔branch diff
         // over the just-seeded store — O(diff-from-main), not O(repo)
@@ -760,6 +761,7 @@ impl Engine {
         };
 
         engine.migrate_symbol_coordinate();
+        engine.route_shared_extensions();
         if let Some(seed) = seed {
             engine.reconcile_seed_diff(&seed);
         }
@@ -1359,6 +1361,15 @@ impl Engine {
         crate::observability::traced(Tool::Status, || crate::navigate::status(self))
     }
 
+    /// [`try_status`](Self::try_status), with the facts a workspace re-reads
+    /// this member's reference classes by (S-637) — from the same read, so a
+    /// workspace `status` adds no walk for them.
+    pub(crate) fn try_status_with_reference_facts(
+        &self,
+    ) -> Result<(StatusInfo, crate::resolve::reference_classes::MemberReferenceFacts)> {
+        crate::observability::traced(Tool::Status, || crate::navigate::status_with_reference_facts(self))
+    }
+
     /// Read-only graph-elements accessor feeding the web surface's interactive
     /// graph canvas ([FR-UI-08], [ADR-29]): a presentation-shaped nodes+edges
     /// snapshot of the hydrated graph, whole-graph (`seed = None`) or seed-scoped
@@ -1861,6 +1872,7 @@ impl Engine {
                             .map(|c| c.as_str().to_string())
                             .collect(),
                     }),
+                    note: plugin.note().map(str::to_string),
                 }
             })
             .collect();
@@ -2192,7 +2204,9 @@ impl Engine {
     /// **Every** offender the last snapshot recorded, uncapped, narrowed by a
     /// path glob and a dimension ([FR-QM-19]): each with its symbol id, the
     /// measure its value counts, the value and the threshold it met, in the
-    /// order the capped lists use. The single entry point behind the CLI
+    /// order the capped lists use. Equality's entries, the functions above the
+    /// mean complexity, are no offenders and are listed only when `filter`
+    /// names their dimension. The single entry point behind the CLI
     /// `offenders` and the MCP `offenders` tool, so the two serialize one
     /// value ([NFR-CC-01]).
     ///
@@ -3049,8 +3063,8 @@ impl Engine {
     }
 
     /// Suppress from the Security page ([FR-SC-12]): add an entry for
-    /// `selector` — one finding's fingerprint, or a path glob with its
-    /// narrowing ([S-770]) — to `.logos/security-ignore.toml` with `reason` and
+    /// `selector` — one finding's fingerprint, a path glob with its
+    /// narrowing ([S-770]), or a rule of one scanner in every file ([S-814]) — to `.logos/security-ignore.toml` with `reason` and
     /// an optional `expires` date written `YYYY-MM-DD`
     /// ([`crate::history::security::suppress`]). Touches no store: the next
     /// [`security_findings`](Self::security_findings) labels the findings from
@@ -3064,6 +3078,7 @@ impl Engine {
     ///
     /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
     /// [S-770]: ../../../docs/planning/journal.md#s-770-a-suppression-can-cover-a-path
+    /// [S-814]: ../../../docs/planning/journal.md#s-814-a-rule-can-be-suppressed-project-wide-with-a-reason
     pub fn security_suppress(
         &self,
         selector: crate::history::security::Selector,
@@ -3072,6 +3087,88 @@ impl Engine {
     ) -> Result<crate::history::security::IgnoreWrite> {
         let expires = expires.map(crate::history::security::parse_expires).transpose()?;
         crate::history::security::suppress(&self.root, selector, reason, expires, today_utc())
+    }
+
+    /// [`security_suppress`](Self::security_suppress) that records the
+    /// `evidence` its reason rests on ([FR-SC-32], [S-818]): each of `evidence`
+    /// — a symbol identity, a canonical symbol or a bare name that names one
+    /// symbol — with the hash of its exact source span now, and, for a
+    /// fingerprint selector, the finding's own enclosing symbol when it binds
+    /// one. The entry then suppresses only while every one holds. No `evidence`
+    /// is `security_suppress`: an entry that reads "no evidence recorded".
+    ///
+    /// # Errors
+    /// As [`security_suppress`](Self::security_suppress); and exit 2 and no
+    /// write for evidence that names no symbol, several (listing them), or one
+    /// the index is behind.
+    ///
+    /// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
+    /// [S-818]: ../../../docs/planning/journal.md#s-818-a-suppression-records-its-evidence-and-re-opens-when-the-evidence-changes
+    pub fn security_suppress_with_evidence(
+        &self,
+        selector: crate::history::security::Selector,
+        reason: &str,
+        expires: Option<&str>,
+        evidence: &[String],
+    ) -> Result<crate::history::security::IgnoreWrite> {
+        crate::history::security::suppress_recording(
+            &self.root,
+            selector,
+            reason,
+            expires,
+            today_utc(),
+            evidence,
+            &|finding| self.enclosing_identity(finding),
+        )
+    }
+
+    /// The identity of the symbol that encloses `finding` in this engine's
+    /// graph, or `None` when it binds none ([`crate::security::context`]).
+    fn enclosing_identity(&self, finding: &crate::history::SecurityFinding) -> Result<Option<String>> {
+        let nodes = crate::security::context::enclosing_symbols(self, &[finding])?;
+        Ok(nodes.into_iter().next().flatten().map(|node| node.identity().to_string()))
+    }
+
+    /// `logos security reconfirm <fingerprint>` / `security_reconfirm` / the
+    /// Security page's Re-confirm ([FR-SC-32], [S-818]): re-record the hash of
+    /// every evidence symbol of the entry that suppresses the finding with this
+    /// `fingerprint` (or is the entry for it), keeping its reason and expiry —
+    /// the verdict re-read against the code as it is now and confirmed. The
+    /// findings it covers are suppressed again. A write to the ignore file, so
+    /// guarded as one ([FR-IN-14]).
+    ///
+    /// # Errors
+    /// Exit 2 and no write when no entry or stored finding carries the
+    /// fingerprint, no entry suppresses the finding, the entry records no
+    /// evidence, an evidence symbol no longer exists (suppress again with other
+    /// evidence), the index is behind a file, or the ignore file is malformed
+    /// or hand-spelled; a failed write.
+    ///
+    /// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
+    /// [FR-IN-14]: ../../../docs/specs/requirements/FR-IN-14.md
+    /// [S-818]: ../../../docs/planning/journal.md#s-818-a-suppression-records-its-evidence-and-re-opens-when-the-evidence-changes
+    pub fn security_reconfirm(&self, fingerprint: &str) -> Result<crate::history::security::IgnoreWrite> {
+        self.security_reconfirm_with_evidence(fingerprint, &[])
+    }
+
+    /// [`security_reconfirm`](Self::security_reconfirm) naming the symbols the
+    /// verdict now rests on: with `evidence`, the entry records exactly those
+    /// symbols (each as [`security_suppress_with_evidence`](Self::security_suppress_with_evidence)
+    /// pins it, the finding's enclosing symbol included) in place of the ones it
+    /// recorded — the way to give an entry that records none its evidence, or to
+    /// swap a symbol that was deleted. Without, every recorded symbol is
+    /// re-recorded as it is now.
+    ///
+    /// # Errors
+    /// As [`security_reconfirm`](Self::security_reconfirm), and for `evidence`
+    /// that names no symbol, several, or one the index is behind.
+    pub fn security_reconfirm_with_evidence(
+        &self,
+        fingerprint: &str,
+        evidence: &[String],
+    ) -> Result<crate::history::security::IgnoreWrite> {
+        let enclosing = |finding: &crate::history::SecurityFinding| self.enclosing_identity(finding);
+        crate::history::security::reconfirm_entry(&self.root, fingerprint, today_utc(), evidence, &enclosing)
     }
 
     /// Remove the entry for `selector` ([FR-SC-12],
@@ -4073,6 +4170,25 @@ impl Engine {
                 "the store's symbols were not migrated to the project coordinate; it keeps \
                  its recorded one until the next open: {err:#}"
             ),
+        }
+    }
+
+    /// Read `.h` by the plugin the store's graph was built with (S-582,
+    /// [FR-PL-07]) — the decision the last index or sync recorded — so a
+    /// process that runs neither, a `callers` or a `status`, routes a header
+    /// as the graph does. A store recording none keeps the default, C++.
+    ///
+    /// Fail-soft, like [`migrate_symbol_coordinate`](Self::migrate_symbol_coordinate):
+    /// an unreadable record keeps the default, and the next index or sync
+    /// decides again from the files it reads.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    fn route_shared_extensions(&self) {
+        let (Some(runtime), Some(registry)) = (self.runtime.as_ref(), self.registry.as_ref()) else {
+            return;
+        };
+        if let Err(err) = crate::pipeline::route_shared_extensions(runtime, registry) {
+            tracing::warn!("the recorded `.h` reader could not be read; C++ reads `.h` until the next sync: {err:#}");
         }
     }
 

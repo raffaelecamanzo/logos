@@ -1,0 +1,17 @@
+// HF-11's assertion as it stood: a raw 200 ms bound on a wall-clock measurement.
+// The shared CI runner measured 212.9 ms and 216.6 ms, so it failed every run.
+#[test]
+fn runtime_open_stays_within_its_store_and_pool_regression_band() {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let runtime = Runtime::open(&db).expect("runtime opens");
+    let elapsed = start.elapsed();
+
+    assert_eq!(runtime.db_path(), db.as_path());
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "Runtime::open took {elapsed:?}, over its 200 ms store-and-pool regression band \
+         (measured ~27 ms). Re-run in isolation before calling it a regression."
+    );
+}

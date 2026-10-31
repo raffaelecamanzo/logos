@@ -12,6 +12,12 @@ notes/
 # `.logos/` was) rather than `.logos/`; only the root files are un-ignored.
 !/.logos/security-ignore.toml
 !/.logos/security-baseline.json
+# The architecture contract and its ratchet baseline (owner, 2026-10-30): tracked so a
+# git worktree receives them with the branch. Worktree seeding (FR-WT-06) copies an
+# untracked rules.toml but not rules-baseline.json, so a ratcheted rule failed every
+# worktree gate. docs/howto/ci-integration.md commits both the same way.
+!/.logos/rules.toml
+!/.logos/rules-baseline.json
 
 # Local-only agent/harness config — kept out of version control per
 # working-directory preference (make them local to this checkout).

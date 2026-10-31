@@ -4,6 +4,7 @@
 /api/v1/coverage/run/cancel
 /api/v1/security/install
 /api/v1/security/install/cancel
+/api/v1/security/reconfirm
 /api/v1/security/scan
 /api/v1/security/scan/cancel
 /api/v1/security/suppress

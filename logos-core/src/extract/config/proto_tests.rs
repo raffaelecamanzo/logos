@@ -576,6 +576,7 @@ fn a_malformed_proto_is_partially_extracted() {
         &SymbolContext::default(),
     );
     assert!(facts.partial, "a syntax error flags partial extraction");
+    assert!(facts.parse_damaged, "and records the file's parse damage (S-571)");
     assert!(
         facts
             .warnings

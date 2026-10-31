@@ -96,6 +96,7 @@ function model(): ConfigReadModel {
           clone_similarity: 0.85,
           clone_min_tokens: 50,
           duplicate_min_tokens: 50,
+          cohesion_min_classes: 5,
         },
         constraints: {
           max_cycles: 0,

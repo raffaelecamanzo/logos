@@ -62,6 +62,13 @@
   color: var(--text-1);
 }
 
+/* The scanners one merged finding names (FR-SC-29): one per line, unbulleted. */
+.reporters {
+  margin: 0 0 var(--space-1);
+  padding: 0;
+  list-style: none;
+}
+
 /* The finding detail sits below every other widget: it is scrolled to, so a little
    room above keeps its top rule in view (HF-1). */
 .detail {
@@ -140,6 +147,14 @@
 .findings table tbody td button {
   padding-inline: var(--space-2);
   font-size: var(--text-xs);
+}
+
+/* The REVIEW tag (S-817) and the DEV tag (S-810) on a line of their own under the location. The one word is
+   the longest the column holds: "NEEDS REVIEW" made the location the widest cell
+   of the table and pushed it past its widget at 1024 px. */
+.reviewTag {
+  display: block;
+  margin-top: var(--space-1);
 }
 
 /* What can be long, held to its column and ellipsised: a rule id, a symbol

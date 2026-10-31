@@ -574,7 +574,7 @@ fn start_an_install(rig: &Rig) -> std::process::Child {
     let start = Instant::now();
     while !ready.exists() {
         assert!(
-            start.elapsed() < Duration::from_secs(60),
+            start.elapsed() < logos_core::perf::scaled(Duration::from_secs(60)),
             "the install never reached the hang"
         );
         if let Some(status) = child.try_wait().unwrap() {

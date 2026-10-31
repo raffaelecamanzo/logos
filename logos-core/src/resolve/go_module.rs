@@ -23,6 +23,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use super::rel_path::parent_of;
+
 /// One Go module: where its `go.mod` sits and the module path it declares.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct GoModule {
@@ -102,11 +104,6 @@ pub(crate) fn discover<'p>(
             .then_with(|| a.root.cmp(&b.root))
     });
     modules
-}
-
-/// The directory part of a project-relative path (`""` for a root-level one).
-fn parent_of(path: &str) -> &str {
-    path.rfind('/').map_or("", |i| &path[..i])
 }
 
 #[cfg(test)]

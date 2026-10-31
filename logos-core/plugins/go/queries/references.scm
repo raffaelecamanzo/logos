@@ -33,6 +33,31 @@
 ;                 The row's alias is that name, not the path's last segment; an
 ;                 unaliased import keeps the last segment, and a dot or blank
 ;                 import (not a `package_identifier`) captures none.
+;   @ref.extends — an embedded struct field (S-525, CR-172, FR-EX-15): `struct {
+;                 Core; *Logger; io.Writer; Gen[int] }` extends each embedded
+;                 type. The captured node is the embedded type; the extraction
+;                 engine reads a package-qualified one as its `pkg::Type` path and
+;                 gives the row to the struct, not to the field that names the
+;                 embedding. A named field (`core Core`) embeds nothing and
+;                 captures nothing. An interface's embedded interface
+;                 (`interface { LevelEnabler; … }`, S-529) extends it too — the
+;                 row the method-set pass expands the interface's methods
+;                 through (FR-RS-18). Only a type element naming one type is an
+;                 embedding: a constraint's `~int` or `A | B` captures nothing,
+;                 and neither does a generic interface's (`type P[T any]
+;                 interface { *T; Marshaler }`, zap's `ObjectMarshalerPtr`): it
+;                 is a constraint, which nothing implements, so it has nothing
+;                 to expand.
+;   @ref.access / @ref.access.operand — a selector on a plain name that no
+;                 argument list applies (`c.enc`, S-529, FR-RS-18): a field
+;                 read. The extraction engine keeps the row only when the
+;                 operand's text is the enclosing method's `self_name` — `c` in
+;                 `func (c *ioCore) …` — so `other.enc`, a free function's
+;                 parameter `c` and a package member `pkg.V` record nothing. The
+;                 row binds to the one `Field` of the method's receiver type
+;                 (`nodes.self_type`) named so. The `self_name` gap above
+;                 applies: a name the method rebinds still reads as the
+;                 receiver.
 ;
 ; Droppable on disk at `.logos/plugins/go/queries/references.scm`.
 
@@ -55,6 +80,25 @@
   receiver: (parameter_list
     (parameter_declaration
       name: (identifier) @ref.receiver.self_name)))
+
+(type_spec
+  type: (struct_type
+    (field_declaration_list
+      (field_declaration
+        !name
+        type: [(type_identifier) (qualified_type) (generic_type)] @ref.extends))))
+
+(type_spec
+  !type_parameters
+  type: (interface_type
+    (type_elem
+      .
+      [(type_identifier) (qualified_type) (generic_type)] @ref.extends
+      .)))
+
+(selector_expression
+  operand: (identifier) @ref.access.operand
+  field: (field_identifier) @ref.access)
 
 (import_spec
   name: (package_identifier)? @ref.import.alias

@@ -1,6 +1,8 @@
 //! `logos offenders` and its MCP twin `offenders` ([FR-QM-19], S-676): every
 //! offender the last snapshot recorded, uncapped, narrowed by path and
-//! dimension.
+//! dimension. Equality's entries are listed only when that dimension is named
+//! ([CR-252] H1, S-815): they are the functions above the mean complexity,
+//! judged against no threshold, and were read as hundreds of defects.
 //!
 //! A pure read of the last snapshot ([ADR-28]): it reconciles, scores and
 //! persists nothing, so it answers "what did the last measurement flag", and a
@@ -10,6 +12,7 @@
 //!
 //! [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 //! [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
+//! [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 //! [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 
 use anyhow::Result;
@@ -89,8 +92,13 @@ impl OffendersFilter {
     }
 
     /// Whether an entry of `dimension` defined in `file` passes the filter.
+    /// Without a dimension, one of [`WorstOffenders::LISTED_ON_REQUEST`] never
+    /// does: its entries are no offenders ([CR-252] H1).
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
     fn admits(&self, dimension: &str, file: &str) -> bool {
-        self.dimension.is_none_or(|d| d == dimension)
+        self.dimension
+            .map_or(!WorstOffenders::LISTED_ON_REQUEST.contains(&dimension), |d| d == dimension)
             && self
                 .path
                 .as_ref()
@@ -100,7 +108,8 @@ impl OffendersFilter {
 
 /// The listing behind [`Engine::offenders`]: the last snapshot's uncapped
 /// lists, flattened in [`WorstOffenders::DIMENSIONS`] order and each list's
-/// computed order, then narrowed by `filter`.
+/// computed order, then narrowed by `filter` — which leaves out equality's
+/// entries unless it names that dimension.
 pub(crate) fn offenders(engine: &Engine, filter: &OffendersFilter) -> Result<OffenderListing> {
     let latest = quality_runtime(engine)?.submit_read(|store| store.latest_uncapped_offenders())?;
     Ok(listing(latest, filter))
@@ -178,7 +187,49 @@ mod tests {
         let filter = OffendersFilter::parse(Some("src/a/**"), None).unwrap();
         let l = listing(Some(recorded()), &filter);
         assert!(l.recorded);
-        assert_eq!(names(&l), [("nesting", "a1"), ("nesting", "a2"), ("equality", "eq")]);
+        assert_eq!(names(&l), [("nesting", "a1"), ("nesting", "a2")]);
+    }
+
+    /// CR-252 H1, the other side: only Equality leaves the default listing.
+    /// Every other dimension keeps its entries, those judged against no
+    /// threshold (uniqueness, acyclicity, depth, redundancy) included — the
+    /// rule names the dimension, it is not "no threshold".
+    #[test]
+    fn every_dimension_but_equality_stays_in_the_default_listing() {
+        let mut lists = recorded();
+        for dimension in WorstOffenders::DIMENSIONS {
+            let list = lists.list_mut(dimension).unwrap();
+            if list.is_empty() {
+                list.push(Offender {
+                    threshold: None,
+                    ..entry(&format!("{dimension}_one"), "src/z.rs")
+                });
+            }
+        }
+        let l = listing(Some(lists), &OffendersFilter::default());
+        let listed: Vec<&str> = WorstOffenders::DIMENSIONS
+            .into_iter()
+            .filter(|d| l.offenders.iter().any(|o| o.dimension == *d))
+            .collect();
+        let expected: Vec<&str> = WorstOffenders::DIMENSIONS.into_iter().filter(|d| *d != "equality").collect();
+        assert_eq!(listed, expected);
+    }
+
+    /// CR-252 H1: Equality's entries are the functions above the mean
+    /// complexity, judged against no threshold, so no listing holds them — by
+    /// path or unfiltered — unless the dimension is named; named, every one is
+    /// listed, and a path still narrows them.
+    #[test]
+    fn equality_is_listed_only_when_its_dimension_is_named() {
+        for path in [None, Some("src/a/**"), Some("src/a/x.rs"), Some("**")] {
+            let l = listing(Some(recorded()), &OffendersFilter::parse(path, None).unwrap());
+            assert!(l.offenders.iter().all(|o| o.dimension != "equality"), "{path:?}: {:?}", names(&l));
+        }
+        let eq = OffendersFilter::parse(None, Some("Equality")).unwrap();
+        let l = listing(Some(recorded()), &eq);
+        assert_eq!((l.dimension, names(&l)), (Some("equality"), vec![("equality", "eq")]));
+        let elsewhere = OffendersFilter::parse(Some("src/ab/**"), Some("equality")).unwrap();
+        assert!(listing(Some(recorded()), &elsewhere).offenders.is_empty(), "a path narrows equality too");
     }
 
     #[test]
@@ -191,11 +242,11 @@ mod tests {
     }
 
     #[test]
-    fn no_filter_lists_every_dimension_in_canonical_order_including_depth() {
+    fn no_filter_lists_every_dimension_but_equality_in_canonical_order_including_depth() {
         let l = listing(Some(recorded()), &OffendersFilter::default());
         assert_eq!(
             names(&l),
-            [("nesting", "a1"), ("nesting", "ab"), ("nesting", "a2"), ("depth", "src"), ("equality", "eq")]
+            [("nesting", "a1"), ("nesting", "ab"), ("nesting", "a2"), ("depth", "src")]
         );
     }
 
@@ -206,7 +257,7 @@ mod tests {
     /// filter at all.
     #[test]
     fn a_path_written_as_a_directory_or_with_separators_names_its_subtree() {
-        let under_a = [("nesting", "a1"), ("nesting", "a2"), ("equality", "eq")];
+        let under_a = [("nesting", "a1"), ("nesting", "a2")];
         for token in ["./src/a/**", "src/a", "src/a/", "./src/a/", "src\\a", "src\\a\\**"] {
             let l = listing(Some(recorded()), &OffendersFilter::parse(Some(token), None).unwrap());
             assert_eq!(names(&l), under_a, "{token:?}");
@@ -214,7 +265,7 @@ mod tests {
         let echoed = OffendersFilter::parse(Some("./src\\a/"), None).unwrap();
         assert_eq!(listing(Some(recorded()), &echoed).path.as_deref(), Some("src/a"));
         let file = OffendersFilter::parse(Some("src/a/x.rs"), None).unwrap();
-        assert_eq!(names(&listing(Some(recorded()), &file)), [("nesting", "a1"), ("equality", "eq")]);
+        assert_eq!(names(&listing(Some(recorded()), &file)), [("nesting", "a1")]);
         let all = listing(Some(recorded()), &OffendersFilter::default());
         for empty in ["", "./"] {
             let l = listing(Some(recorded()), &OffendersFilter::parse(Some(empty), None).unwrap());
@@ -231,7 +282,7 @@ mod tests {
             assert!(l.offenders.iter().all(|o| o.dimension != "depth"), "{glob:?}: {:?}", names(&l));
         }
         let everything = listing(Some(recorded()), &OffendersFilter::parse(Some("**"), None).unwrap());
-        assert_eq!(everything.offenders.len(), 4, "every entry with a file: {:?}", names(&everything));
+        assert_eq!(everything.offenders.len(), 3, "every entry with a file but equality's: {:?}", names(&everything));
     }
 
     #[test]

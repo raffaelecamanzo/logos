@@ -602,7 +602,7 @@ async fn security_install_posts_are_refused_without_same_origin_intent() {
     }
 }
 
-/// The triage writes (S-672, [FR-SC-12]) add and remove a suppression in the
+/// The triage writes (S-672, S-818, [FR-SC-12]) add, remove and re-confirm a suppression in the
 /// committed `.logos/security-ignore.toml`, so they are intent-guarded like
 /// every admitted `POST` ([NFR-SE-06]): a cross-origin, tokenless or
 /// forged-token one is refused `403` — past the method guard, stopped by the
@@ -613,7 +613,10 @@ async fn security_install_posts_are_refused_without_same_origin_intent() {
 /// [NFR-SE-06]: ../../docs/specs/requirements/NFR-SE-06.md
 #[tokio::test]
 async fn security_triage_posts_are_refused_without_same_origin_intent() {
-    assert_eq!(web::SECURITY_TRIAGE_POST_ROUTES, ["/api/v1/security/suppress", "/api/v1/security/unsuppress"]);
+    assert_eq!(
+        web::SECURITY_TRIAGE_POST_ROUTES,
+        ["/api/v1/security/suppress", "/api/v1/security/unsuppress", "/api/v1/security/reconfirm"]
+    );
     let body = r#"{"fingerprint":"0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f92e43","reason":"forged"}"#;
     for path in web::SECURITY_TRIAGE_POST_ROUTES {
         let (dir, router, intent) = mutating_router();
@@ -628,7 +631,7 @@ async fn security_triage_posts_are_refused_without_same_origin_intent() {
         assert!(!dir.path().join(".logos/security-ignore.toml").exists(), "a refused POST {path} wrote the ignore file");
     }
     for path in ["/api/v1/security/suppressions", "/api/v1/security/suppress/all", "/api/v1/security/ignore"] {
-        assert_unmounted_post_is_405(path, "only the suppress and unsuppress routes are admitted").await;
+        assert_unmounted_post_is_405(path, "only the suppress, unsuppress and reconfirm routes are admitted").await;
     }
 }
 

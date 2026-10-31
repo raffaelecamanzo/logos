@@ -19,8 +19,8 @@
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
-//! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, or in the callable around it); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
-//! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself |
+//! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, in the callable around it, or across a `declared` marker's `.scope`); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
+//! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself — and, in a path-import language, no `unproven` marker names `x` (S-537: a field declared with a qualified type) |
 //! | `this` | `this.send()` | the enclosing class |
 //! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) — in a package-model language only; every other language's `super` call keeps its shape and binds through the proven hierarchy (S-522) |
 //! | `implicit` | `send()`, on a `@ref.call` row | the enclosing class, when it declares `send` itself, or when nothing else in scope — an outer class, a static import — could supply `send` |
@@ -39,9 +39,40 @@
 //! binder's package rung (S-465), the one FQN derivation there is.
 //!
 //! `name`, `field`, `this`, `refused` and `unproven` are Java's vocabulary: they
-//! prove types through [`DeclaredTypes`], whose declaration reading has only
-//! been measured on Java. A second grammar uses the shape markers below, and
-//! opts into typing in a typing story of its own.
+//! prove types through [`DeclaredTypes`], whose declaration reading is the
+//! grammar's field names. C# speaks it too (S-558, [FR-RS-30]), with `name`,
+//! `field` and `unproven`, and so does Scala (S-576, [FR-RS-37]), whose
+//! `val`/`var` names are `declared` (a `pattern:`, which the walk never reads
+//! as a name); TypeScript, Python and PHP speak `field`
+//! (S-537, [FR-RS-21]; S-546, [FR-RS-24]: `self.x`; S-552, [FR-RS-27]);
+//! any other grammar uses the shape markers below until a typing story of its
+//! own opts it in. A language opts in through its query alone — the mechanism is
+//! this one, and its declarations are read by [`DeclaredTypes::build_with`]:
+//!
+//! | marker | what it states |
+//! |---|---|
+//! | `declared` + `.type` | a declaration whose type the companion node names, read in place of the field walk's reading of the name: one the walk misreads (C#'s `var x = new T()`, `T? x`) or never sees (C#'s `foreach (T x in xs)`). The companion is the language's type-name normalisation: the node whose text the simple-name rule reads ([`Declarations`]) |
+//! | `declared` + `.scope` | the name is in scope in the type the companion declares, beyond the callable it sits in — a C# primary-constructor parameter, which its type declares no field of — wherever that type is the call's own (never in a nested type) and records no supertype (an inherited member of the name would hide it) |
+//! | `declared` + `.field` | the declaration is a field of its class besides, wherever it sits ([`Declarations::field`]): a TypeScript constructor parameter property (`constructor(private svc: Svc)`, S-537), which types `this.svc` as an annotated field does. Any other stated declaration is a field by its position alone, outside every callable |
+//! | `declared` + `.untyped` | the declaration names no type a call is typed by (S-537: an unannotated, union or qualified TypeScript field), which refuses its name — unless a `.type` statement names the same node |
+//!
+//! **A proven-rows language: structural types (S-537, TypeScript; the
+//! plugin's `structural_types`) or import roots (S-546, Python; the plugin's
+//! `import_roots`).** Its module walk never reaches a class's inherited
+//! members — TypeScript's no member at all, Python's a class's own alone
+//! (S-544) — so a typed row keeps its `other` shape, as a Rust proven row does
+//! (1b): the binder binds it among `T`'s members, up `T`'s proven `Extends`,
+//! by the proven-receiver rung, never by a scope. A TypeScript `T` is qualified by the named import the file brought
+//! it in through (`..::users::users.service::UsersService`), as a type
+//! relation's is (S-535); a Python `T` is kept as written, and the binder reads
+//! it through the file's imports as it reads a written qualifier (S-544). A
+//! plain name is typed by Rust's `variable` / `binding` / `proof`
+//! markers (1b) — the one binding in scope at the call — never by the
+//! file-wide [`DeclaredTypes`], which a TypeScript block, arrow or module
+//! scope, or a Python rebinding, would defeat. A `this.x` / `self.x` reads the
+//! enclosing class's own field declarations, all of which the query states
+//! ([`Declarations::stated_only`]), so another class's `x` never answers for
+//! it.
 //!
 //! **1b. Rust typing (S-587, [CR-188], [FR-RS-42]).** Rust's bindings are
 //! patterns, which [`DeclaredTypes`] does not read, so Rust declares its own
@@ -60,13 +91,77 @@
 //!
 //! A `binding` marker's pattern binds every name it spells; its companion
 //! `.scope` or `.after` says where (a parameter's callable, a `let`'s block
-//! after it), and none means the whole callable, which can only refuse more.
+//! after it), `.local` the innermost callable around its node (a Python
+//! local), `.class` a class body that no method of it sees (a Python
+//! class-body name, which outranks any other scope of the name), `.member`
+//! a class whose own members read the name with no receiver written (a Kotlin
+//! property, S-563), and none means the whole callable, which can only refuse
+//! more.
 //! A shadowed, re-bound or two-typed name — two bindings in scope — proves
 //! nothing, and neither does a generic parameter, `impl Trait`, a slice, tuple,
 //! pointer or `fn` type, an associated type, a chain, or `Self` outside an impl.
 //! `T` is written as the file names it (`Store`, `crate::db::Store`), its
 //! generic arguments dropped; `Self` is the caller's self type where its impl
 //! names it by one segment (`impl crate::m::S` may name another `S`).
+//!
+//! TypeScript speaks `variable`, `binding` and `proof` too (S-537): a
+//! parameter's binding is scoped to its function, a `catch` or loop variable's
+//! to its clause, a `const`/`let`'s to the rest of its block (`.after`), a
+//! `var`'s to the whole callable; its proofs are `.type` (an annotation `T`,
+//! `T<A>`) and `.literal` (`const x = new T()`), and it peels no wrapper.
+//! So does Python (S-546): a parameter's binding is scoped to its function's
+//! or lambda's body, never its default values; every other binding form — an assignment, a `for`, `with` or
+//! `except` target, a walrus, a `def` or `class`, an import, a `case` pattern
+//! — to the innermost function around its statement and the functions nested
+//! in it (`.local`; at module level, the calls outside every function), so a
+//! sibling function's local is never in scope; and a class body's names to
+//! that body alone (`.class`), which no method sees; its proofs are
+//! `.type` (an annotation, normalised by the query to the `T` it names) and
+//! `.literal` (`x = T(…)`).
+//!
+//! PHP speaks them too (S-552, [FR-RS-27]): a parameter's binding is scoped to
+//! its callable, and every other binding — an assignment, a `foreach`, `catch`,
+//! `global` or `static` variable — to the whole callable, as PHP scopes a
+//! variable; its proofs are `.type` (`T`, `?T`) and `.literal` (`$x = new
+//! T()`). A `variable` receiver is read by its one leaf, as a `binding`'s
+//! names are, so `$m` is the `m` its parameter binds. A proven PHP row is the
+//! written `T::m` a static call records, with no shape: only Rust's impl-block
+//! lookup, a proven-rows language and a companion-paths one have a
+//! proven-receiver rung ([`Receivers::impl_blocks`]).
+//!
+//! Kotlin speaks them too (S-563, [FR-RS-32]): a parameter's binding is scoped
+//! to its callable, a lambda, `for`, `catch` or `when` variable's to its
+//! construct, a local's to the rest of its block or lambda (`.after`), a
+//! top-level property's to its file, and a class property's — a constructor
+//! `val`/`var` or a body property — to the members of its class (`.member`,
+//! [`Scope::Member`]): only where that class is the call's own, outside every
+//! anonymous body and every lambda the `rebinds` marker names (`x.apply { }`),
+//! whose own `this` may declare the name. Its proofs are `.type` (`T`, `T?`)
+//! and `.literal` (`val x = T()`). A type lends its name to its companion
+//! there ([`Receivers::companion_paths`]), so the written `T::m` is the
+//! companion's: a proven Kotlin row keeps its `other` shape, and the binder
+//! binds it among `T`'s own members. So does a proven Scala row (S-576), typed
+//! by Java's `name` and `field` markers: a Scala class lends its name to its
+//! companion `object` (S-573), whose methods the written `T::m` reaches.
+//!
+//! C++ speaks them too (S-581, [FR-RS-39]), with one more receiver marker:
+//! `pointee`, the `p` of `p->m()`, proven only by a `.pointer` proof — `T*`,
+//! `std::unique_ptr<T>`, `std::shared_ptr<T>`, the companion naming `T` —
+//! which in turn proves no `variable`: `p.reset()` is the smart pointer's own
+//! member, and `x->m()` on a value its `operator->`. Its `.type` proofs are a
+//! declared `T`, `T&`, `const T&`, `T&&`, and no wrapper is peeled: only Rust's
+//! impl-block lookup reads a peeled row, so a C++ `Box<T>` is a `Box`. A
+//! parameter list sits in the declarator, never around the body, so every
+//! binding names its scope: a parameter's or condition variable's function,
+//! lambda, `catch` or statement (`.scope`), a local's block or `case` after
+//! it (`.after`), a data member's class (`.member`) — and, because a form no
+//! pattern scopes would otherwise leave an outer binding the only one in
+//! scope, every name a declarator declares is a `hides` marker too: one no
+//! `binding` states is bound with no proof across the innermost
+//! `hiding_scope` (a function or lambda) around it
+//! ([`Receivers::bind_hiders`]). A proven C++ row is the
+//! written `T::m` a qualified call records, with no shape, bound through the
+//! includes up `T`'s proven bases (`binder::includes`).
 //!
 //! **1c. A receiver inside a macro (S-610).** A macro's token tree is never
 //! parsed as expressions, so the query marks no receiver there. The token-tree
@@ -92,7 +187,7 @@
 //! | `self` | the receiver: `this`, `self`, `$this`, … | `self` |
 //! | `super` | the receiver: `super`, `super()`, `parent`, … | `super` |
 //! | `other` | the receiver | `other` — or `self` when its text is the `self_name` the caller declares |
-//! | `implicit` | the name of a call written with no receiver, on a `@ref.method` row | per the plugin's `implicit_receiver` policy ([`ImplicitReceiver`]): `self` inside a named class under `"self"` — unless a callable between the call and that class declares the name (a nested `def`, a local function), which shadows the member; otherwise the row becomes the Path-form free call `@ref.call` records, which the lexical scope binds |
+//! | `implicit` | the name of a call written with no receiver, on a `@ref.method` row — or a bare name no local binds, its own invocation (Ruby's `to_app`, [`Receivers::mark_implicit`]) | per the plugin's `implicit_receiver` policy ([`ImplicitReceiver`]): `self` inside a named class under `"self"` — unless a callable between the call and that class declares the name (a nested `def`, a local function), which shadows the member; otherwise the row becomes the Path-form free call `@ref.call` records, which the lexical scope binds |
 //! | `self_name` | the identifier a declaration binds its own instance to (Go's receiver parameter) | nothing; read by `other` |
 //! | `anonymous` | a body whose `self`/`this` is not an instance of the enclosing named class: an anonymous class body (`new T() { … }`, Kotlin `object : T { … }`, Scala `new T { … }`, PHP `new class { … }`), a TS class expression, a TS/JS object-literal method or non-arrow `function`, a Kotlin extension function's body, a Ruby `module`, `def self.x`, `class << self` or `Struct.new` block | nothing; typing stops there, and a `self` / `super` / `this` call inside one records `other` — except a `self` call to a callable that body declares itself, which becomes the free call the lexical scope binds to it |
 //!
@@ -112,6 +207,13 @@
 //! it `other`; either beats `other`, which beats `implicit`.
 //!
 //! [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+//! [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
+//! [FR-RS-24]: ../../../docs/specs/requirements/FR-RS-24.md
+//! [FR-RS-30]: ../../../docs/specs/requirements/FR-RS-30.md
+//! [FR-RS-32]: ../../../docs/specs/requirements/FR-RS-32.md
+//! [FR-RS-37]: ../../../docs/specs/requirements/FR-RS-37.md
+//! [FR-RS-39]: ../../../docs/specs/requirements/FR-RS-39.md
+//! [FR-RS-27]: ../../../docs/specs/requirements/FR-RS-27.md
 //! [CR-188]: ../../../docs/requests/CR-188-rust-receiver-typing.md
 //! [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
 //! [CR-169]: ../../../docs/requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md
@@ -125,13 +227,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tree_sitter::Node;
 
-use super::config::accessor::{outermost_callable, DeclaredTypes};
+use super::config::accessor::{outermost_callable, Declarations, DeclaredTypes};
+use super::local_shadow::{LocalShadows, Shadow};
 use super::refs::MacroReceiver;
 use super::{
     declared_superclass, type_parameters_in_scope, Decl, RefFact, SELF_RECEIVER_METHOD_CAPTURE,
 };
 use crate::model::{EdgeKind, NodeKind, ReceiverShape, RefForm};
-use crate::plugin::ImplicitReceiver;
+use crate::plugin::{ImplicitReceiver, ModuleModelKind, Semantics};
 use crate::resolve::{is_class_like, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS};
 
 /// The prefix every receiver marker capture carries.
@@ -152,6 +255,10 @@ enum Typed {
     /// `x.send()` — a plain name, typed by the one binding of it in scope at
     /// the call (S-587, Rust's `variable` marker).
     Variable(String),
+    /// `p->send()` — a plain name, typed by the one binding of it in scope at
+    /// the call when that binding's proof is a pointer's (S-581, C++'s
+    /// `pointee` marker): the call reaches the type pointed to.
+    Pointee(String),
     /// `self.x.send()` — a field of the caller's own struct, reached through
     /// the caller's self type (S-587, Rust's `self_field` marker).
     SelfField(String),
@@ -205,6 +312,9 @@ enum Recorded {
     /// An implicit call that is not on the current instance: the free call a
     /// `@ref.call` records.
     FreeCall,
+    /// An implicit call a local binding in force shadows (S-594): the free
+    /// call, marked as a call through that binding.
+    Local(Shadow),
     Nothing,
 }
 
@@ -245,6 +355,21 @@ enum Scope<'tree> {
     /// Anywhere in the outermost callable around the binding — what a pattern
     /// no companion scopes is given, which can only refuse more.
     Callable,
+    /// In the innermost callable enclosing this node (the companion `.local`),
+    /// the callables nested in it included — or, at a file's top level, the
+    /// calls outside every callable: a Python local, bound for the whole of
+    /// its function wherever in it the statement sits (S-546).
+    Local(Node<'tree>),
+    /// In the body of this class (the companion `.class`), and in no callable
+    /// inside it: a Python class-body name, which a method never sees (S-546).
+    /// It outranks every other scope recorded for the same name.
+    Class(Node<'tree>),
+    /// In the members of this class-like declaration (the companion
+    /// `.member`), read with no `this.` written: a Kotlin property (S-563).
+    /// Only where that class is the call's own ([`Receivers::member_owner`]) —
+    /// never in a nested or anonymous class, a companion, or a body a
+    /// `rebinds` marker names, whose own receiver may declare the name.
+    Member(Node<'tree>),
 }
 
 /// Where one name a pattern binds is in scope (S-587), resolved once when
@@ -257,6 +382,12 @@ enum Binding {
     /// The calls in the outermost callable with this node id (`None`: at a
     /// field position).
     Callable(Option<usize>),
+    /// The calls whose bytes lie in `start..=end` that no callable inside
+    /// that range encloses: [`Scope::Class`]'s body.
+    ClassBody { start: usize, end: usize },
+    /// The calls whose member owner is the class-like declaration with this
+    /// node id: [`Scope::Member`]'s.
+    Member(usize),
 }
 
 impl Binding {
@@ -269,17 +400,42 @@ impl Binding {
                 end: node.parent().map_or(node.end_byte(), |p| p.end_byte()),
             },
             Scope::Callable => Binding::Callable(outermost_callable(leaf).map(|n| n.id())),
+            Scope::Local(node) => match node.parent().and_then(innermost_callable) {
+                Some(callable) => Binding::Bytes { start: callable.start_byte(), end: callable.end_byte() },
+                None => Binding::Callable(None),
+            },
+            Scope::Class(node) => Binding::ClassBody { start: node.start_byte(), end: node.end_byte() },
+            Scope::Member(node) => Binding::Member(node.id()),
         }
     }
 
     /// Whether this binding is in scope at `invocation`, the outermost
-    /// callable around which has node id `callable`.
-    fn in_scope(self, invocation: Node<'_>, callable: Option<usize>) -> bool {
+    /// callable around which has node id `callable`; `owner` answers whose
+    /// members it reads with no receiver written ([`Receivers::member_owner`]).
+    fn in_scope(self, invocation: Node<'_>, callable: Option<usize>, owner: impl FnOnce() -> Option<usize>) -> bool {
+        let within = |start: usize, end: usize| start <= invocation.start_byte() && invocation.end_byte() <= end;
         match self {
-            Binding::Bytes { start, end } => start <= invocation.start_byte() && invocation.end_byte() <= end,
+            Binding::Bytes { start, end } => within(start, end),
             Binding::Callable(c) => c == callable,
+            Binding::ClassBody { start, end } => {
+                within(start, end) && innermost_callable(invocation).is_none_or(|c| c.start_byte() < start)
+            }
+            Binding::Member(class) => owner() == Some(class),
         }
     }
+}
+
+/// The innermost node at or around `node` that declares a callable — the
+/// nearest one field-naming `parameters` ([`outermost_callable`]'s test).
+fn innermost_callable(node: Node<'_>) -> Option<Node<'_>> {
+    let mut at = Some(node);
+    while let Some(current) = at {
+        if current.child_by_field_name("parameters").is_some() {
+            return Some(current);
+        }
+        at = current.parent();
+    }
+    None
 }
 
 /// What a `proof` marker says a binding's type is (S-587).
@@ -291,6 +447,10 @@ enum Proof<'tree> {
     Constructor(Node<'tree>),
     /// The type of `let x = T { … }`.
     Literal(Node<'tree>),
+    /// The type a declared pointer points to: `T* p`, `std::unique_ptr<T> p`
+    /// (S-581, C++). It proves a `pointee` receiver (`p->m()`) and never a
+    /// `variable` one: `p.reset()` is a call on the pointer itself.
+    Pointer(Node<'tree>),
 }
 
 /// A struct field's declared type, and the struct's declaration index.
@@ -331,6 +491,8 @@ pub(super) struct Receivers<'tree> {
     /// another class. File-scoped, like
     /// [`DeclaredTypes`]: the type the file declares for that name elsewhere is
     /// not proven to be this one's, so the name is poisoned for the whole file.
+    /// A `variable` receiver of the name is refused too (S-546: a Python
+    /// `global` or `nonlocal` name, which another function may rebind).
     unproven: HashSet<String>,
     /// The names the file's NON-static single-type imports bring into scope — a
     /// static import names a member, never a type.
@@ -338,6 +500,10 @@ pub(super) struct Receivers<'tree> {
     /// The bodies the `anonymous` marker names, by node id — anonymous class
     /// bodies and every other body whose `this` is not the enclosing class's.
     anonymous: HashSet<usize>,
+    /// The bodies the `rebinds` marker names, by node id (S-563): a lambda
+    /// whose own receiver may declare any name — Kotlin's `x.apply { }` — so
+    /// no [`Scope::Member`] binding of an enclosing class is in scope inside.
+    rebinding: HashSet<usize>,
     /// declaration index → the name it binds its own instance to (`self_name`);
     /// `None` when two of its markers disagree.
     self_names: HashMap<usize, Option<String>>,
@@ -355,6 +521,30 @@ pub(super) struct Receivers<'tree> {
     /// class's members, and a C# or Kotlin class's one supertype may be an
     /// interface.
     types_super: bool,
+    /// Whether a typed row is a proven row: it keeps its `other` shape, its
+    /// type qualified through the file's named imports ([`FileDecls::imported`]),
+    /// and is bound by the binder's proven-receiver rung; a `this.x` reads the
+    /// class's own field declarations ([`Declarations::stated_only`]). A
+    /// structural-types language's (S-537, TypeScript; the plugin's
+    /// `structural_types`) and an import-root language's (S-546, Python; the
+    /// plugin's `import_roots`): neither module walk reaches the members a
+    /// class inherits.
+    proven_rows: bool,
+    /// Whether the binder binds a call through the one associated-item lookup
+    /// over `impl` blocks (S-607, Rust; the plugin's `impl_block_lookup`). A
+    /// proven row keeps its `other` shape only here and in a
+    /// [`proven_rows`](Self::proven_rows) language, the two the binder's
+    /// proven-receiver rung serves; anywhere else it is the written `T::m`
+    /// path the language's own rungs bind (S-552, PHP's static call).
+    impl_blocks: bool,
+    /// Whether a type lends its name to a companion — a Kotlin `Companion`
+    /// (S-563; the plugin's `companion_name`) or a Scala same-named `object`
+    /// (S-573; the plugin's `companion_objects`): the written `T::m` reaches
+    /// the companion's `m` (I4-INT, S-573), so a typed row is a proven row —
+    /// it keeps its `other` shape and the binder's proven-receiver rung binds
+    /// it among `T`'s own members — and its declared type is read as written,
+    /// peeling no wrapper.
+    companion_paths: bool,
     /// Every name a `binding` marker's pattern binds (S-587): name → pattern
     /// leaf id → the binding. Keyed by leaf so two captures of one pattern
     /// count it once.
@@ -372,6 +562,26 @@ pub(super) struct Receivers<'tree> {
     /// `(struct name, field name)` → the field's node id → its declared type
     /// and the struct's declaration index — read by a `self_field` receiver.
     members: HashMap<(String, String), BTreeMap<usize, Member<'tree>>>,
+    /// The declarations the query states for [`DeclaredTypes`] (S-558, the
+    /// `declared` marker's `.type` companion): read in place of the field
+    /// walk's reading of the same name.
+    declarations: Declarations<'tree>,
+    /// name → the byte ranges of the type declarations a `declared` marker's
+    /// `.scope` companion puts it in scope in (S-558): a C# primary-constructor
+    /// parameter, which its type declares no field of.
+    scoped: HashMap<String, Vec<(usize, usize)>>,
+    /// Each operand-named access row (S-529), with its caller, its operand's
+    /// node and that node's text — appended by [`finish`](Self::finish) when
+    /// the operand is the caller's `self_name` and no local binding rebinds it
+    /// there (S-594).
+    accesses: Vec<(Option<usize>, Node<'tree>, String, RefFact)>,
+    /// Every name a `hides` marker names: a name a declaration declares,
+    /// which [`bind_hiders`](Self::bind_hiders) binds where no `binding`
+    /// states it (S-581).
+    hiders: Vec<Node<'tree>>,
+    /// The byte ranges the `hiding_scope` marker names: a C++ function or
+    /// lambda, across which an unstated declaration hides its name (S-581).
+    hiding_scopes: Vec<(usize, usize)>,
 }
 
 /// What a file's declarations say, for the receiver passes.
@@ -381,6 +591,14 @@ pub(super) struct FileDecls<'a, 'tree> {
     pub decls: &'a [Decl<'tree>],
     pub symbols: &'a [Option<crate::model::LogosSymbol>],
     pub id_to_idx: &'a HashMap<usize, usize>,
+    /// The qualified target a type name the file imports by name is recorded
+    /// under at a node — `<import target>::<exported name>`, read by a
+    /// path-import language's typed row (S-537), as its type relations read it
+    /// (S-535); `None` for a name no named import binds there.
+    pub imported: &'a dyn Fn(Node<'tree>, &str) -> Option<String>,
+    /// The local bindings in force at a node (S-594): a rebound `self_name`
+    /// is no longer the receiver, and a local shadows an implicit call.
+    pub shadows: &'a LocalShadows<'a>,
 }
 
 /// Whether `capture` is a receiver marker.
@@ -392,11 +610,8 @@ impl<'tree> Receivers<'tree> {
     /// The receiver state for a query, or [`None`] when it declares no marker
     /// and no `@ref.method.self` — then nothing is recorded and no row is ever
     /// retyped or shaped.
-    pub(super) fn for_query(
-        capture_names: &[&str],
-        implicit_receiver: ImplicitReceiver,
-        types_super: bool,
-    ) -> Option<Self> {
+    pub(super) fn for_query(capture_names: &[&str], semantics: &Semantics) -> Option<Self> {
+        let proven_rows = semantics.structural_types || semantics.import_roots.is_some();
         capture_names
             .iter()
             .any(|c| is_marker(c) || *c == SELF_RECEIVER_METHOD_CAPTURE)
@@ -405,16 +620,25 @@ impl<'tree> Receivers<'tree> {
                 unproven: HashSet::new(),
                 type_imports: HashSet::new(),
                 anonymous: HashSet::new(),
+                rebinding: HashSet::new(),
                 self_names: HashMap::new(),
                 sites: Vec::new(),
                 macro_sites: Vec::new(),
-                implicit_receiver,
-                types_super,
+                implicit_receiver: semantics.implicit_receiver,
+                types_super: semantics.module_model == ModuleModelKind::Package,
+                proven_rows,
+                impl_blocks: semantics.impl_block_lookup,
+                companion_paths: semantics.companion_name.is_some() || semantics.companion_objects,
                 bindings: HashMap::new(),
                 proofs: HashMap::new(),
                 constructors: HashMap::new(),
                 impl_owners: HashMap::new(),
                 members: HashMap::new(),
+                declarations: if proven_rows { Declarations::stated_only() } else { Declarations::default() },
+                scoped: HashMap::new(),
+                accesses: Vec::new(),
+                hiders: Vec::new(),
+                hiding_scopes: Vec::new(),
             })
     }
 
@@ -440,14 +664,13 @@ impl<'tree> Receivers<'tree> {
                 let scope = companion("ref.receiver.binding.scope")
                     .map(Scope::Whole)
                     .or_else(|| companion("ref.receiver.binding.after").map(Scope::After))
+                    .or_else(|| companion("ref.receiver.binding.local").map(Scope::Local))
+                    .or_else(|| companion("ref.receiver.binding.class").map(Scope::Class))
+                    .or_else(|| companion("ref.receiver.binding.member").map(Scope::Member))
                     .unwrap_or(Scope::Callable);
                 for leaf in bound_names(node) {
                     if let Some(name) = read(leaf).filter(|n| is_identifier(n)) {
-                        self.bindings
-                            .entry(name)
-                            .or_default()
-                            .entry(leaf.id())
-                            .or_insert_with(|| Binding::new(leaf, scope));
+                        self.bind(name, leaf, scope);
                     }
                 }
                 return;
@@ -456,7 +679,8 @@ impl<'tree> Receivers<'tree> {
                 let proof = companion("ref.receiver.proof.type")
                     .map(Proof::Declared)
                     .or_else(|| companion("ref.receiver.proof.constructor").map(Proof::Constructor))
-                    .or_else(|| companion("ref.receiver.proof.literal").map(Proof::Literal));
+                    .or_else(|| companion("ref.receiver.proof.literal").map(Proof::Literal))
+                    .or_else(|| companion("ref.receiver.proof.pointer").map(Proof::Pointer));
                 if let Some(proof) = proof {
                     self.proofs.insert(node.id(), proof);
                 }
@@ -485,8 +709,26 @@ impl<'tree> Receivers<'tree> {
                 }
                 return;
             }
+            // A declaration the field walk misreads or never sees, one in scope
+            // beyond the callable it sits in (S-558), one declaring no type a
+            // call is typed by, or a field from a parameter list (S-537).
+            "ref.receiver.declared" => {
+                if let Some(declared) = companion("ref.receiver.declared.type") {
+                    self.declarations.declare(node, declared);
+                }
+                if companion("ref.receiver.declared.untyped").is_some() {
+                    self.declarations.untyped(node);
+                }
+                if companion("ref.receiver.declared.field").is_some() {
+                    self.declarations.field(node);
+                }
+                if let (Some(scope), Some(name)) = (companion("ref.receiver.declared.scope"), text()) {
+                    self.scoped.entry(name).or_default().push((scope.start_byte(), scope.end_byte()));
+                }
+                return;
+            }
             // A companion: read with its anchor above.
-            c if ["binding.", "proof.", "constructor.", "member."]
+            c if ["binding.", "proof.", "constructor.", "member.", "declared."]
                 .iter()
                 .any(|anchor| c.strip_prefix(MARKER).is_some_and(|rest| rest.starts_with(anchor))) =>
             {
@@ -501,6 +743,18 @@ impl<'tree> Receivers<'tree> {
             }
             "ref.receiver.anonymous" => {
                 self.anonymous.insert(node.id());
+                return;
+            }
+            "ref.receiver.hides" => {
+                self.hiders.push(node);
+                return;
+            }
+            "ref.receiver.hiding_scope" => {
+                self.hiding_scopes.push((node.start_byte(), node.end_byte()));
+                return;
+            }
+            "ref.receiver.rebinds" => {
+                self.rebinding.insert(node.id());
                 return;
             }
             "ref.receiver.self_name" => {
@@ -551,8 +805,16 @@ impl<'tree> Receivers<'tree> {
                 marks.typed = Some(Typed::Implicit);
             }
             // Rust's typing markers (S-587) type the receiver and nothing
-            // else: its `other` shape is the `other` marker's.
-            "ref.receiver.variable" => marks.typed = text().map(Typed::Variable),
+            // else: its `other` shape is the `other` marker's. A `variable` is
+            // read as a `binding` pattern reads its names, by its one leaf: a
+            // PHP `$m` is the `m` its parameter binds (S-552). A `pointee` is
+            // read the same way (S-581, C++'s `p->m()`).
+            "ref.receiver.variable" | "ref.receiver.pointee" => {
+                let leaves = bound_names(node);
+                let name = (leaves.len() == 1).then(|| read(leaves[0])).flatten();
+                let through_pointer = capture == "ref.receiver.pointee";
+                marks.typed = name.map(if through_pointer { Typed::Pointee } else { Typed::Variable });
+            }
             "ref.receiver.self_field" => marks.typed = text().map(Typed::SelfField),
             "ref.receiver.self" => marks.own = true,
             "ref.receiver.other" => {
@@ -563,12 +825,79 @@ impl<'tree> Receivers<'tree> {
         }
     }
 
+    /// Bind every name a `hides` marker names that no `binding` states
+    /// (S-581): with no proof, across the innermost `hiding_scope` around it.
+    /// A declaration form the query scopes no binding for — a labelled one, a
+    /// `case`'s, one under nested `#if`s, a parameter of an unlisted
+    /// declarator — then hides every other binding of its name there, so an
+    /// outer one is never the one binding in scope: the walk fails closed,
+    /// and a scope wider than the declaration's own only refuses more. A name
+    /// outside every hiding scope (a prototype's parameter, a namespace-scope
+    /// variable) binds nothing.
+    fn bind_hiders(&mut self, source: &[u8]) {
+        let stated: HashSet<usize> = self.bindings.values().flat_map(|leaves| leaves.keys().copied()).collect();
+        for leaf in std::mem::take(&mut self.hiders) {
+            if stated.contains(&leaf.id()) {
+                continue;
+            }
+            let around = |&&(start, end): &&(usize, usize)| start <= leaf.start_byte() && leaf.end_byte() <= end;
+            let innermost = self.hiding_scopes.iter().filter(around).min_by_key(|(start, end)| end - start);
+            let (Some(&(start, end)), Some(name)) = (innermost, leaf.utf8_text(source).ok().map(str::trim)) else {
+                continue;
+            };
+            self.proofs.remove(&leaf.id());
+            self.bindings.entry(name.to_string()).or_default().insert(leaf.id(), Binding::Bytes { start, end });
+        }
+    }
+
+    /// Record that the pattern leaf `leaf` binds `name` in `scope`. A leaf is
+    /// recorded once, by the first match naming it — except that a class
+    /// body's scope outranks any other the same leaf is recorded with,
+    /// whichever match came first (S-546).
+    fn bind(&mut self, name: String, leaf: Node<'tree>, scope: Scope<'tree>) {
+        let binding = Binding::new(leaf, scope);
+        let recorded = self.bindings.entry(name).or_default().entry(leaf.id());
+        match (scope, recorded) {
+            (Scope::Class(_), std::collections::btree_map::Entry::Occupied(mut held)) => {
+                held.insert(binding);
+            }
+            (_, entry) => {
+                entry.or_insert(binding);
+            }
+        }
+    }
+
+    /// Defer an access row whose selector's operand is the node `operand`,
+    /// written `name` (S-529): kept by [`finish`](Self::finish) only when it is
+    /// `caller`'s own receiver — `c.enc` inside `func (c *ioCore) …` — which
+    /// the walk's `self_name` markers say only once it ends, and the body does
+    /// not rebind the name where the access is (S-594).
+    pub(super) fn defer_access(&mut self, caller: Option<usize>, operand: Node<'tree>, name: &str, row: RefFact) {
+        self.accesses.push((caller, operand, name.to_string(), row));
+    }
+
+    /// The name the declaration at `caller` binds its own instance to — its
+    /// `self_name` marker's text — or `None` when it records none or two that
+    /// disagree. What an operand-named access is kept on (S-529).
+    pub(super) fn self_name(&self, caller: Option<usize>) -> Option<&str> {
+        caller.and_then(|c| self.self_names.get(&c)).and_then(Option::as_deref)
+    }
+
     /// Mark `invocation`'s receiver as the caller's own instance — what the
     /// S-493 capture `@ref.method.self` says of its call.
     pub(super) fn mark_self(&mut self, invocation: Option<Node<'tree>>) {
         if let Some(invocation) = invocation {
             self.marks.entry(invocation.id()).or_default().own = true;
         }
+    }
+
+    /// Mark the bare name `name` as a call written with no receiver — what the
+    /// `implicit` marker says of a call's name, for a call that is the name
+    /// alone (S-568, Ruby's `to_app`): it is its own invocation.
+    pub(super) fn mark_implicit(&mut self, name: Node<'tree>) {
+        let marks = self.marks.entry(name.id()).or_default();
+        marks.implicit = true;
+        marks.typed = Some(Typed::Implicit);
     }
 
     /// Note that the row about to be pushed at `row` is a call from
@@ -612,14 +941,29 @@ impl<'tree> Receivers<'tree> {
         self.type_imports.insert(name.to_string());
     }
 
-    /// Retype every site whose receiver the file proves, then shape every
+    /// Append the deferred access rows on their caller's own receiver (S-529),
+    /// then retype every site whose receiver the file proves and shape every
     /// Method-form row typing left bare, in place. Runs once, after every
     /// match: a `super` receiver reads the `Extends` rows this same pass
     /// recorded, and a bare call the file's imports.
-    pub(super) fn finish(self, refs: &mut [RefFact], file: &FileDecls<'_, 'tree>) {
+    pub(super) fn finish(mut self, refs: &mut Vec<RefFact>, file: &FileDecls<'_, 'tree>) {
+        // The deferred accesses on the caller's own receiver, appended: no
+        // site's row moves. A receiver name the body rebinds where the access
+        // is (S-594) — a `range` variable, a `:=`, a closure parameter — is
+        // another value, as it is for a call (`shape`).
+        let accesses = std::mem::take(&mut self.accesses);
+        refs.extend(
+            accesses
+                .into_iter()
+                .filter(|(caller, node, operand, _)| {
+                    self.self_name(*caller) == Some(operand.as_str()) && !file.shadows.rebinds(*node, operand)
+                })
+                .map(|(_, _, _, row)| row),
+        );
         if self.sites.is_empty() && self.macro_sites.is_empty() {
             return;
         }
+        self.bind_hiders(file.source);
         // A row typing retyped is Path form now: only bare Method rows remain.
         self.retype(refs, file);
         for site in &self.sites {
@@ -637,6 +981,10 @@ impl<'tree> Receivers<'tree> {
                 }
                 Recorded::Shape(shape) => row.receiver = Some(shape),
                 Recorded::FreeCall => row.form = RefForm::Path,
+                Recorded::Local(local) => {
+                    row.form = RefForm::Path;
+                    local.mark(row);
+                }
                 Recorded::Nothing => {}
             }
         }
@@ -667,11 +1015,13 @@ impl<'tree> Receivers<'tree> {
             (false, false) => {}
         }
         if marks.other {
-            let own_name = site
-                .caller
-                .and_then(|c| self.self_names.get(&c))
-                .and_then(Option::as_deref);
-            let own = own_name.is_some() && marks.other_text.as_deref() == own_name;
+            // The caller's own receiver name — unless the body rebinds it where
+            // the call is (S-594): a `range` variable, a `:=`, a closure
+            // parameter or a type-switch binding of that name is another value.
+            let own_name = self.self_name(site.caller);
+            let own = own_name.is_some_and(|own| {
+                marks.other_text.as_deref() == Some(own) && !file.shadows.rebinds(site.invocation, own)
+            });
             return Recorded::Shape(if own {
                 ReceiverShape::SelfInstance
             } else {
@@ -679,6 +1029,10 @@ impl<'tree> Receivers<'tree> {
             });
         }
         if marks.implicit {
+            // A local binding in force names the call's target (S-594).
+            if let Some(local) = file.shadows.at(site.invocation, name) {
+                return Recorded::Local(local);
+            }
             return match (self.implicit_receiver, class()) {
                 // A callable an enclosing callable declares shadows the
                 // class's member, as an anonymous body's own member does: the
@@ -694,12 +1048,23 @@ impl<'tree> Receivers<'tree> {
         Recorded::Nothing
     }
 
+    /// Whether a typed row is bound by the binder's proven-receiver rung —
+    /// keeping its `other` shape — rather than as the written `T::m` the
+    /// language's own rungs bind: in an [`impl_blocks`](Self::impl_blocks),
+    /// [`proven_rows`](Self::proven_rows) or
+    /// [`companion_paths`](Self::companion_paths) language, where the written
+    /// path is not the instance's (S-576: a Scala `T::m` reaches `T`'s
+    /// companion `object`).
+    fn proven_rung(&self) -> bool {
+        self.impl_blocks || self.proven_rows || self.companion_paths
+    }
+
     /// Retype every site whose receiver the file proves, in place (S-467).
     fn retype(&self, refs: &mut [RefFact], file: &FileDecls<'_, 'tree>) {
         // The one per-file walk this costs, paid only by a file with a site
         // that asks it (a simple-name or `this.x` receiver) — NFR-PE-02.
         let declared: OnceCell<DeclaredTypes> = OnceCell::new();
-        let types = || declared.get_or_init(|| DeclaredTypes::build(file.root, file.source));
+        let types = || declared.get_or_init(|| DeclaredTypes::build_with(file.root, file.source, &self.declarations));
         let imported: HashSet<&str> = refs
             .iter()
             .filter(|r| r.kind == EdgeKind::Imports && r.form == RefForm::Path)
@@ -722,9 +1087,13 @@ impl<'tree> Receivers<'tree> {
         // A callable's own declarations, keyed by the callable — the scope a
         // simple-name receiver must be declared in (see `declared_in_scope`).
         let mut scopes: HashMap<usize, DeclaredTypes> = HashMap::new();
+        // A class's own field declarations, keyed by the class — what a
+        // proven-rows language's `this.x` / `self.x` reads.
+        let mut classes: HashMap<usize, DeclaredTypes> = HashMap::new();
         let mut typed: Vec<(usize, String)> = Vec::new();
         // Rust's proven receivers (S-587): retyped keeping their `other` shape,
-        // with the wrappers peeled to reach the type.
+        // with the wrappers peeled to reach the type — and a path-import
+        // language's typed rows (S-537), which peel nothing.
         let mut proven: Vec<(usize, String, Option<String>)> = Vec::new();
         for site in &self.sites {
             let (row, invocation) = (site.row, site.invocation);
@@ -735,14 +1104,21 @@ impl<'tree> Receivers<'tree> {
                 continue;
             };
             let name = refs[row].target.as_str();
-            if let Typed::Variable(_) | Typed::SelfField(_) = receiver {
+            if let Typed::Variable(_) | Typed::Pointee(_) | Typed::SelfField(_) = receiver {
                 // Only a Method-form row is a receiver call to retype.
                 if refs[row].form != RefForm::Method {
                     continue;
                 }
-                if let Some(found) = self.proven_receiver(receiver, invocation, site.caller, file) {
-                    let (target, peeled) = found.into_row(name);
+                let Some(found) = self.proven_receiver(receiver, invocation, site.caller, file) else {
+                    continue;
+                };
+                let (target, peeled) = self.qualified(found, invocation, file).into_row(name);
+                // Bound by the proven-receiver rung ([`proven_rung`](Self::proven_rung)),
+                // or as the written `T::m` the language binds.
+                if self.proven_rung() {
                     proven.push((row, target, peeled));
+                } else {
+                    typed.push((row, target));
                 }
                 continue;
             }
@@ -755,7 +1131,7 @@ impl<'tree> Receivers<'tree> {
                 // declaration of the name in the file agrees. Declared nowhere
                 // in scope, it is inherited or an outer class's: unproven.
                 Typed::Name(x) if types().declares(x) => {
-                    declared_in_scope(invocation, x, file, anonymous, &supertyped, &mut scopes)
+                    self.declared_in_scope(invocation, x, file, &supertyped, &mut scopes)
                         .then(|| types().get(x))
                         .flatten()
                         .filter(|t| provable(t))
@@ -764,6 +1140,16 @@ impl<'tree> Receivers<'tree> {
                 Typed::Name(x) => (self.type_imports.contains(x) || declares_type(file.decls, x)).then(|| x.clone()),
                 // `this.x` is the enclosing class's field only when that class
                 // declares it; an inherited `x` is another class's.
+                // A proven-rows language reads the class's own field
+                // declarations alone, every one of which its query states.
+                Typed::Field(x) if self.proven_rows => class()
+                    .filter(|&i| declares_field(file.decls, i, x))
+                    .and_then(|i| {
+                        let own = classes.entry(i).or_insert_with(|| {
+                            DeclaredTypes::build_with(file.decls[i].node, file.source, &self.declarations)
+                        });
+                        own.field(x).filter(|t| provable(t)).map(str::to_string)
+                    }),
                 Typed::Field(x) => class()
                     .filter(|&i| declares_field(file.decls, i, x))
                     .and_then(|_| types().field(x))
@@ -789,10 +1175,16 @@ impl<'tree> Receivers<'tree> {
                     let elsewhere = nested(file.decls, i) || imported.contains(name) || static_wildcard;
                     (own || !elsewhere).then(|| file.decls[i].name.clone())
                 }),
-                Typed::Variable(_) | Typed::SelfField(_) => None,
+                Typed::Variable(_) | Typed::Pointee(_) | Typed::SelfField(_) => None,
             };
-            if let Some(head) = head {
-                typed.push((row, format!("{head}::{name}")));
+            match head {
+                // Bound by the proven-receiver rung ([`proven_rung`](Self::proven_rung)).
+                Some(head) if self.proven_rung() => {
+                    let found = self.qualified(Proven { head, peeled: Vec::new() }, invocation, file);
+                    proven.push((row, format!("{}::{name}", found.head), None));
+                }
+                Some(head) => typed.push((row, format!("{head}::{name}"))),
+                None => {}
             }
         }
         // A receiver read inside a macro (S-610) is proven the same way.
@@ -815,6 +1207,58 @@ impl<'tree> Receivers<'tree> {
         }
     }
 
+    /// Whether `name`, a variable the file declares, is declared in scope at
+    /// `invocation`: anywhere in the outermost callable around the call (its
+    /// parameters, its locals, a local or anonymous class's members) — read by
+    /// [`DeclaredTypes`] over that callable alone, so the rule for what a
+    /// declaration is stays the one [`DeclaredTypes::build_with`] has — or as a
+    /// field of the enclosing class, or of a class enclosing THAT one reached
+    /// only through classes that inherit nothing (`supertyped`: a class
+    /// recording an `extends` or `implements` row may inherit a same-named
+    /// field from another file, which would shadow the outer one), or in the
+    /// type a `declared` marker scopes it to (S-558: a C# primary-constructor
+    /// parameter) when that type is the call's own class and inherits nothing —
+    /// a member it inherits hides the parameter, and a nested type never sees
+    /// it. A `@Nested` test class reading its outer class's field is the shape
+    /// the outer-class walk admits.
+    fn declared_in_scope(
+        &self,
+        invocation: Node<'_>,
+        name: &str,
+        file: &FileDecls<'_, '_>,
+        supertyped: &HashSet<&str>,
+        scopes: &mut HashMap<usize, DeclaredTypes>,
+    ) -> bool {
+        let inherits = |i: usize| file.symbols[i].as_ref().is_none_or(|s| supertyped.contains(s.as_str()));
+        let mut class = enclosing_class(invocation, file, &self.anonymous).class();
+        // A `.scope` name is in scope in the type its companion declares, and
+        // only where that type is the call's own: a nested type never sees it.
+        // Any member the type inherits hides it, so a type that records a
+        // supertype proves nothing of it.
+        if let Some(i) = class.filter(|&i| !inherits(i)) {
+            let own = file.decls[i].node;
+            let declares = |&(start, end): &(usize, usize)| start == own.start_byte() && end == own.end_byte();
+            if self.scoped.get(name).is_some_and(|ranges| ranges.iter().any(declares)) {
+                return true;
+            }
+        }
+        while let Some(i) = class {
+            if declares_field(file.decls, i, name) {
+                return true;
+            }
+            if inherits(i) {
+                break;
+            }
+            class = outer_class(file.decls, i);
+        }
+        outermost_callable(invocation).is_some_and(|callable| {
+            scopes
+                .entry(callable.id())
+                .or_insert_with(|| DeclaredTypes::build_with(callable, file.source, &self.declarations))
+                .declares(name)
+        })
+    }
+
     /// The type a Rust receiver the file may prove has at `invocation`, a call
     /// made by the declaration at `caller` (S-587, S-610): `x.f()`'s `x`, or
     /// `self.x.f()`'s field `x`.
@@ -833,34 +1277,89 @@ impl<'tree> Receivers<'tree> {
             .and_then(|c| file.decls[c].self_type.as_deref());
         let module = caller.and_then(|c| module_of(file.decls, c));
         match receiver {
-            Typed::Variable(x) => self.variable_type(x, invocation, own_type, module, file),
+            Typed::Variable(x) => self.variable_type(x, false, invocation, own_type, module, file),
+            Typed::Pointee(x) => self.variable_type(x, true, invocation, own_type, module, file),
             Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, module, file)),
             _ => None,
         }
+    }
+
+    /// `found` with its head qualified through the file's named import of it
+    /// at `invocation`, in a proven-rows language (S-537): the
+    /// `<import target>::<name>` a type relation records (S-535). A head no
+    /// named import brings in — one the file declares, and every Python one
+    /// (S-546: the binder reads it through the file's imports) — is kept as
+    /// written.
+    fn qualified(&self, mut found: Proven, invocation: Node<'tree>, file: &FileDecls<'_, 'tree>) -> Proven {
+        if self.proven_rows {
+            if let Some(imported) = (file.imported)(invocation, &found.head) {
+                found.head = imported;
+            }
+        }
+        found
+    }
+
+    /// The node id of the class-like declaration whose members a name at
+    /// `invocation` reads with no receiver written (S-563, [`Scope::Member`]):
+    /// the nearest one around it — `None` when an anonymous body, or a body a
+    /// `rebinds` marker names, lies nearer, since that body's own receiver may
+    /// declare the name.
+    fn member_owner(&self, invocation: Node<'_>, file: &FileDecls<'_, '_>) -> Option<usize> {
+        let class = file.decls[enclosing_class(invocation, file, &self.anonymous).class()?].node.id();
+        let mut at = invocation.parent();
+        while let Some(node) = at.filter(|n| n.id() != class) {
+            if self.rebinding.contains(&node.id()) {
+                return None;
+            }
+            at = node.parent();
+        }
+        Some(class)
     }
 
     /// The type of the plain-name receiver `x` at `invocation` (S-587): the
     /// one binding of `x` in scope there, when it carries a proof. A name with
     /// no binding in scope (a `static`, a binding a macro introduced), or with
     /// two (shadowed, re-bound, two-typed), proves nothing. `own_type` is the
-    /// caller's self type, what `Self` names.
+    /// caller's self type, what `Self` names. A call through a pointer
+    /// (`pointee`, S-581) is proven by a pointer's proof alone, and every
+    /// other call by any proof but a pointer's.
     fn variable_type(
         &self,
         x: &str,
+        pointee: bool,
         invocation: Node<'_>,
         own_type: Option<&str>,
         module: Option<usize>,
         file: &FileDecls<'_, '_>,
     ) -> Option<Proven> {
+        // A name another scope may rebind (S-546: a Python `global` or
+        // `nonlocal`) proves nothing anywhere in the file.
+        if self.unproven.contains(x) {
+            return None;
+        }
         let source = file.source;
         let callable = outermost_callable(invocation).map(|n| n.id());
-        let mut in_scope = self.bindings.get(x)?.iter().filter(|(_, b)| b.in_scope(invocation, callable));
+        let owner: OnceCell<Option<usize>> = OnceCell::new();
+        let owner = || *owner.get_or_init(|| self.member_owner(invocation, file));
+        let mut in_scope = self.bindings.get(x)?.iter().filter(|(_, b)| b.in_scope(invocation, callable, owner));
         let (Some((&leaf, _)), None) = (in_scope.next(), in_scope.next()) else {
             return None;
         };
         let text = |n: Node<'_>| n.utf8_text(source).ok().map(str::trim);
-        match *self.proofs.get(&leaf)? {
-            Proof::Declared(declared) => declared_type(text(declared)?, declared, own_type, source),
+        let proof = *self.proofs.get(&leaf)?;
+        if pointee != matches!(proof, Proof::Pointer(_)) {
+            return None;
+        }
+        match proof {
+            // Only Rust peels a wrapper, for its impl-block lookup: anywhere
+            // else `Box<T>` is a `Box`, and a pointer names its type pointed to.
+            Proof::Declared(declared) | Proof::Pointer(declared) if !self.impl_blocks => {
+                let head = type_head(text(declared)?, declared, own_type, source)?;
+                Some(Proven { head, peeled: Vec::new() })
+            }
+            Proof::Declared(declared) | Proof::Pointer(declared) => {
+                declared_type(text(declared)?, declared, own_type, source)
+            }
             // One segment only: `E::V { … }` builds an `E`, and its text is
             // the shape of a module-qualified `m::S { … }`.
             Proof::Literal(literal) => {
@@ -1104,13 +1603,18 @@ pub(super) fn self_call(caller: Option<&Decl<'_>>, name: &str, keyword: bool) ->
 
 /// Whether the declared type `t` names a type a call at `invocation` can be
 /// typed by: one identifier (not an array, whose recorded name keeps its
-/// `[]`; not a union), not Java's `var`, and not a type parameter of any
-/// declaration enclosing the call — a type variable is no type ([NFR-RA-05]).
+/// `[]`; not a union), not `var` (Java's and C#'s implicit type), and not a
+/// type parameter of any declaration enclosing the call — a type variable is
+/// no type ([NFR-RA-05]).
 ///
 /// The type-parameter scan ([`type_parameters_in_scope`]) reads the grammar's
-/// `type_parameters` field, which Java, TypeScript, Rust and C# all name so; a
-/// grammar that names it otherwise excludes no type variable, and a typing
-/// story for it says so. No other language names a type `var`.
+/// `type_parameters` field, which Java, TypeScript, Rust and C# all name so
+/// (C#'s class, struct and record declarations hold an unnamed
+/// `type_parameter_list` instead, which it also reads, and Scala's list
+/// field-names each parameter `name`, a `def`'s sitting in its `parameters`
+/// field, S-576, and a C++ template names its `template_parameter_list`
+/// `parameters`, S-581); a grammar that names it otherwise excludes no type variable,
+/// and a typing story for it says so.
 ///
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn provable_type(t: &str, invocation: Node<'_>, source: &[u8]) -> bool {
@@ -1145,47 +1649,8 @@ fn enclosing_class(
     Enclosing::Outside
 }
 
-/// Whether `name`, a variable the file declares, is declared in scope at
-/// `invocation`: anywhere in the outermost callable around the call (its
-/// parameters, its locals, a local or anonymous class's members) — read by
-/// [`DeclaredTypes`] over that callable alone, so the rule for what a
-/// declaration is stays the one [`DeclaredTypes::build`] has — or as a field of
-/// the enclosing class, or of a class enclosing THAT one reached only through
-/// classes that inherit nothing (`supertyped`: a class recording an `extends`
-/// or `implements` row may inherit a same-named field from another file, which
-/// would shadow the outer one). A `@Nested` test class reading its outer
-/// class's field is the shape this admits.
-fn declared_in_scope(
-    invocation: Node<'_>,
-    name: &str,
-    file: &FileDecls<'_, '_>,
-    anonymous: &HashSet<usize>,
-    supertyped: &HashSet<&str>,
-    scopes: &mut HashMap<usize, DeclaredTypes>,
-) -> bool {
-    let mut class = enclosing_class(invocation, file, anonymous).class();
-    while let Some(i) = class {
-        if declares_field(file.decls, i, name) {
-            return true;
-        }
-        let inherits = file.symbols[i]
-            .as_ref()
-            .is_none_or(|s| supertyped.contains(s.as_str()));
-        if inherits {
-            break;
-        }
-        class = outer_class(file.decls, i);
-    }
-    outermost_callable(invocation).is_some_and(|callable| {
-        scopes
-            .entry(callable.id())
-            .or_insert_with(|| DeclaredTypes::build(callable, file.source))
-            .declares(name)
-    })
-}
-
 /// The class-like declaration enclosing the one at `class`, if any.
-fn outer_class(decls: &[Decl<'_>], class: usize) -> Option<usize> {
+pub(super) fn outer_class(decls: &[Decl<'_>], class: usize) -> Option<usize> {
     let mut at = decls[class].parent;
     while let Some(i) = at {
         if is_class_like(decls[i].kind) {
@@ -1197,7 +1662,7 @@ fn outer_class(decls: &[Decl<'_>], class: usize) -> Option<usize> {
 }
 
 /// Whether the class at `class` declares a field named `name` itself.
-fn declares_field(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
+pub(super) fn declares_field(decls: &[Decl<'_>], class: usize, name: &str) -> bool {
     decls
         .iter()
         .any(|d| d.parent == Some(class) && d.name == name && d.kind == NodeKind::Field)

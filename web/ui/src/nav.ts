@@ -13,7 +13,7 @@ import { routeOwns } from "./routeOwns.ts";
 import { isViewHidden } from "./views/hiddenWidgets.ts";
 import { hasViewFor } from "./views/routes.ts";
 
-/** The three sidebar groups (CR-042, FR-UI-55): A assesses (Dashboard, Health,
+/** The three sidebar groups (CR-042, FR-UI-55): A assesses (Dashboard, Quality,
  *  Security, Coverage), B explores (Graph, Rule findings, Files & Risk), C
  *  configures (Statistics, the isolated policy editor). */
 export type NavGroup = "A" | "B" | "C";
@@ -56,7 +56,7 @@ export interface NavItem {
    * its manifest (`replaced_in_workspace_by`).
    *
    * Declared on the replaced entry, never derived from a shared label: two views
-   * may share a name across scopes and BOTH be offered (Dashboard, Health…).
+   * may share a name across scopes and BOTH be offered (Dashboard, Quality…).
    */
   replacedInWorkspaceBy?: string;
 }
@@ -64,7 +64,7 @@ export interface NavItem {
 /**
  * Every navigable view, in sidebar order (S-788, CR-244, FR-UI-55): the value
  * proposition leads. The three groups say what the reader is doing — assess
- * (Dashboard, Health, Security, Coverage), explore (Graph, Architecture, Rule
+ * (Dashboard, Quality, Security, Coverage), explore (Graph, Architecture, Rule
  * findings, Files & Risk), configure (Statistics, Config). Ids, labels, routes and
  * scopes are what they have always been; only the order and the group changed.
  */
@@ -72,7 +72,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   // Group A — assess.
   // S-194: Dashboard is now at `/` (was `/overview` prior to Sprint 34).
   { id: "overview", label: "Dashboard", path: "/", group: "A", scope: "member" },
-  { id: "health", label: "Health", path: "/health", group: "A", scope: "member" },
+  { id: "health", label: "Quality", path: "/health", group: "A", scope: "member" },
   // S-670 (FR-SC-09): the Security page — scanner matrix, findings in graph
   // context, the OWASP view.
   { id: "security", label: "Security", path: "/security", group: "A", scope: "member" },
@@ -131,7 +131,7 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   // and the operational roll-up — over read-models that already existed and had
   // never been reachable from the interface.
   //
-  // Named "Dashboard", "Health" and "Security" exactly like their member-scoped
+  // Named "Dashboard", "Quality" and "Security" exactly like their member-scoped
   // twins. ADR-66 accepted that deliberately: `/` stays the per-member Dashboard so
   // no bookmark changes meaning, and the two levels are told apart by the SECTION
   // label the sidebar renders, not by a second name.
@@ -141,8 +141,8 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
   // lit on the client sub-routes it owns — and light up BOTH the Workspace tab
   // and the new one at once.
   //
-  // S-788 (CR-244, FR-UI-55): the section reads Dashboard, Workspace, Health,
-  // Security, Coverage, Statistics, Config, filed Dashboard, Workspace and Health in
+  // S-788 (CR-244, FR-UI-55): the section reads Dashboard, Workspace, Quality,
+  // Security, Coverage, Statistics, Config, filed Dashboard, Workspace and Quality in
   // group A, Security and Coverage in group B, Statistics and Config in group C
   // (FR-UI-55); the section renders the groups as one list. The literal roster in
   // `nav.test.ts` pins this order and these groups, and `Sidebar.test.tsx` the
@@ -155,7 +155,7 @@ export const WORKSPACE_NAV_ITEMS: readonly NavItem[] = [
     scope: "app",
   },
   { id: "workspace", label: "Workspace", path: "/workspace", group: "A", scope: "app" },
-  { id: "workspace-health", label: "Health", path: "/workspace-health", group: "A", scope: "app" },
+  { id: "workspace-health", label: "Quality", path: "/workspace-health", group: "A", scope: "app" },
   // S-674 (CR-217, FR-SC-16): every member's scanner states and fresh findings,
   // with each member linked to its own Security page.
   {

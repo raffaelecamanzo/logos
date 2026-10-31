@@ -62,9 +62,10 @@ logos --version          # prints the version
 logos languages --json   # lists the compiled-in grammars; "skipped" must be []
 ```
 
-The default binary carries all twelve code-language grammars: **Rust, Python,
-TypeScript/JavaScript (+ TSX/JSX), Go, Java, C, C++, C#, Kotlin, Scala, Ruby,
-PHP** — the five v1 languages plus the seven added in CR-009 — alongside the
+The default binary carries every code language: **Rust, Python, TypeScript
+(+ TSX), JavaScript (+ JSX), Go, Java, C, C++, C#, Kotlin, Scala, Ruby, PHP** —
+the five v1 languages, the seven added in CR-009, and JavaScript as its own
+language over the TSX grammar — alongside the
 `markdown` documentation grammar and the config/infra artifact grammars.
 
 ## First five minutes
@@ -294,6 +295,36 @@ and camelCase humps separate words.
 
 The leg prints the files it scanned. `scripts/verify-evidence.sh` refuses fast-
 and full-tier evidence without it, and CI runs it first on the checkout.
+
+Both tiers also run a `timing-assertions` leg, `scripts/check-timing-assertions.py`.
+Every test that asserts an upper bound on an elapsed time scales its duration through
+`logos_core::perf::scaled` (or `scaled_ms`), which multiplies it by
+`LOGOS_PERF_TOLERANCE`: 1.15 unless the variable holds a finite number of 1.0 or more,
+and `1.0` measures the raw budget. The leg reads every `.rs` file, whatever the change
+touched, and fails naming `file:line` for an `assert!` or `debug_assert!` that compares
+an elapsed time (`.elapsed()`, `Instant::now()`, or a name bound from one) with a
+duration that does not scale, a `deadline` built as `Instant::now() + D` (or `start + D`)
+included, and a bound written against a `*_ms` duration field, a `*_MS` or `Duration`
+constant, or the end of a `(lo..hi).contains(&took)` range. A minimum
+(`waited >= grace`) is counted and never fails, and a `while` or `if` on a deadline is
+not an assertion. The check reads text, so a time that reaches a comparison through a
+function return, a closure parameter or a `for` binding is not seen. Values above 1000
+are ignored too. The leg prints the timing assertions
+it found and the files it read, and a walk that found none fails.
+`scripts/verify-evidence.sh` refuses fast- and full-tier evidence without it.
+
+Both tiers also run an `offline-cargo` leg, `scripts/check-offline-cargo.py`. A test
+that runs cargo `--offline` must name the platform it resolves: `cargo metadata
+--offline` with neither `--filter-platform` nor `--target` resolves every target's
+crates, Android's included, which a build on one host never downloaded, so it passed
+where it was written and failed on CI (HF-12). The leg reads every `.rs` file and
+fails naming `file:line` for that call and for `cargo tree --offline --target all`.
+`cargo metadata --no-deps --offline` (it resolves no graph) and a plain
+`cargo tree --offline` (the host's tree) pass. The check reads the string literals of
+the argument list, so arguments pushed onto it afterwards, or a list held in a
+variable, are not seen. The leg prints the offline cargo calls it found and the files
+it read, and a walk that found none fails. `scripts/verify-evidence.sh` refuses fast-
+and full-tier evidence without it.
 
 The shell scripts' own suites (`scripts/tests/test-*.sh`) run in a
 `script-suites` leg, one evidence unit per suite (a suite that exits non-zero is

@@ -9,7 +9,8 @@
 ; v1 policy (matching Java): constructors are deliberately NOT captured — a
 ; constructor shares its type's name, and a second same-named node would make
 ; every `TypeName` reference ambiguous under the binder's exactly-one-or-nothing
-; rule (NFR-RA-05). `new TypeName()` references stay honestly unresolved.
+; rule (NFR-RA-05). `new TypeName()` is recorded by references.scm
+; (`@ref.instantiates`) and binds to the class, never to a constructor.
 
 (class_declaration
   name: (identifier) @symbol.class)
@@ -51,6 +52,16 @@
 
 (file_scoped_namespace_declaration
   name: (_) @module.namespace)
+
+; ── Type arity (S-602, CR-199) ────────────────────────────────────────────────
+; A type's type-parameter list: its parameters are the type's generic arity,
+; which `[module_model] type_arity` matches a written type's against —
+; `Result` and `Result<T>` are two types. A type with no list records 0. The
+; capture never names a declaration, so every symbol and node is unchanged.
+(class_declaration (type_parameter_list) @item.type_parameters)
+(record_declaration (type_parameter_list) @item.type_parameters)
+(interface_declaration type_parameters: (type_parameter_list) @item.type_parameters)
+(struct_declaration (type_parameter_list) @item.type_parameters)
 
 ; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
 ; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a

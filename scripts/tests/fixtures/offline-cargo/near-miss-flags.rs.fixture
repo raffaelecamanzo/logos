@@ -1,0 +1,6 @@
+// Flags one character from the platform filter name nothing.
+fn unfiltered() {
+    let a = cargo(&["metadata", "--offline", "--filter-platforms", "x"]);
+    let b = cargo(&["metadata", "--offline", "--no-deps-here"]);
+    let c = cargo(&["metadata", "--offline", "--targets", "x"]);
+}

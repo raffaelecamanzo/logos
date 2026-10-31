@@ -108,6 +108,38 @@ pub(crate) fn qualified_call_target(ty: &str, tr: &str, segments: &[String]) -> 
     )
 }
 
+/// The ledger target of a **qualified self naming no trait** call `<T>::m()`
+/// (S-627, [CR-205]): the path the call writes. `<W>::new()` records `W::new`,
+/// `<a::W<u8>>::new()` records `a::W::new` — the generics stripped, as
+/// [`split_path_text`] strips a turbofish — so the one associated-item lookup
+/// binds it as it binds the written `W::new()`; `segments` is the call's path
+/// past the bracket. `<Vec<u8>>::new()` records `Vec::new`, which names no
+/// repository type. A `ty` that is no path (`[u8]`, `&str`, `dyn Tr`, a tuple)
+/// has no type to look the item up on and records as written —
+/// `<[u8]>::len` — a target the resolver reads as an external type, bound to
+/// nothing, never to a free `len` the stripped bracket would have named.
+///
+/// [CR-205]: ../../../docs/requests/CR-205-qualified-self-calls-and-keyword-named-macro-calls-bind-as-rust-reads-them.md
+pub(crate) fn bracketed_call_target(ty: &str, segments: &[String]) -> String {
+    let path = super::assoc::item_path(ty);
+    let is_path = !path.is_empty() && path.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '#' | ':'));
+    if is_path {
+        split_path_text(&path).into_iter().chain(segments.iter().cloned()).collect::<Vec<_>>().join("::")
+    } else {
+        format!("<{path}>::{}", segments.join("::"))
+    }
+}
+
+/// The ledger target of a qualified self `<T as Tr>` or `<T>` followed by
+/// `segments`: [`qualified_call_target`] with a trait, [`bracketed_call_target`]
+/// without one.
+fn qualified_self_target(ty: &str, tr: Option<&str>, segments: &[String]) -> String {
+    match tr {
+        Some(tr) => qualified_call_target(ty, tr, segments),
+        None => bracketed_call_target(ty, segments),
+    }
+}
+
 /// Canonicalise one captured `@ref.import` node's text into path segments, for
 /// a language whose specifiers are **names** ([`ImportSpecifier::Name`]).
 ///
@@ -173,8 +205,10 @@ pub(crate) fn is_relative_head(segment: &str) -> bool {
 ///   `extensions` — the extensions that name the imported file itself — so
 ///   `"./nav.ts"` and `"./nav"` canonicalise to the one target `.::nav`. Any
 ///   other extension (`"./styles.css"`) is kept, so it can never be read as a
-///   code file of the same stem. A bare specifier (`react`, `next/link`) names
-///   a package, never a file, and is never stripped.
+///   code file of the same stem. A bare specifier (`react`, `next/link`,
+///   `@/lib/api`) is never stripped: its dot may belong to a package's name
+///   (`chart.js`), and the one a `tsconfig` alias or a workspace package
+///   rewrites into a file has its extension read by the binder (S-531).
 ///
 /// [CR-142]: ../../../docs/requests/CR-142-cross-file-call-resolution-is-rust-only.md
 /// [FR-RS-01]: ../../../docs/specs/requirements/FR-RS-01.md
@@ -182,7 +216,7 @@ pub(crate) fn is_relative_head(segment: &str) -> bool {
 /// [`ImportSpecifier::Path`]: crate::plugin::ImportSpecifier::Path
 pub(crate) fn specifier_segments(text: &str, extensions: &[String]) -> Vec<String> {
     let spec = unquote(text);
-    let relative = spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../");
+    let relative = is_relative_spec(spec);
     let mut segments: Vec<String> = Vec::new();
     for (i, seg) in spec.split('/').enumerate() {
         match seg {
@@ -202,6 +236,113 @@ pub(crate) fn specifier_segments(text: &str, extensions: &[String]) -> Vec<Strin
         }
     }
     segments
+}
+
+/// Canonicalise a specifier the statement itself makes **relative** to the
+/// importing file's directory, whatever its text spells (S-566, [FR-RS-34]):
+/// Ruby's `require_relative 'abstract/handler'` names `./abstract/handler`. It
+/// is read as [`specifier_segments`] reads `./<spec>`, so it records the same
+/// `.`-headed target, and a spec already headed by `.`/`..` is read as it is —
+/// `'../lib/rack/lint'` keeps its `..`. An absolute spec (`'/opt/x'`) names a
+/// file outside the repository whatever directory it is read from, and an
+/// empty one names no file, so either canonicalises to nothing and records no
+/// row.
+///
+/// [FR-RS-34]: ../../../docs/specs/requirements/FR-RS-34.md
+pub(crate) fn relative_specifier_segments(text: &str, extensions: &[String]) -> Vec<String> {
+    let spec = unquote(text);
+    if spec.is_empty() || spec.starts_with('/') {
+        Vec::new()
+    } else if is_relative_spec(spec) {
+        specifier_segments(spec, extensions)
+    } else {
+        specifier_segments(&format!("./{spec}"), extensions)
+    }
+}
+
+/// Canonicalise a **bare** specifier of a load-path language (S-566,
+/// [FR-RS-34]; `bare_specifiers = "load-path"`): Ruby's `require 'a/b'`, which
+/// is read against the load roots, never against the requiring file. A spec
+/// headed by `./` names a file under the process's working directory —
+/// conventionally the repository root, itself a load root — so it is read as
+/// the path after it: `require './spec/helper'` records `spec::helper`. One
+/// headed by `../`, or absolute (`'/opt/x'`), names a file outside the
+/// repository from there, and an empty one names nothing: none of them records
+/// a row, so none is bound beside the requiring file the way a
+/// `require_relative` is.
+///
+/// [FR-RS-34]: ../../../docs/specs/requirements/FR-RS-34.md
+pub(crate) fn load_path_specifier_segments(text: &str, extensions: &[String]) -> Vec<String> {
+    let mut spec = unquote(text);
+    while let Some(rest) = spec.strip_prefix("./") {
+        spec = rest;
+    }
+    if spec.is_empty() || spec.starts_with('/') || is_relative_spec(spec) {
+        return Vec::new();
+    }
+    specifier_segments(spec, extensions)
+}
+
+/// Canonicalise an `#include` of an include-roots language (S-579,
+/// [FR-RS-38]; `bare_specifiers = "include-roots"`). The header is named
+/// whole, its extension kept — `hash.hpp` beside `hash.cpp` is no ambiguity:
+///
+/// - a quoted `#include "util/hash.hpp"` is read against the including file's
+///   directory first, so it records the `.`-headed target
+///   [`relative_specifier_segments`] gives (`./util/hash.hpp`), a `"../x.h"`
+///   keeping its parent hop;
+/// - an angle-bracketed `#include <ccache/hash.hpp>` is read against the
+///   include roots alone, so it records the bare path (`ccache::hash.hpp`); one
+///   written relative (`<./x.h>`) names no root-relative file.
+///
+/// An absolute or empty header names no repository file and records no row.
+///
+/// [FR-RS-38]: ../../../docs/specs/requirements/FR-RS-38.md
+pub(crate) fn include_specifier_segments(text: &str) -> Vec<String> {
+    let text = text.trim();
+    match text.strip_prefix('<').and_then(|t| t.strip_suffix('>')) {
+        Some(header) => {
+            let header = header.trim();
+            if header.is_empty() || header.starts_with('/') || is_relative_spec(header) {
+                return Vec::new();
+            }
+            specifier_segments(header, &[])
+        }
+        None => relative_specifier_segments(text, &[]),
+    }
+}
+
+/// Canonicalise the file a name-grammar language's include names (S-551,
+/// [FR-RS-26]): PHP's `require`/`include`, whose text is a file path, never a
+/// `\` member path. The file is named whole, its extension kept, and read
+/// against the including file's directory — the `.`-headed target
+/// [`relative_specifier_segments`] gives:
+///
+/// - a literal (`'lib/a.php'`, `'../core.php'`) as written;
+/// - one appended to the including file's directory (`under_dir`: PHP's
+///   `__DIR__ . '/lib/a.php'`) only when it starts with `/`, the separator
+///   `__DIR__` lacks — `__DIR__ . 'a.php'` names a sibling of the directory,
+///   which no repository path spells.
+///
+/// An absolute or empty path names no repository file and records no row.
+///
+/// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+pub(crate) fn include_file_segments(text: &str, under_dir: bool) -> Vec<String> {
+    let spec = unquote(text);
+    if !under_dir {
+        return relative_specifier_segments(spec, &[]);
+    }
+    match spec.strip_prefix('/') {
+        // A doubled separator is one, as the file system reads it.
+        Some(rest) => relative_specifier_segments(rest.trim_start_matches('/'), &[]),
+        None => Vec::new(),
+    }
+}
+
+/// Whether an unquoted path specifier is written relative: `.`, `..`, or headed
+/// by `./` / `../`.
+fn is_relative_spec(spec: &str) -> bool {
+    spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../")
 }
 
 /// Strip one matching pair of surrounding string-literal quotes, if present.
@@ -302,6 +443,13 @@ pub(crate) enum MacroReceiver {
 /// records no row, as outside a macro, where no query pattern captures it. A
 /// qualified path (`<T as Tr>::m()`) is not read here: its call records the
 /// bare `m`.
+///
+/// A name the grammar tokenizes as a keyword inside a token tree — `gen`,
+/// `union`, `default` — is read as the name it is outside one ([`is_name_token`],
+/// S-628): `default(..)`, `T::default()`, `x.union()` and `self.gen()` record
+/// the rows they record outside a macro. A keyword before a `{ … }` group or a
+/// `fn` (`gen { … }`, `default fn`, `union U { … }`) has no `(` group to call,
+/// and one right after a `fn` (`fn default()`) is a declaration, not a call.
 ///
 /// A method call also carries the receiver a proof form can type
 /// ([`MacroReceiver`]); `extract/receiver.rs` proves it, as for a call outside a
@@ -422,21 +570,34 @@ fn scan_token_tree(tt: Node<'_>, source: &[u8], out: &mut Vec<MacroCall>) {
     }
 }
 
+/// `true` for a token that names a function or method: an `identifier`, or one
+/// of the keywords `gen`, `union` and `default`, which the grammar tokenizes as
+/// keywords inside a macro's token tree yet which are ordinary names outside
+/// one — `default()`, `T::default()`, `x.union()`, `self.gen()` (S-628,
+/// [CR-205]). A keyword before a `{ … }` group (`gen { … }`, `union U { … }`) or
+/// a `fn` (`default fn`) is no call: only a `(`-delimited group makes one. The
+/// contextual keywords `auto`, `raw` and `safe` are already `identifier` tokens.
+///
+/// [CR-205]: ../../../docs/requests/CR-205-qualified-self-calls-and-keyword-named-macro-calls-bind-as-rust-reads-them.md
+fn is_name_token(kind: &str) -> bool {
+    matches!(kind, "identifier" | "gen" | "union" | "default")
+}
+
 /// The call whose `(`-delimited argument group is `tt`'s child `group`, or
-/// `None` when no name sits before it. The name is the `identifier` immediately
-/// before the group, or, past a turbofish (`f::<T>(…)`, `x.collect::<Vec<_>>()`),
-/// the one before the `::<…>` run. A `!` before the group (a nested macro) or a
+/// `None` when no name sits before it. The name is the name token
+/// ([`is_name_token`]) immediately before the group, or, past a turbofish
+/// (`f::<T>(…)`, `x.collect::<Vec<_>>()`), the one before the `::<…>` run. A `!` before the group (a nested macro) or a
 /// `[` / `{` group (index, struct literal) is not a call; `opens_with_paren`
 /// is the caller's.
 fn call_before(tt: Node<'_>, group: usize, source: &[u8]) -> Option<MacroCall> {
     let at = |i: usize| tt.child(i);
     let name_idx = match group.checked_sub(1).and_then(at)?.kind() {
-        "identifier" => group - 1,
+        k if is_name_token(k) => group - 1,
         ">" | ">>" => {
             let open = angle_open(tt, group - 1)?;
             // `f::<T>(…)`: the `::` before the `<`, then the name.
             let sep = open.checked_sub(1).filter(|&s| at(s).is_some_and(|n| n.kind() == "::"))?;
-            let name = sep.checked_sub(1).filter(|&n| at(n).is_some_and(|n| n.kind() == "identifier"))?;
+            let name = sep.checked_sub(1).filter(|&n| at(n).is_some_and(|n| is_name_token(n.kind())))?;
             // `x.f::<T>()` records no row outside a macro either: the query
             // has no pattern for a generic method call, so neither does this.
             if name.checked_sub(1).is_some_and(|d| at(d).is_some_and(|p| p.kind() == ".")) {
@@ -447,6 +608,12 @@ fn call_before(tt: Node<'_>, group: usize, source: &[u8]) -> Option<MacroCall> {
         _ => return None,
     };
     let name_node = at(name_idx)?;
+    // `fn default()` declares; it calls nothing. Only the keyword names are
+    // guarded: they recorded no row before S-628, so reading them must not add
+    // a declaration's false edge (a plain `fn new()` keeps the row it records).
+    if name_node.kind() != "identifier" && name_idx > 0 && at(name_idx - 1).is_some_and(|p| p.kind() == "fn") {
+        return None;
+    }
     let name = name_node.utf8_text(source).ok()?;
     let line = name_node.start_position().row as u32 + 1;
     let args = at(group)?;
@@ -571,14 +738,15 @@ fn opens_with_paren(tt: Node<'_>) -> bool {
 /// A turbofish between two segments (`Vec::<u8>::new`) is skipped, as the call
 /// outside a macro records its path without it (S-610). A qualified self
 /// before the path (`<T as Tr>::m`) records [`qualified_call_target`], as the
-/// call outside a macro does (S-606) — never the bare `m`, which a bare-call
-/// rule could bind to a free `m`.
+/// call outside a macro does (S-606), and one naming no trait (`<T>::m`)
+/// records [`bracketed_call_target`] (S-627) — never the bare `m`, which a
+/// bare-call rule could bind to a free `m`.
 fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
     let kind_at = |i: usize| tt.child(i).map(|n| n.kind());
     let mut segs: Vec<&str> = Vec::new();
     let mut idx = call_idx as isize;
     while let Some(node) = usize::try_from(idx).ok().and_then(|u| tt.child(u)) {
-        if node.kind() != "identifier" {
+        if !is_name_token(node.kind()) {
             break;
         }
         let Ok(text) = node.utf8_text(source) else { break };
@@ -596,7 +764,7 @@ fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
             let Some(open) = open.filter(|&o| o > 0 && kind_at(o - 1) == Some("::")) else {
                 if let Some((ty, tr)) = open.and_then(|o| qualified_self(tt, o, close, source)) {
                     let segments: Vec<String> = segs.iter().rev().map(|s| s.to_string()).collect();
-                    return qualified_call_target(ty, tr, &segments);
+                    return qualified_self_target(ty, tr, &segments);
                 }
                 break;
             };
@@ -609,10 +777,11 @@ fn assemble_path(tt: Node<'_>, call_idx: usize, source: &[u8]) -> String {
 }
 
 /// The type and trait text of the qualified self `<T as Tr>` that `tt`'s
-/// children `open..=close` spell, or `None` unless exactly one `as` splits it
-/// at its own depth (`<Vec<u8>>` names no trait). A closing `>>` also closes
-/// the trait's generics (`<X as Tr<u8>>`), so its first `>` is the trait's.
-fn qualified_self<'s>(tt: Node<'_>, open: usize, close: usize, source: &'s [u8]) -> Option<(&'s str, &'s str)> {
+/// children `open..=close` spell — the trait `None` for `<T>` (S-627) — or
+/// `None` unless at most one `as` splits it at its own depth. A closing `>>`
+/// also closes the trait's generics (`<X as Tr<u8>>`) or the type's
+/// (`<Vec<u8>>`), so its first `>` is theirs.
+fn qualified_self<'s>(tt: Node<'_>, open: usize, close: usize, source: &'s [u8]) -> Option<(&'s str, Option<&'s str>)> {
     let mut depth = 0;
     let mut split = None;
     for j in open..close {
@@ -622,13 +791,19 @@ fn qualified_self<'s>(tt: Node<'_>, open: usize, close: usize, source: &'s [u8])
             return None;
         }
     }
-    let split = split?;
     let close_node = tt.child(close)?;
     let end = close_node.start_byte() + usize::from(close_node.kind() == ">>");
     let slice = |from: usize, to: usize| std::str::from_utf8(source.get(from..to)?).ok().filter(|s| !s.trim().is_empty());
-    let ty = slice(tt.child(open + 1)?.start_byte(), tt.child(split.checked_sub(1)?)?.end_byte())?;
+    // A `<<` opener is one token: its second `<` opens a type that is itself a
+    // qualified path (`<<A as B>::X>`), so the type starts inside the token.
+    let opener = tt.child(open)?;
+    let first = if opener.kind() == "<<" { opener.start_byte() + 1 } else { tt.child(open + 1)?.start_byte() };
+    let Some(split) = split else {
+        return Some((slice(first, end)?, None));
+    };
+    let ty = slice(first, tt.child(split.checked_sub(1)?)?.end_byte())?;
     let tr = slice(tt.child(split + 1)?.start_byte(), end)?;
-    Some((ty, tr))
+    Some((ty, Some(tr)))
 }
 
 /// Flatten a `use_declaration`'s argument node into [`UseItem`]s.
@@ -934,6 +1109,76 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_require_reads_against_the_requiring_directory_and_keeps_its_parent_hops() {
+        // rack's two shapes (S-566): `lib/rack/auth/basic.rb` writes
+        // `require_relative 'abstract/handler'`, and its tests
+        // `require_relative '../lib/rack/lint'`.
+        let rb = ["rb".to_string()];
+        assert_eq!(relative_specifier_segments("'abstract/handler'", &rb), [".", "abstract", "handler"]);
+        assert_eq!(relative_specifier_segments("'../lib/rack/lint'", &rb), ["..", "lib", "rack", "lint"]);
+        assert_eq!(relative_specifier_segments("\"./helper.rb\"", &rb), [".", "helper"]);
+        assert_eq!(relative_specifier_segments("'version.rb'", &rb), [".", "version"]);
+        // A bare `require` of the same text is no relative path.
+        assert_eq!(specifier_segments("'abstract/handler'", &rb), ["abstract", "handler"]);
+        // An absolute or empty spec names no repository file.
+        assert!(relative_specifier_segments("'/opt/app/lib/x'", &rb).is_empty());
+        assert!(relative_specifier_segments("''", &rb).is_empty());
+    }
+
+    #[test]
+    fn an_include_keeps_its_extension_and_says_whether_it_was_quoted() {
+        // S-579: ccache writes its own headers `<ccache/hash.hpp>`, a sibling
+        // `"argprocessing.hpp"`.
+        assert_eq!(include_specifier_segments("<ccache/hash.hpp>"), ["ccache", "hash.hpp"]);
+        assert_eq!(include_specifier_segments("\"argprocessing.hpp\""), [".", "argprocessing.hpp"]);
+        assert_eq!(include_specifier_segments("\"../core/types.hpp\""), ["..", "core", "types.hpp"]);
+        assert_eq!(include_specifier_segments("\"./x.h\""), [".", "x.h"]);
+        assert_eq!(include_specifier_segments("<vector>"), ["vector"]);
+        // A near miss of the angle form is no angle form: brackets inside the
+        // quotes are part of a quoted header's name.
+        assert_eq!(include_specifier_segments("\"<a.h>\""), [".", "<a.h>"]);
+        for none in ["<>", "< >", "</usr/include/x.h>", "<./x.h>", "<../x.h>", "\"\"", "\"/opt/x.h\""] {
+            assert!(include_specifier_segments(none).is_empty(), "{none}");
+        }
+    }
+
+    #[test]
+    fn a_php_include_names_its_file_whole_beside_the_includer() {
+        // S-551: mantisbt's `require_once( 'core.php' )`, a parent hop, and an
+        // include under `__DIR__` — each `.`-headed, its extension kept.
+        assert_eq!(include_file_segments("'core.php'", false), [".", "core.php"]);
+        assert_eq!(include_file_segments("\"lib/a.php\"", false), [".", "lib", "a.php"]);
+        assert_eq!(include_file_segments("'../core.php'", false), ["..", "core.php"]);
+        assert_eq!(include_file_segments("'./core.php'", false), [".", "core.php"]);
+        assert_eq!(include_file_segments("'/lib/a.php'", true), [".", "lib", "a.php"]);
+        assert_eq!(include_file_segments("'/../config/defaults.php'", true), ["..", "config", "defaults.php"]);
+        // A doubled separator after `__DIR__` is one.
+        assert_eq!(include_file_segments("'//lib/a.php'", true), [".", "lib", "a.php"]);
+        // An absolute or empty path, and a `__DIR__` suffix missing the
+        // separator — a sibling of the directory — name no repository file.
+        for none in ["'/etc/x.php'", "''"] {
+            assert!(include_file_segments(none, false).is_empty(), "{none}");
+        }
+        for none in ["'a.php'", "'/'", "''"] {
+            assert!(include_file_segments(none, true).is_empty(), "{none}");
+        }
+    }
+
+    #[test]
+    fn a_bare_require_is_never_relative_to_the_requiring_file() {
+        // S-566 review: `require './x'` is read against the load roots (the
+        // working directory is conventionally the repository root), and a spec
+        // leaving the repository from there records nothing.
+        let rb = ["rb".to_string()];
+        assert_eq!(load_path_specifier_segments("'./spec/spec_helper'", &rb), ["spec", "spec_helper"]);
+        assert_eq!(load_path_specifier_segments("'././config'", &rb), ["config"]);
+        assert_eq!(load_path_specifier_segments("'rack/lint'", &rb), ["rack", "lint"]);
+        for gone in ["'../x'", "'./../x'", "'/opt/app/x'", "'./'", "''", "'.'"] {
+            assert!(load_path_specifier_segments(gone, &rb).is_empty(), "{gone}");
+        }
+    }
+
+    #[test]
     fn a_specifier_splits_on_slash_only_so_a_dotted_host_name_stays_whole() {
         // The Go evidence row: the host was cut mid-name into `github::com`.
         assert_eq!(
@@ -951,7 +1196,7 @@ mod tests {
         assert_eq!(specifier_segments("\"net/http\"", &[]), ["net", "http"]);
         assert_eq!(specifier_segments("'next/link'", &ts_exts()), ["next", "link"]);
         assert_eq!(specifier_segments("'react'", &ts_exts()), ["react"]);
-        // …and a bare specifier names a package, never a file: no stripping.
+        // …and a bare specifier is never stripped: its dot may be a package name's.
         assert_eq!(specifier_segments("'chart.js'", &ts_exts()), ["chart.js"]);
     }
 
@@ -1247,7 +1492,7 @@ mod tree_tests {
     /// A fully qualified call inside a macro records the target it records
     /// outside one (S-606's `<T as Tr>::m`), never the bare `m` a bare-call rule
     /// could bind to a free `m` (sprint 92 review). A bracket naming no trait
-    /// (`<Vec<u8>>::new`) records what it did before, as outside a macro.
+    /// (`<Vec<u8>>::new`) records the path it writes (S-627), as outside a macro.
     #[test]
     fn a_qualified_call_in_a_macro_records_its_type_and_trait() {
         for (src, want_path) in [
@@ -1256,7 +1501,7 @@ mod tree_tests {
             (r#"vec![<a::X<u8> as b::Tr<u8>>::m(x)]"#, "<a::X as b::Tr>::m"),
             (r#"vec![<X as Tr>::m::<u8>(x)]"#, "<X as Tr>::m"),
             (r#"vec![<X as Tr>::Out::m(x)]"#, "<X as Tr>::Out::m"),
-            (r#"vec![<Vec<u8>>::new()]"#, "new"),
+            (r#"vec![<Vec<u8>>::new()]"#, "Vec::new"),
         ] {
             let got = macro_calls(src);
             let paths: Vec<&str> = got.iter().filter(|c| c.form == RefForm::Path).map(|c| c.target.as_str()).collect();
@@ -1267,6 +1512,55 @@ mod tree_tests {
             "<X as Tr>::m",
             "the target outside a macro"
         );
+    }
+
+    /// A qualified self naming no trait inside a macro records the path it
+    /// writes — as outside one (S-627) — and a bracket that is no path records
+    /// as written, never the bare `m`. A comparison ahead of a call is no
+    /// bracket: `>` must be followed by `::`, and a turbofish keeps its rule.
+    #[test]
+    fn a_bracketed_type_call_in_a_macro_records_the_path_it_writes() {
+        for (src, want_path) in [
+            (r#"vec![<W>::new()]"#, "W::new"),
+            (r#"vec![<a::W<u8>>::new(1)]"#, "a::W::new"),
+            (r#"vec![<W>::make::<u8>(x)]"#, "W::make"),
+            (r#"vec![<W>::Out::m(x)]"#, "W::Out::m"),
+            (r#"vec![<Self>::new()]"#, "Self::new"),
+            (r#"vec![<[u8]>::len(x)]"#, "<[u8]>::len"),
+            (r#"vec![<&str>::len(s)]"#, "<&str>::len"),
+            (r#"vec![<dyn Tr>::m(x)]"#, "<dyn Tr>::m"),
+            (r#"vec![<<A as B>::X>::m(x)]"#, "<<A as B>::X>::m"),
+            (r#"vec![<<A as B>::X as C>::m(x)]"#, "<<A as B>::X as C>::m"),
+            (r#"vec![<(A, B)>::m(x)]"#, "<(A, B)>::m"),
+            (r#"vec![a < b && c > f(x)]"#, "f"),
+            (r#"vec![W::<u8>::new()]"#, "W::new"),
+        ] {
+            let got = macro_calls(src);
+            let paths: Vec<&str> = got.iter().filter(|c| c.form == RefForm::Path).map(|c| c.target.as_str()).collect();
+            assert_eq!(paths, [want_path], "{src}: {got:?}");
+        }
+        let args = macro_calls(r#"vec![<W>::m(x, 1)]"#);
+        assert_eq!(args.iter().map(|c| c.arg_count).collect::<Vec<_>>(), [Some(2)], "{args:?}");
+    }
+
+    /// The target outside a macro: a path type records its path, generics
+    /// stripped; anything else as written, one space per run.
+    #[test]
+    fn a_bracketed_call_target_is_the_written_path_or_the_written_bracket() {
+        let m = || vec!["m".to_string()];
+        for (ty, want) in [
+            ("W", "W::m"),
+            ("a::W<u8>", "a::W::m"),
+            ("Vec<u8>", "Vec::m"),
+            ("::std::io::Error", "std::io::Error::m"),
+            ("[u8]", "<[u8]>::m"),
+            ("&str", "<&str>::m"),
+            ("dyn  Tr", "<dyn Tr>::m"),
+            ("(A,\n B)", "<(A, B)>::m"),
+            ("Vec<u8", "<Vec<u8>::m"),
+        ] {
+            assert_eq!(super::bracketed_call_target(ty, &m()), want, "{ty:?}");
+        }
     }
 
     /// The type arguments of a turbofish are types, never calls: `Fn(u8)` is a

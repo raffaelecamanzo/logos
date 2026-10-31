@@ -85,7 +85,7 @@ export const HIDDEN_WIDGETS: readonly HiddenWidget[] = [
   {
     id: "non-gated-tier",
     widget: "Non-gated tier callout",
-    hiddenFrom: "Health",
+    hiddenFrom: "Quality",
     reason:
       "No actionable insight (CR-203 item 21): a static pointer to a view the sidebar already lists, with no figure.",
     stillServedBy: ["Files & Risk in the sidebar", "logos hotspots"],
@@ -103,7 +103,7 @@ export const HIDDEN_WIDGETS: readonly HiddenWidget[] = [
   {
     id: "architecture-view",
     widget: "Dependency matrix (the Architecture view)",
-    hiddenFrom: "The sidebar; /architecture and the retired /dsm land on Health",
+    hiddenFrom: "The sidebar; /architecture and the retired /dsm land on Quality",
     reason:
       "Misleads more than it informs (owner, CR-208 item 1): with no layers declared its order is alphabetical, so its \"against order\" marks are arbitrary, and it is unreadable at a thousand rows.",
     stillServedBy: ["GET /api/v1/architecture", "logos dsm", "MCP dsm"],

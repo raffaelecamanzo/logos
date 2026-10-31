@@ -1,0 +1,7 @@
+// Words one step from `cargo metadata` / `cargo tree` are no site.
+fn near() {
+    sh("mycargo metadata --offline");
+    sh("cargo metadatax --offline");
+    sh("cargo treehouse --offline");
+    sh("echo cargo metadata --offline");
+}

@@ -1,9 +1,10 @@
 import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { OverviewModel, OverviewSecurity, SecuritySummary } from "../../api/types.ts";
+import type { InternalResolution, OverviewModel, OverviewSecurity, SecuritySummary } from "../../api/types.ts";
 import {
   DASHBOARD_ABSENCE,
+  RESOLUTION_LOWER_BOUND,
   activity,
   codeCoverage,
   graph,
@@ -27,7 +28,7 @@ const SCANNED: SecuritySummary = {
   scan: "fresh",
   tally: {
     counted: { critical: 0, high: 2, medium: 1, low: 3, info: 0, unrated: 0, total: 6 },
-    excluded: { not_fresh: 0, suppressed: 4, test: 2 },
+    excluded: { not_fresh: 0, suppressed: 4, test: 2, dev: 0, needs_review: 0 },
   },
   newest_scan_at: NOW_UNIX - 3 * 86_400,
   scanners_failed: 1,
@@ -74,6 +75,17 @@ const OVERVIEW: OverviewModel = {
     refs_resolved: 80,
     refs_unresolved: 20,
     resolution_coverage: 0.8,
+    // 6,000 of 8,000 internal candidates resolved (75.0%) among 12,000 code
+    // references, 4,000 provably external — deliberately not the deprecated 80%.
+    internal_resolution: {
+      resolved: 6_000,
+      internal_candidates: 8_000,
+      provably_external: 4_000,
+      code_references: 12_000,
+      lower_bound: 0.75,
+      absence: null,
+    },
+    doc_resolution: { references: 40, resolved: 34, ratio: 0.85, absence: null },
     total_line_count: 54_321,
     source_line_count: 43_210,
     test_line_count: 11_111,
@@ -128,12 +140,15 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     // Languages sized by node count.
     expect(screen.getByText("rust")).toBeInTheDocument();
     expect(screen.getByText("1 grammar skipped at load")).toBeInTheDocument();
-    // Graph compact counts — grouped for readability; Files/Nodes/Edges/Resolution
+    // Graph compact counts — grouped for readability; Files/Nodes/Edges
     // otherwise unchanged by CR-085.
     expect(screen.getByText("42")).toBeInTheDocument();
     expect(screen.getByText("1,200")).toBeInTheDocument();
     expect(screen.getByText("3,400")).toBeInTheDocument();
-    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
+    // The resolution headline is the lower bound over internal candidates
+    // (S-636), not the deprecated whole-ledger ratio.
+    expect(screen.getByText("75.0%")).toBeInTheDocument();
+    expect(screen.queryByText(/80\.0%/)).not.toBeInTheDocument();
     // Graph card LOC figures (CR-085): total/source/test from the read-model,
     // digit-grouped, plus a last-full-index caption.
     expect(screen.getByText("54,321")).toBeInTheDocument();
@@ -143,9 +158,10 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.getByText(/Total Lines of Code/i)).toBeInTheDocument();
     expect(screen.getByText(/Source Lines of Code/i)).toBeInTheDocument();
     expect(screen.getByText(/Test Lines of Code/i)).toBeInTheDocument();
-    // Both footnotes render; the resolution caveat moved into the `**` footnote.
+    // Both footnotes render; the resolution caveat is the lower-bound explanation.
     expect(screen.getByText(/reflect the last full index/i)).toBeInTheDocument();
-    expect(screen.getByText(/partial resolution figure is expected/i)).toBeInTheDocument();
+    expect(screen.getByText(RESOLUTION_LOWER_BOUND)).toBeInTheDocument();
+    expect(screen.queryByText(/partial resolution figure is expected/i)).not.toBeInTheDocument();
     // Rule findings widget: the passing (green) state names the checked-rule count.
     expect(screen.getByText(/No findings/i)).toBeInTheDocument();
     // Both the quality and rule-findings cards carry a PASS badge.
@@ -191,10 +207,13 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     m.coverage.overall_coverage_bp = null; // no coverage ingested
     m.stats.calls_total = 0; // no telemetry
     m.composition.languages = []; // nothing indexed
+    m.status.internal_resolution = NO_CODE_REFERENCES().status.internal_resolution; // no code reference
+    m.status.doc_resolution = { references: 0, resolved: 0, ratio: null, absence: ABSENT };
     stub(m);
     render(<DashboardView />);
 
     expect(await screen.findByText(/No quality signal recorded yet/i)).toBeInTheDocument();
+    expect(screen.getByText(DASHBOARD_ABSENCE.noCodeReferences)).toBeInTheDocument();
     expect(screen.getAllByText(/No coverage ingested/i).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText(/No telemetry yet/i)).toBeInTheDocument();
     expect(screen.getByText(/No languages indexed/i)).toBeInTheDocument();
@@ -213,7 +232,7 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(await screen.findByText("42")).toBeInTheDocument();
     expect(screen.getByText("1,200")).toBeInTheDocument();
     expect(screen.getByText("3,400")).toBeInTheDocument();
-    expect(screen.getByText("80.0% (80 of 100 refs)")).toBeInTheDocument();
+    expect(screen.getByText("75.0%")).toBeInTheDocument();
     expect(screen.getByText(/Lines of code not yet counted/i)).toBeInTheDocument();
     // Never a fabricated `0` LOC figure (scoped to Graph: the Security widget's
     // severity row states its own honest zeros).
@@ -332,6 +351,37 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
   });
 });
 
+// ── S-636: the Graph widget's reference-resolution states ────────────────────
+
+/** An absence's `cause` tag: the view reads the counts beside it, not the tag, and
+ *  the tags' spellings belong to the sites the absence census pins. */
+const ABSENT = { cause: "unread" };
+
+/** `OVERVIEW` with the Graph widget's headline replaced. */
+function withResolution(over: Partial<InternalResolution>): OverviewModel {
+  const m = clone();
+  m.status.internal_resolution = { ...m.status.internal_resolution!, ...over };
+  return m;
+}
+
+/** The two absences of the headline: no code reference at all, and every one provably external. */
+const NO_CODE_REFERENCES = (): OverviewModel =>
+  withResolution({
+    resolved: 0, internal_candidates: 0, provably_external: 0, code_references: 0,
+    lower_bound: null, absence: ABSENT,
+  });
+const ALL_EXTERNAL = (): OverviewModel =>
+  withResolution({
+    resolved: 0, internal_candidates: 0, provably_external: 9, code_references: 9,
+    lower_bound: null, absence: ABSENT,
+  });
+const UNREPORTED = (): OverviewModel => {
+  const m = clone();
+  delete m.status.internal_resolution;
+  delete m.status.doc_resolution;
+  return m;
+};
+
 // ── S-617 (CR-203, FR-UI-39/40): every widget explains itself, in one stack ──
 
 /** Each widget's catalogue entry, by title. */
@@ -440,6 +490,21 @@ const STATES: {
       "Rule findings",
     ],
   },
+  {
+    name: "the reference resolution headline is absent (no code reference)",
+    model: NO_CODE_REFERENCES,
+    expected: ["Quality index", "Security", "Code coverage", "Languages", "Graph", "Activity", "Rule findings"],
+  },
+  {
+    name: "the reference resolution headline is absent (every code reference provably external)",
+    model: ALL_EXTERNAL,
+    expected: ["Quality index", "Security", "Code coverage", "Languages", "Graph", "Activity", "Rule findings"],
+  },
+  {
+    name: "the server reported no reference resolution",
+    model: UNREPORTED,
+    expected: ["Quality index", "Security", "Code coverage", "Languages", "Graph", "Activity", "Rule findings"],
+  },
 ];
 
 describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
@@ -491,6 +556,100 @@ describe("Dashboard widgets explain themselves (S-617, FR-UI-39/40)", () => {
     // Graph's not-yet-counted lines name the full index, in its evidence.
     expect(screen.getByText(DASHBOARD_ABSENCE.noLines)).toBeInTheDocument();
     expect(DASHBOARD_ABSENCE.noLines).toContain("a full logos index counts them");
+  });
+});
+
+// ── S-636 (CR-212, FR-RS-49): the Graph widget's reference resolution ─────────
+
+describe("the Graph widget states reference resolution over internal candidates (S-636, FR-RS-49)", () => {
+  async function graphWidget(model: OverviewModel): Promise<HTMLElement> {
+    stub(model);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Graph" });
+    return widgetTitled(container, "Graph");
+  }
+
+  it("leads with internal_resolution's lower bound in the figure row, never 36% of references resolved", async () => {
+    const m = clone();
+    // The deprecated whole-ledger ratio: 36% of everything, as the owner saw it.
+    m.status.resolution_coverage = 0.36;
+    m.status.refs_resolved = 36;
+    m.status.refs_total = 100;
+    const graph = await graphWidget(m);
+    const figure = graph.querySelector('[data-widget-part="figure"]')!;
+    expect(readerText(figure)).toBe("75.0% of internal candidates resolved");
+    expect(readerText(graph)).not.toMatch(/36\.0%|of references resolved|\brefs\b/);
+  });
+
+  it("states the population line in its evidence: x internal candidates of y code references, z provably external", async () => {
+    const graph = await graphWidget(clone());
+    const evidence = graph.querySelector('[data-widget-part="evidence"]')!;
+    expect(readerText(evidence)).toContain(
+      "6,000 of 8,000 internal candidates resolved — 8,000 internal candidates of 12,000 code references, 4,000 provably external",
+    );
+  });
+
+  it("states the doc-reference figure apart from the headline", async () => {
+    const graph = await graphWidget(clone());
+    const evidence = graph.querySelector('[data-widget-part="evidence"]')!;
+    expect(readerText(evidence)).toContain("Documentation references: 85.0% resolved (34 of 40)");
+    // Apart: the figure row carries the code headline alone.
+    expect(readerText(graph.querySelector('[data-widget-part="figure"]')!)).not.toMatch(/Documentation/);
+  });
+
+  it("explains the lower bound in one sentence, replacing the partial-figure footnote", async () => {
+    const graph = await graphWidget(clone());
+    expect(readerText(graph)).toContain(RESOLUTION_LOWER_BOUND);
+    expect(RESOLUTION_LOWER_BOUND).toMatch(/method calls on values of unknown type/);
+    expect(RESOLUTION_LOWER_BOUND.match(/[.!?](\s|$)/g)).toHaveLength(1);
+    expect(readerText(graph)).not.toMatch(/partial resolution figure is expected/i);
+  });
+
+  it.each([
+    ["no code reference at all", NO_CODE_REFERENCES, DASHBOARD_ABSENCE.noCodeReferences],
+    [
+      "every code reference provably external",
+      ALL_EXTERNAL,
+      "All 9 code references are provably external, so none could resolve here and there is no share to state.",
+    ],
+    ["a server that reported no figure", UNREPORTED, DASHBOARD_ABSENCE.resolutionUnreported],
+  ] as const)("renders its absence sentence when there is %s — never 100% or 0%", async (_name, model, sentence) => {
+    const graph = await graphWidget(model());
+    const absence = graph.querySelector('[data-widget-part="figure"] > [data-widget-absence]')!;
+    expect(absence.textContent).toBe(sentence);
+    // No share anywhere in the figure row, and no population line to hang one on.
+    expect(readerText(graph.querySelector('[data-widget-part="figure"]')!)).not.toMatch(/\d+(\.\d)?%/);
+    expect(readerText(graph)).not.toMatch(/(?<![\d.])(100|0)(\.0)?%/);
+    expect(readerText(graph)).not.toMatch(/internal candidates of/);
+    // No empty population line, and no wrapper left standing for it.
+    expect(graph.querySelector("[data-resolution-population]")).toBeNull();
+    // The doc line stays only where the server reported a doc figure.
+    expect(graph.querySelector("[data-resolution-docs]") === null).toBe(model === UNREPORTED);
+    // The structural counts still render: an absent share does not hide the graph's size.
+    expect(within(graph).getByText("1,200")).toBeInTheDocument();
+  });
+
+  it("states the all-external sentence in the singular and with grouped digits", () => {
+    expect(DASHBOARD_ABSENCE.allReferencesExternal(1)).toBe(
+      "All 1 code reference is provably external, so none could resolve here and there is no share to state.",
+    );
+    expect(DASHBOARD_ABSENCE.allReferencesExternal(12_345)).toBe(
+      "All 12,345 code references are provably external, so none could resolve here and there is no share to state.",
+    );
+  });
+
+  it("states a zero lower bound as a measured 0.0%, not an absence", async () => {
+    const graph = await graphWidget(withResolution({ resolved: 0, lower_bound: 0 }));
+    expect(graph.querySelector("[data-widget-absence]")).toBeNull();
+    expect(readerText(graph.querySelector('[data-widget-part="figure"]')!)).toBe("0.0% of internal candidates resolved");
+  });
+
+  it("names a graph with no documentation reference instead of a doc ratio", async () => {
+    const m = clone();
+    m.status.doc_resolution = { references: 0, resolved: 0, ratio: null, absence: ABSENT };
+    const graph = await graphWidget(m);
+    expect(readerText(graph)).toContain("No documentation references recorded.");
+    expect(readerText(graph)).not.toMatch(/Documentation references:/);
   });
 });
 
@@ -570,7 +729,7 @@ describe("the Security widget (S-789)", () => {
 
   it("agrees the noun with the count: 1 finding", async () => {
     const m = clone();
-    m.security = read({ ...SCANNED, tally: { counted: { critical: 0, high: 1, medium: 0, low: 0, info: 0, unrated: 0, total: 1 }, excluded: { not_fresh: 0, suppressed: 0, test: 0 } } });
+    m.security = read({ ...SCANNED, tally: { counted: { critical: 0, high: 1, medium: 0, low: 0, info: 0, unrated: 0, total: 1 }, excluded: { not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review: 0 } } });
     stub(m);
     const { container } = render(<DashboardView />);
     await screen.findByRole("heading", { name: "Security" });
@@ -579,6 +738,46 @@ describe("the Security widget (S-789)", () => {
     expect(figure).not.toContain("1 findings");
     // Nothing in test code: no statement about it.
     expect(within(widgetTitled(container, "Security")).queryByText(/in test code/)).not.toBeInTheDocument();
+  });
+
+  it("states how many more findings need review, in the Dashboard's own words, and nothing when none do (S-817)", async () => {
+    const excluded = (needs_review: number) => ({ not_fresh: 0, suppressed: 0, test: 0, dev: 0, needs_review });
+    const counted = { critical: 0, high: 1, medium: 0, low: 0, info: 0, unrated: 0, total: 1 };
+    for (const [n, said] of [[3, "3 more need review"], [1, "1 more needs review"]] as const) {
+      const m = clone();
+      m.security = read({ ...SCANNED, tally: { counted, excluded: excluded(n) } });
+      stub(m);
+      const { container, unmount } = render(<DashboardView />);
+      await screen.findByRole("heading", { name: "Security" });
+      expect(within(widgetTitled(container, "Security")).getByText(said)).toBeInTheDocument();
+      unmount();
+    }
+    const m = clone();
+    m.security = read({ ...SCANNED, tally: { counted, excluded: excluded(0) } });
+    stub(m);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    expect(within(widgetTitled(container, "Security")).queryByText(/review/)).not.toBeInTheDocument();
+  });
+
+  it("states how many more findings are on a dev-only dependency, in the Dashboard's own words, and nothing when none are (S-810)", async () => {
+    const excluded = (dev: number) => ({ not_fresh: 0, suppressed: 0, test: 0, dev, needs_review: 0 });
+    const counted = { critical: 0, high: 1, medium: 0, low: 0, info: 0, unrated: 0, total: 1 };
+    for (const [n, said] of [[60, "60 more in dev-only dependencies"], [1, "1 more in dev-only dependencies"]] as const) {
+      const m = clone();
+      m.security = read({ ...SCANNED, tally: { counted, excluded: excluded(n) } });
+      stub(m);
+      const { container, unmount } = render(<DashboardView />);
+      await screen.findByRole("heading", { name: "Security" });
+      expect(within(widgetTitled(container, "Security")).getByText(said)).toBeInTheDocument();
+      unmount();
+    }
+    const m = clone();
+    m.security = read({ ...SCANNED, tally: { counted, excluded: excluded(0) } });
+    stub(m);
+    const { container } = render(<DashboardView />);
+    await screen.findByRole("heading", { name: "Security" });
+    expect(within(widgetTitled(container, "Security")).queryByText(/dev-only/)).not.toBeInTheDocument();
   });
 
   it("states that no [security] table is configured, with no verdict badge", async () => {

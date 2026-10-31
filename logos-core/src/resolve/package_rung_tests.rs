@@ -40,6 +40,7 @@ fn contains(source: i64, target: i64) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind: EdgeKind::Contains,
+        dispatch: false,
     }
 }
 

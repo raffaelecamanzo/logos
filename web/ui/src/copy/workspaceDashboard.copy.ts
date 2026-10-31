@@ -10,6 +10,16 @@
 
 import { plural, type CopyEntry } from "./types.ts";
 
+/** The counts a reference-resolution sentence states (S-637) — the shape of the
+ *  read-model's `InternalResolution`, stated here so the catalogue formats what
+ *  it is handed and imports no read-model. */
+interface ResolutionCounts {
+  resolved: number;
+  internal_candidates: number;
+  provably_external: number;
+  code_references: number;
+}
+
 // ── Security (S-790) ─────────────────────────────────────────────────────────
 
 export const workspaceSecurityWidget: CopyEntry = {
@@ -24,6 +34,13 @@ export const reachability: CopyEntry = {
   why: "Their own repository's dead-code report lists them, yet deleting one breaks the service that calls it.",
 };
 
+// ── Reference resolution across the workspace (S-637) ────────────────────────
+
+export const workspaceResolution: CopyEntry = {
+  what: "How much of the code that could link up across every service does: all services' references pooled, where a call into another service's own code counts as one that could link.",
+  why: "It can only undercount: a method call on a value of unknown type stays unlinked even when its target is in the workspace, and a service that did not open adds nothing to it.",
+};
+
 // ── Members (item 3) ─────────────────────────────────────────────────────────
 
 export const members: CopyEntry = {
@@ -32,6 +49,14 @@ export const members: CopyEntry = {
 };
 
 // ── Figure-row and absence sentences ─────────────────────────────────────────
+
+/** Why a reference-resolution figure states no ratio, read from its own counts
+ *  (S-637): no code reference at all, or every one provably external. */
+function resolutionAbsent(codeReferences: number, provablyExternal: number): string {
+  return codeReferences === 0
+    ? "no code reference recorded"
+    : `all ${provablyExternal} code ${plural(provablyExternal, "reference", "references")} provably external`;
+}
 
 export const DASHBOARD_TEXT = {
   /** The reachability lead (CR-203 item 2): "at least" when coverage is partial. */
@@ -79,6 +104,30 @@ export const DASHBOARD_TEXT = {
     scan === "never_run" ? "never run" : scan,
   /** BR-56 for the Security widget: per member, never rolled up. */
   securityPerMember: "Counts are per member; they are not summed or averaged across members.",
+  /** Why a reference-resolution figure states no ratio (S-637). */
+  resolutionAbsent: (r: ResolutionCounts) => resolutionAbsent(r.code_references, r.provably_external),
+  /** A member's own figure in the Members column, never bare: its numerator,
+   *  its denominator and the population it was taken over ride with it
+   *  (CR-111, FR-RS-49). */
+  ownResolution: (percent: string, r: ResolutionCounts) =>
+    `${percent} (${r.resolved.toLocaleString("en-US")} of ${r.internal_candidates.toLocaleString("en-US")} internal candidates; ${r.code_references.toLocaleString("en-US")} code references, ${r.provably_external.toLocaleString("en-US")} provably external)`,
+  /** The workspace figure's qualifier (S-637). */
+  workspaceResolutionUnit: "at least, of the internal candidates resolved",
+  /** The workspace figure stated absent (NFR-CC-04), never 0% or 100%. */
+  workspaceResolutionAbsent: (r: ResolutionCounts) =>
+    `No figure: ${resolutionAbsent(r.code_references, r.provably_external)}.`,
+  /** The population line the figure is never shown without (FR-RS-49). */
+  workspacePopulation: (r: ResolutionCounts) =>
+    `${r.internal_candidates.toLocaleString("en-US")} internal candidates of ${r.code_references.toLocaleString("en-US")} code references (${r.provably_external.toLocaleString("en-US")} provably external).`,
+  /** What the workspace counted that no member could (S-637). */
+  workspaceCrossMember: (byName: number, byType: number, resolved: number) =>
+    `${byName} ${plural(byName, "reference counts", "references count")} as internal because another service declares ${plural(byName, "its name", "their names")}, and ${byType} because another service declares ${plural(byType, "its type", "their types")}; ${resolved} ${plural(resolved, "call is", "calls are")} resolved by a cross-service call into another service.`,
+  /** The member denominator, and BR-56's rule for this figure. */
+  workspacePooled: (read: number, total: number) =>
+    `Pooled over ${read} of ${total} members — their counts summed, never their figures averaged.`,
+  /** Members the pooled figure could not read: named, never dropped silently. */
+  workspaceUnread: (n: number) =>
+    `${n} ${plural(n, "member is", "members are")} not summed, because ${plural(n, "its", "their")} references were not read:`,
   /** BR-56, as one plain sentence (CR-203 item 3). */
   notAveraged: "Figures are per service; they are not averaged.",
 } as const;

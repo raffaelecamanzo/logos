@@ -729,15 +729,16 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
 
 // ── FR-QM-18: one coverage warning, from one helper, on every scoring surface ─
 
-/// A C project whose calls cross files but cannot bind across them: C binds
-/// within a file only, so its call graph has no edge between `src/net` and
-/// `src/core`, and C is all of the production callables.
+/// A C project whose calls cross files but cannot bind across them: the one
+/// definition `net.c` calls is `static`, its own file's alone (S-584), so the
+/// call graph has no edge between `src/net` and `src/core`, and C is all of the
+/// production callables.
 fn same_file_only_fixture() -> TempDir {
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
         "src/core/core.c",
-        "int helper(int x) { return x + 1; }\nint core_step(int x) { return helper(x) * 2; }\n",
+        "int helper(int x) { return x + 1; }\nstatic int core_step(int x) { return helper(x) * 2; }\n",
     );
     write(
         tmp.path(),

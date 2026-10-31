@@ -144,6 +144,7 @@ pub mod manifest;
 pub mod open_state;
 pub mod query;
 pub mod reach;
+pub mod reference_resolution;
 pub mod registry;
 pub mod residue;
 pub mod telemetry;
@@ -228,6 +229,7 @@ pub use type_refs::{
     TypeOrigin, TypeOwner, TypeRefForm, TypeReference, TypeReferenceHeadline, TypeReferenceIndex,
     TypeReferences, TypeRowAccounting, AMBIGUOUS_OWNER,
 };
+pub use reference_resolution::{CrossMemberReferences, ReferenceMembersRead, WorkspaceReferenceResolution};
 pub use warm_state::{MemberWarmState, WarmEvidence, WarmRollup};
 
 /// One resolved, validated member repository of a [`Federation`] ([FR-WS-01]).

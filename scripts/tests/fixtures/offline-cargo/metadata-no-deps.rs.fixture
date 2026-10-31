@@ -1,0 +1,4 @@
+// --no-deps resolves no graph, so no target's crates are needed.
+fn declared() {
+    let metadata = cargo(&["metadata", "--no-deps", "--offline", "--format-version", "1"]);
+}

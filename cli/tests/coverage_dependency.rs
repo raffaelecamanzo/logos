@@ -190,7 +190,8 @@ fn a_dependency_addition_stopped_by_a_signal_leaves_no_half_applied_change() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("the logos binary runs");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let deadline = std::time::Instant::now()
+            + logos_core::perf::scaled(std::time::Duration::from_secs(60));
         while !marker.exists() {
             assert!(std::time::Instant::now() < deadline, "SIG{signal}: the stub manager never ran");
             std::thread::sleep(std::time::Duration::from_millis(20));

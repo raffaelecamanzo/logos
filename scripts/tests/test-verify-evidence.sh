@@ -85,6 +85,24 @@ files_unit() {
     printf '"verdict":"pass","truncation":"none"}]'
 }
 
+# The timing-assertions gate's one unit (gate.sh's gate_timing_assertions): the
+# elapsed-time assertions its walk found, and the upper bounds that bypass
+# logos_core::perf as its failures. Args: sites-found hits
+sites_unit() {
+    printf '[{"unit":"sites","expected":%d,"floor":1,"started":%d,"finished":%d,' "$1" "$1" "$1"
+    printf '"passed":%d,"failed":%d,"ignored":1,"exit_code":0,' "$(($1 - $2))" "$2"
+    printf '"verdict":"pass","truncation":"none"}]'
+}
+
+# The offline-cargo gate's one unit (gate.sh's gate_offline_cargo): the offline cargo
+# calls its walk found, and the unfiltered ones as its failures.
+# Args: sites-found hits
+cargo_unit() {
+    printf '[{"unit":"sites","expected":%d,"floor":1,"started":%d,"finished":%d,' "$1" "$1" "$1"
+    printf '"passed":%d,"failed":%d,"ignored":0,"exit_code":0,' "$(($1 - $2))" "$2"
+    printf '"verdict":"pass","truncation":"none"}]'
+}
+
 # The agents-marker gate's one unit (gate.sh's gate_agents_marker): the gated tests
 # scripts/agents-marker.sh names, against those that printed a result line.
 # Args: expected started finished failed
@@ -113,12 +131,14 @@ seed_all_valid() {
     local tier="${1:-full}"
     rm -rf "$EVID"
     local g
-    for g in clippy test agents-marker deny arch public-terms script-suites ui-typecheck ui-test ui-build ui-e2e; do
+    for g in clippy test agents-marker deny arch public-terms timing-assertions offline-cargo script-suites ui-typecheck ui-test ui-build ui-e2e; do
         case "$g" in
             script-suites) write_gate "$g" "$tier" pass "$TREE" "$(suites_valid)" ;;
             agents-marker) write_gate "$g" "$tier" pass "$TREE" "$(gated_unit 1 1 1 0)" ;;
             test) write_gate "$g" "$tier" pass "$TREE" "$(good_unit)" ;;
             public-terms) write_gate "$g" "$tier" pass "$TREE" "$(files_unit 1044 0)" ;;
+            timing-assertions) write_gate "$g" "$tier" pass "$TREE" "$(sites_unit 71 0)" ;;
+            offline-cargo) write_gate "$g" "$tier" pass "$TREE" "$(cargo_unit 4 0)" ;;
             *) write_gate "$g" "$tier" pass "$TREE" "[]" ;;
         esac
     done
@@ -293,7 +313,66 @@ write_gate public-terms full pass "$TREE" '[{"unit":"files","expected":1044,"flo
 check "a truncated public-terms walk is reported in files" 1 "public-terms/files: 900 of 1044 text files ran"
 
 seed_all_valid
-check "the public-terms walk is reported with its denominator, outside the test count" 0 "public-terms   full   pass        1044/1044 files 0 hits"
+check "the public-terms walk is reported with its denominator, outside the test count" 0 "public-terms       full   pass        1044/1044 files 0 hits"
+
+# --- the timing-assertions gate (S-804) ---------------------------------------
+#
+# Required at BOTH tiers (the check reads the whole tree, whatever the change
+# touched), and its one unit counts the timing assertions the walk found: a walk
+# that found none, or an upper bound that bypasses the helper, fails it whatever
+# its verdict field says.
+
+seed_all_valid
+rm -f "$EVID/timing-assertions.json"
+check "the timing-assertions gate is required at full tier" 1 "timing-assertions: no evidence file"
+
+seed_all_valid fast
+rm -f "$EVID/timing-assertions.json"
+TIER_FLAG="--tier fast"
+check "the timing-assertions gate is required at fast tier" 1 "timing-assertions: no evidence file"
+TIER_FLAG=""
+
+seed_all_valid
+write_gate timing-assertions full pass "$TREE" "$(sites_unit 0 0)"
+check "a timing-assertions walk that found no site rejected" 1 "timing-assertions/sites: the walk found no timing assertion"
+
+seed_all_valid
+write_gate timing-assertions full pass "$TREE" "$(sites_unit 71 2)"
+check "unscaled bounds under a 'pass' verdict rejected" 1 "timing-assertions/sites: 2 unscaled elapsed-time bound(s)"
+
+seed_all_valid
+write_gate timing-assertions full pass "$TREE" "$(sites_unit 0 0)"
+check_absent "an empty walk is not also misreported as a test-floor breach" "is below"
+
+seed_all_valid
+check "the timing-assertions walk is reported with its denominator, outside the test count" 0 "timing-assertions  full   pass        71/71 sites    0 unscaled"
+
+# --- the offline-cargo gate (S-805) --------------------------------------------
+#
+# Required at BOTH tiers like the timing-assertions gate, and its one unit counts
+# the offline cargo calls the walk found: a walk that found none, or a call naming
+# no platform, fails it whatever its verdict field says.
+
+seed_all_valid
+rm -f "$EVID/offline-cargo.json"
+check "the offline-cargo gate is required at full tier" 1 "offline-cargo: no evidence file"
+
+seed_all_valid fast
+rm -f "$EVID/offline-cargo.json"
+TIER_FLAG="--tier fast"
+check "the offline-cargo gate is required at fast tier" 1 "offline-cargo: no evidence file"
+TIER_FLAG=""
+
+seed_all_valid
+write_gate offline-cargo full pass "$TREE" "$(cargo_unit 0 0)"
+check "an offline-cargo walk that found no call rejected" 1 "offline-cargo/sites: the walk found no offline cargo call"
+
+seed_all_valid
+write_gate offline-cargo full pass "$TREE" "$(cargo_unit 4 1)"
+check "an unfiltered call under a 'pass' verdict rejected" 1 "offline-cargo/sites: 1 unfiltered offline cargo call(s)"
+
+seed_all_valid
+check "the offline-cargo walk is reported with its denominator, outside the test count" 0 "offline-cargo      full   pass        4/4 sites      0 unfiltered"
 
 # --- the agents-marker gate ------------------------------------------------------
 #
@@ -322,9 +401,9 @@ write_gate agents-marker full pass "$TREE" "$(gated_unit 1 1 1 1)"
 check "a failed gated test under a 'pass' verdict rejected" 1 "agents-marker/gated: 1 test(s) failed"
 
 seed_all_valid
-check "the agents-marker gate is reported with its denominator" 0 "agents-marker  full   pass        1/1 gated"
+check "the agents-marker gate is reported with its denominator" 0 "agents-marker      full   pass        1/1 gated"
 
-# Exactly what `gate.sh fast` writes: its four gates and nothing else.
+# Exactly what `gate.sh fast` writes: its five gates and nothing else.
 seed_all_valid fast
 for g in agents-marker deny script-suites ui-typecheck ui-test ui-build ui-e2e; do rm -f "$EVID/$g.json"; done
 TIER_FLAG="--tier fast"
@@ -418,6 +497,181 @@ check "fast tier validates the leg when present: a failed verdict rejected" 1 "s
 write_gate script-suites fast fail "0000000000000000000000000000000000000000" "[$(suite_unit test-beta 5 2 1)]"
 check "fast tier ignores script-suites evidence for an older tree" 0 "EVIDENCE VERIFIED for tree $TREE (tier fast"
 TIER_FLAG=""
+
+# --- tier ci (S-806): the container run's evidence, and only it ---------------
+#
+# gate.sh ci records three gates under their own names. `--tier ci` certifies tier
+# "ci" and nothing else; the fast and full tiers never read a ci gate; and the
+# evidence of one is no use to the other.
+
+seed_ci_valid() {
+    local tier="${1:-ci}"
+    rm -rf "$EVID"
+    write_gate ci-ui-build "$tier" pass "$TREE" "[]"
+    write_gate ci-script-suites "$tier" pass "$TREE" "$(suites_valid)"
+    write_gate ci-test "$tier" pass "$TREE" "$(good_unit)"
+}
+
+TIER_FLAG="--tier ci"
+seed_ci_valid
+check "tier ci: valid ci evidence accepted, with the test denominator" 0 "EVIDENCE VERIFIED for tree $TREE (tier ci, 10/10 test binaries)"
+seed_ci_valid
+rm -f "$EVID/ci-test.json"
+check "tier ci: a missing ci-test gate is a gate that did not run" 1 "ci-test: no evidence file"
+seed_ci_valid
+rm -f "$EVID/ci-ui-build.json"
+check "tier ci: a missing ci-ui-build gate is a gate that did not run" 1 "ci-ui-build: no evidence file"
+seed_ci_valid
+rm -f "$EVID/ci-script-suites.json"
+check "tier ci: a missing ci-script-suites gate is a gate that did not run" 1 "ci-script-suites: no evidence file"
+seed_ci_valid
+write_gate ci-test ci skip "$TREE" "[]"
+check "tier ci: a skipped ci gate is not a pass" 1 "ci-test: skipped"
+seed_ci_valid
+write_gate ci-test ci pass "$TREE" '[{"unit":"workspace","expected":10,"floor":9,"started":10,"finished":7,"passed":50,"failed":0,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]'
+check "tier ci: a truncated workspace run is rejected from its counters" 1 "ci-test/workspace: 10 binaries started, only 7 finished"
+seed_ci_valid
+write_gate ci-test ci pass "$TREE" '[{"unit":"workspace","expected":10,"floor":9,"started":10,"finished":10,"passed":50,"failed":2,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"}]'
+check "tier ci: failing tests in the container are rejected" 1 "ci-test/workspace: 2 test(s) failed"
+seed_ci_valid
+write_gate ci-script-suites ci pass "$TREE" "[$(suite_unit test-alpha 12 0 0),$(suite_unit test-beta 5 2 1)]"
+check "tier ci: a failed suite in the container is rejected" 1 "ci-script-suites/test-beta"
+seed_ci_valid
+write_gate ci-script-suites ci pass "$TREE" "[$(suite_unit test-alpha 12 0 0)]"
+check "tier ci: a suite the tree holds and the container did not run is rejected" 1 "ci-script-suites/test-beta: the tree holds this suite"
+seed_ci_valid
+write_gate ci-test ci pass "0000000000000000000000000000000000000000" "$(good_unit)"
+check "tier ci: ci evidence for another tree is stale" 1 "stale evidence"
+
+seed_ci_valid
+write_gate ci-script-suites ci pass "$TREE" '[{"unit":"test-alpha","expected":1,"floor":1,"started":0,"finished":0,"passed":0,"failed":0,"ignored":0,"exit_code":0,"verdict":"pass","truncation":"none"},'"$(suite_unit test-beta 7 0 0)"']'
+check "tier ci: a suite unit speaks of suites, not binaries" 1 "ci-script-suites/test-alpha: the suite did not run"
+
+# Evidence of another tier is refused in its place.
+seed_ci_valid fast
+check "tier ci: ci gates that say tier fast are refused" 1 "ci-test: tier is 'fast', not \"ci\""
+seed_ci_valid full
+check "tier ci: ci gates that say tier full are refused" 1 "ci-test: tier is 'full', not \"ci\""
+seed_all_valid
+check "tier ci: a complete FULL-tier evidence set is refused" 1 "never stands in for tier ci"
+seed_all_valid fast
+check "tier ci: a FAST-tier evidence set is refused" 1 "ci-test: no evidence file"
+
+# ... and ci evidence is no use to the other two tiers, whole or partial.
+TIER_FLAG="--tier full"
+seed_ci_valid
+check "tier full: a complete ci evidence set is refused" 1 "clippy: no evidence file"
+seed_all_valid
+write_gate ci-test ci pass "$TREE" "$(good_unit)"
+check "tier full: a ci gate beside valid full evidence is not read" 0 "EVIDENCE VERIFIED for tree $TREE (tier full"
+TIER_FLAG="--tier fast"
+seed_ci_valid
+check "tier fast: a complete ci evidence set is refused" 1 "clippy: no evidence file"
+seed_all_valid fast
+write_gate ci-test ci fail "$TREE" "$(good_unit)"
+check "tier fast: a failed ci gate beside valid fast evidence is not read" 0 "EVIDENCE VERIFIED for tree $TREE (tier fast"
+# A full-tier gate under a ci gate's tier is no ci evidence either.
+write_gate test ci pass "$TREE" "$(good_unit)"
+check "tier fast: a fast gate that says tier ci is refused" 1 "test: tier is 'ci', which is neither"
+TIER_FLAG=""
+
+# The marker is a handoff's; a publish precondition writes none.
+seed_ci_valid
+mkdir -p "$WORK/pending"
+bash scripts/verify-evidence.sh --strict --tier ci --write-marker "$WORK/pending/S-806-review-done" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 2 ] && [ ! -e "$WORK/pending/S-806-review-done" ]; then
+    echo "  ok    tier ci writes no marker (exit 2, nothing written)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  tier ci --write-marker: exit $rc, marker present: $([ -e "$WORK/pending/S-806-review-done" ] && echo yes || echo no)"
+    FAIL=$((FAIL + 1))
+fi
+bash scripts/verify-evidence.sh --strict --tier bogus >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 2 ]; then
+    echo "  ok    an unknown tier is a usage error"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  an unknown tier exited $rc, wanted 2"
+    FAIL=$((FAIL + 1))
+fi
+
+# --- --tree (S-807): certify a given tree, not the working directory's ------------
+#
+# scripts/publish-sprint.sh publishes local main's tree, wherever it is run from. A
+# working directory that has moved on (an untracked file, a suite not committed)
+# must neither make main's evidence stale nor lend its own suites to the check.
+
+: >scripts/tests/test-gamma.sh
+seed_ci_valid
+TIER_FLAG="--tier ci"
+check "--tree: a dirty working tree makes ci evidence for HEAD's tree stale without it" 1 "stale evidence"
+TIER_FLAG="--tier ci --tree $TREE"
+check "--tree: ci evidence for the tree given is accepted, the working directory notwithstanding" 0 "EVIDENCE VERIFIED for tree $TREE (tier ci"
+seed_ci_valid
+write_gate ci-test ci pass "0000000000000000000000000000000000000000" "$(good_unit)"
+check "--tree: ci evidence for another tree than the one given is stale" 1 "stale evidence"
+seed_ci_valid
+TIER_FLAG="--tier ci --tree HEAD"
+check "--tree: a revision that names the tree is resolved to it" 0 "EVIDENCE VERIFIED for tree $TREE"
+TIER_FLAG="--tier ci --tree $TREE"
+write_gate ci-script-suites ci pass "$TREE" "[$(suite_unit test-alpha 12 0 0)]"
+check "--tree: a suite the given tree holds and the run lacks is still rejected" 1 "ci-script-suites/test-beta: the tree holds this suite"
+rm -f scripts/tests/test-gamma.sh
+# The suites a tree holds are the direct children of scripts/tests, as gate.sh runs
+# them: a helper nested under it is not a suite, and a name with a non-ASCII byte is.
+mkdir -p scripts/tests/fixtures
+: >scripts/tests/fixtures/test-helper.sh
+git add -A >/dev/null 2>&1
+git commit -qm "nested helper" >/dev/null 2>&1
+TREE_NESTED="$(git rev-parse 'HEAD^{tree}')"
+seed_ci_valid
+for g in ci-ui-build ci-script-suites ci-test; do sed -i.bak "s/$TREE/$TREE_NESTED/" "$EVID/$g.json"; done
+rm -f "$EVID"/*.bak
+TIER_FLAG="--tier ci --tree $TREE_NESTED"
+check "--tree: a test-*.sh nested under scripts/tests is not a suite the tree holds" 0 "EVIDENCE VERIFIED for tree $TREE_NESTED"
+: >"scripts/tests/test-é.sh"
+git add -A >/dev/null 2>&1
+git commit -qm "non-ascii suite" >/dev/null 2>&1
+TREE_UTF="$(git rev-parse 'HEAD^{tree}')"
+for g in ci-ui-build ci-script-suites ci-test; do sed -i.bak "s/$TREE_NESTED/$TREE_UTF/" "$EVID/$g.json"; done
+rm -f "$EVID"/*.bak
+TIER_FLAG="--tier ci --tree $TREE_UTF"
+check "--tree: a suite with a non-ASCII name that the run lacks is still rejected" 1 "ci-script-suites/test-é: the tree holds this suite"
+git reset -q --hard "$(git rev-list --max-parents=0 HEAD)" >/dev/null 2>&1
+seed_ci_valid
+TIER_FLAG=""
+bash scripts/verify-evidence.sh --strict --tier ci --tree 0123456789abcdef0123456789abcdef01234567 >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 2 ]; then
+    echo "  ok    --tree naming no tree of the repository is a usage error"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  --tree naming no tree exited $rc, wanted 2"
+    FAIL=$((FAIL + 1))
+fi
+for empty in '--tree' '--tree ""'; do
+    eval "bash scripts/verify-evidence.sh --strict --tier ci $empty" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        echo "  ok    $empty with no tree id is a usage error, not the working directory's tree"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL  $empty with no tree id exited $rc, wanted 2"
+        FAIL=$((FAIL + 1))
+    fi
+done
+seed_all_valid
+bash scripts/verify-evidence.sh --strict --tree "$TREE" --write-marker "$WORK/pending/S-807-review-done" >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 2 ] && [ ! -e "$WORK/pending/S-807-review-done" ]; then
+    echo "  ok    --tree writes no marker (exit 2, nothing written)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL  --tree --write-marker: exit $rc, marker present: $([ -e "$WORK/pending/S-807-review-done" ] && echo yes || echo no)"
+    FAIL=$((FAIL + 1))
+fi
 
 # --- and the control: valid evidence must be ACCEPTED -------------------------
 #

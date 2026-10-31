@@ -77,3 +77,12 @@ sr_need_scoped_scan() {
         *) sr_die 3 "$LOGOS_BIN has no \`security scan --scanner --path\`; a fix cannot be proven by a targeted re-scan, so only escalations can be reported" ;;
     esac
 }
+
+# sr_need_reconfirm — exits 3 unless this logos can record a verdict's evidence
+# (`security reconfirm --evidence`, FR-SC-32): a draft that names evidence prints that
+# command, and printing one that cannot run would leave the entry "no evidence
+# recorded". Needs rv_need_logos first.
+sr_need_reconfirm() {
+    "$LOGOS_BIN" security reconfirm --help >/dev/null 2>&1 ||
+        sr_die 3 "$LOGOS_BIN has no \`security reconfirm\` (S-818): the evidence of a false positive cannot be recorded, so none is drafted with it; install a newer logos"
+}

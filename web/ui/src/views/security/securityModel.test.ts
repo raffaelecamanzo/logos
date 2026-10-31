@@ -21,8 +21,10 @@ import {
   REDACTED_TEXT,
   SCAN_JOB_TEXT,
   SCOPE_TEXT,
+  evidenceNote,
   selectorText,
   suppressionNote,
+  suppressionState,
 } from "../../copy/security.copy.ts";
 import { commandsIn, documentedCommands, isDocumented } from "../../test/commandCheck.ts";
 import installReal from "./fixtures/install-job.real.json";
@@ -34,6 +36,7 @@ import {
   editionOf,
   findingLocation,
   findingMessage,
+  findingScanners,
   hiddenByScope,
   ignoredDirsKey,
   inScope,
@@ -41,6 +44,8 @@ import {
   keeps,
   liveStates,
   markersShown,
+  devDependencyText,
+  needsReviewText,
   normalisePath,
   notCoveredCommand,
   pathFromSearch,
@@ -198,8 +203,8 @@ describe("code scope (FR-SC-28, S-796)", () => {
   });
 
   it("words what the scope hid in either direction, and for one or many", () => {
-    expect(SCOPE_TEXT.hidden(1, "production")).toBe("No production finding matches these filters; 1 finding does in the other code: change the code scope to see it.");
-    expect(SCOPE_TEXT.hidden(2, "test-code")).toBe("No test-code finding matches these filters; 2 findings do in the other code: change the code scope to see them.");
+    expect(SCOPE_TEXT.hidden(1, "production")).toBe("No production finding matches these filters; 1 finding does outside this scope (test code, a dev-only dependency, or marked needs review): change the code scope to see it.");
+    expect(SCOPE_TEXT.hidden(2, "test-code")).toBe("No test-code finding matches these filters; 2 findings do outside this scope (test code, a dev-only dependency, or marked needs review): change the code scope to see them.");
   });
 
   it("states each OWASP category's count from the server's two figures, equal to a recount over the listed findings", () => {
@@ -233,6 +238,136 @@ describe("code scope (FR-SC-28, S-796)", () => {
       ]);
     }
     expect(categoryCount({ ...stated[0], state: { state: "not_covered" } }, "production")).toBeNull();
+  });
+});
+
+describe("one advisory several scanners report (FR-SC-29, S-809)", () => {
+  const reporter = (scanner_name: string, fingerprint: string) => ({
+    scanner_name,
+    scanner_version: "1",
+    fingerprint,
+    rule_id: "CVE-2026-1",
+    severity: "high" as const,
+  });
+  const merged: SecurityFinding = {
+    ...SQL,
+    scanner_name: "Trivy",
+    fingerprint: "t",
+    reporters: [reporter("Trivy", "t"), reporter("osv-scanner", "o"), reporter("Trivy", "t2")],
+  };
+  const classification = editionOf(PAGE, "2025").classify(SQL);
+  const drivers = new Map([["trivy", "Trivy"], ["osv-scanner", "osv-scanner"]]);
+  const listed = (scanner: string, f: SecurityFinding) => keeps(f, { ...NO_FILTERS, scanner }, classification, drivers);
+
+  it("names every scanner once, its own first, and a finding one scanner reported by that scanner alone", () => {
+    expect(findingScanners(merged)).toEqual(["Trivy", "osv-scanner"]);
+    expect(findingScanners(SQL)).toEqual([SQL.scanner_name]);
+  });
+
+  it("lists a merged finding under each of its reporters, by driver or registry name, and under no other scanner", () => {
+    expect(listed("osv-scanner", merged)).toBe(true);
+    expect(listed("trivy", merged)).toBe(true);
+    expect(listed("semgrep", merged)).toBe(false);
+    expect(listed("osv-scanner", SQL)).toBe(false);
+  });
+
+  it("states a row's findings counted under another scanner, and nothing when there are none", () => {
+    const fresh = (merged?: number) =>
+      scannerStateText(row({ state: "fresh", snapshot_head: "h", version: "1", findings: 2, suppressed: 1, merged }));
+    expect(fresh(1)).toBe("2 findings, 1 suppressed, 1 counted under another scanner");
+    expect(fresh(0)).toBe("2 findings, 1 suppressed");
+    expect(fresh(undefined)).toBe("2 findings, 1 suppressed");
+  });
+});
+
+describe("needs review (FR-SC-31, S-817)", () => {
+  const review = { ...SQL, fingerprint: "low", confidence: "low" as const, needs_review: true };
+  const medium = { ...SQL, fingerprint: "medium", confidence: "medium" as const, needs_review: false };
+  const reviewInTest = { ...review, fingerprint: "low-in-test", code_scope: "test" as const, code_scope_reason: "test_path" as const };
+  const none = new Map<string, string>();
+  const classify = (f: SecurityFinding) => editionOf(PAGE, "2025").classify(f);
+
+  it("leaves a low-confidence finding out of the default scope and lists it under test or all by its code", () => {
+    expect(inScope(review, "production")).toBe(false);
+    expect(inScope(medium, "production")).toBe(true);
+    expect(inScope(SQL, "production")).toBe(true);
+    expect(inScope(review, "all")).toBe(true);
+    // Its scope is its code: in production code it is not in `test`.
+    expect(inScope(review, "test")).toBe(false);
+    expect(inScope(reviewInTest, "test")).toBe(true);
+    expect(inScope(reviewInTest, "production")).toBe(false);
+  });
+
+  it("counts what the default scope hides, of what the other filters keep", () => {
+    const all = [SQL, medium, review, reviewInTest];
+    expect(hiddenByScope(all, NO_FILTERS, classify, none)).toBe(2);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "all" }, classify, none)).toBe(0);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "test" }, classify, none)).toBe(3);
+    expect(keeps(review, NO_FILTERS, classify(review), none)).toBe(false);
+    expect(keeps(review, { ...NO_FILTERS, scope: "all" }, classify(review), none)).toBe(true);
+  });
+
+  it("words why a finding needs review, naming the scanner's confidence, and nothing for another", () => {
+    expect(needsReviewText(review)).toBe(SCOPE_TEXT.reviewReason("low"));
+    expect(needsReviewText(review)).toContain("low-confidence");
+    expect(needsReviewText(review)).toContain("[security] rules");
+    expect(needsReviewText(medium)).toBeNull();
+    expect(needsReviewText({ ...SQL, confidence: "unstated" as const, needs_review: false })).toBeNull();
+  });
+
+  it("states a category's count so production, needs review and test code partition its findings", () => {
+    const covered = editionOf(PAGE, "2025").categories.find((c) => c.state.state === "covered" && c.production_findings === 1) as SecurityCategoryCoverage;
+    // Three findings stored under it beyond the page's one: one in production, one needing review, one in test code.
+    const stated: SecurityCategoryCoverage = {
+      ...covered,
+      state: { state: "covered", findings: 4 },
+      production_findings: 2,
+      needs_review_findings: 1,
+    };
+    expect([categoryCount(stated, "production"), categoryCount(stated, "test"), categoryCount(stated, "all")]).toEqual([2, 1, 4]);
+    // A payload from before the count existed reads as none needing review.
+    expect(categoryCount({ ...stated, needs_review_findings: undefined }, "test")).toBe(2);
+  });
+});
+
+describe("dev-only dependencies (FR-SC-30, S-810)", () => {
+  const dev = { ...SQL, fingerprint: "dev", code_scope: "dev" as const, code_scope_reason: "dev_dependency" as const };
+  const none = new Map<string, string>();
+  const classify = (f: SecurityFinding) => editionOf(PAGE, "2025").classify(f);
+
+  it("lists a dev finding under All alone: neither Production nor Test code holds it", () => {
+    expect([inScope(dev, "production"), inScope(dev, "test"), inScope(dev, "all")]).toEqual([false, false, true]);
+    expect(inScope(SQL, "production")).toBe(true);
+  });
+
+  it("counts what the other scopes hide, of what the other filters keep", () => {
+    const all = [SQL, dev];
+    expect(hiddenByScope(all, NO_FILTERS, classify, none)).toBe(1);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "test" }, classify, none)).toBe(2);
+    expect(hiddenByScope(all, { ...NO_FILTERS, scope: "all" }, classify, none)).toBe(0);
+    expect(keeps(dev, NO_FILTERS, classify(dev), none)).toBe(false);
+    expect(keeps(dev, { ...NO_FILTERS, scope: "all" }, classify(dev), none)).toBe(true);
+  });
+
+  it("words why a finding reads dev, and nothing for another scope", () => {
+    expect(devDependencyText(dev)).toBe(SCOPE_TEXT.reason.dev_dependency);
+    expect(devDependencyText(dev)).toContain("[security] rules");
+    expect(devDependencyText(SQL)).toBeNull();
+    expect(scopeReasonText(dev)).toBeNull();
+  });
+
+  it("states a category's count so production, dev, needs review and test code partition its findings", () => {
+    const covered = editionOf(PAGE, "2025").categories.find((c) => c.state.state === "covered" && c.production_findings === 1) as SecurityCategoryCoverage;
+    const stated: SecurityCategoryCoverage = {
+      ...covered,
+      state: { state: "covered", findings: 6 },
+      production_findings: 2,
+      needs_review_findings: 1,
+      dev_findings: 2,
+    };
+    expect([categoryCount(stated, "production"), categoryCount(stated, "test"), categoryCount(stated, "all")]).toEqual([2, 1, 6]);
+    // A payload from before the count existed reads as none on a dev-only dependency.
+    expect(categoryCount({ ...stated, dev_findings: undefined }, "test")).toBe(3);
   });
 });
 
@@ -313,6 +448,28 @@ describe("filters mirror `security findings`", () => {
       keeps(f, { ...NO_FILTERS, suppression }, c2025(f), drivers);
     expect([keep(suppressed, "suppressed"), keep(suppressed, "active")]).toEqual([true, false]);
     expect([keep(expired, "suppressed"), keep(expired, "active")]).toEqual([false, true]);
+    // An out-of-date verdict suppresses nothing: the finding is active (FR-SC-32).
+    const stale = { ...SQL, suppression: { state: "out_of_date" as const, reason: "r", expires: null, by: { fingerprint: SQL.fingerprint }, changed: [] } };
+    expect([keep(stale, "suppressed"), keep(stale, "active")]).toEqual([false, true]);
+  });
+
+  it("words an out-of-date verdict and its evidence (FR-SC-32)", () => {
+    const by = { fingerprint: "f" };
+    const change = (kind: "changed" | "gone" | "unverifiable", detail?: string) => ({ symbol: "s", name: "DefaultCookieConfig", change: kind, ...(detail ? { detail } : {}) });
+    const stale = (...changed: ReturnType<typeof change>[]) => ({ state: "out_of_date" as const, reason: "r", expires: null, by, changed });
+    expect(suppressionNote(stale(change("changed")))).toBe("r");
+    expect(evidenceNote(stale(change("changed")))).toBe("`DefaultCookieConfig` changed");
+    expect(suppressionNote(stale(change("gone")))).toBe("r");
+    expect(evidenceNote(stale(change("gone")))).toBe("`DefaultCookieConfig` no longer exists");
+    expect(evidenceNote(stale(change("unverifiable", "the index is behind a.go: run `logos sync a.go`")))).toBe(
+      "`DefaultCookieConfig` could not be checked: the index is behind a.go: run `logos sync a.go`",
+    );
+    expect(suppressionState(stale())).toBe("out of date");
+    expect(suppressionNote({ state: "out_of_date", reason: "r", expires: null, by: { path: "src" }, changed: [change("changed")] })).toBe(
+      "r — covers everything under src",
+    );
+    expect(evidenceNote({ state: "suppressed", reason: "r", expires: null, by })).toBe("No evidence recorded");
+    expect(evidenceNote({ state: "expired", reason: "r", expires: null, by })).toBeNull();
   });
 
   it("matches an unbound finding's path as the report named it, and a pasted path with spaces", () => {
@@ -467,6 +624,25 @@ describe("path suppressions (S-770)", () => {
     expect(suppressionNote({ state: "suppressed", reason: "r", expires: "2027-01-01", by: { path: "src" } })).toBe("r (until 2027-01-01) — covers everything under src");
     expect(suppressionNote({ state: "expired", reason: "r", expires: "2026-01-01", by: { path: "src" } })).toBe("r (expired after 2026-01-01) — covers everything under src");
     expect(suppressionNote({ state: "suppressed", reason: "r", expires: null, by: { fingerprint: "f" } })).toBe("r");
+  });
+
+  it("names a rule-wide entry as the one that suppressed a finding, with its reason and expiry (S-814)", () => {
+    const by = { rule: "CKV_K8S_21", scanner: "checkov" };
+    expect(selectorText(by)).toBe("rule CKV_K8S_21 of checkov, in every file");
+    expect(suppressionNote({ state: "suppressed", reason: "deploy tool sets it", expires: null, by })).toBe(
+      "deploy tool sets it — suppressed by a rule-wide entry (rule CKV_K8S_21 of checkov, in every file)",
+    );
+    expect(suppressionNote({ state: "suppressed", reason: "r", expires: "2027-01-01", by })).toBe(
+      "r (until 2027-01-01) — suppressed by a rule-wide entry (rule CKV_K8S_21 of checkov, in every file)",
+    );
+    expect(suppressionNote({ state: "expired", reason: "r", expires: "2026-01-01", by })).toBe(
+      "r (expired after 2026-01-01) — rule-wide entry (rule CKV_K8S_21 of checkov, in every file)",
+    );
+  });
+
+  it("keys a rule-wide entry apart from a path entry that narrows to the same rule and scanner", () => {
+    const keys = [{ rule: "r", scanner: "s" }, { path: "src", rule: "r", scanner: "s" }, { rule: "s", scanner: "r" }, { fingerprint: "r" }].map(selectorKey);
+    expect(new Set(keys).size).toBe(4);
   });
 });
 

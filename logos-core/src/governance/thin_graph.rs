@@ -151,12 +151,26 @@ impl ThinGraph {
     /// least [`COVERAGE_MIN_SHARE_PERCENT`] of the production callables, in
     /// language order.
     pub fn warned(&self) -> impl Iterator<Item = &LanguageCoverage> {
-        self.languages.iter().filter(|row| {
-            row.same_file_only.is_some()
-                && row.production_callables * 100
-                    >= self.production_callables * COVERAGE_MIN_SHARE_PERCENT
-                && row.production_callables > 0
-        })
+        self.languages
+            .iter()
+            .filter(|row| row.same_file_only.is_some() && self.large_enough(row))
+    }
+
+    /// Whether `language` holds at least [`COVERAGE_MIN_SHARE_PERCENT`] of the
+    /// production callables — the bar every warning naming a language holds
+    /// it to, the parse-damage warning's ([`super::parse_damage`]) included.
+    /// `false` for a language not in the store.
+    #[must_use]
+    pub fn large_enough_to_name(&self, language: &str) -> bool {
+        self.languages
+            .iter()
+            .find(|row| row.language == language)
+            .is_some_and(|row| self.large_enough(row))
+    }
+
+    fn large_enough(&self, row: &LanguageCoverage) -> bool {
+        row.production_callables > 0
+            && row.production_callables * 100 >= self.production_callables * COVERAGE_MIN_SHARE_PERCENT
     }
 
     /// One coverage warning per [`warned`](Self::warned) language, naming the
@@ -228,6 +242,8 @@ mod tests {
             calls,
             imports,
             call_residue: None,
+            header_ownership: None,
+            parse_damage: None,
         }
     }
 

@@ -19,6 +19,10 @@
 //! The comparison is `serde_json::Value` equality over every figure the readout
 //! carries, so neither side's shape is written down here.
 //!
+//! The figures include the internal-candidate headline and the doc figure
+//! (S-635, FR-RS-49): the planted capture row names nothing the module
+//! declares, so counting it would read as one more provably external reference.
+//!
 //! [CR-195]: ../../docs/requests/CR-195-status-resolution-figures-exclude-capture-before-delete-rows.md
 //! [FR-RS-09]: ../../docs/specs/requirements/FR-RS-09.md
 //! [FR-RS-04]: ../../docs/specs/requirements/FR-RS-04.md
@@ -44,7 +48,9 @@ const B_GO: &str = "package b\n\nimport \"example.com/m/a\"\n\nfunc G() {\n\ta.F
 
 /// The status fields that are resolution figures — everything else (paths, sizes,
 /// timestamps, revisions) legitimately differs between two stores.
-const FIGURES: [&str; 5] = [
+const FIGURES: [&str; 7] = [
+    "internal_resolution",
+    "doc_resolution",
     "refs_total",
     "refs_resolved",
     "refs_unresolved",

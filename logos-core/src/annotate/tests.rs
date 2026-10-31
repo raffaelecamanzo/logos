@@ -187,15 +187,19 @@ fn markers() -> Vec<String> {
         .collect()
 }
 
-/// The reachability-capable extension set (S-159, [CR-043], [ADR-39]) the
-/// production registry would build with only Rust declaring the capability —
-/// `{"rs"}`. The annotation pass computes a dead-code verdict only for callables
-/// whose file extension is in this set; everything else renders `is_dead = NULL`.
+/// The reachability (S-159, [CR-043], [ADR-39]) the production registry would
+/// build with only Rust declaring the capability — capable `{"rs"}`, and no
+/// language-scoped root. The annotation pass computes a dead-code verdict only
+/// for callables whose file extension is in that set; everything else renders
+/// `is_dead = NULL`.
 ///
 /// [CR-043]: ../../../docs/requests/CR-043-dead-code-detector-precision.md
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
-fn reach() -> std::collections::HashSet<String> {
-    std::iter::once("rs".to_string()).collect()
+fn reach() -> Reachability {
+    Reachability {
+        capable: std::iter::once("rs".to_string()).collect(),
+        ..Reachability::default()
+    }
 }
 
 /// Seed a file row carrying an explicit language + path, returning its id — the
@@ -580,7 +584,7 @@ fn an_empty_capability_set_renders_every_callable_null() {
     );
     let public = seed_node(&rt, 2, "open_api", NodeKind::Function, true, None, None);
 
-    let empty = std::collections::HashSet::new();
+    let empty = Reachability::default();
     let stats = run(&rt, &Rules::default(), &entries(), &markers(), &empty, &coordinate_less(), false).unwrap();
 
     let snap = snapshot(&rt);
@@ -1230,6 +1234,34 @@ fn layered_rules_materialise_policy_nodes_and_flag_the_violation() {
     assert_eq!(stats.boundary_nodes, 1);
 }
 
+/// A trait call's fan-out to a presentation implementation is no forbidden
+/// dependency, yet it still keeps that implementation live ([FR-QM-20]): the
+/// boundary pass skips a dispatch edge, dead code walks it. A `local n1`
+/// symbol names the trait method the marker records.
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+#[test]
+fn a_dispatch_edge_crosses_no_boundary_and_keeps_its_implementation_live() {
+    let (rt, _dir) = runtime();
+    let domain_file = seed_file(&rt, "src/domain/model.rs");
+    let ui_file = seed_file(&rt, "src/ui/view.rs");
+    let domain_fn = seed_node(&rt, 1, "compute", NodeKind::Function, true, None, Some(domain_file));
+    // Unexported, so only an edge keeps it live.
+    let ui_impl = seed_node(&rt, 2, "render", NodeKind::Method, false, None, Some(ui_file));
+    let payload = crate::model::dispatch::dispatch_payload("local n1");
+    rt.submit_write(move |w| w.insert_edge_with_payload_if_absent(domain_fn, ui_impl, EdgeKind::Calls, Some(&payload)))
+        .expect("seed dispatch edge commits");
+
+    let stats = run(&rt, &layered_rules(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
+
+    assert_eq!(stats.forbidden_edges, 0, "a dispatch crosses no boundary");
+    assert_eq!(
+        row(&snapshot(&rt), ui_impl).is_dead,
+        Some(false),
+        "an implementation reached only by dispatch is live"
+    );
+}
+
 #[test]
 fn no_rules_means_no_policy_artifacts_and_null_layers() {
     let (rt, _dir) = runtime();
@@ -1824,4 +1856,158 @@ fn annotation_is_stable_under_repeated_multiworker_runs() {
         run(&rt, &Rules::default(), &entries(), &markers(), &reach(), &coordinate_less(), false).unwrap();
         assert_eq!(first, verdicts(&rt), "verdicts drifted on repeat run {run_ix}");
     }
+}
+
+// ── S-530: language-scoped dead-code roots (Go) ──────────────────────────────
+
+/// The reachability a registry builds when Go joins Rust as capable and
+/// declares its runtime entry points and method-set interfaces — the shape
+/// S-530 measured with (Go itself does not ship the capability).
+fn go_reach() -> Reachability {
+    Reachability {
+        capable: ["rs", "go"].iter().map(|e| (*e).to_string()).collect(),
+        entry_points: ["main", "init"]
+            .iter()
+            .map(|n| ((*n).to_string(), std::iter::once("go".to_string()).collect()))
+            .collect(),
+        method_sets: std::iter::once("go".to_string()).collect(),
+    }
+}
+
+#[test]
+fn a_language_entry_point_is_a_live_root_only_in_its_language() {
+    let (rt, _dir) = runtime();
+    let go = seed_lang_file(&rt, "cmd/app/main.go", "go");
+    let rs = seed_file(&rt, "src/lib.rs");
+    let go_init = seed_node(&rt, 1, "init", NodeKind::Function, false, None, Some(go));
+    let go_helper = seed_node(&rt, 2, "setup", NodeKind::Function, false, None, Some(go));
+    let rs_init = seed_node(&rt, 3, "init", NodeKind::Function, false, None, Some(rs));
+    // Only a function: a method named `init` is an ordinary method in Go.
+    let go_init_method = seed_node(&rt, 4, "init", NodeKind::Method, false, None, Some(go));
+    // `init` called by the runtime reaches what it calls.
+    seed_edge(&rt, go_init, go_helper, EdgeKind::Calls);
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &go_reach(), &coordinate_less(), false).unwrap();
+
+    let snap = snapshot(&rt);
+    assert_eq!(row(&snap, go_init).is_dead, Some(false), "Go's runtime calls `init`: a live root");
+    assert_eq!(row(&snap, go_helper).is_dead, Some(false), "what `init` calls is reachable");
+    assert_eq!(
+        row(&snap, rs_init).is_dead,
+        Some(true),
+        "Go's `init` root never reaches a Rust `fn init` with no caller"
+    );
+    assert_eq!(
+        row(&snap, go_init_method).is_dead,
+        Some(true),
+        "a Go method named `init` has no runtime caller"
+    );
+}
+
+/// The registry's declarations reach the annotation pass as `Reachability::of`
+/// reads them — the input both production callers build (S-530).
+#[cfg(feature = "lang-go")]
+#[test]
+fn reachability_of_the_registry_scopes_gos_roots_to_go() {
+    let tmp = TempDir::new().expect("temp dir");
+    let registry = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+    let reach = Reachability::of(&registry);
+    let go: HashSet<String> = std::iter::once("go".to_string()).collect();
+    assert_eq!(reach.entry_points.get("init"), Some(&go), "{:?}", reach.entry_points);
+    assert_eq!(reach.entry_points.get("main"), Some(&go), "{:?}", reach.entry_points);
+    assert_eq!(reach.method_sets, go, "Go alone implements by method set");
+    assert!(reach.capable.contains("rs") && !reach.capable.contains("go"));
+}
+
+#[test]
+fn a_go_method_an_implemented_interface_declares_is_a_live_root() {
+    let (rt, _dir) = runtime();
+    let iface_file = seed_lang_file(&rt, "zapcore/encoder.go", "go");
+    let impl_file = seed_lang_file(&rt, "zapcore/json_encoder.go", "go");
+    let other_pkg = seed_lang_file(&rt, "internal/other.go", "go");
+    // `type encoder interface { encode(); Close() }`, implemented by `jsonEncoder`.
+    let iface = seed_node(&rt, 1, "encoder", NodeKind::Interface, false, None, Some(iface_file));
+    let spec = seed_node(&rt, 2, "encode", NodeKind::Method, false, None, Some(iface_file));
+    let exported_spec = seed_node(&rt, 3, "Close", NodeKind::Method, true, None, Some(iface_file));
+    let ty = seed_node(&rt, 4, "jsonEncoder", NodeKind::Struct, false, None, Some(impl_file));
+    seed_edge(&rt, iface, spec, EdgeKind::Contains);
+    seed_edge(&rt, iface, exported_spec, EdgeKind::Contains);
+    seed_edge(&rt, ty, iface, EdgeKind::Implements);
+    // The interface the type does not implement declares `decode`.
+    let unused = seed_node(&rt, 5, "decoder", NodeKind::Interface, false, None, Some(iface_file));
+    let unused_spec = seed_node(&rt, 6, "decode", NodeKind::Method, false, None, Some(iface_file));
+    seed_edge(&rt, unused, unused_spec, EdgeKind::Contains);
+
+    let satisfying = seed_node(&rt, 7, "encode", NodeKind::Method, false, None, Some(impl_file));
+    let reached = seed_node(&rt, 8, "escape", NodeKind::Function, false, None, Some(impl_file));
+    seed_edge(&rt, satisfying, reached, EdgeKind::Calls);
+    let other_package = seed_node(&rt, 9, "encode", NodeKind::Method, false, None, Some(other_pkg));
+    // Go's export convention marks a capitalised method exported at extraction.
+    let exported_name = seed_node(&rt, 10, "Close", NodeKind::Method, true, None, Some(other_pkg));
+    let not_implemented = seed_node(&rt, 11, "decode", NodeKind::Method, false, None, Some(impl_file));
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &go_reach(), &coordinate_less(), false).unwrap();
+
+    let snap = snapshot(&rt);
+    assert_eq!(
+        row(&snap, satisfying).is_dead,
+        Some(false),
+        "a method an implemented interface declares is reached through the interface"
+    );
+    assert_eq!(row(&snap, reached).is_dead, Some(false), "and what it calls is reachable");
+    assert_eq!(
+        row(&snap, other_package).is_dead,
+        Some(true),
+        "an unexported spec name is its package's own: another package's method stays dead"
+    );
+    assert_eq!(
+        row(&snap, exported_name).is_dead,
+        Some(false),
+        "an exported method is live in any package, by exported-is-live"
+    );
+    assert_eq!(
+        row(&snap, not_implemented).is_dead,
+        Some(true),
+        "a name only an interface nothing implements declares roots nothing"
+    );
+}
+
+#[test]
+fn the_interface_root_is_scoped_to_method_set_languages() {
+    // Each side of the rule is language-scoped, so a directory mixing Go and
+    // Rust roots nothing across the two: Rust's dead-code verdicts are unchanged
+    // by S-530.
+    let (rt, _dir) = runtime();
+    let go = seed_lang_file(&rt, "src/encode.go", "go");
+    let rs = seed_file(&rt, "src/encode.rs");
+    // An implemented Go interface declares `encode`; a Rust method of that name
+    // is not reached through it.
+    let go_iface = seed_node(&rt, 1, "encoder", NodeKind::Interface, false, None, Some(go));
+    let go_spec = seed_node(&rt, 2, "encode", NodeKind::Method, false, None, Some(go));
+    let go_type = seed_node(&rt, 3, "jsonEncoder", NodeKind::Struct, false, None, Some(go));
+    seed_edge(&rt, go_iface, go_spec, EdgeKind::Contains);
+    seed_edge(&rt, go_type, go_iface, EdgeKind::Implements);
+    let rs_method = seed_node(&rt, 4, "encode", NodeKind::Method, false, None, Some(rs));
+    // An implemented interface of a language without method sets declares
+    // `decode`; a Go method of that name is not reached through it.
+    let rs_iface = seed_node(&rt, 5, "Decoder", NodeKind::Interface, false, None, Some(rs));
+    let rs_spec = seed_node(&rt, 6, "decode", NodeKind::Method, false, None, Some(rs));
+    let rs_type = seed_node(&rt, 7, "Json", NodeKind::Struct, false, None, Some(rs));
+    seed_edge(&rt, rs_iface, rs_spec, EdgeKind::Contains);
+    seed_edge(&rt, rs_type, rs_iface, EdgeKind::Implements);
+    let go_method = seed_node(&rt, 8, "decode", NodeKind::Method, false, None, Some(go));
+
+    run(&rt, &Rules::default(), &entries(), &markers(), &go_reach(), &coordinate_less(), false).unwrap();
+
+    let snap = snapshot(&rt);
+    assert_eq!(
+        row(&snap, rs_method).is_dead,
+        Some(true),
+        "a Go interface's spec never roots a Rust method of its name"
+    );
+    assert_eq!(
+        row(&snap, go_method).is_dead,
+        Some(true),
+        "only a method-set language's interfaces root a method by name"
+    );
 }

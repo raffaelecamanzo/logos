@@ -1,0 +1,14 @@
+// no_network_deps.rs's shape: a host-only tree.
+fn logos_tree_crates() {
+    let args = vec![
+        "tree",
+        "--package",
+        "logos",
+        "--edges",
+        "normal,build",
+        "--color",
+        "never",
+        "--offline",
+    ];
+    let output = Command::new(cargo).args(&args).output();
+}

@@ -1,22 +1,27 @@
-// The Coverage page's run model (S-739, FR-CV-15, FR-CV-11): the progress list of
+// The Coverage page's run model (S-739, FR-CV-15, FR-CV-11): the per-tool rows of
 // a followed run, from the snapshot plus the streamed steps — a tool not started
 // is queued, the one started runs, each settled one reads its outcome in words,
 // and a cancel leaves every unsettled tool cancelled; tools whose ecosystem is
 // absent never appear. Steps merge by `seq`, and the live line says what changed.
 import { describe, expect, it } from "vitest";
 
+import type { CoverageJobEvent } from "../../api/index.ts";
 import { COVERAGE_PREPARE_TEXT, COVERAGE_RUN_TEXT } from "../../copy/coverageView.copy.ts";
 import {
   announcement,
   detectedEcosystems,
+  elapsedMs,
   filesOf,
   listedTools,
+  liveTools,
+  toolMessages,
   NO_RUN,
   prepareRows,
   progressRows,
   runnable,
   withJob,
   withSteps,
+  type PrepareRow,
   type RunView,
 } from "./coverageRunModel.ts";
 import {
@@ -30,6 +35,7 @@ import {
   PREPARABLE_TOOLS,
   RUNNING,
   TOOLS,
+  TOOLS_AFTER,
 } from "./fixtures/coverageRun.ts";
 
 const EXPECTED = TOOLS.filter(runnable).map((t) => t.tool);
@@ -215,5 +221,188 @@ describe("what a prepared run readies first (S-750)", () => {
       "the SHA-256 does not match",
       COVERAGE_PREPARE_TEXT.byHand("no rustup on the PATH", "rustup component add llvm-tools-preview"),
     ]);
+  });
+});
+
+// ── The table carries the run (S-803, CR-250) ────────────────────────────────
+
+describe("liveTools — each tool's live State while a run goes", () => {
+  const live = (job: Parameters<typeof withJob>[1], tools = TOOLS) => {
+    const view = withJob(NO_RUN, job);
+    return liveTools(view, progressRows(view, tools), prepareRows(view));
+  };
+  const words = (m: ReturnType<typeof live>) => [...m].map(([tool, l]) => `${tool}:${l.state}`);
+
+  it("is each tool's progress state while the job runs: queued, running, or its outcome", () => {
+    expect(words(live(RUNNING))).toEqual(["vitest:tests_failed", "maven:not_installed", "go:running", "custom:queued"]);
+  });
+
+  it("is empty once the job is not running — the stored state is shown again (HF-6)", () => {
+    for (const job of [COMPLETED, CANCELLED_END, { ...RUNNING, state: "failed" as const }]) expect(live(job).size).toBe(0);
+    expect(liveTools(NO_RUN, [], []).size).toBe(0);
+  });
+
+  it("gives a tool being readied installing or adding dependency, then queued once readied, then its own run", () => {
+    const [started, finished, componentStarted, componentFinished] = INSTALL_RUNNING.events;
+    const at = (events: typeof INSTALL_RUNNING.events) => live({ ...INSTALL_RUNNING, events }, PREPARABLE_TOOLS).get("cargo-llvm-cov");
+    expect(at([started])).toEqual({ state: "installing", startedMs: started.at_ms, endedMs: null });
+    expect(at([started, finished])?.state).toBe("queued");
+    // The component step belongs to the tool it prepares.
+    expect(at([started, finished, componentStarted])).toEqual({ state: "installing", startedMs: componentStarted.at_ms, endedMs: null });
+    expect(at([started, finished, componentStarted, componentFinished])?.state).toBe("queued");
+    expect(at(INSTALL_RUNNING.events)?.state).toBe("running");
+    const adding = live({ ...DEPENDENCY_CANCELLED, state: "running", events: DEPENDENCY_CANCELLED.events.slice(0, 1) }, PREPARABLE_TOOLS);
+    expect(adding.get("vitest")?.state).toBe("adding_dependency");
+  });
+
+  it("leaves a tool whose readying step did not succeed to its stored state", () => {
+    const [started] = INSTALL_RUNNING.events;
+    const failed = {
+      seq: 1,
+      at_ms: 50,
+      event: { phase: "install_finished" as const, tool: "cargo-llvm-cov", version: "0.9.1", outcome: "failed" as const, stage: "download", reason: "offline" },
+    };
+    expect(live({ ...INSTALL_RUNNING, events: [started, failed] }, PREPARABLE_TOOLS).has("cargo-llvm-cov")).toBe(false);
+  });
+
+  it("keeps when a tool started and ended in the job, from the steps", () => {
+    const go = live(RUNNING).get("vitest");
+    expect(go).toEqual({ state: "tests_failed", startedMs: EVENTS[1].at_ms, endedMs: EVENTS[2].at_ms });
+  });
+});
+
+describe("elapsedMs — a tool's Elapsed", () => {
+  const tool = TOOLS_AFTER.find((t) => t.tool === "vitest")!;
+
+  it("is the recorded duration when the tool is not live, and none when nothing is recorded", () => {
+    expect(elapsedMs(tool, undefined, null)).toBe(4_200);
+    expect(elapsedMs(TOOLS_AFTER.find((t) => t.tool === "maven")!, undefined, 9_000)).toBeNull();
+    const old = { ...tool, last_run: { ...tool.last_run!, duration_ms: undefined } };
+    expect(elapsedMs(old, undefined, null)).toBeNull();
+  });
+
+  it("counts from the start while live, stops at the end once it settled, and is none before it starts", () => {
+    expect(elapsedMs(tool, { state: "running", startedMs: 1_000, endedMs: null }, 4_500)).toBe(3_500);
+    expect(elapsedMs(tool, { state: "ran", startedMs: 1_000, endedMs: 2_500 }, 9_000)).toBe(1_500);
+    expect(elapsedMs(tool, { state: "queued", startedMs: null, endedMs: null }, 9_000)).toBeNull();
+    expect(elapsedMs(tool, { state: "running", startedMs: 1_000, endedMs: null }, null)).toBeNull();
+    // The clock never runs it backwards.
+    expect(elapsedMs(tool, { state: "running", startedMs: 5_000, endedMs: null }, 4_000)).toBe(0);
+  });
+});
+
+describe("toolMessages — the cause below the table", () => {
+  const kinds = (m: ReturnType<typeof toolMessages>) => m.map((x) => `${x.tool}:${x.state}`);
+
+  it("holds the failed, timed-out and tests-failed tools of the stored record, in table order, nothing else", () => {
+    expect(kinds(toolMessages(TOOLS_AFTER, [], new Map()))).toEqual(["vitest:tests_failed", "custom:failed"]);
+    expect(toolMessages(TOOLS, [], new Map())).toEqual([]);
+    const [vitest] = toolMessages(TOOLS_AFTER, [], new Map());
+    expect(vitest).toMatchObject({ kind: "run", cause: expect.stringContaining("totals the cart"), log: null });
+  });
+
+  it("carries a missing cause as null and a missing log as null, never an empty text", () => {
+    const bare = TOOLS_AFTER.map((t) => (t.last_run ? { ...t, last_run: { ...t.last_run, cause: undefined, log: null } } : t));
+    expect(toolMessages(bare, [], new Map()).map((m) => (m.kind === "run" ? [m.cause, m.log] : null))).toEqual([[null, null], [null, null]]);
+  });
+
+  it("leaves out a tool live in the run going, and adds a readying step that failed or was refused", () => {
+    const view = withJob(NO_RUN, RUNNING);
+    const live = liveTools(view, progressRows(view, TOOLS_AFTER), prepareRows(view));
+    expect(toolMessages(TOOLS_AFTER, [], live)).toEqual([]);
+    const refused = {
+      key: "dependency:vitest", tool: "vitest", kind: "dependency" as const, what: "pnpm add", state: "refused" as const, detail: "run by hand", startedMs: 0,
+    };
+    // A cancel that changed nothing says nothing; one that put files back names them.
+    const quiet = { ...refused, key: "x", state: "cancelled" as const, detail: null };
+    const putBack = { ...quiet, key: "y", detail: "Put back as it was: package.json." };
+    expect(toolMessages([], [refused, quiet, putBack], new Map()).map((m) => (m.kind === "prepare" ? `${m.key}:${m.state}` : m.tool))).toEqual([
+      "dependency:vitest:refused",
+      "y:cancelled",
+    ]);
+  });
+});
+
+describe("COVERAGE_RUN_TEXT.elapsed — the Elapsed cell's words (S-803)", () => {
+  it.each([
+    [0, "<1 s"],
+    [999, "<1 s"],
+    [1_000, "1 s"],
+    [4_200, "4 s"],
+    [59_999, "59 s"],
+    [60_000, "1 min 0 s"],
+    [125_000, "2 min 5 s"],
+  ])("reads %i ms as %s", (ms, words) => {
+    expect(COVERAGE_RUN_TEXT.elapsed(ms)).toBe(words);
+  });
+});
+
+describe("which readying outcomes let a tool go on, and which the message area states (S-803)", () => {
+  const readyingJob = (events: CoverageJobEvent["event"][]) => ({
+    ...INSTALL_RUNNING,
+    events: events.map((event, seq) => ({ seq, at_ms: 100 + seq * 100, event })),
+  });
+  const liveOf = (events: CoverageJobEvent["event"][]) => {
+    const view = withJob(NO_RUN, readyingJob(events));
+    return liveTools(view, progressRows(view, PREPARABLE_TOOLS), prepareRows(view)).get("cargo-llvm-cov")?.state;
+  };
+  const install = { phase: "install_started", tool: "cargo-llvm-cov", version: "0.9.1" } as const;
+  const component = { phase: "component_started", component: "llvm-tools-preview", command: "rustup component add llvm-tools-preview" } as const;
+
+  it("reads queued after an install that found the tool already present", () => {
+    expect(
+      liveOf([install, { phase: "install_finished", tool: "cargo-llvm-cov", version: "0.9.1", outcome: "already_present", binary: "/tools/cargo-llvm-cov" }]),
+    ).toBe("queued");
+  });
+
+  it("keeps the stored state of a tool with one step done and another not: every step must have ended well", () => {
+    const installed = { phase: "install_finished", tool: "cargo-llvm-cov", version: "0.9.1", outcome: "installed", binary: "/tools/cargo-llvm-cov" } as const;
+    const noRustup = { phase: "component_finished", component: "llvm-tools-preview", outcome: "no_rustup", reason: "rustup was not found", command: "rustup component add llvm-tools-preview" } as const;
+    expect(liveOf([install, installed, component, noRustup])).toBeUndefined();
+  });
+
+  it("states a readying step that did not end well, and no step that did or still goes", () => {
+    const step = (state: PrepareRow["state"]): PrepareRow => ({
+      key: `install:${state}`, tool: "cargo-llvm-cov", kind: "install", what: "cargo-llvm-cov 0.9.1", state, detail: null, startedMs: 0,
+    });
+    const stated = (states: PrepareRow["state"][]) =>
+      toolMessages([], states.map(step), new Map()).map((m) => (m.kind === "prepare" ? m.state : "run"));
+    expect(stated(["failed", "unavailable", "timed_out", "refused", "no_rustup"])).toEqual(["failed", "unavailable", "timed_out", "refused", "no_rustup"]);
+    expect(stated(["installed", "already_present", "added", "running", "pending"])).toEqual([]);
+  });
+});
+
+describe("toolMessages lists only the tools the table lists (S-803)", () => {
+  it("leaves out a tool whose ecosystem is not here, whatever its stored record says", () => {
+    const tools = TOOLS_AFTER.map((t) =>
+      t.tool === "jest" ? { ...t, last_run: { outcome: "failed" as const, exit_code: 1, head_sha: null, finished_at: 1, log: null, cause: "stale" } } : t,
+    );
+    expect(tools.find((t) => t.tool === "jest")?.state).toBe("not_applicable");
+    expect(toolMessages(tools, [], new Map()).map((m) => (m.kind === "run" ? m.tool : m.key))).toEqual(["vitest", "custom"]);
+  });
+});
+
+describe("the detail a readying step carries (S-803)", () => {
+  const detailsOf = (events: CoverageJobEvent["event"][]) =>
+    prepareRows(withJob(NO_RUN, { ...INSTALL_RUNNING, state: "completed", events: events.map((event, seq) => ({ seq, at_ms: 10 + seq, event })) })).map(
+      (r) => r.detail,
+    );
+
+  it("gives an install that was unavailable its reason, and a refused addition the command to run by hand", () => {
+    expect(
+      detailsOf([{ phase: "install_finished", tool: "cargo-llvm-cov", version: "0.9.1", outcome: "unavailable", reason: "no release for this platform" }]),
+    ).toEqual(["no release for this platform"]);
+    expect(
+      detailsOf([
+        {
+          phase: "dependency_finished",
+          tool: "vitest",
+          package: "@vitest/coverage-v8@3",
+          outcome: "refused",
+          reason: "no lockfile names the package manager",
+          hand_command: "npm install --save-dev @vitest/coverage-v8@3",
+        },
+      ]),
+    ).toEqual([COVERAGE_PREPARE_TEXT.byHand("no lockfile names the package manager", "npm install --save-dev @vitest/coverage-v8@3")]);
   });
 });

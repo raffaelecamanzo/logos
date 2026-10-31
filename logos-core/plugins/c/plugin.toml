@@ -3,30 +3,48 @@
 # Droppable `.scm` query overrides resolve under `.logos/plugins/c/queries/`
 # (FR-PL-04, UAT-PL-03).
 #
-# C is the set's **honesty fixture** (NFR-CC-04): it ships NO test convention
-# (test files fall back to the path-convention `is_test` heuristic) and NO
-# frameworks capability, and it is NOT class-applicable — its
-# symbols query emits neither `Class` nor `Struct` nodes, so the Cohesion
-# (Class) and Focus (Class ∪ Struct) dimensions both drop out as `n/a` rather
-# than fabricating a clean score on method-less C aggregates (FR-QM-11,
-# FR-CV-08 — n/a paths).
+# C is the set's **honesty fixture** (NFR-CC-04): it ships NO frameworks
+# capability, and it is NOT class-applicable — its symbols query emits no
+# `Class` node, so the Cohesion (Class) dimension drops out as `n/a` rather
+# than scoring a method-less C aggregate (FR-QM-11, FR-CV-08 — n/a paths). A
+# `struct`/`union` with a body is a `Struct` (S-582, FR-EX-31), so Focus
+# (Class ∪ Struct) counts it as it counts a Go type with no methods: by its
+# span alone.
 
 name = "c"
-# `.c` only — `.h` headers belong to the C++ plugin under the fixed ownership
-# rule (S-056/S-058): C ⊂≈ C++ grammatically, so the C++ grammar parses headers
-# without losing C constructs, and a single owner avoids double extraction.
-extensions = ["c"]
+
+# Disclosed beside this row of `logos languages` and, with the count, on the
+# row that reads the headers in `status` of a repository holding both C and
+# C++ sources (S-572, S-582, CR-185, FR-PL-07).
+note = "`.h` headers are read as C in a repository with more C sources (`.c`) than C++ sources (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`), and as C++ otherwise."
+# `.h` is shared with the C++ plugin, which claims it too (S-582, FR-PL-07):
+# each repository's headers are read by one of the two — C when its `.c`
+# files outnumber its C++ sources, C++ otherwise — so no header is extracted
+# twice. The decision is recorded with the graph.
+extensions = ["c", "h"]
+shared_extensions = ["h"]
 
 # C has a flat translation-unit module space (no packages/namespaces); the
 # `::` ledger separator is the canonical join, matching the engine default.
 module_separator = "::"
+
+# An `#include` names a header by path, read as C++'s are (S-579, S-584,
+# FR-RS-38): only `/` separates, and the header is named whole, extension
+# included. A quoted `#include "x.h"` is read against the including file's
+# directory first; it and `#include <a/b.h>` are then read against the include
+# roots — every `include/` and `src/` directory, and every directory holding an
+# `include/` one — to exactly one file. A header no root holds (`<stdio.h>`) is
+# a system header and stays external. A bare call reads the including file's
+# own declarations, then those of every file its includes reach.
+import_specifier = "path"
+bare_specifiers = "include-roots"
 
 # tree-sitter-c 0.24.2 is generated against ABI 15.
 abi_version = 15
 
 # No `frameworks` capability (C has no dominant web framework) — the honesty
 # posture.
-capabilities = ["symbols", "references"]
+capabilities = ["symbols", "references", "locals"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03):
 # the C control-flow keywords and short-circuit/ternary operators. C has no
@@ -45,24 +63,42 @@ export_convention = "non-static"
 
 # A call may expand a macro (S-521, CR-170, FR-RS-16): `f(x)` whose one
 # candidate is a `#define f(x)` binds `Calls` to that Macro node. A macro and a
-# function of one name in one file are two candidates, and stay unbound. Headers
-# belong to the C++ plugin (above), so a macro a `.h` defines is no candidate.
+# function of one name in one file are two candidates, and stay unbound. A
+# header C reads (above) declares its `#define`s as Macro nodes too (S-582).
 macros_callable = true
 
-# No `test_convention` key: C has no dominant unit-test annotation/naming idiom
-# at extraction time, so it defaults to `TestConvention::None`. Test files are
-# still recognised by the path-convention `is_test` fallback (FR-QM-08); the
-# absence of an extraction-time marker is honest, not an error (FR-EX-06).
+# C's test idioms are macros and framework headers, not annotations (S-583,
+# CR-185, FR-EX-06): a function whose return-type position holds a known test
+# macro (libuv's `TEST_IMPL(name) { … }`), a `test_*` function of a file that
+# includes Unity or cmocka, and a function a cmocka `cmocka_unit_test*(f, …)`
+# registration names. Test files are also recognised by the path-convention
+# `is_test` fallback (FR-QM-08), which this adds to rather than replaces.
+test_convention = "c-test-macros"
 
-# Declared cross-file reach (S-570, CR-180, FR-PL-09): declarations only —
-# nothing binds across files; a call to a function of the same file does bind
-# (stakeholder decision, Sprint 86 HF-3: C and C++ read `same-file`, not `symbols`).
+# The link unit (S-584, CR-185, FR-RS-40): a bare call its own file and its
+# includes do not define binds to the one non-`static` definition of the name
+# among the repository's C files (`.c`, and `.h` where C reads the headers) — a
+# prototype a header declares names the function, never a second candidate. A `static` function is its own file's
+# alone; two non-`static` definitions (platform variants, libuv's
+# `uv_loop_init`) bind neither. No build file is read.
+[module_model]
+kind = "path"
+link_unit = true
+
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): an `#include` binds the
+# header it names, and a bare call binds through the includes and the link
+# unit (S-584). C has no type relation the graph records, and no call on a
+# receiver (`s->f()`, a function pointer) binds.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
-level = "same-file"
+level = "partial"
+cross_file = ["calls", "imports"]
 
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"

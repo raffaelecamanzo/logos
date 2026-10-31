@@ -1,0 +1,12 @@
+// A liveness timeout: the duration is inside the deadline the assertion reads.
+fn ended(jobs: &Jobs) -> Snapshot {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let snapshot = jobs.snapshot().expect("a job ran");
+        if snapshot.state != State::Running {
+            return snapshot;
+        }
+        assert!(Instant::now() < deadline, "the job is still running: {snapshot:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}

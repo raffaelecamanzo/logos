@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/`engine.rs`/Engine#",
+      "value": 163
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/coverage/`mod.rs`/CoverageRunner#",
+      "value": 20
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/extract/`receiver.rs`/Receivers#",
+      "value": 22
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/federation/`registry.rs`/EngineRegistry#",
+      "value": 33
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/graph_store/`mod.rs`/BatchWriter#",
+      "value": 53
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/graph_store/`mod.rs`/SqliteGraphStore#",
+      "value": 91
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/plugin/`manifest.rs`/PluginManifest#",
+      "value": 20
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/plugin/`registry.rs`/LanguageRegistry#",
+      "value": 56
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/resolve/`binder.rs`/Ctx#",
+      "value": 182
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/resolve/`binder.rs`/Index#",
+      "value": 54
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/resolve/`package_key.rs`/PackageLayout#",
+      "value": 77
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/security/`mod.rs`/Orchestrator#",
+      "value": 33
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-core/src/tools/`mod.rs`/Installer#",
+      "value": 34
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "logos-ext/src/`host.rs`/ExtensionHost#",
+      "value": 20
+    },
+    {
+      "rule": "no_god_containers",
+      "symbol": "mcp/src/`server.rs`/LogosMcp#",
+      "value": 58
+    }
+  ]
+}

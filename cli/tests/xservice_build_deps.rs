@@ -321,7 +321,16 @@ fn a_workspace_without_build_manifests_prints_status_with_no_build_section() {
     // runnable source) — part of the payload before the relation existed.
     assert_eq!(
         keys,
-        ["coverage", "degraded_rollup", "kind_candidates", "members", "topics", "warm_rollup", "workspace"],
+        [
+            "coverage",
+            "degraded_rollup",
+            "kind_candidates",
+            "members",
+            "reference_resolution",
+            "topics",
+            "warm_rollup",
+            "workspace"
+        ],
     );
     let (text, _) = logos_human(tmp.path(), &["workspace", "status"]);
     assert!(!text.contains("build_dependency"), "{text}");

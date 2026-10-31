@@ -1,0 +1,18 @@
+// Loop guards read the clock to decide whether to keep polling; they assert no
+// bound, so they are not sites. `assert_eq!` is not a bound either.
+fn wait_for_ready(ready: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !ready.exists() {
+        if Instant::now() > deadline {
+            panic!("never became ready");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn poll(started: Instant) {
+    while started.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(started.elapsed().as_secs() < 5, false);
+}

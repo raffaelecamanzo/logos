@@ -33,8 +33,9 @@
 //! finding, migration 8 ([S-767]) the commit a history-only secret is
 //! anchored to, migration 9 ([S-768]) the `unrated` severity and
 //! migration 10 ([S-778]) one OSV-Scanner identity in any clone,
-//! migration 11 ([S-780]) a history-only secret's own path — the
-//! evidence store stays one file.
+//! migration 11 ([S-780]) a history-only secret's own path, migration 12
+//! ([S-817]) a finding's stated confidence — the evidence store stays one
+//! file.
 //!
 //! Migrations follow the same forward-only `user_version` discipline as
 //! [`crate::graph_store::migrate`] and [`crate::observability::db`] — one
@@ -57,6 +58,9 @@
 //! [S-768]: ../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
 //! [S-778]: ../../../docs/planning/journal.md#s-778-an-osv-scanner-finding-has-one-identity-in-any-clone-and-at-any-scanner-version
 //! [S-780]: ../../../docs/planning/journal.md#s-780-a-secret-found-only-in-history-is-known-by-its-own-path-not-by-todays-files
+//! [S-817]: ../../../docs/planning/journal.md#s-817-a-finding-its-scanner-marks-low-confidence-reads-needs-review-and-is-still-gated
+//! [S-808]: ../../../docs/planning/journal.md#s-808-a-dependency-result-is-keyed-by-its-package-and-a-repeated-result-is-one-finding
+//! [S-809]: ../../../docs/planning/journal.md#s-809-one-advisory-on-one-package-is-one-finding-whichever-scanners-reported-it
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 
 use std::path::Path;
@@ -75,8 +79,11 @@ use super::miner::{CommitFact, FileChange};
 /// scoped-snapshot provenance, [S-765] migration 7 for the Gitleaks
 /// identity, [S-767] migration 8 for a history-only secret's commit
 /// anchor, [S-768] migration 9 for the `unrated` severity, [S-778]
-/// migration 10 for the OSV-Scanner identity and [S-780] migration 11 for a
-/// history-only secret's own path, on this same track. A shipped migration is **never** edited.
+/// migration 10 for the OSV-Scanner identity, [S-780] migration 11 for a
+/// history-only secret's own path, [S-817] migration 12 for a finding's
+/// stated confidence, [S-808] migration 13 for a dependency result's
+/// package identity and [S-809] migration 14 for its stored package, on this
+/// same track. A shipped migration is **never** edited.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -534,6 +541,78 @@ const MIGRATIONS: &[(i64, &str)] = &[
         11,
         "UPDATE security_snapshots SET report_hash = 'pre-11:' || report_hash
           WHERE lower(trim(scanner_name)) = 'gitleaks';",
+    ),
+    // ── Migration 12 (S-817, CR-253, ADR-79): a finding carries the confidence
+    // its scanner states — Semgrep's `... CONFIDENCE` rule tag, CodeQL's and
+    // gosec's rule `precision`, Bandit's `issue_confidence` — so a `low` one
+    // reads "needs review" without a re-read of its report. The column is no
+    // part of a finding's identity: no fingerprint, baseline row or ignore
+    // entry changes.
+    //
+    // A stored row's confidence was never kept and its report is not, so every
+    // existing row reads 'unstated': it stays in the headline until the next
+    // ingest of its scanner decides it anew. The stored snapshots' report
+    // hashes are marked so that re-ingesting one of their very reports is that
+    // ingest, not a no-op that would leave them 'unstated'. A hash an earlier
+    // migration already marked (`pre-9:`..`pre-11:`) is left as it is: it
+    // matches no report either, and the next Gitleaks ingest still finds a
+    // `pre-11:` snapshot by its prefix (store::pre11_places).
+    (
+        12,
+        "ALTER TABLE security_findings
+             ADD COLUMN confidence TEXT NOT NULL DEFAULT 'unstated'
+                 CHECK (confidence IN ('low','medium','high','unstated'));
+         UPDATE security_snapshots SET report_hash = 'pre-12:' || report_hash
+          WHERE report_hash NOT LIKE 'pre-%';",
+    ),
+    // ── Migration 13 (S-808, CR-252, ADR-79): a dependency result is keyed by
+    // its package. An OSV-Scanner, Trivy or Dependency-Check result that names
+    // its package is keyed by rule, path and the package's name and version,
+    // never by its region or the report's identity, and takes no occurrence
+    // suffix: the results OSV-Scanner writes once per record of one advisory
+    // are one finding, and two packages sharing one advisory stay two. Every
+    // other finding keeps its key.
+    //
+    // A stored row cannot be re-keyed here: its package was never stored
+    // (only its masked message is). The next ingest of each of those
+    // scanners re-keys every stored row its results map, in every snapshot
+    // and in the ratchet's baseline — an exact repeat's two rows merging into
+    // one — and each row lists its old keys in `legacy_fingerprints`
+    // (store::rekey), which every surface honours. Their snapshots' report
+    // hashes are marked so that re-ingesting one of their very reports is
+    // that ingest, not a no-op that would leave them under the old keys; a
+    // hash an earlier migration marked (`pre-9:`..`pre-12:`) already matches
+    // no report and is left as it is.
+    (
+        13,
+        "UPDATE security_snapshots SET report_hash = 'pre-13:' || report_hash
+          WHERE report_hash NOT LIKE 'pre-%'
+            AND lower(trim(scanner_name)) IN ('osv-scanner', 'trivy', 'dependency-check');",
+    ),
+    // ── Migration 14 (S-809, CR-252, ADR-79): one advisory on one package is
+    // one finding, whichever scanners reported it. A dependency row stores the
+    // package its scanner names — the name and version as that scanner states
+    // them — so the reader can merge the findings of OSV-Scanner, Trivy and
+    // Dependency-Check on one lockfile, package and version whose advisory
+    // aliases intersect (security::merge). The columns are no part of a
+    // finding's identity: no fingerprint, baseline row or ignore entry changes.
+    //
+    // A row stored before this migration has none. OSV-Scanner's and Trivy's
+    // messages name the package, so theirs is read from the stored message;
+    // Dependency-Check names it only in a location's `logicalLocations`,
+    // which was never stored. Its snapshots' report hashes are marked so that
+    // re-ingesting one of their very reports stores the package, not a no-op
+    // that would leave its findings unmerged; a hash an earlier migration
+    // marked (`pre-9:`..`pre-13:`) already matches no report and is left as
+    // it is. The mark is above 13, so that ingest recovers no pre-13 key
+    // (store::recovers_pre13).
+    (
+        14,
+        "ALTER TABLE security_findings ADD COLUMN package_name TEXT;
+         ALTER TABLE security_findings ADD COLUMN package_version TEXT;
+         UPDATE security_snapshots SET report_hash = 'pre-14:' || report_hash
+          WHERE report_hash NOT LIKE 'pre-%'
+            AND lower(trim(scanner_name)) = 'dependency-check';",
     ),
 ];
 

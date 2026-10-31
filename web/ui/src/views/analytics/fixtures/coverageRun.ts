@@ -28,8 +28,9 @@ export const TOOLS: CoverageToolStatus[] = [
   { tool: "custom", state: "never_run", last_run: null },
 ];
 
-/** The same project after one run: vitest's suite failed with its report
- *  ingested, go ran, the custom command failed. */
+/** The same project after one run (S-802's record: each tool's `duration_ms`, and
+ *  the `cause` of the two that did not pass): vitest's suite failed with its
+ *  report ingested and names the failing test, go ran, the custom command failed. */
 export const TOOLS_AFTER: CoverageToolStatus[] = [
   { tool: "cargo-llvm-cov", state: "not_applicable", last_run: null },
   {
@@ -37,7 +38,15 @@ export const TOOLS_AFTER: CoverageToolStatus[] = [
     state: "tests_failed",
     version: "3.2.4",
     origin: "project",
-    last_run: { outcome: "tests_failed", exit_code: 1, head_sha: "4f9c2e1d0b7a", finished_at: 1_761_170_000, log: null },
+    last_run: {
+      outcome: "tests_failed",
+      exit_code: 1,
+      head_sha: "4f9c2e1d0b7a",
+      finished_at: 1_761_170_000,
+      log: null,
+      duration_ms: 4_200,
+      cause: "FAIL src/cart.test.ts > totals the cart\nAssertionError: expected 41 to be 42",
+    },
   },
   { tool: "jest", state: "not_applicable", last_run: null },
   { tool: "pytest-cov", state: "not_applicable", last_run: null },
@@ -47,7 +56,7 @@ export const TOOLS_AFTER: CoverageToolStatus[] = [
     tool: "go",
     state: "ran",
     origin: "path",
-    last_run: { outcome: "ran", exit_code: 0, head_sha: "4f9c2e1d0b7a", finished_at: 1_761_170_000, log: null },
+    last_run: { outcome: "ran", exit_code: 0, head_sha: "4f9c2e1d0b7a", finished_at: 1_761_170_000, log: null, duration_ms: 1_500 },
   },
   {
     tool: "custom",
@@ -58,6 +67,8 @@ export const TOOLS_AFTER: CoverageToolStatus[] = [
       head_sha: "4f9c2e1d0b7a",
       finished_at: 1_761_170_000,
       log: ".logos/coverage/custom.failed.log",
+      duration_ms: 380,
+      cause: "make: *** No rule to make target 'cov'.  Stop.",
     },
   },
 ];

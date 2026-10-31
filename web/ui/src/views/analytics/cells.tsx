@@ -31,7 +31,10 @@ export function CoverageCellView({ cell, pct }: { cell: CoverageCell; pct: strin
  *  file with none, and any stale findings labelled apart — they never join the
  *  count (the file changed since the scan, so they may no longer hold). The
  *  findings in test code are `+N test` beside it (FR-SC-28, S-796), a second
- *  link to the Security page's test-code scope: they are not in the count either. */
+ *  link to the Security page's test-code scope: they are not in the count either.
+ *  The production findings their scanner marks low-confidence are `+N review`
+ *  (FR-SC-31, S-817), and the findings on a dev-only dependency `+N dev`
+ *  (FR-SC-30, S-810), both linking to the page's all-code scope. */
 export function FindingsCellView({ cell, path }: { cell: PathFindings; path: string }) {
   return (
     <>
@@ -55,6 +58,22 @@ export function FindingsCellView({ cell, path }: { cell: PathFindings; path: str
           {" "}
           <a href={securityHref(path, "test")} className="muted">
             +{cell.test} test
+          </a>
+        </>
+      )}
+      {cell.dev > 0 && (
+        <>
+          {" "}
+          <a href={securityHref(path, "all")} className="muted">
+            +{cell.dev} dev
+          </a>
+        </>
+      )}
+      {cell.needs_review > 0 && (
+        <>
+          {" "}
+          <a href={securityHref(path, "all")} className="muted">
+            +{cell.needs_review} review
           </a>
         </>
       )}

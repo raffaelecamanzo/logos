@@ -111,7 +111,10 @@
           },
           "excluded": {
             "not_fresh": 1,
-            "suppressed": 1
+            "suppressed": 1,
+            "test": 0,
+            "dev": 0,
+            "needs_review": 0
           },
           "owasp": [
             {
@@ -314,7 +317,10 @@
           "findings": null,
           "excluded": {
             "not_fresh": 0,
-            "suppressed": 0
+            "suppressed": 0,
+            "test": 0,
+            "dev": 0,
+            "needs_review": 0
           },
           "owasp": [
             {
@@ -454,7 +460,10 @@
     },
     "excluded": {
       "not_fresh": 1,
-      "suppressed": 1
+      "suppressed": 1,
+      "test": 0,
+      "dev": 0,
+      "needs_review": 0
     },
     "owasp": [
       {

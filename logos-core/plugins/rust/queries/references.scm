@@ -80,6 +80,26 @@
           type: (_) @ref.call.qualified.type
           alias: (_) @ref.call.qualified.trait))) @ref.call))
 
+;   @ref.call.qualified.bare — a qualified self naming no trait, `<T>::m()` (S-627,
+;                 CR-205, FR-RS-47): the bracket's type node, beside its `@ref.call`.
+;                 The row records the path the call writes — `<W>::new()` is
+;                 `W::new`, `<Vec<u8>>::new()` is `Vec::new` — so the one
+;                 associated-item lookup binds it, never the bare `new` a bracket
+;                 stripped to (which bound a free `fn new`). A type that is no
+;                 path (`<[u8]>::len`, `<&str>::len`, `<dyn Tr>::m`) records as
+;                 written and binds nothing. The capture also matches the
+;                 `qualified_type` of `<T as Tr>::m`; extraction ignores that.
+(call_expression
+  function: (scoped_identifier
+    path: (bracketed_type
+      (_) @ref.call.qualified.bare)) @ref.call)
+
+(call_expression
+  function: (generic_function
+    function: (scoped_identifier
+      path: (bracketed_type
+        (_) @ref.call.qualified.bare)) @ref.call))
+
 (call_expression
   function: (field_expression
     value: (_) @_receiver

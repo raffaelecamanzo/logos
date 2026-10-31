@@ -38,12 +38,15 @@
 #   exists now.
 #
 #   `--tier fast` certifies what `gate.sh fast` actually runs — clippy, test,
-#   arch, public-terms — and NOTHING is relaxed about those four: same
-#   recomputation from counters, same tree identity, same refusal of a "skip".
-#   (public-terms is required at both tiers, S-716: a term merged after a fast
-#   gate is as public as one merged after a full gate. script-suites, S-719, is
-#   required at full only: `gate.sh fast` runs it exactly when scripts/ or the
-#   plugin tree (plugins/, .claude-plugin/) changed, so fast accepts evidence
+#   arch, public-terms, timing-assertions, offline-cargo — and NOTHING is relaxed
+#   about those six: same recomputation from counters, same tree identity, same
+#   refusal of a "skip". (public-terms is required at both tiers, S-716: a term
+#   merged after a fast gate is as public as one merged after a full gate.
+#   timing-assertions, S-804, is required at both for the same reason: the check
+#   reads the whole tree, whatever the change touched; offline-cargo, S-805,
+#   likewise. script-suites, S-719, is required at full only: `gate.sh fast` runs
+#   it exactly when scripts/ or the plugin tree (plugins/, .claude-plugin/)
+#   changed, so fast accepts evidence
 #   with or without it and validates it when present.)
 #   The fast tier exists because the standing sprint contract runs one full gate
 #   on MERGED MAIN at review rather than eight per-branch full gates, and
@@ -57,11 +60,30 @@
 #       fails on the stale tree id;
 #     - it is opt-in per call. Nothing acquires a weaker gate by default.
 #
+# THE THIRD TIER, `--tier ci` (S-806, NFR-MA-11): the evidence of `gate.sh ci`, the
+#   pre-publish run of ci.yml's test steps in a Linux container. Its three gates
+#   (ci-ui-build, ci-script-suites, ci-test) carry their own names, so it never
+#   overwrites the full tier's evidence, and the two stand in for each other
+#   nowhere: `--tier ci` accepts only tier "ci" evidence — a tier "fast" or "full"
+#   file under a ci gate's name is refused — and `--tier fast|full` never reads a
+#   ci gate. Same recomputation from counters, same tree identity, same refusal
+#   of a "skip". It certifies a PUBLISH precondition, not a session handoff, so it
+#   writes no marker (--write-marker with it is a usage error).
+#
+# `--tree <id>` (S-807): certify THAT tree instead of the one the working directory
+#   holds. scripts/publish-sprint.sh hands it local main's tree, because what a
+#   sprint publishes is main's tree, whatever is checked out where the owner runs
+#   it: evidence for any other tree — HEAD's, a dirty working tree's — is stale.
+#   The suites the tree holds are then listed from that tree, not from the disk.
+#   It certifies a tree, not a handoff, so it writes no marker (a usage error).
+#
 # `set -uo pipefail` without -e: the checks report, they must not abort. bash 3.2.
 #
 # Usage:
 #   bash scripts/verify-evidence.sh --strict
 #   bash scripts/verify-evidence.sh --strict --tier fast --write-marker <path>
+#   bash scripts/verify-evidence.sh --strict --tier ci  # after `bash scripts/gate.sh ci`
+#   bash scripts/verify-evidence.sh --strict --tier ci --tree <tree-id>
 #   bash scripts/verify-evidence.sh --report            # human-readable, no gate
 #
 # Exit codes:
@@ -74,6 +96,8 @@ set -uo pipefail
 MODE=""
 MARKER=""
 EXPECT_TIER="full"
+TREE_GIVEN=""
+TREE_SET=no
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -93,6 +117,11 @@ while [ $# -gt 0 ]; do
             MARKER="${2:-}"
             shift 2 || shift
             ;;
+        --tree)
+            TREE_GIVEN="${2:-}"
+            TREE_SET=yes
+            shift 2 || shift
+            ;;
         *)
             echo "verify-evidence.sh: unknown argument: $1" >&2
             exit 2
@@ -101,18 +130,33 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$MODE" ]; then
-    echo "usage: bash scripts/verify-evidence.sh --strict [--tier full|fast] [--write-marker <path>]" >&2
+    echo "usage: bash scripts/verify-evidence.sh --strict [--tier full|fast|ci] [--write-marker <path> | --tree <id>]" >&2
     echo "       bash scripts/verify-evidence.sh --report" >&2
     exit 2
 fi
 
 case "$EXPECT_TIER" in
-    full|fast) ;;
+    full|fast|ci) ;;
     *)
-        echo "verify-evidence.sh: --tier must be \"full\" or \"fast\", got: $EXPECT_TIER" >&2
+        echo "verify-evidence.sh: --tier must be \"full\", \"fast\" or \"ci\", got: $EXPECT_TIER" >&2
         exit 2
         ;;
 esac
+
+if [ "$EXPECT_TIER" = ci ] && [ -n "$MARKER" ]; then
+    echo "verify-evidence.sh: tier ci certifies a publish precondition, not a handoff; it writes no marker" >&2
+    exit 2
+fi
+
+if [ "$TREE_SET" = yes ] && [ -z "$TREE_GIVEN" ]; then
+    echo "verify-evidence.sh: --tree needs a tree id" >&2
+    exit 2
+fi
+
+if [ -n "$TREE_GIVEN" ] && [ -n "$MARKER" ]; then
+    echo "verify-evidence.sh: --tree certifies a given tree, not a handoff; it writes no marker" >&2
+    exit 2
+fi
 
 if ! command -v python3 >/dev/null 2>&1; then
     echo "verify-evidence.sh: python3 is required" >&2
@@ -131,33 +175,58 @@ EVID="$(git rev-parse --path-format=absolute --git-path gate-evidence)"
 # Recomputed independently of anything gate.sh recorded. Identical method to
 # gate.sh's, deliberately: `git add -A` onto a throwaway index copy yields the
 # same tree object that git-commit-and-verify.sh will commit, so the identity is
-# invariant across the commit boundary.
-idx="$(git rev-parse --path-format=absolute --git-path index)"
-tmpidx="$EVID/.verify-index.$$"
-mkdir -p "$EVID" || exit 2
-if ! cp "$idx" "$tmpidx" 2>/dev/null; then
-    echo "verify-evidence.sh: could not copy the index" >&2
-    exit 2
+# invariant across the commit boundary. With --tree it is the tree asked for.
+if [ -n "$TREE_GIVEN" ]; then
+    TREE_NOW="$(git rev-parse --verify --quiet "$TREE_GIVEN^{tree}" 2>/dev/null)"
+    if [ -z "$TREE_NOW" ]; then
+        echo "verify-evidence.sh: --tree names no tree of this repository: $TREE_GIVEN" >&2
+        exit 2
+    fi
+else
+    idx="$(git rev-parse --path-format=absolute --git-path index)"
+    tmpidx="$EVID/.verify-index.$$"
+    mkdir -p "$EVID" || exit 2
+    if ! cp "$idx" "$tmpidx" 2>/dev/null; then
+        echo "verify-evidence.sh: could not copy the index" >&2
+        exit 2
+    fi
+    GIT_INDEX_FILE="$tmpidx" git add -A >/dev/null 2>&1
+    TREE_NOW="$(GIT_INDEX_FILE="$tmpidx" git write-tree 2>/dev/null)"
+    rm -f "$tmpidx"
 fi
-GIT_INDEX_FILE="$tmpidx" git add -A >/dev/null 2>&1
-TREE_NOW="$(GIT_INDEX_FILE="$tmpidx" git write-tree 2>/dev/null)"
-rm -f "$tmpidx"
 
 if [ -z "$TREE_NOW" ]; then
     echo "verify-evidence.sh: could not compute the current tree identity" >&2
     exit 2
 fi
 
-VERIFY_OUT="$EVID/.verify-out.$$"
-python3 - "$EVID" "$TREE_NOW" "$MODE" "$EXPECT_TIER" >"$VERIFY_OUT" 2>&1 <<'PY'
-import glob, json, os, sys
+# Beside the evidence directory, not in it: with --tree that directory may not exist
+# (no gate ran), and a read-only question must not create it.
+VERIFY_OUT="$(git rev-parse --path-format=absolute --git-path "verify-out.$$")"
+python3 - "$EVID" "$TREE_NOW" "$MODE" "$EXPECT_TIER" "$TREE_GIVEN" >"$VERIFY_OUT" 2>&1 <<'PY'
+import glob, json, os, subprocess, sys
 
 evid, tree_now, mode, expect_tier = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+tree_given = sys.argv[5]
+
+
+def suites_held():
+    """The scripts/tests/test-*.sh the certified tree holds: the working directory's
+    by default, the given tree's when --tree names one (never the disk then)."""
+    if not tree_given:
+        return sorted(glob.glob(os.path.join("scripts", "tests", "test-*.sh")))
+    # Direct children only, as the glob above and gate.sh's suite loop see them; -z so
+    # that a name with a non-ASCII byte is not C-quoted into something that fails the match.
+    listed = subprocess.run(["git", "ls-tree", "-z", "--name-only", "-r", tree_now, "scripts/tests/"],
+                            capture_output=True, encoding="utf-8", errors="surrogateescape",
+                            check=True).stdout.split("\0")
+    return sorted(p for p in listed if os.path.dirname(p) == "scripts/tests"
+                  and os.path.basename(p).startswith("test-") and p.endswith(".sh"))
 
 # The full tier's contract. A gate absent from disk is a gate that did not run.
 ALL_GATES = [
     "clippy", "test", "agents-marker", "deny", "arch", "public-terms",
-    "script-suites", "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
+    "timing-assertions", "offline-cargo", "script-suites", "ui-typecheck", "ui-test", "ui-build", "ui-e2e",
 ]
 # What `gate.sh fast` actually runs. Its two UI legs are conditional on web/ui
 # having changed (and script-suites, when scripts/ or the plugin tree did), so they are not
@@ -167,7 +236,11 @@ ALL_GATES = [
 # older tree is history from an earlier run, not a claim about the tree being
 # handed off, so it is skipped rather than treated as a failure: the marker will
 # name the gates it actually certified.
-FAST_GATES = ["clippy", "test", "arch", "public-terms"]
+FAST_GATES = ["clippy", "test", "arch", "public-terms", "timing-assertions", "offline-cargo"]
+# What `gate.sh ci` runs (S-806): ci.yml's test steps in a Linux container. Each is
+# recorded by a tier-"ci" run under its own name, so the three tiers' evidence
+# never collide, and none of them appears in ALL_GATES or FAST_GATES.
+CI_GATES = ["ci-ui-build", "ci-script-suites", "ci-test"]
 
 # What a unit counts, per gate, in every message and row that names it: test
 # binaries and tests by default. The public-terms gate's one unit counts the
@@ -205,6 +278,28 @@ UNIT_WORDS = {
         "floor": None,
         "row_field": "passed", "row_extra": "%d checks passed",
     },
+    # The timing-assertions gate's one unit counts the elapsed-time assertions its
+    # walk found (gate.sh's gate_timing_assertions); a failure is an upper bound
+    # that bypasses logos_core::perf. A walk that found none is `started == 0`.
+    "timing-assertions": {
+        "things": "timing assertions", "short": "sites",
+        "killed": "the scan was killed mid-walk",
+        "failures": "unscaled elapsed-time bound(s)",
+        "nothing_ran": "the walk found no timing assertion",
+        "floor": None,
+        "row_field": "failed", "row_extra": "%d unscaled",
+    },
+    # The offline-cargo gate's one unit counts the offline cargo calls its walk found
+    # (gate.sh's gate_offline_cargo); a failure is a call that names no platform
+    # (S-805). A walk that found none is `started == 0`.
+    "offline-cargo": {
+        "things": "offline cargo calls", "short": "sites",
+        "killed": "the scan was killed mid-walk",
+        "failures": "unfiltered offline cargo call(s)",
+        "nothing_ran": "the walk found no offline cargo call",
+        "floor": None,
+        "row_field": "failed", "row_extra": "%d unfiltered",
+    },
     "public-terms": {
         "things": "text files", "short": "files",
         "killed": "the scan was killed mid-walk",
@@ -215,10 +310,23 @@ UNIT_WORDS = {
     },
 }
 
-REQUIRED = FAST_GATES if expect_tier == "fast" else ALL_GATES
-OPTIONAL = [g for g in ALL_GATES if g not in REQUIRED]
-# A stronger tier than the one asked for is never a problem; a weaker one is.
-ALLOWED_TIERS = {"full"} if expect_tier == "full" else {"fast", "full"}
+# The ci-script-suites unit is a suite exactly as script-suites' is.
+UNIT_WORDS["ci-script-suites"] = UNIT_WORDS["script-suites"]
+SUITE_GATES = ("script-suites", "ci-script-suites")
+
+if expect_tier == "ci":
+    REQUIRED, OPTIONAL = CI_GATES, []
+elif expect_tier == "fast":
+    REQUIRED = FAST_GATES
+    OPTIONAL = [g for g in ALL_GATES if g not in REQUIRED]
+else:
+    REQUIRED = ALL_GATES
+    OPTIONAL = []
+# A stronger tier than the one asked for is never a problem; a weaker one is. The
+# ci tier is not on that ladder: it is a different run (another OS, an empty cargo
+# home), so only itself certifies it, and it certifies nothing of the other two.
+ALLOWED_TIERS = {"ci"} if expect_tier == "ci" else (
+    {"full"} if expect_tier == "full" else {"fast", "full"})
 
 problems = []
 seen_trees = {}
@@ -232,6 +340,12 @@ for gate in REQUIRED + OPTIONAL:
     if not os.path.exists(path):
         if gate in REQUIRED:
             problems.append("%s: no evidence file (the gate did not run)" % gate)
+            if expect_tier == "ci" and gate == REQUIRED[0]:
+                other = [g for g in ALL_GATES if os.path.exists(os.path.join(evid, g + ".json"))]
+                if other:
+                    problems.append(
+                        "the %s evidence here is tier fast or full, which never stands in "
+                        "for tier ci: run bash scripts/gate.sh ci" % ",".join(other))
             rows.append((gate, "-", "MISSING", "-", "-"))
         continue
     try:
@@ -251,7 +365,12 @@ for gate in REQUIRED + OPTIONAL:
 
     tier = doc.get("tier")
     if tier not in ALLOWED_TIERS:
-        if expect_tier == "full":
+        if expect_tier == "ci":
+            problems.append(
+                "%s: tier is %r, not \"ci\" — evidence from another tier never "
+                "stands in for the container run" % (gate, tier)
+            )
+        elif expect_tier == "full":
             problems.append(
                 "%s: tier is %r, not \"full\" — the fast tier is never sufficient "
                 "for a full-tier handoff" % (gate, tier)
@@ -327,25 +446,25 @@ for gate in REQUIRED + OPTIONAL:
     # status is checked on its own — the generic counters above see `failed`,
     # which a suite that exited non-zero without counting a failure would leave
     # at zero.
-    if gate == "script-suites" and doc.get("tree_id") == tree_now:
+    if gate in SUITE_GATES and doc.get("tree_id") == tree_now:
         if verdict == "pass" and not units:
-            problems.append("script-suites: passed with no suite unit — nothing was run")
+            problems.append("%s: passed with no suite unit — nothing was run" % gate)
         ran = set()
         for u in units:
             ran.add(u.get("unit"))
             if u.get("exit_code") != 0:
-                problems.append("script-suites/%s: the suite exited %r"
-                                % (u.get("unit"), u.get("exit_code")))
+                problems.append("%s/%s: the suite exited %r"
+                                % (gate, u.get("unit"), u.get("exit_code")))
             elif u.get("verdict") == "pass" and not u.get("passed"):
-                problems.append("script-suites/%s: the suite counted no passing check "
-                                "— a suite that proved nothing is not a pass" % u.get("unit"))
-        for suite in sorted(glob.glob(os.path.join("scripts", "tests", "test-*.sh"))):
+                problems.append("%s/%s: the suite counted no passing check "
+                                "— a suite that proved nothing is not a pass" % (gate, u.get("unit")))
+        for suite in suites_held():
             name = os.path.basename(suite)[:-len(".sh")]
             if name not in ran:
-                problems.append("script-suites/%s: the tree holds this suite "
-                                "but the evidence has no unit for it" % name)
+                problems.append("%s/%s: the tree holds this suite "
+                                "but the evidence has no unit for it" % (gate, name))
 
-    if gate == "test":
+    if gate in ("test", "ci-test"):
         # The denominator, carried into the marker. A test gate with no units is
         # a pass over ZERO binaries; the marker must say so rather than let a
         # reader infer a suite ran.

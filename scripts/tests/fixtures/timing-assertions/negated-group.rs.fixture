@@ -1,0 +1,7 @@
+// A negated group holds its bound the other way round: the comparison inside
+// `!( .. || ..)` is an upper bound when it reads `>`.
+fn negated_group(flag: bool) {
+    let start = Instant::now();
+    assert!(!(start.elapsed() > Duration::from_secs(1) || flag));
+    assert!(!(start.elapsed() > logos_core::perf::scaled(Duration::from_secs(1)) || flag));
+}

@@ -12,7 +12,7 @@ use std::path::Path;
 use chrono::NaiveDate;
 
 use super::suppress::{canonical_path, label, suppress, unsuppress, IgnoreFile, Labelled, Selector, Suppression, IGNORE_FILE};
-use super::{FindingBinding, SecurityFinding, Severity};
+use super::{FindingBinding, ScannerConfidence, SecurityFinding, Severity};
 use crate::error::exit_code;
 
 const FP_A: &str = "0a7c3e51d9b84f26a1c05e8d7b3f9246e1d08a5c7b2f4963d8e0a1b5c7f92e43";
@@ -33,6 +33,7 @@ fn at(path: &str, scanner: &str, rule: &str) -> SecurityFinding {
         fingerprint: format!("{:064x}", fxhash(&format!("{scanner}␟{rule}␟{path}"))),
         rule_id: rule.into(),
         severity: Severity::High,
+        confidence: ScannerConfidence::Unstated,
         cwes: Vec::new(),
         message: "m".into(),
         redacted: false,
@@ -47,6 +48,7 @@ fn at(path: &str, scanner: &str, rule: &str) -> SecurityFinding {
         legacy_fingerprints: Vec::new(),
         anchor: None,
         freshness: "fresh",
+        reporters: Vec::new(),
     }
 }
 
@@ -256,7 +258,7 @@ fn a_path_suppression_serialises_its_selector() {
         json["entries"][0],
         serde_json::json!({
             "entry": {"path": "tests/fixtures", "scanner": "gitleaks", "reason": "r", "expires": null},
-            "expired": false, "orphaned": false, "suppressed": 1, "should_name": null
+            "expired": false, "orphaned": false, "suppressed": 1, "should_name": null, "out_of_date": []
         })
     );
 }
@@ -325,10 +327,11 @@ fn an_escaping_or_broken_glob_is_rejected_at_its_line() {
 
 #[test]
 fn an_entry_with_neither_selector_still_names_its_header_line() {
-    let (message, code) = rejected("\n\n[[ignore]]\nrule = \"x\"\nreason = \"r\"\n");
+    let (message, code) = rejected("\n\n[[ignore]]\nreason = \"r\"\n");
     assert_eq!(code, 2);
     assert!(message.contains("line 3"), "{message}");
     assert!(message.contains("no `fingerprint`") && message.contains("no `path`"), "{message}");
+    assert!(message.contains("no `rule` with its `scanner`"), "{message}");
 }
 
 #[test]
@@ -553,4 +556,269 @@ fn project_location_is_root_relative_and_none_outside_the_project() {
         assert_eq!(project_location(root, "/work/project-old/Cargo.lock"), None, "near miss: a sibling sharing the prefix");
         assert_eq!(project_location(root, "/elsewhere/Cargo.lock"), None);
     }
+}
+
+// ── a rule suppressed project-wide ([S-814]) ────────────────────────────────
+//
+// [S-814]: ../../../../docs/planning/journal.md#s-814-a-rule-can-be-suppressed-project-wide-with-a-reason
+
+const CHECKOV_RULE_WIDE: &str =
+    "[[ignore]]\nscanner = \"checkov\"\nrule = \"CKV_K8S_21\"\nreason = \"the namespace is set by the deploy tool\"\n";
+
+#[test]
+fn a_rule_wide_entry_suppresses_that_rule_of_that_scanner_in_every_file() {
+    let findings = [
+        at("k8s/deploy.yaml", "Checkov", "CKV_K8S_21"),
+        at("charts/api/templates/pod.yaml", "Checkov", "CKV_K8S_21"),
+        at("Dockerfile", "Checkov", "CKV_K8S_21"),
+        at("k8s/deploy.yaml", "Checkov", "CKV_K8S_22"),
+        at("k8s/deploy.yaml", "Semgrep OSS", "CKV_K8S_21"),
+        at("k8s/deploy.yaml", "Checkov", "ckv_k8s_21"),
+        at("k8s/deploy.yaml", "Checkov", "CKV_K8S_210"),
+        at("k8s/deploy.yaml", "Checkov", "XCKV_K8S_21"),
+        at("k8s/deploy.yaml", "Checkov OSS", "CKV_K8S_21"),
+    ];
+    let out = labelled(&findings, CHECKOV_RULE_WIDE);
+    let held: Vec<_> = out.findings.iter().map(|f| f.is_suppressed()).collect();
+    assert_eq!(
+        held,
+        [true, true, true, false, false, false, false, false, false],
+        "the rule matches exactly, the scanner in either case and whole"
+    );
+    for labelled in out.findings.iter().filter(|f| f.is_suppressed()) {
+        let Some(Suppression::Suppressed { reason, expires, by, .. }) = &labelled.suppression else { panic!("{labelled:?}") };
+        assert_eq!(reason, "the namespace is set by the deploy tool", "each stays listed with the entry's reason");
+        assert_eq!(*expires, None);
+        assert_eq!(*by, Selector::Rule { rule: "CKV_K8S_21".into(), scanner: "checkov".into() });
+    }
+    assert_eq!(out.entries[0].suppressed, 3);
+    assert!(!out.entries[0].orphaned && !out.entries[0].expired);
+}
+
+#[test]
+fn a_rule_wide_entry_names_a_finding_with_no_location() {
+    let mut nowhere = at("x", "checkov", "CKV_K8S_21");
+    nowhere.path = None;
+    nowhere.report_path = None;
+    let out = labelled(&[nowhere], CHECKOV_RULE_WIDE);
+    assert!(out.findings[0].is_suppressed(), "no file is needed to be named by a rule");
+    assert_eq!(out.entries[0].suppressed, 1);
+}
+
+#[test]
+fn a_rule_wide_entry_that_matches_no_finding_is_orphaned() {
+    let out = labelled(&[at("k8s/deploy.yaml", "Checkov", "CKV_K8S_22")], CHECKOV_RULE_WIDE);
+    assert!(out.entries[0].orphaned);
+    assert_eq!(out.entries[0].suppressed, 0);
+    assert!(out.findings[0].suppression.is_none());
+}
+
+#[test]
+fn a_rule_wide_entry_honours_its_expiry_through_the_day_it_names() {
+    let findings = [at("k8s/deploy.yaml", "Checkov", "CKV_K8S_21")];
+    let text = format!("{CHECKOV_RULE_WIDE}expires = 2026-10-19\n");
+    let ignore = IgnoreFile::parse(&text).unwrap();
+    let on = |day: u32| label(&findings, &ignore, Path::new(ROOT), NaiveDate::from_ymd_opt(2026, 10, day).unwrap());
+
+    let last_day = on(19);
+    assert!(last_day.findings[0].is_suppressed(), "the entry suppresses through its expiry, inclusive");
+    assert_eq!(last_day.entries[0].suppressed, 1);
+
+    let after = on(20);
+    assert!(!after.findings[0].is_suppressed());
+    let Some(Suppression::Expired { reason, expires, by }) = &after.findings[0].suppression else {
+        panic!("{:?}", after.findings[0].suppression)
+    };
+    assert_eq!((reason.as_str(), *expires), ("the namespace is set by the deploy tool", NaiveDate::from_ymd_opt(2026, 10, 19)));
+    assert_eq!(*by, Selector::Rule { rule: "CKV_K8S_21".into(), scanner: "checkov".into() });
+    assert!(after.entries[0].expired && !after.entries[0].orphaned);
+    assert_eq!(after.entries[0].suppressed, 0);
+}
+
+#[test]
+fn a_rule_wide_entry_labels_after_a_fingerprint_and_a_path_entry_name_the_finding() {
+    let finding = at("k8s/deploy.yaml", "Checkov", "CKV_K8S_21");
+    let fingerprint = finding.fingerprint.clone();
+    let without_fingerprint = format!("{CHECKOV_RULE_WIDE}\n[[ignore]]\npath = \"k8s\"\nreason = \"the k8s tree\"\n");
+    let text = format!("{without_fingerprint}\n[[ignore]]\nfingerprint = \"{fingerprint}\"\nreason = \"this one\"\n");
+    let out = labelled(std::slice::from_ref(&finding), &text);
+    let Some(Suppression::Suppressed { reason, .. }) = &out.findings[0].suppression else { panic!() };
+    assert_eq!(reason, "this one", "fingerprint, then path, then rule-wide");
+    assert_eq!(out.entries.iter().map(|e| (e.suppressed, e.orphaned)).collect::<Vec<_>>(), [(1, false), (0, false), (0, false)]);
+
+    let out = labelled(&[finding], &without_fingerprint);
+    let Some(Suppression::Suppressed { reason, .. }) = &out.findings[0].suppression else { panic!() };
+    assert_eq!(reason, "the k8s tree", "a path entry labels before a rule-wide one");
+}
+
+#[test]
+fn a_rule_wide_suppression_serialises_its_selector_without_a_path_or_fingerprint() {
+    let out = labelled(&[at("k8s/deploy.yaml", "Checkov", "CKV_K8S_21")], CHECKOV_RULE_WIDE);
+    let json = serde_json::to_value(&out).unwrap();
+    assert_eq!(
+        json["findings"][0]["suppression"],
+        serde_json::json!({
+            "state": "suppressed", "reason": "the namespace is set by the deploy tool", "expires": null,
+            "by": {"rule": "CKV_K8S_21", "scanner": "checkov"}
+        })
+    );
+    assert_eq!(
+        json["entries"][0],
+        serde_json::json!({
+            "entry": {"rule": "CKV_K8S_21", "scanner": "checkov", "reason": "the namespace is set by the deploy tool", "expires": null},
+            "expired": false, "orphaned": false, "suppressed": 1, "should_name": null, "out_of_date": []
+        })
+    );
+}
+
+#[test]
+fn an_entry_with_only_a_rule_or_only_a_scanner_is_rejected_naming_the_missing_key() {
+    for (keys, line, missing, present) in [
+        ("rule = \"CKV_K8S_21\"\nreason = \"r\"\n", 2, "`scanner`", "`rule`"),
+        ("reason = \"r\"\nrule = \"CKV_K8S_21\"\n", 3, "`scanner`", "`rule`"),
+        ("scanner = \"checkov\"\nreason = \"r\"\n", 2, "`rule`", "`scanner`"),
+        ("reason = \"r\"\nscanner = \"checkov\"\n", 3, "`rule`", "`scanner`"),
+    ] {
+        let (message, code) = rejected(&format!("[[ignore]]\n{keys}"));
+        assert_eq!(code, 2, "{keys}");
+        assert!(message.contains(&format!("line {line}")), "{keys}: {message}");
+        assert!(message.contains(&format!("has a {present} but no {missing}")), "{keys}: {message}");
+    }
+}
+
+#[test]
+fn a_rule_wide_entry_with_a_blank_key_is_rejected_at_its_line() {
+    for (key, other) in [("rule", "scanner = \"checkov\""), ("scanner", "rule = \"CKV_K8S_21\"")] {
+        let (message, code) = rejected(&format!("[[ignore]]\n{other}\n{key} = \" \"\nreason = \"r\"\n"));
+        assert_eq!(code, 2, "{key}");
+        assert!(message.contains("line 3") && message.contains(&format!("`{key}` is empty")), "{key}: {message}");
+        assert!(!message.contains("leave it out"), "a rule-wide entry cannot leave the key out: {message}");
+    }
+}
+
+#[test]
+fn a_rule_wide_entry_leaves_the_other_rejections_in_force() {
+    // A whole-project glob is refused whatever rule and scanner sit beside it.
+    for glob in ["*", "**", "."] {
+        let text = format!("[[ignore]]\npath = \"{glob}\"\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\nreason = \"r\"\n");
+        let (message, code) = rejected(&text);
+        assert_eq!(code, 2, "{glob}");
+        assert!(message.contains("line 2") && message.contains("covers the whole project"), "{glob}: {message}");
+    }
+    // A fingerprint takes no narrowing, rule and scanner together included.
+    let (message, code) = rejected(&format!(
+        "[[ignore]]\nfingerprint = \"{FP_A}\"\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\nreason = \"r\"\n"
+    ));
+    assert_eq!(code, 2);
+    assert!(message.contains("line 3") && message.contains("narrow a `path` entry"), "{message}");
+    // Nor does the rule-wide entry take a reason-less spelling or a repeat.
+    let (message, _) = rejected("[[ignore]]\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\n");
+    assert!(message.contains("no `reason`"), "{message}");
+    let twice = format!("{CHECKOV_RULE_WIDE}\n[[ignore]]\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\nreason = \"again\"\n");
+    let (message, code) = rejected(&twice);
+    assert_eq!(code, 2);
+    assert!(message.contains("line 7") && message.contains("already given at line 3"), "{message}");
+    assert!(message.contains("duplicate rule \"CKV_K8S_21\" scanner \"checkov\""), "{message}");
+}
+
+#[test]
+fn rule_wide_entries_sort_last_and_a_canonical_file_round_trips_byte_for_byte() {
+    let canonical = format!(
+        "[[ignore]]\nfingerprint = \"{FP_A}\"\nreason = \"one\"\n\n\
+         [[ignore]]\npath = \"tests/fixtures\"\nreason = \"two\"\n\n\
+         [[ignore]]\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\nreason = \"three\"\nexpires = 2027-04-19\n\n\
+         [[ignore]]\nrule = \"CKV_K8S_22\"\nscanner = \"checkov\"\nreason = \"four\"\n"
+    );
+    assert_eq!(IgnoreFile::parse(&canonical).unwrap().to_toml(), canonical);
+
+    // Any key order and the lenient spellings parse to the same canonical text.
+    let shuffled = format!(
+        "[[ignore]]\nreason = \"four\"\nscanner = \"checkov\"\nrule = \"CKV_K8S_22\"\n\n\
+         [[ignore]]\nscanner = 'checkov'\nexpires = \"2027-04-19\"\nreason = \"three\"\nrule = \"CKV_K8S_21\"\n\n\
+         [[ignore]]\nreason = \"two\"\npath = \"./tests/fixtures/\"\n\n\
+         [[ignore]]\nreason = \"one\"\nfingerprint = \"{FP_A}\"\n"
+    );
+    assert_eq!(IgnoreFile::parse(&shuffled).unwrap().to_toml(), canonical);
+}
+
+#[test]
+fn suppressing_a_rule_writes_the_canonical_spelling_and_unsuppressing_restores_the_file_byte_for_byte() {
+    let before = std::fs::read_to_string(sorted_fixture()).unwrap();
+    let dir = root_with(&before);
+    let selector = Selector::Rule { rule: "CKV_K8S_21".into(), scanner: "checkov".into() };
+    let added = suppress(dir.path(), selector.clone(), " the deploy tool sets it ", NaiveDate::from_ymd_opt(2027, 1, 1), today()).unwrap();
+    assert_eq!((added.entries, &added.entry.selector), (4, &selector));
+    let written = std::fs::read_to_string(dir.path().join(IGNORE_FILE)).unwrap();
+    assert!(
+        written.ends_with(
+            "\n\n[[ignore]]\nrule = \"CKV_K8S_21\"\nscanner = \"checkov\"\nreason = \"the deploy tool sets it\"\nexpires = 2027-01-01\n"
+        ),
+        "the rule-wide entry is written last, canonical: {written}"
+    );
+    // A second write reads the file as canonical, and the repeat is refused.
+    let err = suppress(dir.path(), selector.clone(), "again", None, today()).unwrap_err();
+    assert!(err.to_string().contains("already suppressed"), "{err}");
+
+    unsuppress(dir.path(), selector).unwrap();
+    assert_eq!(std::fs::read_to_string(dir.path().join(IGNORE_FILE)).unwrap(), before, "add-then-remove restores the file");
+}
+
+#[test]
+fn a_refused_rule_wide_suppression_writes_nothing() {
+    let before = std::fs::read_to_string(sorted_fixture()).unwrap();
+    for (selector, why) in [
+        (Selector::Rule { rule: " ".into(), scanner: "checkov".into() }, "`rule` is empty"),
+        (Selector::Rule { rule: "CKV_K8S_21".into(), scanner: String::new() }, "`scanner` is empty"),
+    ] {
+        let dir = root_with(&before);
+        let err = suppress(dir.path(), selector.clone(), "r", None, today()).unwrap_err();
+        assert_eq!(exit_code(&err), 2, "{selector:?}");
+        assert!(err.to_string().contains(why), "{selector:?}: {err}");
+        assert_eq!(std::fs::read_to_string(dir.path().join(IGNORE_FILE)).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_surface_selector_with_a_rule_and_a_scanner_alone_is_rule_wide() {
+    let some = |s: &str| Some(s.to_string());
+    assert_eq!(
+        Selector::from_parts(None, None, some("CKV_K8S_21"), some("checkov")).unwrap(),
+        Selector::Rule { rule: "CKV_K8S_21".into(), scanner: "checkov".into() }
+    );
+    for (rule, scanner, missing) in
+        [(some("CKV_K8S_21"), None, "has a `rule` but no `scanner`"), (None, some("checkov"), "has a `scanner` but no `rule`")]
+    {
+        let err = Selector::from_parts(None, None, rule, scanner).unwrap_err();
+        assert_eq!(exit_code(&err), 2, "{missing}");
+        assert!(err.to_string().contains(missing), "{missing}: {err}");
+    }
+    let err = Selector::from_parts(None, None, some(" "), some("checkov")).unwrap_err();
+    assert!(err.to_string().contains("`rule` is empty"), "{err}");
+    // Beside a path it is still a narrowing, and beside a fingerprint still refused.
+    assert!(matches!(Selector::from_parts(None, some("tests"), some("k"), some("s")).unwrap(), Selector::Path { .. }));
+    let err = Selector::from_parts(some(FP_A), None, some("k"), some("s")).unwrap_err();
+    assert!(err.to_string().contains("narrow a `path` entry"), "{err}");
+}
+
+#[test]
+fn the_same_rule_of_two_scanners_is_two_entries_each_removed_on_its_own() {
+    let both = format!("{CHECKOV_RULE_WIDE}\n[[ignore]]\nrule = \"CKV_K8S_21\"\nscanner = \"semgrep\"\nreason = \"semgrep's own\"\n");
+    let ignore = IgnoreFile::parse(&both).expect("one rule of two scanners is not a repeat");
+    assert_eq!(ignore.len(), 2);
+    let out = label(
+        &[at("k8s/a.yaml", "checkov", "CKV_K8S_21"), at("k8s/a.yaml", "semgrep", "CKV_K8S_21")],
+        &ignore,
+        Path::new(ROOT),
+        today(),
+    );
+    assert_eq!(out.entries.iter().map(|e| (e.suppressed, e.orphaned)).collect::<Vec<_>>(), [(1, false), (1, false)]);
+
+    let wide = |scanner: &str| Selector::Rule { rule: "CKV_K8S_21".into(), scanner: scanner.into() };
+    let dir = tempfile::tempdir().unwrap();
+    suppress(dir.path(), wide("checkov"), "one", None, today()).unwrap();
+    suppress(dir.path(), wide("semgrep"), "two", None, today()).expect("the second scanner is not 'already suppressed'");
+    let removed = unsuppress(dir.path(), wide("semgrep")).unwrap();
+    assert_eq!((removed.entry.selector, removed.entries), (wide("semgrep"), 1));
+    let left = IgnoreFile::load(dir.path()).unwrap();
+    assert_eq!(left.entries().iter().map(|e| e.selector.clone()).collect::<Vec<_>>(), [wide("checkov")]);
 }

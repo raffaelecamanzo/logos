@@ -26,7 +26,7 @@
                   "security",
                   "external/cwe/cwe-89"
                 ],
-                "precision": "low"
+                "precision": "medium"
               },
               "helpUri": "https://bandit.readthedocs.io/en/1.7.10/plugins/b608_hardcoded_sql_expressions.html"
             }
@@ -127,7 +127,7 @@
             }
           ],
           "properties": {
-            "issue_confidence": "LOW",
+            "issue_confidence": "MEDIUM",
             "issue_severity": "MEDIUM"
           },
           "ruleId": "B608",

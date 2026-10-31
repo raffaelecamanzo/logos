@@ -285,7 +285,7 @@ impl Page {
 
     /// The member's install job, once it is no longer running.
     async fn ended(&self) -> Value {
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         loop {
             let (status, body) = self.get("/api/v1/security/install").await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -500,7 +500,7 @@ async fn cancelling_mid_download_leaves_no_partial_tool_and_reports_what_was_ins
         let answer = json!({ "scan": true, "consent": accepted(&asked["plan"]), "scan_consent": defaults });
         let (status, started) = page.post("/api/v1/security/install", &answer).await;
         assert_eq!(status, StatusCode::OK, "{started}");
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         let (leader, sleeper) = loop {
             if let Some(line) = fs::read_to_string(w.rec().join("curl.pids")).ok().filter(|s| s.ends_with('\n')) {
                 let pids: Vec<u32> = line.split_whitespace().map(|p| p.parse().unwrap()).collect();
@@ -533,7 +533,7 @@ async fn cancelling_mid_download_leaves_no_partial_tool_and_reports_what_was_ins
         assert_eq!(job["state"], "cancelled", "{job}");
 
         // The download was killed: neither the hanging curl nor its child runs.
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(10));
         let alive = |pid: &u32| {
             Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
         };
@@ -611,7 +611,7 @@ async fn beside_a_web_install_mcp_and_cli_scans_and_installs_are_refused_naming_
             page.post("/api/v1/security/install", &json!({ "tools": [tool], "consent": accepted(&asked["plan"]) })).await;
         assert_eq!(status, StatusCode::OK, "{started}");
         let job = started["job"]["id"].as_u64().unwrap();
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while w.downloads().is_empty() {
             assert!(Instant::now() < deadline, "the install never started its download");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -800,7 +800,7 @@ async fn an_install_waiting_for_another_members_is_cancelled_at_once() {
         let (first, second) = (w.page(&manifest), w.page_at(&other, &manifest));
         let consent = |tool: &str| json!({ "tools": [tool], "consent": [format!("{tool} {}", manifest.tool(tool).unwrap().version)] });
         assert_eq!(first.post("/api/v1/security/install", &consent("trivy")).await.0, StatusCode::OK);
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while !fs::read_to_string(w.rec().join("curl.pids")).is_ok_and(|s| s.ends_with('\n')) {
             assert!(Instant::now() < deadline, "trivy's download never started");
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -810,7 +810,7 @@ async fn an_install_waiting_for_another_members_is_cancelled_at_once() {
         let (status, _) = second.post("/api/v1/security/install/cancel", &json!({})).await;
         assert_eq!(status, StatusCode::OK);
         let cancelled = Instant::now();
-        let deadline = cancelled + Duration::from_secs(5);
+        let deadline = cancelled + logos_core::perf::scaled(Duration::from_secs(5));
         let job = loop {
             let (_, body) = second.get("/api/v1/security/install").await;
             if body["job"]["state"] != "running" {
@@ -1020,7 +1020,7 @@ async fn an_install_waits_out_a_scan_and_a_scan_phase_cancel_reports_what_was_in
             ),
         );
         let sleeping = || async {
-            let deadline = Instant::now() + JOB_WAIT;
+            let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
             while !fs::read_to_string(w.rec().join("trivy.pids")).is_ok_and(|s| s.ends_with('\n')) {
                 assert!(Instant::now() < deadline, "trivy never started scanning");
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1046,7 +1046,7 @@ async fn an_install_waits_out_a_scan_and_a_scan_phase_cancel_reports_what_was_in
         assert_eq!(current["job"]["id"], installed["id"], "no install job started: {current}");
         assert_eq!(w.downloads().len(), downloads, "nothing is fetched beside a scan");
         page.post("/api/v1/security/scan/cancel", &json!({})).await;
-        let deadline = Instant::now() + JOB_WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(JOB_WAIT);
         while page.get("/api/v1/security/scan").await.1["job"]["state"] == "running" {
             assert!(Instant::now() < deadline, "the scan is still running");
             tokio::time::sleep(Duration::from_millis(25)).await;

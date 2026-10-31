@@ -32,15 +32,28 @@
 #   exactly as they would be published (read from the commit, never from the
 #   working directory). A hit aborts before any commit object is written (exit 1).
 #   Last, once the commit id is known, the remote-tracking branch origin/sprint/N,
-#   when present, must be that commit (exit 2). That one check follows the build,
-#   so its refusal leaves the unreferenced commit object behind; with --push the
-#   branch on origin itself is read instead and must be absent or that commit.
+#   when present, must be that commit (exit 2). That check follows the build, so its
+#   refusal leaves the unreferenced commit object behind, as does the --push
+#   refusal for missing gate evidence (below); with --push the branch on origin
+#   itself is read instead and must be absent or that commit.
+#   --push alone also needs the evidence of `bash scripts/gate.sh ci` (below).
 #
 # DRY RUN BY DEFAULT
 #   Without --push the script writes one unreferenced commit object and nothing
-#   else: no branch, no tag, no remote call. It prints the commit id, the message
-#   and the exact `git push` and `gh pr create` it would run. Local main, every
+#   else: no branch, no tag, no remote call. It prints the commit id, whether the
+#   gate evidence below is present, the message and the exact `git push` and
+#   `gh pr create` it would run. Local main, every
 #   existing ref, local history and every remote are never moved in either mode.
+#
+# THE CI GATE (--push only; S-807, NFR-MA-11)
+#   --push exits 2, naming `bash scripts/gate.sh ci` and writing no ref, unless passing
+#   tier `ci` evidence exists for the tree of local main — the tree this script
+#   publishes, whatever is checked out where it runs, decided by
+#   `verify-evidence.sh --strict --tier ci --tree <main's tree>`. Evidence for any
+#   other tree counts as absent. It is checked once the commit is built, so the
+#   ancestry and the term gates refuse first, as before. A dry run prints whether
+#   the evidence is present and builds and prints the commit either way.
+#   scripts/publish-public.sh --tag-only has no such precondition.
 #
 # --push
 #   Checks that origin can be read and its main still equals the local
@@ -69,7 +82,8 @@
 # Exit codes:
 #   0  dry run printed, or the push and the pull request succeeded
 #   1  the term gate found a listed term in the message or the tree; nothing built
-#   2  usage error, or a precondition above does not hold
+#   2  usage error, or a precondition above does not hold (with --push: no passing
+#      tier ci evidence for main's tree)
 #   3  the term gate could not run, or read a different number of files than
 #      the message or the tree holds
 #   4  the push failed
@@ -81,6 +95,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHECK="$HERE/check-public-terms.sh"
 CORE="$HERE/lib/publish-core.sh"
+VERIFY="$HERE/verify-evidence.sh"
 REMOTE=origin
 SPRINT=""
 PUSH=no
@@ -145,6 +160,7 @@ done
 [ -n "$SPRINT" ] || usage
 [[ "$SPRINT" =~ ^[1-9][0-9]*$ ]] || die 2 "--sprint must be a sprint number (got '$SPRINT')"
 [ -f "$CHECK" ] || die 2 "cannot find $CHECK"
+[ -f "$VERIFY" ] || die 2 "cannot find $VERIFY"
 
 # The repository is the one the caller stands in; nothing in the environment may
 # point git somewhere else.
@@ -284,6 +300,19 @@ echo "  stories  $STORY_IDS"
 publish_commit_message
 echo "  squash   $SQUASH"
 
+# The evidence of `gate.sh ci` for main's tree (S-807). Only --push refuses on it;
+# either way the run says whether it is there. Whatever the verifier cannot certify
+# counts as absent, its own exit 2 (no python3, no such tree) included.
+GATE_CI_CMD="bash scripts/gate.sh ci"
+EVIDENCE=absent
+EVIDENCE_OUT="$(bash "$VERIFY" --strict --tier ci --tree "$TREE" 2>&1)" && EVIDENCE=present
+if [ "$EVIDENCE" = present ]; then
+    echo "  gate evidence: present (tier ci, tree $TREE)"
+else
+    echo "  gate evidence: absent for tree $TREE: run $GATE_CI_CMD"
+    printf '%s\n' "$EVIDENCE_OUT" | sed -n '/^EVIDENCE REJECTED/,/^$/p; /^verify-evidence.sh:/p' | sed 's/^/    /'
+fi
+
 # The branch origin's tracking ref already holds must be this commit. Offline: the
 # dry run makes no remote call, and --push reads origin itself below.
 TRACKED="$(git rev-parse --verify --quiet "refs/remotes/$REMOTE/$BRANCH^{commit}" || true)"
@@ -307,11 +336,19 @@ echo "pr:   $(quoted "${PR_CMD[@]}")"
 if [ "$PUSH" = no ]; then
     echo
     echo "dry run: the commit above is unreferenced; no branch, pull request or remote was touched."
-    echo "Re-run with --push to push it and open the pull request."
+    if [ "$EVIDENCE" = present ]; then
+        echo "Re-run with --push to push it and open the pull request."
+    else
+        echo "Run $GATE_CI_CMD, then re-run with --push to push it and open the pull request (--push refuses without that evidence)."
+    fi
     exit 0
 fi
 
 # --- --push ---------------------------------------------------------------------------
+# The tree about to be published must have passed the CI test steps (S-807). Checked
+# first, before any remote is read or written.
+[ "$EVIDENCE" = present ] \
+    || die 2 "no passing tier ci evidence for main's tree $TREE: run $GATE_CI_CMD on it, then re-run; nothing was pushed"
 # Every read is checked: an unreachable remote is a failed precondition (exit 2),
 # never git's own status.
 # The pull request is the last step and cannot be undone by a re-run, so what it

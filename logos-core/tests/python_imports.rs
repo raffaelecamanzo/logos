@@ -12,10 +12,14 @@
 //! `.logos/config.toml` override replaces the detected roots, a JavaScript
 //! `main.js` is the module `main`, the interop family keeps Java↔Kotlin binding
 //! and C#↛PHP apart, two local names of one import target are two ledger rows
-//! that both bind ([FR-DB-07]), and a one-file sync equals a full reindex
+//! that both bind ([FR-DB-07]), a call through an imported module or class
+//! binds that module's or class's member and an external one stays unbound
+//! (S-544, [FR-RS-23]), Django routes to a shared handler name bind their own
+//! integration's handler, and a one-file sync equals a full reindex
 //! ([NFR-RA-06]).
 //!
 //! [FR-RS-14]: ../../docs/specs/requirements/FR-RS-14.md
+//! [FR-RS-23]: ../../docs/specs/requirements/FR-RS-23.md
 //! [FR-DB-07]: ../../docs/specs/requirements/FR-DB-07.md
 //! [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
 #![cfg(all(
@@ -232,13 +236,16 @@ fn a_call_through_an_import_alias_binds_the_imported_declaration() {
     );
 }
 
-/// S-520: `import typing as t` binds the module under the name `t`, and `t.cast(...)`
-/// is a call on a module-shaped receiver: it binds nothing, even when the
-/// workspace holds a `typing` module declaring a `cast` of its own (never
-/// fabricate). This pins the guard, not the capture: it holds with or without
-/// the alias, which is why it asserts the import itself still binds.
+/// S-520: `import typing as t` binds the module under the name `t`; S-544
+/// ([FR-RS-23]): `t.cast(...)` is then a call through that import, and it goes
+/// exactly where the import goes. Here the workspace holds the `typing` module
+/// the import binds, so the call reaches its `cast`. Without that module the
+/// import binds nothing, and neither does the call
+/// (`a_call_through_an_external_module_stays_unbound`).
+///
+/// [FR-RS-23]: ../../docs/specs/requirements/FR-RS-23.md
 #[test]
-fn a_call_through_a_module_alias_stays_external() {
+fn a_call_through_a_module_alias_goes_where_its_import_goes() {
     let (_tmp, engine) = indexed(&[
         ("typing.py", "def cast(tp, value):\n    return value\n"),
         ("pkg/__init__.py", ""),
@@ -249,7 +256,143 @@ fn a_call_through_a_module_alias_stays_external() {
     ]);
     let rt = engine.runtime().unwrap();
     assert_eq!(edges_from(rt, "pkg/app.py", EdgeKind::Imports), strings(&["typing.py:typing:module"]));
-    assert!(edges_from(rt, "pkg/app.py", EdgeKind::Calls).is_empty());
+    assert_eq!(edges_from(rt, "pkg/app.py", EdgeKind::Calls), strings(&["typing.py:cast:function"]));
+}
+
+// ── S-544: a call through an imported module or class ───────────────────────
+
+/// A healthchecks-shaped tree (S-544, [FR-RS-23]): `hc/lib/curl.py`'s
+/// functions, a model class with a class method beside a module function of
+/// the same name, and two integrations whose URLconfs both route to a handler
+/// named `add` — one through `from . import views`, one through an absolute
+/// import.
+///
+/// [FR-RS-23]: ../../docs/specs/requirements/FR-RS-23.md
+const QUALIFIED_CALLS: fixtures::Fixture = &[
+    ("hc/__init__.py", ""),
+    ("hc/lib/__init__.py", ""),
+    ("hc/lib/curl.py", "def post(url):\n    return url\n\n\ndef get(url):\n    return url\n"),
+    ("hc/api/__init__.py", ""),
+    (
+        "hc/api/models.py",
+        "class Check:\n    @classmethod\n    def for_project(cls, p):\n        return p\n\n\ndef for_project(p):\n    return p\n",
+    ),
+    ("hc/integrations/__init__.py", ""),
+    ("hc/integrations/pd/__init__.py", ""),
+    ("hc/integrations/pd/views.py", "def add(request):\n    return request\n"),
+    (
+        "hc/integrations/pd/urls.py",
+        "from django.urls import path\n\nfrom . import views\n\nurlpatterns = [path(\"add_pd/\", views.add)]\n",
+    ),
+    ("hc/integrations/sms/__init__.py", ""),
+    ("hc/integrations/sms/views.py", "def add(request):\n    return request\n"),
+    (
+        "hc/integrations/sms/urls.py",
+        "from django.urls import path\n\nfrom hc.integrations.sms import views\n\nurlpatterns = [path(\"add_sms/\", views.add)]\n",
+    ),
+    (
+        "hc/integrations/pd/transport.py",
+        "import os\n\nfrom hc.lib import curl\nfrom hc.api import models\nfrom hc.api.models import Check\n\n\n\
+def notify(p):\n    curl.post(p)\n    models.Check()\n    Check.for_project(p)\n    os.getcwd()\n    return os.path.join(p)\n",
+    ),
+];
+
+/// Every edge of `kind` out of the file `rel`, as `target file:line name`, sorted
+/// — the line tells a method from a module function of its name.
+fn edges_with_lines(rt: &Runtime, rel: &str, kind: EdgeKind) -> Vec<String> {
+    let rel = rel.to_string();
+    rt.submit_read(move |store| {
+        let label: HashMap<NodeId, (String, String)> = store
+            .all_nodes()?
+            .into_iter()
+            .map(|n| {
+                let file = n.file_path.unwrap_or_default();
+                let at = format!("{file}:{} {}", n.start_line.unwrap_or_default(), n.name);
+                (n.id, (file, at))
+            })
+            .collect();
+        let mut out: Vec<String> = store
+            .all_edges()?
+            .into_iter()
+            .filter(|e| e.kind == kind && label[&e.source].0 == rel)
+            .map(|e| label[&e.target].1.clone())
+            .collect();
+        out.sort();
+        Ok(out)
+    })
+    .expect("read runs")
+}
+
+/// FR-RS-23 AC: `curl.post()` through `from hc.lib import curl` binds the
+/// module's function, `models.Check()` constructs the module's class, and
+/// `Check.for_project()` through a named-imported class binds among that class's
+/// methods — never the module function of the same name beside it.
+#[test]
+fn a_call_through_an_imported_module_or_class_binds_its_member() {
+    let (_tmp, engine) = indexed(QUALIFIED_CALLS);
+    let rt = engine.runtime().unwrap();
+    let transport = "hc/integrations/pd/transport.py";
+    assert_eq!(
+        edges_with_lines(rt, transport, EdgeKind::Calls),
+        strings(&["hc/api/models.py:3 for_project", "hc/lib/curl.py:1 post"])
+    );
+    assert_eq!(edges_from(rt, transport, EdgeKind::Instantiates), strings(&["hc/api/models.py:Check:class"]));
+}
+
+/// FR-RS-23 AC: an external module call stays unbound — `os.getcwd()` through
+/// an import no workspace module answers, and `os.path.join()`, whose receiver
+/// is no imported name at all — under every policy, even beside a workspace
+/// module that declares both names. The call reads its import's path as Python
+/// does, so neither the balanced suffix match nor the aggressive unique-name
+/// guess (which binds the import `os` itself to that module) reaches it.
+#[test]
+fn a_call_through_an_external_module_stays_unbound() {
+    for policy in ["strict", "balanced", "aggressive"] {
+        let config = format!("[resolution]\npolicy = \"{policy}\"\n");
+        let (_tmp, engine) = indexed_with(
+            QUALIFIED_CALLS,
+            &[
+                ("hc/compat/os.py", "def getcwd():\n    return ''\n\n\ndef join(p):\n    return p\n"),
+                (".logos/config.toml", &config),
+            ],
+        );
+        let rt = engine.runtime().unwrap();
+        let transport = "hc/integrations/pd/transport.py";
+        let calls = edges_from(rt, transport, EdgeKind::Calls);
+        assert!(!calls.iter().any(|c| c.starts_with("hc/compat/os.py")), "{policy}: {calls:?}");
+    }
+}
+
+/// S-544 review: `import json` beside `import myproj.json` binds the name `json`
+/// to the standard library's module, so `json.dumps()` binds nothing — never
+/// `myproj/json.py`'s `dumps`, which the file's alias table also keys `json`.
+#[test]
+fn a_call_through_a_stdlib_import_never_reaches_a_workspace_module_of_its_name() {
+    let (_tmp, engine) = indexed(&[
+        ("myproj/__init__.py", ""),
+        ("myproj/json.py", "def dumps(x):\n    return x\n"),
+        (
+            "myproj/app.py",
+            "import json\nimport myproj.json\n\n\ndef f(x):\n    return json.dumps(x)\n",
+        ),
+    ]);
+    let rt = engine.runtime().unwrap();
+    assert!(edges_from(rt, "myproj/app.py", EdgeKind::Calls).is_empty());
+}
+
+/// FR-RS-23 AC: Django routes to a handler name two integrations share
+/// (`views.add`) each bind to their own integration's handler, through a
+/// relative and an absolute `views` import alike.
+#[test]
+fn a_django_route_binds_to_its_own_integrations_handler() {
+    let (_tmp, engine) = indexed(QUALIFIED_CALLS);
+    let rt = engine.runtime().unwrap();
+    for integration in ["pd", "sms"] {
+        assert_eq!(
+            edges_from(rt, &format!("hc/integrations/{integration}/urls.py"), EdgeKind::RoutesTo),
+            strings(&[&format!("hc/integrations/{integration}/views.py:add:function")])
+        );
+    }
 }
 
 /// S-519 T2: the same import repeated in every method (werkzeug's
@@ -656,4 +799,120 @@ fn sync_equals_a_full_reindex_over_alias_twins() {
         ]
     );
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(ALIAS_TWINS)));
+}
+
+/// S-544: a call through an imported module or class re-binds on a sync of the
+/// module it names — a renamed function, a renamed method, a method moved out
+/// of its class to the module beside it, a route handler renamed — exactly as a
+/// cold index binds it, and binds again when the module is restored.
+#[test]
+fn sync_equals_a_full_reindex_when_a_qualified_calls_target_changes() {
+    let (tmp, engine) = indexed(QUALIFIED_CALLS);
+    let rt = engine.runtime().unwrap();
+    let transport = "hc/integrations/pd/transport.py";
+    let files = paths(QUALIFIED_CALLS);
+    let original = |rel: &str| QUALIFIED_CALLS.iter().find(|(path, _)| *path == rel).expect("fixture file").1;
+    for (rel, text) in [
+        ("hc/lib/curl.py", "def post2(url):\n    return url\n"),
+        ("hc/api/models.py", "class Check:\n    pass\n\n\ndef for_project(p):\n    return p\n"),
+    ] {
+        write(tmp.path(), rel, text);
+        engine.sync(&[rel.into()]);
+        assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{rel}");
+    }
+    assert!(edges_from(rt, transport, EdgeKind::Calls).is_empty());
+    for rel in ["hc/lib/curl.py", "hc/api/models.py"] {
+        write(tmp.path(), rel, original(rel));
+        engine.sync(&[rel.into()]);
+        assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{rel} restored");
+    }
+    assert_eq!(edges_from(rt, transport, EdgeKind::Calls).len(), 2);
+    // A route handler renamed and restored: the edges agree with a cold index.
+    // (The ledger does not yet: the framework pass keeps the deleted handler's
+    // capture-before-delete `RoutesTo` row, as it does before S-544.)
+    let (views, urls) = ("hc/integrations/pd/views.py", "hc/integrations/pd/urls.py");
+    write(tmp.path(), views, "def add2(request):\n    return request\n");
+    engine.sync(&[views.into()]);
+    assert_eq!(binding_facts(rt).0, cold_facts(&tmp, &files).0, "{views}");
+    assert!(edges_from(rt, urls, EdgeKind::RoutesTo).is_empty());
+    write(tmp.path(), views, original(views));
+    engine.sync(&[views.into()]);
+    assert_eq!(binding_facts(rt).0, cold_facts(&tmp, &files).0, "{views} restored");
+    assert_eq!(edges_from(rt, urls, EdgeKind::RoutesTo), strings(&["hc/integrations/pd/views.py:add:function"]));
+}
+
+// ── S-545: a bare decorator is a reference ──────────────────────────────────
+
+/// A healthchecks-shaped tree (S-545, [FR-RS-23]): `hc/api/decorators.py`'s
+/// `authorize` is applied bare, by a named import and through the module, beside
+/// the builtin decorators, a decorator no import names and an attribute the
+/// module does not declare.
+///
+/// [FR-RS-23]: ../../docs/specs/requirements/FR-RS-23.md
+const DECORATORS: fixtures::Fixture = &[
+    ("hc/__init__.py", ""),
+    ("hc/api/__init__.py", ""),
+    (
+        "hc/api/decorators.py",
+        "def authorize(f):\n    return f\n\n\ndef audited(f):\n    return f\n\n\ndef property(f):\n    return f\n",
+    ),
+    (
+        "hc/api/views.py",
+        "from hc.api import decorators\nfrom hc.api.decorators import authorize\n\n\n@authorize\ndef ping(r):\n    return r\n\n\n\
+@decorators.audited\ndef status(r):\n    return r\n\n\nclass Check:\n    @property\n    def name(self):\n        return 1\n\n    \
+@staticmethod\n    def make():\n        return 2\n\n    @undeclared\n    def other(self):\n        return 3\n\n    \
+@decorators.missing\n    def last(self):\n        return 4\n",
+    ),
+];
+
+/// FR-RS-23 AC (S-545): `@authorize` through a named import and `@mod.name`
+/// through an imported module bind the decorator's declaration. `@property` and
+/// `@staticmethod` stay unbound — the workspace's own `property` is not the
+/// builtin, and the file never imports it — as does a name no import binds and
+/// an attribute the module does not declare.
+#[test]
+fn a_bare_decorator_binds_the_declaration_it_names_and_a_builtin_stays_unbound() {
+    let (_tmp, engine) = indexed(DECORATORS);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges_with_lines(rt, "hc/api/views.py", EdgeKind::Calls),
+        strings(&["hc/api/decorators.py:1 authorize", "hc/api/decorators.py:5 audited"])
+    );
+}
+
+/// S-545: under every policy `@authorize` binds and `@staticmethod` stays
+/// unbound. `@property` stays unbound under strict and balanced even beside a
+/// workspace function of that name, which `views.py` never imports; only the
+/// aggressive unique-name guess binds it, as it binds a `property(x)` call.
+#[test]
+fn a_bare_decorator_binds_the_same_under_every_policy() {
+    for policy in ["strict", "balanced", "aggressive"] {
+        let config = format!("[resolution]\npolicy = \"{policy}\"\n");
+        let (_tmp, engine) = indexed_with(DECORATORS, &[(".logos/config.toml", &config)]);
+        let rt = engine.runtime().unwrap();
+        let calls = edges_with_lines(rt, "hc/api/views.py", EdgeKind::Calls);
+        assert!(calls.contains(&"hc/api/decorators.py:1 authorize".to_string()), "{policy}: {calls:?}");
+        assert!(!calls.iter().any(|c| c.ends_with(" staticmethod")), "{policy}: {calls:?}");
+        let property = calls.contains(&"hc/api/decorators.py:9 property".to_string());
+        assert_eq!(property, policy == "aggressive", "{policy}: {calls:?}");
+    }
+}
+
+/// S-545: a decorator re-binds on a sync of the module it names exactly as a
+/// cold index binds it, and binds again when the module is restored.
+#[test]
+fn sync_equals_a_full_reindex_when_a_decorators_target_changes() {
+    let (tmp, engine) = indexed(DECORATORS);
+    let rt = engine.runtime().unwrap();
+    let files = paths(DECORATORS);
+    let rel = "hc/api/decorators.py";
+    let original = DECORATORS.iter().find(|(path, _)| *path == rel).expect("fixture file").1;
+    write(tmp.path(), rel, "def authorize2(f):\n    return f\n");
+    engine.sync(&[rel.into()]);
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "renamed");
+    assert!(edges_from(rt, "hc/api/views.py", EdgeKind::Calls).is_empty());
+    write(tmp.path(), rel, original);
+    engine.sync(&[rel.into()]);
+    assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "restored");
+    assert_eq!(edges_from(rt, "hc/api/views.py", EdgeKind::Calls).len(), 2);
 }

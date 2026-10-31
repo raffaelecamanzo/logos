@@ -23,6 +23,7 @@ GET      /api/v1/search
 GET      /api/v1/security
 GET POST /api/v1/security/install
 POST     /api/v1/security/install/cancel
+POST     /api/v1/security/reconfirm
 GET POST /api/v1/security/scan
 POST     /api/v1/security/scan/cancel
 POST     /api/v1/security/suppress

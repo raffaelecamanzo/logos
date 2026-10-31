@@ -45,6 +45,7 @@ import {
   graph as graphCopy,
   languages as languagesCopy,
   qualityIndex,
+  RESOLUTION_LOWER_BOUND,
   securityWidget,
 } from "../../copy/dashboard.copy.ts";
 import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
@@ -52,12 +53,17 @@ import { plural } from "../../copy/types.ts";
 import { SeverityRow } from "../security/SeverityRow.tsx";
 import {
   bandOf,
+  docResolutionStatement,
   fmtInt,
   freshnessStatement,
   gateStatement,
+  devOnlyStatement,
+  internalPopulationStatement,
+  needsReviewStatement,
   newestScanStatement,
   pctBp,
-  resolutionStatement,
+  resolutionHeadline,
+  type ResolutionHeadline,
   scannersFailedStatement,
   securityState,
   testCodeStatement,
@@ -135,7 +141,7 @@ function DetailLink({ href, label }: { href: string; label: string }) {
  *  the step that records a signal, which is what the widget reports missing. */
 function QualityCard({ gate }: { gate: GateResult }) {
   const signal = gate.signal;
-  const link = <DetailLink href="/health" label="Health" />;
+  const link = <DetailLink href="/health" label="Quality" />;
   if (signal === null) {
     return (
       <Widget
@@ -203,6 +209,8 @@ function SecurityCard({ security }: { security: OverviewSecurity }) {
       const { summary, counted } = state;
       const gate = gateStatement(summary.gate);
       const inTests = summary.tally === null ? null : testCodeStatement(summary.tally);
+      const toReview = summary.tally === null ? null : needsReviewStatement(summary.tally);
+      const inDev = summary.tally === null ? null : devOnlyStatement(summary.tally);
       return (
         <Widget
           title="Security"
@@ -224,6 +232,8 @@ function SecurityCard({ security }: { security: OverviewSecurity }) {
         >
           <SeverityRow counts={counted} />
           {inTests !== null && <FigureNote block>{inTests}</FigureNote>}
+          {inDev !== null && <FigureNote block>{inDev}</FigureNote>}
+          {toReview !== null && <FigureNote block>{toReview}</FigureNote>}
           <dl className={styles.statList}>
             <dt>Gate</dt>
             <dd>{gate === null ? DASHBOARD_ABSENCE.noSecurityTable : gate}</dd>
@@ -347,14 +357,39 @@ function LanguagesCard({
   );
 }
 
+/** The Graph widget's figure row: the headline's share, or its absence sentence.
+ *  Spread into `Widget`, which takes a figure or an absence, never both. */
+function resolutionRow(headline: ResolutionHeadline) {
+  switch (headline.kind) {
+    case "share":
+      return {
+        figure: (
+          <span>
+            <span className="mono">{headline.share}</span> <FigureNote>of internal candidates resolved</FigureNote>
+          </span>
+        ),
+      };
+    case "no_references":
+      return { absence: DASHBOARD_ABSENCE.noCodeReferences };
+    case "all_external":
+      return { absence: DASHBOARD_ABSENCE.allReferencesExternal(headline.provablyExternal) };
+    case "unreported":
+      return { absence: DASHBOARD_ABSENCE.resolutionUnreported };
+  }
+}
+
 /** *Graph (compact)* — structural counts from `status`, plus the CR-085
  *  total/source/test physical-LOC roll-up, with the reference resolution as the
- *  figure. The roll-up is computed only at full-index time ([FR-IX-12]); on a
- *  graph where it is not yet computed, all three figures are `null` in lock-step,
- *  so the rows are left out and the evidence names the full index rather than a
- *  fabricated `0` ([NFR-CC-04]). */
+ *  figure: the lower bound over internal candidates ([FR-RS-49], S-636), its
+ *  population and the doc-reference figure in the evidence, and a named absence
+ *  when it has no denominator. The roll-up is computed only at full-index time
+ *  ([FR-IX-12]); on a graph where it is not yet computed, all three figures are
+ *  `null` in lock-step, so the rows are left out and the evidence names the full
+ *  index rather than a fabricated `0` ([NFR-CC-04]). */
 function GraphCard({ status }: { status: StatusInfo }) {
-  const resolution = resolutionStatement(status);
+  const headline = resolutionHeadline(status);
+  const population = internalPopulationStatement(status);
+  const docs = docResolutionStatement(status);
   // Bind the LOC roll-up as a narrowed object so the figures are `number` (not
   // `number | null`) at the render site — the three fields are null in lock-step
   // ([FR-IX-12]), so either all three are present or the rows are left out.
@@ -372,12 +407,14 @@ function GraphCard({ status }: { status: StatusInfo }) {
     <Widget
       title="Graph"
       copy={graphCopy}
-      figure={
-        <span>
-          <span className="mono">{resolution}</span> <FigureNote>of references resolved</FigureNote>
-        </span>
-      }
+      {...resolutionRow(headline)}
     >
+      {(population !== null || docs !== null) && (
+        <div className={styles.resolutionLines}>
+          {population !== null && <p data-resolution-population="">{population}</p>}
+          {docs !== null && <p data-resolution-docs="">{docs}</p>}
+        </div>
+      )}
       <dl className={styles.statList}>
         <dt>Files</dt>
         <dd className="mono num">{fmtInt(status.file_count)}</dd>
@@ -404,7 +441,7 @@ function GraphCard({ status }: { status: StatusInfo }) {
       </dl>
       <div className={styles.footnotes}>
         {loc !== null ? <p>* LOC figures reflect the last full index</p> : <p>{DASHBOARD_ABSENCE.noLines}</p>}
-        <p>A partial resolution figure is expected: many references resolve lazily.</p>
+        <p>{RESOLUTION_LOWER_BOUND}</p>
       </div>
     </Widget>
   );

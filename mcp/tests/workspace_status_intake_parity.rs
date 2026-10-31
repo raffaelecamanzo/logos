@@ -314,6 +314,45 @@ async fn workspace_status_mcp_publishes_the_resolved_edge_headline_with_its_rate
     server.abort();
 }
 
+/// **The MCP twin states the workspace reference resolution** (S-637,
+/// [FR-RS-49]): the members' own populations pooled — summed, never a mean of
+/// their ratios — with the static client call `web`'s route serves, unbound in
+/// `api`'s own graph, counted resolved because the bridge bound it, and the
+/// members it summed over stated. The same read-model `logos workspace status`
+/// prints, so the numbers are the CLI's.
+///
+/// [FR-RS-49]: ../../docs/specs/requirements/FR-RS-49.md
+#[tokio::test]
+async fn workspace_status_mcp_states_the_pooled_reference_resolution() {
+    let (_tmp, status, client, server) = two_population_status().await;
+    let section = &status["reference_resolution"];
+    let figure = &section["internal_resolution"];
+    let field = |value: &Value, name: &str| value[name].as_u64().unwrap_or_else(|| panic!("{name}: {value}"));
+    let summed = |name: &str| -> u64 {
+        status["members"]
+            .as_array()
+            .expect("members")
+            .iter()
+            .map(|row| field(&row["result"]["internal_resolution"], name))
+            .sum()
+    };
+    let cross = &section["cross_member"];
+    assert_eq!(field(cross, "bridge_bound"), 1, "the static call the bridge bound: {section}");
+    assert_eq!(field(figure, "code_references"), summed("code_references"), "{section}");
+    assert_eq!(field(figure, "resolved"), summed("resolved") + 1, "{section}");
+    assert_eq!(
+        field(figure, "provably_external"),
+        summed("provably_external") - field(cross, "named_by_another_member") - field(cross, "type_in_another_member"),
+        "{section}"
+    );
+    assert_eq!(section["members"], serde_json::json!({"members": 2, "read": 2}), "{section}");
+    let summary = section["summary"].as_str().expect("a composed line");
+    assert!(summary.contains("summed over 2 of 2 members"), "{summary}");
+
+    client.cancel().await.ok();
+    server.abort();
+}
+
 /// **The shipped tool description explains the headline it now carries** — the
 /// second half of the same duty, on the surface where the description *is* the
 /// documentation ([NFR-CC-04]).

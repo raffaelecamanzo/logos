@@ -794,6 +794,104 @@ fn an_installed_scanner_that_never_ran_covers_no_category() {
     assert!(covered(&w.findings(&FindingsFilter::default())) > 0, "semgrep's report covers its categories");
 }
 
+/// S-809 (FR-SC-29): one `go.mod` advisory OSV-Scanner (twice, byte for
+/// byte) and Trivy both report is one finding. `findings` lists it once, under
+/// either scanner, naming both reporters; `status` counts it on its first
+/// reporter's row and states it as `merged` on the other's, so each row still
+/// accounts for every finding of its report.
+#[test]
+fn one_advisory_two_scanners_report_is_counted_once_and_merged_on_the_other_row() {
+    let w = World::new();
+    fs::write(w.root.join("go.mod"), "module example.test/app\n").unwrap();
+    git(&w.root, &["add", "."]);
+    git(&w.root, &["commit", "-q", "-m", "go.mod"]);
+    let osv = json!({
+        "ruleId": "CVE-2026-107214", "level": "warning",
+        "message": {"text": "Package 'github.com/xuri/excelize/v2@2.11.0' is vulnerable to 'CVE-2026-107214' (also known as 'GO-2026-6684')."},
+        "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/go.mod", w.root.display())}}}]
+    });
+    let trivy = json!({
+        "ruleId": "CVE-2026-107214", "level": "error",
+        "message": {"text": "Package: github.com/xuri/excelize/v2\nInstalled Version: v2.11.0\nVulnerability CVE-2026-107214"},
+        "locations": [{"physicalLocation": {"artifactLocation": {"uri": "go.mod", "uriBaseId": "ROOTPATH"}}}]
+    });
+    let report = w.rec.join("deps.sarif");
+    let runs = json!({"version": "2.1.0", "runs": [
+        {"tool": {"driver": {"name": "osv-scanner", "version": "2.7.0", "rules": []}}, "results": [osv.clone(), osv]},
+        {"tool": {"driver": {"name": "Trivy", "version": "0.76.0", "rules": []}}, "results": [trivy]}
+    ]});
+    fs::write(&report, runs.to_string()).unwrap();
+    crate::history::security::ingest(&w.root, &report, &[]).unwrap();
+
+    let listed = w.findings(&FindingsFilter::default());
+    assert_eq!((listed["total"].as_u64(), listed["findings"].as_array().map(Vec::len)), (Some(1), Some(1)), "{listed}");
+    let reporters: Vec<&str> =
+        listed["findings"][0]["reporters"].as_array().unwrap().iter().map(|r| r["scanner_name"].as_str().unwrap()).collect();
+    assert_eq!(reporters, ["Trivy", "osv-scanner"]);
+    assert_eq!(listed["findings"][0]["severity"], "high", "Trivy's `error`; OSV-Scanner's unrated never lowers it");
+    for scanner in ["osv-scanner", "trivy"] {
+        let filter = FindingsFilter { scanner: Some(scanner.to_string()), ..FindingsFilter::default() };
+        assert_eq!(w.findings(&filter)["findings"].as_array().map(Vec::len), Some(1), "listed under {scanner}");
+    }
+
+    let rows = w.status();
+    let counts = |scanner: &str| {
+        let row = scanner_row(&rows, scanner);
+        (row["state"].as_str().map(str::to_string), row["findings"].as_u64(), row["merged"].as_u64())
+    };
+    assert_eq!(counts("trivy"), (Some("fresh".to_string()), Some(1), Some(0)), "{rows}");
+    assert_eq!(counts("osv-scanner"), (Some("fresh".to_string()), Some(0), Some(1)), "{rows}");
+
+    // The Dashboard's Security widget counts it once too.
+    let manifest = crate::tools::Manifest::builtin();
+    let read = status(&w.root, &w.env(), manifest, TODAY.unwrap(), super::VersionProbes::Never, false, no_test_symbols).unwrap();
+    let widget = super::summary(&w.root, &w.env(), manifest, TODAY.unwrap(), read, None, no_test_symbols).unwrap();
+    assert_eq!(widget.tally.map(|t| (t.counted.total, t.counted.high)), Some((1, 1)));
+}
+
+/// S-809 review: a merged finding's row is fresh by its first reporter's scan,
+/// yet each other reporter's own report still reads `stale` once a file it
+/// anchors moved since its scan: OSV-Scanner scanned `go.mod` before an edit,
+/// Trivy after it.
+#[test]
+fn a_later_reporters_moved_file_makes_its_own_row_stale() {
+    let w = World::new();
+    fs::write(w.root.join("go.mod"), "module example.test/app\n").unwrap();
+    git(&w.root, &["add", "."]);
+    git(&w.root, &["commit", "-q", "-m", "go.mod"]);
+    let result = |driver: &str| match driver {
+        "osv-scanner" => json!({
+            "ruleId": "CVE-2026-107214", "level": "warning",
+            "message": {"text": "Package 'github.com/xuri/excelize/v2@2.11.0' is vulnerable to 'CVE-2026-107214'."},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": format!("file://{}/go.mod", w.root.display())}}}]
+        }),
+        _ => json!({
+            "ruleId": "CVE-2026-107214", "level": "error",
+            "message": {"text": "Package: github.com/xuri/excelize/v2\nInstalled Version: v2.11.0\nVulnerability CVE-2026-107214"},
+            "locations": [{"physicalLocation": {"artifactLocation": {"uri": "go.mod", "uriBaseId": "ROOTPATH"}}}]
+        }),
+    };
+    let ingest = |driver: &str| {
+        let report = w.rec.join(format!("{driver}.sarif"));
+        let sarif = json!({"version": "2.1.0", "runs": [
+            {"tool": {"driver": {"name": driver, "version": "1", "rules": []}}, "results": [result(driver)]}
+        ]});
+        fs::write(&report, sarif.to_string()).unwrap();
+        crate::history::security::ingest(&w.root, &report, &["go.mod".to_string()]).unwrap();
+    };
+    ingest("osv-scanner");
+    fs::write(w.root.join("go.mod"), "module example.test/app\n\ngo 1.23\n").unwrap();
+    ingest("Trivy");
+
+    let rows = w.status();
+    let state = |scanner: &str| {
+        let row = scanner_row(&rows, scanner);
+        (row["state"].as_str().map(str::to_string), row["because"].as_str().map(str::to_string), row["findings"].as_u64(), row["merged"].as_u64())
+    };
+    assert_eq!(state("trivy"), (Some("fresh".to_string()), None, Some(1), Some(0)), "{rows}");
+    assert_eq!(state("osv-scanner"), (Some("stale".to_string()), Some("files_changed".to_string()), Some(0), Some(1)), "{rows}");
+}
+
 /// The status states the S-667 review's mutations found unasserted: a changed
 /// file is stale; an unregistered tool's report is listed apart; disabled
 /// outranks a stored report; suppressed findings are counted apart; a symlink
@@ -827,7 +925,7 @@ fn status_states_each_case_and_neither_read_starts_a_scanner() {
     assert_eq!((semgrep["state"].as_str(), semgrep["findings"].as_u64(), semgrep["suppressed"].as_u64()), (Some("fresh"), Some(1), Some(1)), "{semgrep}");
     assert_eq!(semgrep["last_failure"], Value::Null, "a symlinked log is not reported");
     assert_eq!(scanner_row(&status, "bandit")["state"], "disabled", "disabled outranks a stored report");
-    assert_eq!(status["other_reports"], json!([{"scanner": "ESLint", "driver": "ESLint", "state": "fresh", "snapshot_head": semgrep["snapshot_head"], "version": "1.7.10", "findings": 0, "suppressed": 0, "not_fresh": 0, "test": 0, "installed": null, "install": null, "last_failure": null}]));
+    assert_eq!(status["other_reports"], json!([{"scanner": "ESLint", "driver": "ESLint", "state": "fresh", "snapshot_head": semgrep["snapshot_head"], "version": "1.7.10", "findings": 0, "suppressed": 0, "not_fresh": 0, "test": 0, "dev": 0, "needs_review": 0, "merged": 0, "installed": null, "install": null, "last_failure": null}]));
     // Status reads each installed copy's version (S-744, FR-SC-08): the
     // version probe is the only process it starts, and findings starts none.
     assert_eq!(w.started(), ["--version"], "status starts no scan, only semgrep's version probe");
@@ -1086,7 +1184,7 @@ fn a_cancelled_scan_kills_its_scanner_writes_no_failure_log_and_starts_nothing_a
     })
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(20));
     while !fs::read_to_string(&pids).is_ok_and(|s| s.ends_with('\n')) {
         assert!(Instant::now() < deadline, "the sleeping scanner never started");
         std::thread::sleep(Duration::from_millis(10));
@@ -1103,7 +1201,7 @@ fn a_cancelled_scan_kills_its_scanner_writes_no_failure_log_and_starts_nothing_a
     };
     assert_eq!(job.state, JobState::Cancelled, "{job:?}");
     for pid in recorded {
-        let gone_by = Instant::now() + Duration::from_secs(10);
+        let gone_by = Instant::now() + crate::perf::scaled(Duration::from_secs(10));
         // SAFETY: signal 0 only checks that the process exists.
         #[allow(unsafe_code)]
         while unsafe { libc::kill(pid, 0) } == 0 {
@@ -1151,7 +1249,7 @@ fn a_cancel_between_scanners_reports_no_later_scanner_started() {
     })
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(20));
     let job = loop {
         let job = jobs.snapshot(JobKind::SecurityScan, &w.root).unwrap();
         if job.state != JobState::Running {
@@ -2167,6 +2265,319 @@ fn every_count_leaves_test_code_out_and_the_buckets_partition_the_rest() {
     assert_eq!(partition(scanner_row(&w.status(), "semgrep")).iter().sum::<u64>(), stored, "every finding once");
 }
 
+// ── A finding its scanner marks low-confidence reads "needs review" (S-817, FR-SC-31) ──
+
+/// A Semgrep report whose rules carry the confidence tag and the constant
+/// `precision: very-high` Semgrep writes on every rule: `sql` is `LOW
+/// CONFIDENCE`, `cookie` is `MEDIUM CONFIDENCE`, `weak` names no rule at all.
+/// Each result is `(uri, rule, line)`, `error` level, under CWE-89 except `weak`.
+fn confidence_report(results: &[(&str, &str, i64)]) -> String {
+    let rule = |id: &str, tag: &str| {
+        json!({"id": id, "properties": {"precision": "very-high", "tags": ["CWE-89: SQL Injection", tag, "security"]}})
+    };
+    let results: Vec<Value> = results
+        .iter()
+        .map(|(uri, rule, line)| {
+            json!({
+                "ruleId": rule,
+                "level": "error",
+                "message": {"text": "tainted"},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": line}}}]
+            })
+        })
+        .collect();
+    json!({"version": "2.1.0", "runs": [{"tool": {"driver": {
+        "name": "Semgrep OSS", "semanticVersion": "1.85.0",
+        "rules": [rule("sql", "LOW CONFIDENCE"), rule("cookie", "MEDIUM CONFIDENCE")]}}, "results": results}]})
+    .to_string()
+}
+
+impl World {
+    /// Two production findings in `app/db.py` — `sql` (low confidence) and
+    /// `cookie` (medium, beside `precision: very-high`) — a `weak` one with
+    /// no rule, and a low-confidence `sql` in `tests/test_db.py`.
+    fn with_confidence(&self) {
+        let full = self.root.join("tests/test_db.py");
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, "import sqlite3\n").unwrap();
+        git(&self.root, &["add", "."]);
+        git(&self.root, &["commit", "-q", "-m", "tests"]);
+        let report = self.rec.join("confidence.sarif");
+        fs::write(
+            &report,
+            confidence_report(&[("app/db.py", "sql", 1), ("app/db.py", "cookie", 1), ("app/db.py", "weak", 1), ("tests/test_db.py", "sql", 1)]),
+        )
+        .unwrap();
+        let indexed = ["app/db.py", "tests/test_db.py"].map(str::to_string);
+        crate::history::security::ingest(&self.root, &report, &indexed).unwrap();
+    }
+}
+
+/// The rule, confidence and `needs_review` of every listed finding, by path.
+fn reviewed(listed: &Value) -> Vec<(String, String, String, bool)> {
+    listed["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["path"].as_str().unwrap().to_string(),
+                f["rule_id"].as_str().unwrap().to_string(),
+                f["confidence"].as_str().unwrap().to_string(),
+                f["needs_review"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The default scope leaves a low-confidence finding out and says how many;
+/// `--scope all` lists it, labelled; `MEDIUM CONFIDENCE` over a constant
+/// `precision: very-high` stays; a low-confidence finding in test code is
+/// counted as test code, once.
+#[test]
+fn a_low_confidence_finding_reads_needs_review_and_the_default_scope_states_it_left_out() {
+    let w = World::new();
+    w.with_confidence();
+    let parse = |scope: Option<&str>| FindingsFilter::parse(None, None, None, None, None, None, scope).unwrap();
+    let row = |path: &str, rule: &str, confidence: &str, review: bool| (path.to_string(), rule.to_string(), confidence.to_string(), review);
+
+    let default = w.findings(&parse(None));
+    assert_eq!(
+        reviewed(&default),
+        [row("app/db.py", "cookie", "medium", false), row("app/db.py", "weak", "unstated", false)],
+        "medium and unstated stay in the headline"
+    );
+    assert_eq!(
+        (default["hidden_needs_review"].as_u64(), default["hidden_by_scope"].as_u64()),
+        (Some(1), Some(1)),
+        "one production finding needs review; the low-confidence one in test code is test code: {default}"
+    );
+
+    let all = w.findings(&parse(Some("all")));
+    assert_eq!(
+        reviewed(&all),
+        [
+            row("app/db.py", "cookie", "medium", false),
+            row("app/db.py", "sql", "low", true),
+            row("app/db.py", "weak", "unstated", false),
+            row("tests/test_db.py", "sql", "low", true),
+        ],
+        "`--scope all` lists every finding, the low-confidence ones labelled"
+    );
+    assert_eq!((all["hidden_needs_review"].as_u64(), all["hidden_by_scope"].as_u64()), (Some(0), Some(0)));
+
+    // The hidden count is of what the other filters kept: a severity no finding
+    // reaches leaves nothing for the scope to hide, and one they all reach hides the one.
+    let severe = |severity: &str, scope: Option<&str>| {
+        FindingsFilter::parse(Some(severity), None, None, None, None, None, scope).unwrap()
+    };
+    let none = w.findings(&severe("critical", None));
+    assert_eq!((none["hidden_needs_review"].as_u64(), none["hidden_by_scope"].as_u64()), (Some(0), Some(0)), "{none}");
+    let high = w.findings(&severe("high", None));
+    assert_eq!((high["hidden_needs_review"].as_u64(), high["hidden_by_scope"].as_u64()), (Some(1), Some(1)), "{high}");
+    let by_path = FindingsFilter::parse(None, None, None, Some("tests"), None, None, None).unwrap();
+    let tests_dir = w.findings(&by_path);
+    assert_eq!((tests_dir["hidden_needs_review"].as_u64(), tests_dir["hidden_by_scope"].as_u64()), (Some(0), Some(1)), "{tests_dir}");
+
+    let test = w.findings(&parse(Some("test")));
+    assert_eq!(reviewed(&test), [row("tests/test_db.py", "sql", "low", true)]);
+    assert_eq!((test["hidden_needs_review"].as_u64(), test["hidden_by_scope"].as_u64()), (Some(0), Some(3)));
+    assert_eq!(
+        reviewed(&w.findings(&FindingsFilter::default())).len(),
+        4,
+        "an unset filter keeps every finding, as every read-model built over it does"
+    );
+}
+
+/// Every count leaves a needs-review finding out and states it; the excluded
+/// buckets — suppressed, not fresh, test, needs review — still partition the
+/// rest, each finding in the first that holds, and the figures agree across
+/// `status`, the page, the roll-up and Files & Risk.
+#[test]
+fn every_count_states_needs_review_and_the_buckets_still_partition_the_rest() {
+    let w = World::new();
+    w.with_confidence();
+    let partition = |v: &Value| ["findings", "suppressed", "not_fresh", "test", "needs_review"].map(|k| v[k].as_u64().unwrap());
+    assert_eq!(partition(scanner_row(&w.status(), "semgrep")), [2, 0, 0, 1, 1], "cookie and weak count; sql in test code is test; sql needs review");
+
+    // A report whose HEAD moved is `stale`, and counts the findings of files nothing
+    // touched as a fresh one does — the Stale state states needs review too.
+    git(&w.root, &["commit", "--allow-empty", "-q", "-m", "later"]);
+    let stale = w.status();
+    let row = scanner_row(&stale, "semgrep");
+    assert_eq!(row["state"], "stale", "{row}");
+    assert_eq!(partition(row), [2, 0, 0, 1, 1], "{row}");
+    git(&w.root, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    let page = w.page_counts();
+    assert_eq!((page.counted.total, page.excluded.test, page.excluded.needs_review), (2, 1, 1));
+    let rollup = w.rollup();
+    assert_eq!((rollup.findings.unwrap(), rollup.excluded), (page.counted, page.excluded), "one rule, two surfaces");
+    let cells = w.cells().unwrap();
+    assert_eq!((cells["app/db.py"].count, cells["app/db.py"].needs_review, cells["app/db.py"].test), (2, 1, 0));
+    assert_eq!((cells["tests/test_db.py"].count, cells["tests/test_db.py"].needs_review, cells["tests/test_db.py"].test), (0, 0, 1));
+
+    // The OWASP count under the default scope leaves it out too, and the
+    // three figures partition `findings`: 1 production (cookie), 1 needs review.
+    let all = w.findings(&FindingsFilter::default());
+    let injection = all["categories"].as_array().unwrap().iter().find(|c| c["id"] == "A05:2025").unwrap();
+    assert_eq!(
+        (injection["state"]["findings"].as_u64(), injection["production_findings"].as_u64(), injection["needs_review_findings"].as_u64()),
+        (Some(3), Some(1), Some(1)),
+        "{injection}"
+    );
+
+    // A suppressed needs-review finding is suppressed first, and a stale one is stale first.
+    let sql = all["findings"].as_array().unwrap().iter().find(|f| f["path"] == "app/db.py" && f["rule_id"] == "sql").unwrap();
+    crate::history::security::suppress(&w.root, sql["fingerprint"].as_str().unwrap().to_string(), "accepted", None, TODAY.unwrap()).unwrap();
+    assert_eq!(partition(scanner_row(&w.status(), "semgrep")), [2, 1, 0, 1, 0]);
+    let stored = w.findings(&FindingsFilter::default())["total"].as_u64().unwrap();
+    assert_eq!(partition(scanner_row(&w.status(), "semgrep")).iter().sum::<u64>(), stored, "every finding once");
+}
+
+// ── dev-only dependencies (FR-SC-30, S-810) ──────────────────────────────────
+
+/// An npm lockfile (v3) marking `vite` and `esbuild` dev-only and `react` not.
+const NPM_LOCK: &str = r#"{"lockfileVersion":3,"packages":{
+  "":{"name":"web","version":"1.0.0"},
+  "node_modules/vite":{"version":"5.0.0","dev":true},
+  "node_modules/esbuild":{"version":"0.19.0","dev":true},
+  "node_modules/react":{"version":"18.2.0"}}}"#;
+
+impl World {
+    /// An OSV-Scanner report over `web/package-lock.json` (vite and esbuild
+    /// dev-only, react not) and a `Cargo.lock` that names a package called
+    /// `vite` too: the Cargo one never guesses, so it reads production.
+    fn with_dev_dependencies(&self) {
+        fs::create_dir_all(self.root.join("web")).unwrap();
+        fs::write(self.root.join("web/package-lock.json"), NPM_LOCK).unwrap();
+        fs::write(self.root.join("Cargo.lock"), "# lockfile\n").unwrap();
+        git(&self.root, &["add", "."]);
+        git(&self.root, &["commit", "-q", "-m", "lockfiles"]);
+        let uri = |file: &str| format!("file://{}/{file}", self.root.display());
+        let result = |package: &str, advisory: &str, file: &str, level: &str| {
+            json!({
+                "ruleId": advisory,
+                "level": level,
+                "message": {"text": format!("Package '{package}' is vulnerable to '{advisory}'.")},
+                // CWE-1104 (unmaintained third-party components) falls under A03:2025,
+                // the category OSV-Scanner covers, so the categories carry a count.
+                "properties": {"tags": ["CWE-1104"]},
+                "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri(file)}}}]
+            })
+        };
+        let report = self.rec.join("dev-dependencies.sarif");
+        fs::write(
+            &report,
+            json!({"version": "2.1.0", "runs": [{
+                "tool": {"driver": {"name": "osv-scanner", "version": "1.9.2", "rules": []}},
+                "results": [
+                    result("vite@5.0.0", "GHSA-vite", "web/package-lock.json", "error"),
+                    result("esbuild@0.19.0", "GHSA-esbuild", "web/package-lock.json", "warning"),
+                    result("react@18.2.0", "GHSA-react", "web/package-lock.json", "warning"),
+                    result("vite@5.0.0", "RUSTSEC-vite", "Cargo.lock", "error"),
+                ]}]})
+            .to_string(),
+        )
+        .unwrap();
+        crate::history::security::ingest(&self.root, &report, &["app/db.py".to_string()]).unwrap();
+    }
+}
+
+/// `(advisory, code_scope, reason)` of every listed finding, in store order.
+fn dependency_scopes(listed: &Value) -> Vec<(String, String, Value)> {
+    listed["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["rule_id"].as_str().unwrap().to_string(), f["code_scope"].as_str().unwrap().to_string(), f["code_scope_reason"].clone()))
+        .collect()
+}
+
+/// A finding on a `"dev": true` package reads `dev`; any other lockfile finding
+/// reads `production`. The default scope leaves `dev` out and states how many
+/// ("N more in dev-only dependencies"), apart from the findings the scope hid;
+/// `--scope all` lists it, labelled; `--scope test` lists test code alone.
+#[test]
+fn a_dev_only_dependency_finding_is_labelled_dev_and_the_default_scope_states_it_left_out() {
+    let w = World::new();
+    w.with_dev_dependencies();
+    let parse = |severity: Option<&str>, scope: Option<&str>| FindingsFilter::parse(severity, None, None, None, None, None, scope).unwrap();
+    let row = |rule: &str, scope: &str, reason: Value| (rule.to_string(), scope.to_string(), reason);
+    let dev = |rule: &str| row(rule, "dev", json!("dev_dependency"));
+    let production = |rule: &str| row(rule, "production", Value::Null);
+
+    let default = w.findings(&parse(None, None));
+    assert_eq!(dependency_scopes(&default), [production("GHSA-react"), production("RUSTSEC-vite")], "{default}");
+    assert_eq!((default["hidden_dev"].as_u64(), default["hidden_by_scope"].as_u64()), (Some(2), Some(0)), "{default}");
+
+    let all = w.findings(&parse(None, Some("all")));
+    let mut listed = dependency_scopes(&all);
+    listed.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(listed, [dev("GHSA-esbuild"), production("GHSA-react"), dev("GHSA-vite"), production("RUSTSEC-vite")], "{all}");
+    assert_eq!((all["hidden_dev"].as_u64(), all["hidden_by_scope"].as_u64()), (Some(0), Some(0)), "`--scope all` hides nothing");
+
+    let test = w.findings(&parse(None, Some("test")));
+    assert_eq!(dependency_scopes(&test), []);
+    assert_eq!((test["hidden_dev"].as_u64(), test["hidden_by_scope"].as_u64()), (Some(0), Some(4)), "`test` hides every finding: {test}");
+
+    // The hidden count is of what the other filters kept: osv-scanner's `error` is high.
+    let high = w.findings(&parse(Some("high"), None));
+    assert_eq!(dependency_scopes(&high), [production("RUSTSEC-vite")]);
+    assert_eq!(high["hidden_dev"], 1, "only the high dev one: {high}");
+    assert_eq!(w.findings(&FindingsFilter::default())["findings"].as_array().unwrap().len(), 4, "an unset filter keeps every scope");
+}
+
+/// Every count leaves a `dev` finding out and states it; the excluded buckets —
+/// suppressed, not fresh, test, dev, needs review — still partition the rest,
+/// each finding in the first that holds, and `status`, the page and the
+/// roll-up agree.
+#[test]
+fn every_count_states_dev_only_dependencies_and_the_buckets_still_partition_the_rest() {
+    let w = World::new();
+    w.with_dev_dependencies();
+    let partition = |v: &Value| ["findings", "suppressed", "not_fresh", "test", "dev", "needs_review"].map(|k| v[k].as_u64().unwrap());
+    assert_eq!(partition(scanner_row(&w.status(), "osv-scanner")), [2, 0, 0, 0, 2, 0], "react and the Cargo.lock one count; vite and esbuild are dev");
+
+    // A report whose HEAD moved is `stale`, and counts a finding bound to no file
+    // as a fresh one does — the Stale state states `dev` too.
+    git(&w.root, &["commit", "--allow-empty", "-q", "-m", "later"]);
+    let stale = w.status();
+    let row = scanner_row(&stale, "osv-scanner");
+    assert_eq!(row["state"], "stale", "{row}");
+    assert_eq!(partition(row), [2, 0, 0, 0, 2, 0], "{row}");
+    git(&w.root, &["reset", "-q", "--hard", "HEAD~1"]);
+
+    // The OWASP count under the default scope leaves a dev finding out of
+    // `production_findings` and states it as `dev_findings`, so production and
+    // dev partition the category's `findings`.
+    let before = w.findings(&FindingsFilter::default());
+    let supply_chain = before["categories"].as_array().unwrap().iter().find(|c| c["id"] == "A03:2025").unwrap();
+    assert_eq!(
+        (
+            supply_chain["state"]["findings"].as_u64(),
+            supply_chain["production_findings"].as_u64(),
+            supply_chain["dev_findings"].as_u64(),
+            supply_chain["needs_review_findings"].as_u64()
+        ),
+        (Some(4), Some(2), Some(2), Some(0)),
+        "{supply_chain}"
+    );
+
+    let page = w.page_counts();
+    assert_eq!((page.counted.total, page.excluded.dev, page.excluded.test), (2, 2, 0));
+    let rollup = w.rollup();
+    assert_eq!((rollup.findings.unwrap(), rollup.excluded), (page.counted, page.excluded), "one rule, two surfaces");
+
+    // Suppressed first: a suppressed dev finding is suppressed, not dev.
+    let all = w.findings(&FindingsFilter::default());
+    let vite = all["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "GHSA-vite").unwrap();
+    crate::history::security::suppress(&w.root, vite["fingerprint"].as_str().unwrap().to_string(), "accepted", None, TODAY.unwrap()).unwrap();
+    let after = partition(scanner_row(&w.status(), "osv-scanner"));
+    assert_eq!(after, [2, 1, 0, 0, 1, 0]);
+    assert_eq!(after.iter().sum::<u64>(), all["total"].as_u64().unwrap(), "every finding once");
+}
+
 // ── the NVD API key (FR-SC-27, S-794) ────────────────────────────────────────
 
 /// A planted NVD API key. The scanning process's environment carries it; it
@@ -2319,7 +2730,7 @@ fn a_cancelled_dependency_check_run_leaves_no_key_file() {
     .unwrap();
 
     let key_file = w.root.join(OUTPUT_DIR).join(super::NVD_KEY_FILE);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(20));
     while !seen.exists() {
         assert!(Instant::now() < deadline, "the sleeping scanner never started");
         std::thread::sleep(Duration::from_millis(10));

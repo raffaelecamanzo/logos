@@ -93,6 +93,7 @@ import {
   whereToStartFigure,
   WHERE_TO_START_CAPTION,
   WHERE_TO_START_STATEMENT,
+  type MemberListCopy,
 } from "../../copy/health.copy.ts";
 import { isWidgetHidden } from "../hiddenWidgets.ts";
 import {
@@ -521,12 +522,13 @@ function MetricsTable({ rows }: { rows: MetricRow[] }) {
  * out. The nine offender-backed dimensions (five since S-499, four more since
  * CR-209) keep three honest states, decided by `dim.offenderState` (never by list
  * length) — "not recorded" (never shown as clean, CR-162), a recorded-empty "none
- * flagged", or the worst-offender table in persisted order. Modularity carries no
+ * flagged", or the worst-offender table in persisted order; Equality words the
+ * last two as the above-average functions they are (CR-252). Modularity carries no
  * list in the payload: it states that, never an empty table (NFR-CC-04).
  */
 function DimensionWidget({ dim, currency }: { dim: DimensionDetail; currency: SnapshotCurrency | null }) {
   const copy = DIMENSION_COPY[dim.key];
-  const badge = offenderBadge(dim.offenderState, dim.offenders.length);
+  const badge = offenderBadge(dim.offenderState, dim.offenders.length, copy.members);
   const common = {
     title: dim.name,
     badge: badge === null ? undefined : <span className="muted">{badge}</span>,
@@ -612,18 +614,33 @@ function CyclesLink() {
 }
 
 /** The offender table, the statement of a state with no table, or — for the
- *  dimension the payload lists nothing for — the named absence. */
+ *  dimension the payload lists nothing for — the named absence. A list of
+ *  distribution members (Equality, CR-252) says what its units are above its
+ *  table, and states an empty list in its own words. */
 function OffenderEvidence({ dim }: { dim: DimensionDetail }) {
+  const members = DIMENSION_COPY[dim.key].members;
   switch (dim.offenderState) {
     case "not-applicable":
       return null;
     case "listed":
+      if (members !== undefined) {
+        return (
+          <>
+            <p className={styles.statement} data-offender-state="members">
+              {members.listed}
+            </p>
+            <OffendersTable offenders={dim.offenders} members={members} />
+          </>
+        );
+      }
       return <OffendersTable offenders={dim.offenders} />;
     case "none-flagged":
     case "not-recorded":
       return (
         <p className={styles.statement} data-offender-state={dim.offenderState}>
-          {OFFENDER_STATEMENT[dim.offenderState]}
+          {dim.offenderState === "none-flagged" && members !== undefined
+            ? members.none
+            : OFFENDER_STATEMENT[dim.offenderState]}
         </p>
       );
     case "unlisted": {
@@ -638,10 +655,11 @@ function OffenderEvidence({ dim }: { dim: DimensionDetail }) {
   }
 }
 
-/** The worst-offender table for one dimension: entity, file, line, detail. */
-function OffendersTable({ offenders }: { offenders: Offender[] }) {
+/** The worst-offender table for one dimension: entity, file, line, detail —
+ *  captioned and headed in a member list's own words where it has them. */
+function OffendersTable({ offenders, members }: { offenders: Offender[]; members?: MemberListCopy }) {
   const columns: Column<Offender>[] = [
-    { key: "name", header: "Offender", mono: true, cell: (o) => o.name, sortValue: (o) => o.name },
+    { key: "name", header: members?.header ?? "Offender", mono: true, cell: (o) => o.name, sortValue: (o) => o.name },
     { key: "file", header: "File", mono: true, cell: (o) => o.file, sortValue: (o) => o.file },
     {
       key: "line",
@@ -658,7 +676,7 @@ function OffendersTable({ offenders }: { offenders: Offender[] }) {
       columns={columns}
       rows={offenders}
       rowKey={(o, i) => `${o.file}:${o.name}:${i}`}
-      caption="Worst offenders"
+      caption={members?.caption ?? "Worst offenders"}
       captionVisible
       pageSize={DEFAULT_TABLE_PAGE_SIZE}
     />

@@ -159,7 +159,8 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     //     needed no rescoping — it already measured exactly the amended
     //     enumeration; only its literal moved.
     //
-    // The bound is tolerance-banded via LOGOS_PERF_TOLERANCE so a loaded CI
+    // The bound is tolerance-banded via LOGOS_PERF_TOLERANCE (read once, in
+    // `logos_core::perf`, as every timing assertion's is) so a loaded CI
     // host can widen it without editing the budget (a breach is re-run in
     // isolation first). S-369 set the default at 1.0 and recorded that widening
     // it was explicitly not an available outcome *then* — the headroom above was
@@ -206,7 +207,7 @@ fn cold_start_to_ready_engine_is_within_pe05_budget() {
     // now pays it.
     let elapsed = cold_start_in_a_fresh_process();
 
-    let budget = Duration::from_millis(600).mul_f64(perf_tolerance());
+    let budget = logos_core::perf::scaled_ms(600);
     assert!(
         elapsed < budget,
         "cold start to a ready Engine took {elapsed:?}, over the NFR-PE-05 ≤600ms total budget \
@@ -267,20 +268,6 @@ fn pe05_budget_cold_start_child_sample() {
 
     assert!(engine.runtime().is_some(), "engine is ready to serve");
     println!("{COLD_START_MARKER}{}", elapsed.as_nanos());
-}
-
-/// Multiplier applied to every wall-clock budget so a loaded CI host can widen
-/// the bands without editing the budget itself (S-024). `LOGOS_PERF_TOLERANCE`
-/// defaults to `1.15` since 2026-09-21 (see the call site for the measurement
-/// that set it); a breach is re-run in isolation before being treated as a
-/// regression. Values below `1.0` are ignored so a budget is never tightened by
-/// accident; set `LOGOS_PERF_TOLERANCE=1.0` to measure against the raw budget.
-fn perf_tolerance() -> f64 {
-    std::env::var("LOGOS_PERF_TOLERANCE")
-        .ok()
-        .and_then(|v| v.parse::<f64>().ok())
-        .filter(|v| *v >= 1.0)
-        .unwrap_or(1.15)
 }
 
 /// Per language, a few files that call across one another — several files per

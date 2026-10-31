@@ -128,7 +128,7 @@ impl Machine {
         let mcp_input = child.stdin.take();
         let mut served =
             Served { child: Some(child), _mcp_input: mcp_input, addr: ([127, 0, 0, 1], port).into(), intent: String::new() };
-        let deadline = Instant::now() + WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(WAIT);
         while TcpStream::connect_timeout(&served.addr, Duration::from_millis(200)).is_err() {
             if let Some(status) = served.child().try_wait().unwrap() {
                 panic!("serve --ui exited ({status}): {}", served.stderr());
@@ -146,7 +146,7 @@ impl Machine {
 
     /// The `<pid> <child pid>` a hanging stub recorded, once it did.
     fn hung(&self, stub: &str, served: &mut Served) -> [u32; 2] {
-        let deadline = Instant::now() + WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(WAIT);
         loop {
             if let Ok(line) = fs::read_to_string(self.pids(stub)) {
                 let pids: Vec<u32> = line.split_whitespace().map(|p| p.parse().unwrap()).collect();
@@ -232,7 +232,7 @@ impl Served {
     fn stop(mut self, signal: &str) -> (ExitStatus, String) {
         let pid = self.child().id().to_string();
         assert!(Command::new("/bin/kill").args([signal, &pid]).status().unwrap().success());
-        let deadline = Instant::now() + WAIT;
+        let deadline = Instant::now() + logos_core::perf::scaled(WAIT);
         let status = loop {
             if let Some(status) = self.child().try_wait().unwrap() {
                 break status;

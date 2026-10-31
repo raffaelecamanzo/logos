@@ -14,7 +14,7 @@ const KIND: JobKind = JobKind::SecurityScan;
 
 /// The job's snapshot once it is no longer running.
 fn ended(jobs: &AnalysisJobs, member: &Path) -> JobSnapshot {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(20));
     loop {
         let snapshot = jobs.snapshot(KIND, member).expect("a job ran");
         if snapshot.state != JobState::Running {
@@ -130,7 +130,7 @@ fn a_coverage_run_and_a_security_scan_of_one_member_run_side_by_side() {
     assert!(running(JobKind::SecurityScan) && running(JobKind::CoverageRun), "both run at once");
 
     jobs.cancel(JobKind::CoverageRun, member);
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(20));
     while running(JobKind::CoverageRun) {
         assert!(Instant::now() < deadline, "the coverage run never ended");
         std::thread::sleep(Duration::from_millis(10));
@@ -157,7 +157,7 @@ fn a_detached_daemon_in_the_tools_group_dies_with_the_cancel() {
         Err(Cancelled.into())
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(10));
     let daemon = loop {
         if let Ok(pid) = std::fs::read_to_string(&pids) {
             break pid.trim().parse::<u32>().unwrap();
@@ -190,7 +190,7 @@ fn cancel_kills_every_child_group_and_ends_the_job_cancelled() {
     })
     .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(10));
     let recorded = loop {
         if let Some(line) = std::fs::read_to_string(&pids).ok().filter(|s| s.ends_with('\n')) {
             break line;
@@ -296,7 +296,7 @@ fn dropping_the_runner_kills_what_its_jobs_run() {
         Err(Cancelled.into())
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(10));
     let recorded = loop {
         if let Some(line) = std::fs::read_to_string(&pids).ok().filter(|s| s.ends_with('\n')) {
             break line;
@@ -338,7 +338,7 @@ fn shutdown_cancels_every_running_job_and_waits_for_each_to_end() {
         .unwrap();
         started.push((kind, member, pids, cleaned));
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + crate::perf::scaled(Duration::from_secs(10));
     while !started.iter().all(|(.., pids, _)| std::fs::read_to_string(pids).is_ok_and(|s| s.ends_with('\n'))) {
         assert!(Instant::now() < deadline, "the children never started");
         std::thread::sleep(Duration::from_millis(10));
@@ -348,7 +348,10 @@ fn shutdown_cancels_every_running_job_and_waits_for_each_to_end() {
     assert!(jobs.shutdown(Duration::from_secs(30)), "every job ended within the grace");
     // Woken as the last job ends, not at the end of the grace.
     let waited = began.elapsed();
-    assert!(waited < Duration::from_secs(5), "shutdown returned once the jobs ended: {waited:?}");
+    assert!(
+        waited < crate::perf::scaled(Duration::from_secs(5)),
+        "shutdown returned once the jobs ended: {waited:?}"
+    );
     for (kind, member, pids, cleaned) in &started {
         let job = jobs.snapshot(*kind, member).expect("the job is known");
         assert_eq!(job.state, JobState::Cancelled, "ended by the time shutdown returns: {job:?}");
@@ -374,7 +377,7 @@ fn shutdown_waits_no_longer_than_its_grace() {
     assert!(!jobs.shutdown(Duration::from_millis(200)), "the job is still running");
     let waited = began.elapsed();
     assert!(waited >= Duration::from_millis(200), "it waited the grace: {waited:?}");
-    assert!(waited < Duration::from_secs(5), "and no longer: {waited:?}");
+    assert!(waited < crate::perf::scaled(Duration::from_secs(5)), "and no longer: {waited:?}");
     release.send(()).unwrap();
 }
 
@@ -386,7 +389,7 @@ fn shutdown_with_no_running_job_returns_at_once() {
     let _ = ended(&jobs, Path::new("/project"));
     let began = Instant::now();
     assert!(jobs.shutdown(Duration::from_secs(30)));
-    assert!(began.elapsed() < Duration::from_secs(5));
+    assert!(began.elapsed() < crate::perf::scaled(Duration::from_secs(5)));
 }
 
 /// A child's registration ends with its guard: a cancel after the spawning

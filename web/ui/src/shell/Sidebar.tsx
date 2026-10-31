@@ -64,7 +64,7 @@ const ICONS: Record<string, ComponentType<SVGProps<SVGSVGElement>>> = {
   config: IconConfig,
   // Workspace mode only (S-250) — absent from a single-root sidebar.
   workspace: IconWorkspace,
-  // S-428: the app-level twins of the Dashboard and Health tabs (FR-UI-36). They
+  // S-428: the app-level twins of the Dashboard and Quality tabs (FR-UI-36). They
   // carry their member-scoped twin's icon deliberately — the icon says WHAT the
   // view answers, and the section label says what it answers FOR (ADR-66 §4).
   "workspace-dashboard": IconDashboard,

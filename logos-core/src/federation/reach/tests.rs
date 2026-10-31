@@ -593,6 +593,7 @@ fn erow(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
     }
 }
 

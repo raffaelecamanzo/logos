@@ -31,6 +31,11 @@
  * suppresses counted and an orphaned one flagged (S-770); a path entry covers
  * every finding under it, and Unsuppress on any of them removes that entry.
  *
+ * A suppression that records evidence (FR-SC-32, S-818) stops suppressing when a
+ * symbol its reason rests on changes: the finding is listed again, its badge
+ * reads "out of date", and Re-confirm beside Unsuppress re-records the evidence
+ * and keeps the reason.
+ *
  * Code scope (FR-SC-28, S-796): the payload lists every finding with its scope;
  * the Production · Test code · All control narrows the table from memory,
  * production by default, and is kept in the URL's `?scope=`. A test-code row
@@ -42,7 +47,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchSecurity } from "../../api/client.ts";
-import { requestDetail, suppressFinding, unsuppressFinding } from "../../api/securityClient.ts";
+import { reconfirmFinding, requestDetail, suppressFinding, unsuppressFinding } from "../../api/securityClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import type {
   OwaspEditionYear,
@@ -73,6 +78,7 @@ import {
 import {
   ANCHOR_TEXT,
   CONTEXT_TEXT,
+  EVIDENCE_TEXT,
   FINDING_COUNT_TEXT,
   FINDINGS_TABLE_TEXT,
   OWASP_TEXT,
@@ -86,6 +92,7 @@ import {
   securityGate,
   selectorText,
   suppressionEntries,
+  suppressionState,
 } from "../../copy/security.copy.ts";
 import { plural } from "../../copy/types.ts";
 import { currentUrl, replaceUrl } from "../../router.tsx";
@@ -98,11 +105,14 @@ import {
   SCOPES,
   SEVERITIES,
   categoryCount,
+  devDependencyText,
   editionOf,
   findingKey,
   findingLocation,
+  findingScanners,
   hiddenByScope,
   keeps,
+  needsReviewText,
   notCoveredSentence,
   pathFromSearch,
   reachabilityText,
@@ -170,17 +180,17 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => P
     setSelected(key);
     setShown((n) => n + 1);
   };
-  // The finding the suppression dialog is open for, and a refused unsuppress.
+  // The finding the suppression dialog is open for, and a refused unsuppress or re-confirm.
   const [suppressing, setSuppressing] = useState<SecurityFinding | null>(null);
   const [triageError, setTriageError] = useState<string | null>(null);
-  // The entries (by `selectorKey`) with an unsuppress in flight, or done and
-  // awaiting the reloaded page: every button removing one stays disabled until
-  // the page shows the removal, so a double click cannot answer "no entry" for
+  // The entries (by `selectorKey`) with an unsuppress or a re-confirm in flight, or done and
+  // awaiting the reloaded page: every button rewriting one stays disabled until
+  // the page shows the change, so a double click cannot answer "no entry" for
   // a removal that succeeded. The ref guards within one tick; the state disables.
-  const unsuppressing = useRef(new Set<string>());
+  const rewriting = useRef(new Set<string>());
   const [busy, setBusy] = useState<ReadonlySet<string>>(() => new Set());
   useEffect(() => {
-    unsuppressing.current.clear();
+    rewriting.current.clear();
     setBusy(new Set());
   }, [page]);
   // A category id names its edition (`A05:2025`), so a category filter cannot
@@ -200,28 +210,37 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => P
   const detail = page.findings.findings.find((f) => findingKey(f) === selected) ?? null;
   const total = page.findings.total;
 
-  const suppress = async (selector: SecuritySelector, reason: string, expires: string | null) => {
-    await suppressFinding(selector, reason, expires);
+  const suppress = async (selector: SecuritySelector, reason: string, expires: string | null, evidence: readonly string[] = []) => {
+    await suppressFinding(selector, reason, expires, evidence);
     setSuppressing(null);
     setTriageError(null);
     reload();
   };
   // Removes the entry `selector` names: a finding's `suppression.by`, or a
   // Suppressions row's own entry.
-  const unsuppress = async (selector: SecuritySelector) => {
+  const unsuppress = (selector: SecuritySelector) =>
+    rewrite(selector, () => unsuppressFinding(selector), SUPPRESS_TEXT.removeFailed);
+  // Re-records the evidence of the entry that suppresses the finding with this
+  // fingerprint, keeping its reason (FR-SC-32): the entry `selector` is busy
+  // until the reloaded page shows the verdict again.
+  const reconfirm = (fingerprint: string, selector: SecuritySelector) =>
+    rewrite(selector, () => reconfirmFinding(fingerprint), EVIDENCE_TEXT.reconfirmFailed);
+  // One write to an entry, and its refusal stated: both writes change the
+  // entry, so each disables every button on it until the page reloads.
+  const rewrite = async (selector: SecuritySelector, write: () => Promise<unknown>, failed: (detail: string) => string) => {
     const key = selectorKey(selector);
-    const inFlight = unsuppressing.current;
+    const inFlight = rewriting.current;
     if (inFlight.has(key)) return;
     inFlight.add(key);
     setBusy(new Set(inFlight));
     setTriageError(null);
     try {
-      await unsuppressFinding(selector);
+      await write();
       reload();
     } catch (e) {
       inFlight.delete(key);
       setBusy(new Set(inFlight));
-      setTriageError(SUPPRESS_TEXT.removeFailed(requestDetail(e)));
+      setTriageError(failed(requestDetail(e)));
     }
   };
 
@@ -248,13 +267,15 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => P
         onSelect={select}
         onSuppress={setSuppressing}
         onUnsuppress={(selector) => void unsuppress(selector)}
-        unsuppressing={busy}
+        onReconfirm={(fingerprint, selector) => void reconfirm(fingerprint, selector)}
+        rewriting={busy}
         triageError={triageError}
       />
       <SuppressionsWidget
         entries={page.findings.suppressions}
         onUnsuppress={(selector) => void unsuppress(selector)}
-        unsuppressing={busy}
+        onReconfirm={(fingerprint, selector) => void reconfirm(fingerprint, selector)}
+        rewriting={busy}
       />
       <OwaspWidget
         page={page}
@@ -269,7 +290,7 @@ function SecurityContent({ page, reload }: { page: SecurityPage; reload: () => P
         <SuppressDialog
           key={findingKey(suppressing)}
           finding={suppressing}
-          onSubmit={(selector, reason, expires) => suppress(selector, reason, expires)}
+          onSubmit={(selector, reason, expires, evidence) => suppress(selector, reason, expires, evidence)}
           onCancel={() => setSuppressing(null)}
         />
       )}
@@ -326,12 +347,15 @@ interface FindingsWidgetProps {
   onSelect: (key: string) => void;
   /** Opens the suppression dialog for an unsuppressed finding. */
   onSuppress: (f: SecurityFinding) => void;
-  /** Removes the entry a suppressed or expired finding's label names. */
+  /** Removes the entry a suppressed, out-of-date or expired finding's label names. */
   onUnsuppress: (selector: SecuritySelector) => void;
-  /** The entries (by `selectorKey`) whose unsuppress is in flight or awaiting
-   *  the reload: every button removing one is disabled. */
-  unsuppressing: ReadonlySet<string>;
-  /** Why the last unsuppress was refused, if it was. */
+  /** Re-confirms an out-of-date verdict: the finding's fingerprint, and the
+   *  selector of the entry it re-records. */
+  onReconfirm: (fingerprint: string, selector: SecuritySelector) => void;
+  /** The entries (by `selectorKey`) whose unsuppress or re-confirm is in flight or awaiting
+   *  the reload: every button rewriting one is disabled. */
+  rewriting: ReadonlySet<string>;
+  /** Why the last unsuppress or re-confirm was refused, if it was. */
   triageError: string | null;
 }
 
@@ -352,6 +376,8 @@ function LocationCell({ finding, label }: { finding: SecurityFinding; label: str
         </>
       )}
       <TestTag finding={finding} />
+      <ReasonTag why={devDependencyText(finding)} label={SCOPE_TEXT.devTag} data={{ "data-code-scope": "dev" }} />
+      <ReasonTag why={needsReviewText(finding)} label={SCOPE_TEXT.reviewTag} data={{ "data-needs-review": "true" }} />
       {finding.binding === "historical" && (
         <>
           {" "}
@@ -383,6 +409,21 @@ function TestTag({ finding }: { finding: SecurityFinding }) {
         <span className="sr-only"> {why}</span>
       </span>
     </>
+  );
+}
+
+/** The muted tag of a finding left out of the default scope for a reason other
+ *  than test code — `DEV` for a dev-only dependency (FR-SC-30), `REVIEW` for a
+ *  finding its scanner marks low-confidence (FR-SC-31) — its reason on hover and,
+ *  for a reader without one, after it, on a line of its own under the location.
+ *  Nothing when `why` is `null`. `data` is the attribute the specs find it by. */
+function ReasonTag({ why, label, data }: { why: string | null; label: string; data: Record<`data-${string}`, string> }) {
+  if (why === null) return null;
+  return (
+    <span className={styles.reviewTag} title={why} {...data}>
+      <Badge tone="muted">{label}</Badge>
+      <span className="sr-only"> {why}</span>
+    </span>
   );
 }
 
@@ -449,7 +490,8 @@ function FindingsWidget({
   onSelect,
   onSuppress,
   onUnsuppress,
-  unsuppressing,
+  onReconfirm,
+  rewriting,
   triageError,
 }: FindingsWidgetProps) {
   // One abbreviation per distinct path over the whole table, so no two rows share a label.
@@ -471,7 +513,7 @@ function FindingsWidget({
           {f.suppression && (
             <>
               {" "}
-              <Badge tone="muted">{f.suppression.state}</Badge>
+              <Badge tone={f.suppression.state === "out_of_date" ? "orange" : "muted"}>{suppressionState(f.suppression)}</Badge>
             </>
           )}
         </span>
@@ -495,7 +537,7 @@ function FindingsWidget({
         </span>
       ),
     },
-    { key: "scanner", header: "Scanner", cell: (f) => f.scanner_name },
+    { key: "scanner", header: "Scanner", cell: (f) => findingScanners(f).join(", ") },
     { key: "owasp", header: "OWASP", mono: true, cell: (f) => classify(f).categories.join(", ") || "—" },
     {
       key: "open",
@@ -511,14 +553,29 @@ function FindingsWidget({
       header: "Triage",
       cell: (f) =>
         f.suppression ? (
-          <Button
-            size="sm"
-            onClick={() => f.suppression && onUnsuppress(f.suppression.by)}
-            disabled={unsuppressing.has(selectorKey(f.suppression.by))}
-            aria-label={`Unsuppress ${f.rule_id} at ${findingLocation(f)}`}
-          >
-            {SUPPRESS_TEXT.unsuppress}
-          </Button>
+          <>
+            {f.suppression.state === "out_of_date" && (
+              <>
+                <Button
+                  size="sm"
+                  title={EVIDENCE_TEXT.reconfirmTip}
+                  onClick={() => f.suppression && onReconfirm(f.fingerprint, f.suppression.by)}
+                  disabled={rewriting.has(selectorKey(f.suppression.by))}
+                  aria-label={`Re-confirm ${f.rule_id} at ${findingLocation(f)}`}
+                >
+                  {EVIDENCE_TEXT.reconfirm}
+                </Button>{" "}
+              </>
+            )}
+            <Button
+              size="sm"
+              onClick={() => f.suppression && onUnsuppress(f.suppression.by)}
+              disabled={rewriting.has(selectorKey(f.suppression.by))}
+              aria-label={`Unsuppress ${f.rule_id} at ${findingLocation(f)}`}
+            >
+              {SUPPRESS_TEXT.unsuppress}
+            </Button>
+          </>
         ) : (
           <Button size="sm" onClick={() => onSuppress(f)} aria-label={`Suppress ${f.rule_id} at ${findingLocation(f)}`}>
             {SUPPRESS_TEXT.suppress}
@@ -540,7 +597,8 @@ function FindingsWidget({
           </span>
           <FigureNote block>
             {FINDING_COUNT_TEXT.totals(counted.critical, counted.high, counted.medium, counted.low, counted.info, counted.unrated)}{" "}
-            {FINDING_COUNT_TEXT.testCode(excluded.test)}
+            {FINDING_COUNT_TEXT.testCode(excluded.test)} {FINDING_COUNT_TEXT.devOnly(excluded.dev)}{" "}
+            {FINDING_COUNT_TEXT.needsReview(excluded.needs_review)}
           </FigureNote>
           <FigureNote block>{FINDING_COUNT_TEXT.excluded(excluded.not_fresh, excluded.suppressed)}</FigureNote>
         </div>
@@ -623,21 +681,38 @@ function FindingsWidget({
 function SuppressionsWidget({
   entries,
   onUnsuppress,
-  unsuppressing,
+  onReconfirm,
+  rewriting,
 }: {
   entries: SecurityEntryStatus[];
   onUnsuppress: (selector: SecuritySelector) => void;
-  unsuppressing: ReadonlySet<string>;
+  onReconfirm: (fingerprint: string, selector: SecuritySelector) => void;
+  rewriting: ReadonlySet<string>;
 }) {
   if (entries.length === 0) return null;
-  const selectorOf = (e: SecurityEntryStatus): SecuritySelector =>
-    "fingerprint" in e.entry
-      ? { fingerprint: e.entry.fingerprint }
-      : { path: e.entry.path, ...(e.entry.rule ? { rule: e.entry.rule } : {}), ...(e.entry.scanner ? { scanner: e.entry.scanner } : {}) };
+  const selectorOf = (e: SecurityEntryStatus): SecuritySelector => {
+    if ("fingerprint" in e.entry) return { fingerprint: e.entry.fingerprint };
+    if (!("path" in e.entry)) return { rule: e.entry.rule, scanner: e.entry.scanner };
+    return { path: e.entry.path, ...(e.entry.rule ? { rule: e.entry.rule } : {}), ...(e.entry.scanner ? { scanner: e.entry.scanner } : {}) };
+  };
   const suppressed = entries.reduce((n, e) => n + e.suppressed, 0);
   const columns: Column<SecurityEntryStatus>[] = [
     { key: "what", header: "Suppresses", mono: true, cell: (e) => selectorText(selectorOf(e)) },
-    { key: "reason", header: "Reason", cell: (e) => e.entry.reason },
+    {
+      key: "reason",
+      header: "Reason",
+      cell: (e) => (
+        <>
+          {e.entry.reason}
+          {e.out_of_date.length > 0 && (
+            <>
+              <br />
+              <span data-entry-out-of-date>{EVIDENCE_TEXT.entryOutOfDate(e.out_of_date)}</span>
+            </>
+          )}
+        </>
+      ),
+    },
     { key: "expires", header: "Expires", mono: true, cell: (e) => e.entry.expires ?? "—" },
     { key: "count", header: "Findings", sortValue: (e) => e.suppressed, cell: (e) => SUPPRESSIONS_TEXT.count(e.suppressed) },
     {
@@ -645,7 +720,7 @@ function SuppressionsWidget({
       header: "State",
       cell: (e) => (
         <>
-          <Badge tone={e.orphaned || e.expired ? "orange" : "muted"}>{SUPPRESSIONS_TEXT.state(e)}</Badge>
+          <Badge tone={e.orphaned || e.expired || e.out_of_date.length > 0 ? "orange" : "muted"}>{SUPPRESSIONS_TEXT.state(e)}</Badge>
           {e.should_name && (
             <>
               {" "}
@@ -659,14 +734,29 @@ function SuppressionsWidget({
       key: "remove",
       header: "Triage",
       cell: (e) => (
-        <Button
-          size="sm"
-          onClick={() => onUnsuppress(selectorOf(e))}
-          disabled={unsuppressing.has(selectorKey(selectorOf(e)))}
-          aria-label={SUPPRESSIONS_TEXT.remove(selectorOf(e))}
-        >
-          {SUPPRESS_TEXT.unsuppress}
-        </Button>
+        <>
+          {e.out_of_date.length > 0 && "fingerprint" in e.entry && (
+            <>
+              <Button
+                size="sm"
+                title={EVIDENCE_TEXT.reconfirmTip}
+                onClick={() => "fingerprint" in e.entry && onReconfirm(e.entry.fingerprint, selectorOf(e))}
+                disabled={rewriting.has(selectorKey(selectorOf(e)))}
+                aria-label={SUPPRESSIONS_TEXT.reconfirm(selectorOf(e))}
+              >
+                {EVIDENCE_TEXT.reconfirm}
+              </Button>{" "}
+            </>
+          )}
+          <Button
+            size="sm"
+            onClick={() => onUnsuppress(selectorOf(e))}
+            disabled={rewriting.has(selectorKey(selectorOf(e)))}
+            aria-label={SUPPRESSIONS_TEXT.remove(selectorOf(e))}
+          >
+            {SUPPRESS_TEXT.unsuppress}
+          </Button>
+        </>
       ),
     },
   ];
@@ -712,7 +802,11 @@ function OwaspWidget({ page, edition, setEdition, categories, classify, scope }:
       copy={owaspView}
       figure={
         <span>
-          {OWASP_TEXT.edition(edition)} <FigureNote>{FINDING_COUNT_TEXT.testCode(page.counts.excluded.test)}</FigureNote>
+          {OWASP_TEXT.edition(edition)}{" "}
+          <FigureNote>
+            {FINDING_COUNT_TEXT.testCode(page.counts.excluded.test)} {FINDING_COUNT_TEXT.devOnly(page.counts.excluded.dev)}{" "}
+            {FINDING_COUNT_TEXT.needsReview(page.counts.excluded.needs_review)}
+          </FigureNote>
           {unclassified > 0 && <FigureNote> · {OWASP_TEXT.unclassified(unclassified)}</FigureNote>}
         </span>
       }
