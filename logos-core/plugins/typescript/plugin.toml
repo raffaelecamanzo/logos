@@ -1,11 +1,13 @@
 # Declarative descriptor for the TypeScript grammar (S-015, FR-PL-01,
-# FR-FW-03, ADR-09): `.ts`/`.js` sources. JSX-bearing files (`.tsx`/`.jsx`)
-# parse with the sibling `tsx` plugin — a distinct tree-sitter Language from
-# the same crate/feature. Droppable `.scm` query overrides resolve under
-# `.logos/plugins/typescript/queries/` (FR-PL-04, UAT-PL-03).
+# FR-FW-03, ADR-09): `.ts` sources. JSX-bearing `.tsx` files parse with the
+# sibling `tsx` plugin — a distinct tree-sitter Language from the same
+# crate/feature — and JavaScript (`.js`/`.mjs`/`.cjs`/`.jsx`) is its own
+# `javascript` plugin over that TSX Language (S-538, FR-PL-08). Droppable `.scm`
+# query overrides resolve under `.logos/plugins/typescript/queries/` (FR-PL-04,
+# UAT-PL-03).
 
 name = "typescript"
-extensions = ["ts", "js", "mjs", "cjs"]
+extensions = ["ts"]
 
 # Member paths join with a dot (`a.b.c`). An import specifier is a different
 # grammar — a PATH — and is declared separately (S-439, CR-142 D1): only `/`
@@ -16,6 +18,11 @@ extensions = ["ts", "js", "mjs", "cjs"]
 module_separator = "."
 import_specifier = "path"
 specifier_extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
+# A bare specifier (`@/lib/api`, `@acme/ui`) binds through the importing file's
+# nearest `tsconfig.json`/`jsconfig.json` (`extends`, `paths`, `baseUrl`) and
+# the workspace packages' `package.json` names (S-531, FR-RS-02); one neither
+# rewrites (`react`) names an external package and stays unbound.
+bare_specifiers = "tsconfig"
 
 # tree-sitter-typescript 0.23 is generated against ABI 14; asserted at load
 # against the compiled grammar (FR-PL-03, NFR-PC-03).
@@ -27,12 +34,7 @@ abi_version = 14
 # `references.scm`.
 implicit_receiver = "none"
 
-# JavaScript enforces no arity (S-592, FR-RS-43; Sprint 91 Autonomous Decision
-# 3): a JS call may pass any number of arguments to any function, so a call in
-# one of these files is never filtered by a parameter range. `.ts` calls are.
-arity_unchecked_extensions = ["js", "mjs", "cjs"]
-
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
 
 # The optional member-access capability (S-523, CR-171, ADR-39): Cohesion
 # scores a class only in a language that declares it, so a class of a language
@@ -41,10 +43,6 @@ capabilities = ["symbols", "references", "frameworks", "invocations"]
 # Accesses edges (`queries/references.scm`, `@ref.access`), so its classes'
 # LCOM4 has its shared-field links.
 member_access = true
-# JavaScript is carved out: a JS class's fields are usually assigned only in
-# its constructor (`this.x = …`), which declares no `Field` node for `this.x`
-# to bind to, so its LCOM4 would rest on calls alone (S-523).
-member_access_excluded_extensions = ["js", "mjs", "cjs"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
@@ -57,11 +55,13 @@ nesting_block_kinds = ["if_statement", "for_statement", "for_in_statement", "whi
 # Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11): a
 # Function/Method is implemented when its declaration is, or has a direct
 # child of, one of these kinds — a function/method `statement_block`, or the `arrow_function`/
-# `function_expression` a `const f = …` declarator binds. Overload signatures,
-# `abstract` and interface method signatures are separate node kinds
-# (`function_signature`, `method_signature`, …) the symbols query does not
-# capture, so no bodyless callable reaches the graph from them.
-body_node_kinds = ["statement_block", "arrow_function", "function_expression"]
+# `function_expression` a `const f = …` declarator binds, or the wrapper
+# `call_expression` a component binds (`const B = forwardRef(…)`, S-532). Overload
+# signatures are separate node kinds (`function_signature`, a class's
+# `method_signature`) the symbols query does not capture, so no bodyless callable
+# reaches the graph from them; an `abstract` or interface method signature is
+# captured (S-532) and, matching none of these kinds, is the bodyless Method.
+body_node_kinds = ["statement_block", "arrow_function", "function_expression", "call_expression"]
 
 # TS/JS exports are structural: a declaration under an `export_statement`
 # ancestor is an exported dead-code root (FR-AN-01).
@@ -73,8 +73,10 @@ export_convention = "export-statement"
 test_convention = "js-callback"
 
 # The ratified v1 TypeScript/JS framework set (FR-FW-03): Express + Next.js
-# (`react` rides along: a Next.js component file may import only react).
-framework_detectors = ["express", "next", "react"]
+# (`react` rides along: a Next.js component file may import only react), plus
+# NestJS (S-533): `@nestjs/common` is how a scoped package's ledger target reads
+# (`@nestjs::common`), and the controller/route decorators come from it.
+framework_detectors = ["express", "next", "react", "@nestjs::common"]
 
 # Canonical reference prefixes whose presence in a file's ledger makes the file
 # an outbound **HTTP client-call** candidate (S-343, CR-108, FR-WS-08) — the
@@ -98,9 +100,19 @@ framework_detectors = ["express", "next", "react"]
 # `queries/invocations.scm` is anchored to a NAMED client, and this language
 # ships no broad `<receiver>.<method>(<arg>)` anchor.
 #
-# Both TS grammars share the row: `.ts`/`.js` and `.tsx`/`.jsx` are one language
-# split across two tree-sitter `Language`s (ADR-09).
+# Every TypeScript-family descriptor shares the row: `.ts`, `.tsx` and the
+# `javascript` plugin's files are one family split across two tree-sitter
+# `Language`s (ADR-09, S-538).
 http_client_detectors = ["axios", "fetch"]
+
+# TypeScript's types are structural (S-535, CR-173, FR-EX-17): an `implements`
+# names an interface, an abstract class or a type alias alike, and an interface
+# may `extend` a class, so a supertype clause binds any type-like declaration
+# it names (a class's `extends` and a `new` still bind a class). Every type
+# annotation, `new` and type argument relates the declaration it sits in — a
+# function, a field, a module-level variable — and one written through an
+# import binds only within what that import binds to.
+structural_types = true
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): some relations bind
 # across files, not all.
@@ -109,7 +121,7 @@ http_client_detectors = ["axios", "fetch"]
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["calls", "imports"]
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -120,6 +132,9 @@ frameworks = "queries/frameworks.scm"
 # spelling. Anchors only — the HTTP-verb and static-literal decisions stay in the
 # generic dispatch and `resolve::http_client_call`.
 invocations = "queries/invocations.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` text → HTTP method (S-015). Express router
 # verbs map to themselves; `all` and `use` (mounting) carry every verb.
 [framework_methods]
@@ -132,3 +147,14 @@ head = "HEAD"
 options = "OPTIONS"
 all = "ANY"
 use = "ANY"
+# NestJS route decorators (S-533): the decorator name, capitalised, is the
+# captured method text. Case-sensitive, so these never collide with Express's
+# lower-case verbs above.
+Get = "GET"
+Post = "POST"
+Put = "PUT"
+Delete = "DELETE"
+Patch = "PATCH"
+Head = "HEAD"
+Options = "OPTIONS"
+All = "ANY"

@@ -18,6 +18,7 @@ import type {
   SecurityFindingContext,
   SecuritySelector,
   SecurityStaleBecause,
+  SecurityEvidenceChange,
   SecuritySuppression,
 } from "../api/types.ts";
 
@@ -75,15 +76,27 @@ export const SCOPE_TEXT = {
   label: "Code scope",
   options: { production: "Production", test: "Test code", all: "All" },
   tag: "TEST",
+  /** The tag of a finding its scanner marks low-confidence (FR-SC-31, S-817):
+   *  one word, since the Findings table holds no wider cell at 1024 px; the hover
+   *  and the reader's text say "Needs review". */
+  reviewTag: "REVIEW",
+  /** Why it reads that: the scanner's own word, and what it changes. */
+  reviewReason: (confidence: string) =>
+    `Needs review: the scanner marks it ${confidence}-confidence. It is left out of the default list and counts, and still counts for the [security] rules, bless and the branch delta.`,
   reason: {
     /** A test-code finding the payload gave no reason for. */
     unstated: "In test code.",
     test_symbol: "In test code: the symbol that encloses it is a test.",
     test_path: "In test code: its path is a test, fixtures or testdata path.",
+    /** A finding on a package its lockfile marks dev-only (FR-SC-30, S-810). */
+    dev_dependency:
+      "Dev-only dependency: its lockfile marks the package dev. It is left out of the default list and counts, and still counts for the [security] rules, bless and the branch delta.",
   },
+  /** The tag of a finding on a dev-only dependency: one word, as the others. */
+  devTag: "DEV",
   /** A table that lists nothing because the scope hid what the other filters kept. */
   hidden: (n: number, scopeWord: string) =>
-    `No ${scopeWord} finding matches these filters; ${n} ${plural(n, "finding does", "findings do")} in the other code: change the code scope to see ${plural(n, "it", "them")}.`,
+    `No ${scopeWord} finding matches these filters; ${n} ${plural(n, "finding does", "findings do")} outside this scope (test code, a dev-only dependency, or marked needs review): change the code scope to see ${plural(n, "it", "them")}.`,
 } as const;
 
 /** The named absences, each with the command that fixes it. */
@@ -128,8 +141,22 @@ export const SCANNER_STATE_TEXT = {
    *  its log and where that log is. */
   lastFailed: "LAST SCAN FAILED",
   failureCause: (cause: string | undefined, log: string) => `${cause !== undefined ? `${cause} — ` : ""}the output is in ${log}.`,
-  fresh: (findings: number, suppressed: number) =>
-    `${findings} ${plural(findings, "finding", "findings")}${suppressed > 0 ? `, ${suppressed} suppressed` : ""}`,
+  /** `merged`: its findings another scanner reports too, counted on that
+   *  scanner's row once (FR-SC-29); unstated at 0. */
+  fresh: (findings: number, suppressed: number, merged = 0) =>
+    `${findings} ${plural(findings, "finding", "findings")}${suppressed > 0 ? `, ${suppressed} suppressed` : ""}${
+      merged > 0 ? `, ${merged} counted under another scanner` : ""
+    }`,
+} as const;
+
+/** A finding several scanners report (FR-SC-29, S-809): one advisory on one
+ *  lockfile, package and version, named by every reporter. */
+export const REPORTERS_TEXT = {
+  label: "Reported by",
+  /** One reporter: its scanner and version, and what it reported it as. */
+  reporter: (scanner: string, version: string, rule: string, severity: string) =>
+    `${scanner} ${version}: ${rule} (${severity})`,
+  note: "One advisory on one package, counted once at the highest rating any scanner gave. Suppressing it by any reporter's fingerprint suppresses it.",
 } as const;
 
 /** A not-covered category's sentence, naming the command that covers it. */
@@ -158,6 +185,12 @@ export const FINDING_COUNT_TEXT = {
   /** The findings in test code, which no count includes (FR-SC-28): stated
    *  beside the count, `security status`'s "N more in test code". */
   testCode: (n: number) => `· ${n} in test code`,
+  /** The findings their scanner marks low-confidence, which no count includes
+   *  (FR-SC-31, S-817): `security status`'s "N more need review". */
+  needsReview: (n: number) => `· ${n} more ${plural(n, "needs", "need")} review`,
+  /** The findings on a dev-only dependency, which no count includes (FR-SC-30,
+   *  S-810): `security status`'s "N more in dev-only dependencies". */
+  devOnly: (n: number) => `· ${n} more in dev-only dependencies`,
 } as const;
 
 /** Why a finding has no OWASP category under the edition shown (FR-SC-04). */
@@ -411,20 +444,85 @@ export const INSTALL_CONSENT_TEXT = {
 /** The committed file a suppression is written to (mirrors `IGNORE_FILE`). */
 export const IGNORE_FILE = ".logos/security-ignore.toml";
 
-/** A suppressed or expired finding's label beside its state badge: the reason
- *  it was accepted for, and until when — and, for a path entry (S-770), which
- *  entry covers it, since removing that entry unsuppresses everything under it. */
+/** A suppressed, out-of-date or expired finding's label beside its state badge: the reason
+ *  it was accepted for, and until when — and, for a path entry (S-770) or a
+ *  rule-wide one (S-814), which entry covers it, since removing that entry
+ *  unsuppresses everything it covers. */
 export function suppressionNote(suppression: SecuritySuppression): string {
-  const { reason, expires, by } = suppression;
-  const covers = "path" in by ? ` — covers ${selectorText(by)}` : "";
+  const { reason, expires } = suppression;
+  const covers = coverNote(suppression);
   if (suppression.state === "expired") return `${reason} (expired after ${expires ?? "its date"})${covers}`;
+  // An out-of-date verdict keeps the reason it was given for; what changed is the Evidence row's (`evidenceNote`).
   return (expires === null ? reason : `${reason} (until ${expires})`) + covers;
 }
 
-/** How an entry's selector reads: a fingerprint's first twelve digits, or the
- *  path glob with its narrowing. */
+/** The note's tail naming the entry that covers a finding: nothing for a fingerprint, the glob
+ *  for a path, and the rule-wide entry — which an expired one no longer "suppresses by". */
+function coverNote({ state, by }: SecuritySuppression): string {
+  if ("fingerprint" in by) return "";
+  if ("path" in by) return ` — covers ${selectorText(by)}`;
+  return ` — ${state === "suppressed" ? "suppressed by a rule-wide entry" : "rule-wide entry"} (${selectorText(by)})`;
+}
+
+/** The state badge's word: `out_of_date` reads "out of date". */
+export function suppressionState(suppression: SecuritySuppression): string {
+  return suppression.state === "out_of_date" ? "out of date" : suppression.state;
+}
+
+/** One changed evidence symbol, in the sentence "`DefaultCookieConfig` changed". */
+export function changeText(change: SecurityEvidenceChange): string {
+  switch (change.change) {
+    case "changed":
+      return `\`${change.name}\` changed`;
+    case "gone":
+      return `\`${change.name}\` no longer exists`;
+    case "unverifiable":
+      return `\`${change.name}\` could not be checked${change.detail ? `: ${change.detail}` : ""}`;
+  }
+}
+
+/** The changed evidence symbols as one sentence: "`A` changed; `B` no longer exists". */
+export function changesText(changes: readonly SecurityEvidenceChange[]): string {
+  return changes.map(changeText).join("; ");
+}
+
+/** A suppression's evidence line: what its reason rests on, "no evidence
+ *  recorded" when it records none (FR-SC-32), or — for an out-of-date verdict —
+ *  the symbols that changed. `null` for an expired entry, which is not checked. */
+export function evidenceNote(suppression: SecuritySuppression): string | null {
+  switch (suppression.state) {
+    case "suppressed": {
+      const evidence = suppression.evidence ?? [];
+      return evidence.length === 0 ? EVIDENCE_TEXT.none : EVIDENCE_TEXT.resting(evidence.map((e) => e.name));
+    }
+    case "out_of_date":
+      return changesText(suppression.changed);
+    case "expired":
+      return null;
+  }
+}
+
+/** The evidence a suppression records and the verdict that re-opens when it
+ *  changes (FR-SC-32, S-818). */
+export const EVIDENCE_TEXT = {
+  outOfDate: "Verdict out of date: re-review",
+  none: "No evidence recorded",
+  resting: (names: readonly string[]) => `Reason rests on ${names.map((n) => `\`${n}\``).join(", ")}, unchanged`,
+  label: "Evidence",
+  reconfirm: "Re-confirm",
+  reconfirmTip: "Re-record the evidence as it is now, keeping the reason: the finding is suppressed again.",
+  reconfirmFailed: (detail: string) => `The verdict was not re-confirmed: ${detail}`,
+  recordEvidence: "Record the enclosing symbol as evidence",
+  recordEvidenceHint: (name: string) =>
+    `The suppression then holds only while \`${name}\` is unchanged: if its source changes the finding comes back as "verdict out of date".`,
+  entryOutOfDate: (changes: readonly SecurityEvidenceChange[]) => `${EVIDENCE_TEXT.outOfDate} — ${changesText(changes)}`,
+} as const;
+
+/** How an entry's selector reads: a fingerprint's first twelve digits, the
+ *  path glob with its narrowing, or a rule of a scanner in every file. */
 export function selectorText(selector: SecuritySelector): string {
   if ("fingerprint" in selector) return `fingerprint ${selector.fingerprint.slice(0, 12)}…`;
+  if (!("path" in selector)) return `rule ${selector.rule} of ${selector.scanner}, in every file`;
   const narrowing = [selector.rule && `rule ${selector.rule}`, selector.scanner && `scanner ${selector.scanner}`].filter(Boolean);
   return [`everything under ${selector.path}`, ...narrowing].join(", ");
 }
@@ -469,7 +567,9 @@ export const SUPPRESSIONS_TEXT = {
   caption: `The entries of ${IGNORE_FILE}`,
   count: (n: number) => `${n} suppressed`,
   /** The one state an entry is in, orphaned first: it is the one to act on. */
-  state: (e: SecurityEntryStatus) => (e.orphaned ? "orphaned" : e.expired ? "expired" : "active"),
+  state: (e: SecurityEntryStatus) =>
+    e.orphaned ? "orphaned" : e.expired ? "expired" : e.out_of_date.length > 0 ? "out of date" : "active",
   shouldName: (fingerprint: string) => `should name fingerprint ${fingerprint.slice(0, 12)}…`,
   remove: (selector: SecuritySelector) => `Remove the entry for ${selectorText(selector)}`,
+  reconfirm: (selector: SecuritySelector) => `Re-confirm the entry for ${selectorText(selector)}`,
 } as const;

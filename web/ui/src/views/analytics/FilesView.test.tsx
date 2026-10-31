@@ -373,8 +373,8 @@ describe("FilesView (S-188, FR-UI-11)", () => {
   describe("findings column (S-671, FR-SC-14)", () => {
     const scanned = (over: Partial<FilesModel["hotspots"]> = {}): FilesModel => {
       const m = model(over);
-      m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 0 };
-      m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 0 };
+      m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 0, dev: 0, needs_review: 0 };
+      m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 0, dev: 0, needs_review: 0 };
       return m;
     };
 
@@ -393,7 +393,7 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     it("reads a scoped-only project's file at the same count as its Security page and roll-up (S-760)", async () => {
       stubFetch(() => {
         const m = model();
-        m.hotspots.files[0].findings = { count: SCOPED_ONLY_COUNTED.total, highest: "medium", stale: 0, test: 0 };
+        m.hotspots.files[0].findings = { count: SCOPED_ONLY_COUNTED.total, highest: "medium", stale: 0, test: 0, dev: 0, needs_review: 0 };
         return m;
       });
       render(<FilesView />);
@@ -427,8 +427,8 @@ describe("FilesView (S-188, FR-UI-11)", () => {
     it("shows +N test beside a file's production count, linking to its test-code findings (S-796)", async () => {
       stubFetch(() => {
         const m = scanned();
-        m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 2 };
-        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 0, test: 4 };
+        m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 2, dev: 0, needs_review: 0 };
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 0, test: 4, dev: 0, needs_review: 0 };
         return m;
       });
       render(<FilesView />);
@@ -442,10 +442,42 @@ describe("FilesView (S-188, FR-UI-11)", () => {
       expect(cold.getByRole("link", { name: "+4 test" })).toHaveAttribute("href", "/security?path=src%2Fcold.rs&scope=test");
     });
 
+    it("shows +N review beside a file's count for the findings its scanner marks low-confidence, linking to all code (S-817)", async () => {
+      stubFetch(() => {
+        const m = scanned();
+        m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 0, dev: 0, needs_review: 2 };
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 0, test: 0, dev: 0, needs_review: 0 };
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const hot = within(within(table).getByText("src/hot.rs").closest("tr")!);
+      expect(hot.getByRole("link", { name: /^3/ })).toHaveTextContent("3 high");
+      expect(hot.getByRole("link", { name: "+2 review" })).toHaveAttribute("href", "/security?path=src%2Fhot.rs&scope=all");
+      const cold = within(within(table).getByText("src/cold.rs").closest("tr")!);
+      expect(cold.queryByRole("link", { name: /review/ })).toBeNull();
+    });
+
+    it("shows +N dev beside a file's count for the findings on a dev-only dependency, linking to all code (S-810)", async () => {
+      stubFetch(() => {
+        const m = scanned();
+        m.hotspots.files[0].findings = { count: 3, highest: "high", stale: 0, test: 0, dev: 4, needs_review: 0 };
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 0, test: 0, dev: 0, needs_review: 0 };
+        return m;
+      });
+      render(<FilesView />);
+      const table = await screen.findByRole("table", { name: "Files ranked by risk" });
+      const hot = within(within(table).getByText("src/hot.rs").closest("tr")!);
+      expect(hot.getByRole("link", { name: /^3/ })).toHaveTextContent("3 high");
+      expect(hot.getByRole("link", { name: "+4 dev" })).toHaveAttribute("href", "/security?path=src%2Fhot.rs&scope=all");
+      const cold = within(within(table).getByText("src/cold.rs").closest("tr")!);
+      expect(cold.queryByRole("link", { name: /dev/ })).toBeNull();
+    });
+
     it("shows +N test beside a stale label too, each in its own place (S-796)", async () => {
       stubFetch(() => {
         const m = scanned();
-        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 5 };
+        m.hotspots.files[1].findings = { count: 0, highest: null, stale: 2, test: 5, dev: 0, needs_review: 0 };
         return m;
       });
       render(<FilesView />);

@@ -909,7 +909,9 @@ class Ok {
     /// parameter property, so they are one component (cohesion 1); `Split`'s two
     /// getters read disjoint fields, so they are two (cohesion 1/2). Mean 0.75.
     /// With no `Field` nodes every `Shared` method would be its own component
-    /// (1/3), so this mean cannot be reached without the fields.
+    /// (1/3), so this mean cannot be reached without the fields. Two classes are
+    /// below the default `cohesion_min_classes` (v9), so the dimension is read
+    /// under a minimum of 1.
     #[test]
     fn lcom4_reflects_the_shared_typescript_fields() {
         let tmp = TempDir::new().unwrap();
@@ -954,7 +956,11 @@ class Split {
             .hydrate(Granularity::ExcludeContains)
             .expect("dependency view hydrates");
         let rt = engine.runtime().unwrap();
-        let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
+        let thresholds = metrics::Thresholds {
+            cohesion_min_classes: 1,
+            ..metrics::Thresholds::default()
+        };
+        let model = metrics::snapshot(rt, &view, None, thresholds, &engine.registry().expect("a started engine holds its registry").member_access_extensions())
             .expect("snapshot runs")
             .metrics;
 
@@ -1131,6 +1137,147 @@ class Account {
         assert!(
             !unmatched[0].resolved,
             "an unbindable access stays resolved = 0 and retries on sync (NFR-RA-05)"
+        );
+    }
+}
+
+/// Python's `self.x` reads and writes bind `Accesses` to the Fields its classes
+/// now declare, and Python Cohesion is computed from them (S-543, [FR-EX-20],
+/// [FR-QM-11]).
+///
+/// [FR-EX-20]: ../../docs/specs/requirements/FR-EX-20.md
+/// [FR-QM-11]: ../../docs/specs/requirements/FR-QM-11.md
+#[cfg(feature = "lang-python")]
+mod python_accesses {
+    use logos_core::model::{EdgeKind, NodeId, NodeKind};
+    use logos_core::{metrics, Engine, Granularity, Runtime};
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn node_id(rt: &Runtime, name: &str, kind: NodeKind) -> NodeId {
+        let wanted = name.to_string();
+        rt.submit_read(move |store| {
+            let rows = store.search(&wanted, Some(kind), 16)?;
+            Ok(rows.into_iter().find(|r| r.name == wanted).map(|r| r.id))
+        })
+        .expect("read runs")
+        .unwrap_or_else(|| panic!("no {kind:?} node named {name}"))
+    }
+
+    fn accesses_edges(rt: &Runtime) -> Vec<(NodeId, NodeId)> {
+        rt.submit_read(|store| {
+            Ok(store
+                .all_edges()?
+                .into_iter()
+                .filter(|e| e.kind == EdgeKind::Accesses)
+                .map(|e| (e.source, e.target))
+                .collect())
+        })
+        .expect("read runs")
+    }
+
+    /// werkzeug's `MapAdapter` shape: `__init__` writes `self.map`, `match`
+    /// reads it. Both bind to the one Field `map`; `self.missing`, which no
+    /// method writes and the class does not declare, stays unresolved.
+    #[test]
+    fn a_self_read_binds_to_the_field_a_method_writes() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("routing.py"),
+            "\
+class MapAdapter:
+    def __init__(self, map, server_name):
+        self.map = map
+        self.server_name = server_name
+
+    def match(self):
+        return self.map.rules, self.missing
+",
+        )
+        .unwrap();
+
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        engine.index();
+
+        let init = node_id(rt, "__init__", NodeKind::Method);
+        let matcher = node_id(rt, "match", NodeKind::Method);
+        let map = node_id(rt, "map", NodeKind::Field);
+        let server_name = node_id(rt, "server_name", NodeKind::Field);
+
+        let mut edges = accesses_edges(rt);
+        edges.sort();
+        let mut expected = vec![(init, map), (init, server_name), (matcher, map)];
+        expected.sort();
+        assert_eq!(edges, expected, "each `self.x` of a declared field is one Accesses edge (FR-EX-08)");
+
+        let refs = rt.submit_read(|store| store.unresolved_refs()).expect("read runs");
+        let missing: Vec<_> = refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Accesses && r.target == "missing")
+            .collect();
+        assert_eq!(missing.len(), 1, "the undeclared attribute is recorded once");
+        assert!(!missing[0].resolved, "and stays unresolved (NFR-RA-05)");
+    }
+
+    /// LCOM4 reads the Python fields ([FR-QM-11]): `Shared`'s methods meet
+    /// through the attributes `__init__` writes, so they are one component
+    /// (cohesion 1); `Split`'s two getters read disjoint class-body fields, so
+    /// they are two (1/2). Mean 0.75 — unreachable without the fields, where
+    /// every method is its own component — and computed at all only because
+    /// Python declares `member_access`. Read under a minimum of 1 class (v9).
+    #[test]
+    fn lcom4_reflects_the_shared_python_fields() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("shared.py"),
+            "\
+class Shared:
+    def __init__(self, http):
+        self.count = 0
+        self.http = http
+
+    def a(self):
+        return self.count + self.http
+
+    def b(self):
+        return self.http
+
+
+class Split:
+    x = 0
+    y = 0
+
+    def get_x(self):
+        return self.x
+
+    def get_y(self):
+        return self.y
+",
+        )
+        .unwrap();
+
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        engine.index();
+        let view = engine
+            .hydrate(Granularity::ExcludeContains)
+            .expect("dependency view hydrates");
+        let rt = engine.runtime().unwrap();
+        let thresholds = metrics::Thresholds {
+            cohesion_min_classes: 1,
+            ..metrics::Thresholds::default()
+        };
+        let member_access = engine.registry().expect("a started engine holds its registry").member_access_extensions();
+        assert!(member_access.contains("py"), "Python declares member_access: {member_access:?}");
+        let model = metrics::snapshot(rt, &view, None, thresholds, &member_access)
+            .expect("snapshot runs")
+            .metrics;
+
+        let cohesion = model.cohesion.expect("two Python classes with methods → Cohesion applies");
+        assert!(
+            (cohesion.raw - 0.75).abs() < 1e-12,
+            "mean of Shared 1/1 and Split 1/2 = 0.75, got {}",
+            cohesion.raw
         );
     }
 }

@@ -23,7 +23,7 @@ fn alive(pid: u32) -> bool {
 }
 
 fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(20));
     while !done() {
         assert!(Instant::now() < deadline, "{what}");
         std::thread::sleep(Duration::from_millis(10));

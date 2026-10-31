@@ -155,7 +155,9 @@ export function suggestedPath(f: SecurityFinding): string {
 /** One entry's identity: what an unsuppress is keyed by, so every row one path
  *  entry covers waits on the same removal. */
 export function selectorKey(s: SecuritySelector): string {
-  return "fingerprint" in s ? `fingerprint\u0000${s.fingerprint}` : `path\u0000${s.path}\u0000${s.rule ?? ""}\u0000${s.scanner ?? ""}`;
+  if ("fingerprint" in s) return `fingerprint\u0000${s.fingerprint}`;
+  if (!("path" in s)) return `rule\u0000${s.rule}\u0000${s.scanner}`;
+  return `path\u0000${s.path}\u0000${s.rule ?? ""}\u0000${s.scanner ?? ""}`;
 }
 
 /** The page's filters; an empty string is "any". */
@@ -173,7 +175,7 @@ export interface FindingFilters {
 }
 
 /** The code scope control's values, as `security findings --scope` spells them. */
-export type ScopeFilter = SecurityCodeScope | "all";
+export type ScopeFilter = Exclude<SecurityCodeScope, "dev"> | "all";
 
 /** The scopes the control offers, the default first. */
 export const SCOPES: readonly ScopeFilter[] = ["production", "test", "all"];
@@ -207,13 +209,31 @@ export function scopeReasonText(f: SecurityFinding): string | null {
   return f.code_scope_reason === null ? SCOPE_TEXT.reason.unstated : SCOPE_TEXT.reason[f.code_scope_reason];
 }
 
+/** Why a finding reads `dev`, in words — the `DEV` tag's hover and the detail's
+ *  line; `null` for a finding that is not on a dev-only dependency (FR-SC-30). */
+export function devDependencyText(f: SecurityFinding): string | null {
+  return f.code_scope === "dev" ? SCOPE_TEXT.reason.dev_dependency : null;
+}
+
+/** Why a finding reads "needs review", in words — the tag's hover and the
+ *  detail's line; `null` for a finding its scanner does not mark low-confidence. */
+export function needsReviewText(f: SecurityFinding): string | null {
+  return f.needs_review ? SCOPE_TEXT.reviewReason(f.confidence) : null;
+}
+
 /** Does the scope list a finding? */
 export function inScope(f: SecurityFinding, scope: ScopeFilter): boolean {
-  return scope === "all" || f.code_scope === scope;
+  if (scope === "all") return true;
+  // The default scope also leaves out a finding its scanner marks low-confidence
+  // (FR-SC-31, S-817): "needs review", listed under `all`, counted apart. A
+  // finding on a dev-only dependency (`dev`, FR-SC-30, S-810) is in neither
+  // production nor test code, so only `all` lists it.
+  return scope === "production" ? f.code_scope === "production" && !f.needs_review : f.code_scope === "test";
 }
 
 /** How many findings the scope alone leaves out of the table: those every
- *  other filter keeps (the CLI's `hidden_by_scope`, counted the same way). */
+ *  other filter keeps (the CLI's `hidden_by_scope`, `hidden_needs_review` and
+ *  `hidden_dev` together, counted the same way). */
 export function hiddenByScope(
   findings: readonly SecurityFinding[],
   filters: FindingFilters,
@@ -242,7 +262,11 @@ export function unclassifiedCount(
 export function categoryCount(c: SecurityCategoryCoverage, scope: ScopeFilter): number | null {
   if (c.state.state !== "covered") return null;
   const production = c.production_findings ?? 0;
-  return scope === "all" ? c.state.findings : scope === "production" ? production : c.state.findings - production;
+  // Production, dev-only, needs review and test code partition `findings`
+  // (FR-SC-30, FR-SC-31).
+  const review = c.needs_review_findings ?? 0;
+  const dev = c.dev_findings ?? 0;
+  return scope === "all" ? c.state.findings : scope === "production" ? production : c.state.findings - production - review - dev;
 }
 
 export const NO_FILTERS: FindingFilters = {
@@ -300,9 +324,10 @@ export function keeps(
     (filters.severity === "unrated"
       ? f.severity === "unrated"
       : severityRank(gatedAs(f.severity)) >= severityRank(filters.severity));
+  // A merged finding is any of its reporters' (FR-SC-29).
   const want = filters.scanner.toLowerCase();
   const scanner =
-    want === "" || f.scanner_name.toLowerCase() === want || scanners.get(want) === f.scanner_name;
+    want === "" || findingScanners(f).some((name) => name.toLowerCase() === want || scanners.get(want) === name);
   const category =
     filters.category === "" ||
     classification.categories.some((id) => {
@@ -316,6 +341,13 @@ export function keeps(
   const suppression = filters.suppression === "" || suppressed === (filters.suppression === "suppressed");
   const reachability = filters.reachability === "" || f.context.reachability.verdict === filters.reachability;
   return severity && scanner && category && path && suppression && reachability && inScope(f, filters.scope);
+}
+
+/** The scanners that reported `f`, each once, its own first: every reporter of
+ *  one advisory several scanners report (FR-SC-29, S-809), else its scanner. */
+export function findingScanners(f: Pick<SecurityFinding, "scanner_name" | "reporters">): string[] {
+  const names = (f.reporters ?? []).map((r) => r.scanner_name);
+  return [...new Set([f.scanner_name, ...names])];
 }
 
 /** Registry name → driver name, over the registered scanners. An unregistered
@@ -343,7 +375,7 @@ export function scannerStateText(row: SecurityScannerStatus, pending: readonly s
       // scanner, has no copy here to run: only a newer report refreshes it.
       return SCANNER_STATE_TEXT.stale(row.because, row.installed !== null ? SECURITY_COMMANDS.scan : SECURITY_COMMANDS.ingest);
     case "fresh":
-      return SCANNER_STATE_TEXT.fresh(row.findings, row.suppressed);
+      return SCANNER_STATE_TEXT.fresh(row.findings, row.suppressed, row.merged);
   }
 }
 

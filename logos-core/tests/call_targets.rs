@@ -163,14 +163,18 @@ fn two_python_classes_or_none_stay_unbound() {
 
 /// FR-RS-16 AC: a Kotlin `Foo()` with one in-repository class `Foo` records
 /// `Instantiates`, through a single-type import and from the class's own
-/// package.
+/// package — inside a class too, when the class declares no `Foo` and inherits
+/// nothing, so the bare call is the free one (S-560).
 #[test]
 fn a_kotlin_call_to_one_class_records_instantiates() {
     let (_tmp, engine) = indexed(fixtures::KOTLIN);
     let rt = engine.runtime().unwrap();
     assert_eq!(
         edges_from(rt, "src/main/kotlin/com/y/Use.kt", EdgeKind::Instantiates),
-        strings(&["build -> src/main/kotlin/com/x/Foo.kt:Foo:class"])
+        strings(&[
+            "build -> src/main/kotlin/com/x/Foo.kt:Foo:class",
+            "go -> src/main/kotlin/com/x/Foo.kt:Foo:class",
+        ])
     );
     assert_eq!(
         edges_from(rt, "src/main/kotlin/com/x/Make.kt", EdgeKind::Instantiates),
@@ -179,18 +183,16 @@ fn a_kotlin_call_to_one_class_records_instantiates() {
 }
 
 /// A Kotlin `Bar()` naming the two `com.z.Bar` classes of two source sets, and
-/// a `Missing()` nothing declares, stay unbound. A bare `Foo()` inside a class
-/// body is a call on the current instance (`implicit_receiver = "self"`): it
-/// binds among the class's own members only, so it never reaches `Foo`.
+/// a `Missing()` nothing declares, stay unbound.
 #[test]
-fn two_kotlin_classes_none_or_a_call_inside_a_class_stay_unbound() {
+fn two_kotlin_classes_or_none_stay_unbound() {
     let (_tmp, engine) = indexed(fixtures::KOTLIN);
     let rt = engine.runtime().unwrap();
     let mk = "src/main/kotlin/com/z/Mk.kt";
     assert!(edges_from(rt, mk, EdgeKind::Instantiates).is_empty());
     assert_eq!(unbound_calls(rt, mk), strings(&["Bar"]));
     let use_kt = "src/main/kotlin/com/y/Use.kt";
-    assert_eq!(unbound_calls(rt, use_kt), strings(&["Foo", "Missing"]));
+    assert_eq!(unbound_calls(rt, use_kt), strings(&["Missing"]));
 }
 
 /// A Kotlin factory function beside its class (`fun Job(s: String): Job`) is a

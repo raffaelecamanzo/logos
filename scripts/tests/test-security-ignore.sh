@@ -6,9 +6,11 @@
 # A fingerprint that is not 64 lowercase hex characters is rejected by the reader
 # (the whole file with it); one with a typo in it parses and suppresses nothing, so
 # the shape is what can be checked offline. Each entry must name exactly one of a
-# `fingerprint` and a `path`, carry a non-empty `reason`, and repeat no fingerprint;
-# the file stays in the canonical spelling the writer produces (fingerprint entries
-# first, sorted, then the path entries) so a triage edit shows as a minimal diff.
+# `fingerprint`, a `path` and a rule-wide `rule` with its `scanner` (S-814: a rule
+# with no scanner, or a scanner with no rule, is rejected), carry a non-empty
+# `reason`, and repeat no fingerprint; the file stays in the canonical spelling the
+# writer produces (fingerprint entries first, sorted, then the path entries, then
+# the rule-wide ones) so a triage edit shows as a minimal diff.
 # The checker is run over copies of the real file with one defect each and must fail
 # every one of them: a check that cannot fail proves nothing.
 #
@@ -46,11 +48,23 @@ except Exception as e:
 bad = []
 if not entries:
     bad.append("no [[ignore]] entry (nothing checked is not a pass)")
-seen, fps, paths_started = set(), [], False
+seen, fps, last_kind = set(), [], 0
 for i, e in enumerate(entries, 1):
     has_fp, has_path = "fingerprint" in e, "path" in e
-    if has_fp == has_path:
-        bad.append("entry %d names %s" % (i, "both a fingerprint and a path" if has_fp else "neither a fingerprint nor a path"))
+    has_rule, has_scanner = "rule" in e, "scanner" in e
+    wide = not has_fp and not has_path and (has_rule or has_scanner)
+    if has_fp and has_path:
+        bad.append("entry %d names both a fingerprint and a path" % i)
+    elif not has_fp and not has_path and not wide:
+        bad.append("entry %d names neither a fingerprint, a path nor a rule with its scanner" % i)
+    if wide and has_rule != has_scanner:
+        bad.append("entry %d has %s but no %s" % (i, "a rule" if has_rule else "a scanner", "scanner" if has_rule else "rule"))
+    if has_fp and (has_rule or has_scanner):
+        bad.append("entry %d: a rule or scanner beside a fingerprint" % i)
+    kind = 0 if has_fp else (1 if has_path else 2)
+    if kind < last_kind:
+        bad.append("entry %d: a %s entry after a %s entry (not the canonical order)" % (i, ["fingerprint", "path", "rule-wide"][kind], ["fingerprint", "path", "rule-wide"][last_kind]))
+    last_kind = max(last_kind, kind)
     if not isinstance(e.get("reason"), str) or not e["reason"].strip():
         bad.append("entry %d has no reason" % i)
     if has_fp:
@@ -60,10 +74,6 @@ for i, e in enumerate(entries, 1):
         if fp in seen:
             bad.append("entry %d repeats fingerprint %s" % (i, fp[:12]))
         seen.add(fp); fps.append(fp)
-        if paths_started:
-            bad.append("entry %d: a fingerprint entry after a path entry (not the canonical order)" % i)
-    else:
-        paths_started = True
 if fps != sorted(fps):
     bad.append("the fingerprint entries are not sorted")
 print("\n".join(bad))
@@ -93,6 +103,15 @@ expect_caught() {
     if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -qE -- "$3"; then ok "caught: $1"; else bad "not caught ($1): exit $RC, wanted /$3/"; fi
 }
 
+# expect_accepted NAME PERL-EXPR — perl -0pe edit of a copy; the checker must exit 0 (a valid shape is not rejected).
+expect_accepted() {
+    local f="$WORK/a.toml"
+    perl -0pe "$2" "$FILE" >"$f"
+    if cmp -s "$FILE" "$f"; then OUT="the edit changed nothing: $2"; bad "edit inert ($1)"; return; fi
+    OUT="$(check_file "$f" 2>&1)"; RC=$?
+    if [ "$RC" -eq 0 ]; then ok "accepted: $1"; else bad "wrongly rejected ($1): exit $RC"; fi
+}
+
 expect_caught "a 63-hex fingerprint" "s/$FIRST/substr(\$&, 0, 63)/e" 'not 64 lowercase hex'
 expect_caught "a 65-hex fingerprint" "s/$FIRST/${FIRST}0/" 'not 64 lowercase hex'
 expect_caught "an upper-case fingerprint" "s/$FIRST/\\U\$&/" 'not 64 lowercase hex'
@@ -103,6 +122,17 @@ expect_caught "a fingerprint and a path in one entry" 's/^(fingerprint = "[0-9a-
 expect_caught "a repeated fingerprint" "s/(\\[\\[ignore\\]\\]\\nfingerprint = \"$FIRST\"\\n[^\\n]*\\n)/\$1\\n\$1/" 'repeats fingerprint'
 expect_caught "fingerprint entries out of order" "s/^(\\[\\[ignore\\]\\]\\nfingerprint = \")$FIRST/\${1}ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff/m" 'not sorted'
 expect_caught "a file that is not TOML" 's/^reason = /reason: /m' 'does not parse as TOML'
+
+# A rule-wide entry (S-814): a rule and its scanner, no path, no fingerprint, last in the file.
+WIDE='\n[[ignore]]\nrule = "CKV_K8S_21"\nscanner = "checkov"\nreason = "the deploy tool sets it"\n'
+expect_accepted "a rule-wide entry after the path entries" "s/\\z/$WIDE/"
+expect_caught "a rule with no scanner" 's/\z/\n[[ignore]]\nrule = "CKV_K8S_21"\nreason = "r"\n/' 'has a rule but no scanner'
+expect_caught "a scanner with no rule" 's/\z/\n[[ignore]]\nscanner = "checkov"\nreason = "r"\n/' 'has a scanner but no rule'
+expect_caught "an entry with a reason and no selector" 's/\z/\n[[ignore]]\nreason = "r"\n/' 'names neither'
+expect_caught "a rule beside a fingerprint" 's/^(fingerprint = "[0-9a-f]{64}"\n)/$1rule = "CKV_K8S_21"\n/m' 'beside a fingerprint'
+expect_caught "a scanner beside a fingerprint" 's/^(fingerprint = "[0-9a-f]{64}"\n)/$1scanner = "checkov"\n/m' 'beside a fingerprint'
+expect_caught "a rule-wide entry before the fingerprint entries" 's/\A/[[ignore]]\nrule = "CKV_K8S_21"\nscanner = "checkov"\nreason = "r"\n\n/' 'not the canonical order'
+expect_caught "a path entry after a rule-wide entry" "s/\\z/$WIDE\n[[ignore]]\npath = \"docs\"\nreason = \"r\"\n/" 'path entry after a rule-wide entry'
 
 echo
 echo "passed $PASS, failed $FAIL"

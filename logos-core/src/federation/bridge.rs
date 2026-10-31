@@ -2191,7 +2191,7 @@ where
                 // above, and it reads its stored target verbatim — no corpus is
                 // opened for it and none would tell it anything.
                 _ => {
-                    if reference.relation.bridge_role() != Some(BridgeRole::Consumer) {
+                    if !reference.relation.is_invocation_consumer() {
                         continue;
                     }
                     let endpoint = BridgeEndpoint {
@@ -2237,7 +2237,7 @@ where
             });
             continue;
         };
-        if reference.relation.bridge_role() != Some(BridgeRole::Consumer) {
+        if !reference.relation.is_invocation_consumer() {
             continue; // the HTTP arm has no ledger-side provider to index
         }
         let endpoint = BridgeEndpoint {
@@ -3265,6 +3265,7 @@ mod tests {
             source: NodeId(source),
             target: NodeId(target),
             kind: EdgeKind::Contains,
+            dispatch: false,
         }
     }
 

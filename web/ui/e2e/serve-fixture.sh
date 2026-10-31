@@ -80,12 +80,25 @@ if [ "$KIND" = single ]; then
     # churn to rank and ownership to disperse; then rank it, which mines that
     # history — the files view reads the ranking, it never mines on a GET.
     bash "$HERE/fixtures/single.history.sh" "$RUN"
+    # The one coverage tool the copy has (S-803): a custom `refresh_cmd` that fails
+    # and names the failing test, so coverage.project.spec.ts can run it from the
+    # Coverage page and read the cause. It runs through `sh -c` (linked into the
+    # scannerless PATH below) and uses shell builtins only. Written after the
+    # commit, so the copy's history is the fixture's.
+    mkdir -p "$RUN/.logos"
+    cat >>"$RUN/.logos/config.toml" <<'TOML'
+[coverage_ingest]
+refresh_cmd = "echo 'running 1 test'; echo 'FAIL tests::checkout_totals_include_tax: expected 42, got 41' >&2; exit 3"
+TOML
     "$BIN" --project "$RUN" index --quiet
     "$BIN" --project "$RUN" hotspots --quiet >/dev/null
     # A stored security report (S-670), so the Security page renders findings in
     # graph context rather than only its no-scan state. Ingesting reads and parses
     # the report; no scanner runs.
     "$BIN" --project "$RUN" security ingest "$HERE/fixtures/single.security.sarif" >/dev/null
+    # An OSV-Scanner report over the copy's `web/package-lock.json` (S-810): its one
+    # finding is on a package the lockfile marks `"dev": true`.
+    "$BIN" --project "$RUN" security ingest "$HERE/fixtures/single.dev.security.sarif" >/dev/null
 else
     for member in "$RUN"/*/; do
         git_repo "${member%/}"
@@ -108,11 +121,14 @@ fi
 # machine's, so the Security page (S-670) reads only the fixture's stored report
 # and starts no version probe of a scanner installed here: a first run of a large
 # scanner binary can outlast a page's ready wait, and no spec may depend on what
-# the host has installed. PATH keeps git alone, which serve needs.
+# the host has installed. PATH keeps git alone, which serve needs, and `sh`, which
+# the fixture's coverage command runs through.
 HOST_GIT="$(command -v git)"
 SCANNERLESS="$HERE/.run/$KIND-scannerless"
 rm -rf "$SCANNERLESS"
 mkdir -p "$SCANNERLESS/bin"
 ln -s "$HOST_GIT" "$SCANNERLESS/bin/git"
+# The coverage run's custom command goes through `sh -c` (S-803).
+ln -s /bin/sh "$SCANNERLESS/bin/sh"
 exec env PATH="$SCANNERLESS/bin" LOGOS_CONFIG_HOME="$SCANNERLESS/config" LOGOS_DATA_HOME="$SCANNERLESS/tools" \
     "$BIN" serve --ui --port "$PORT" --project "$RUN"

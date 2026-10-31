@@ -10,11 +10,14 @@
 //! per finding.** A finding counts by [`counts`](crate::history::security::counts),
 //! the one definition every security surface shares ([S-760]): no current
 //! entry suppresses it, its own file is unchanged since the scan, and it does
-//! not sit in test code ([FR-SC-28]) — by this member's own graph. A report's own
+//! not sit in test code ([FR-SC-28]) — by this member's own graph — and its
+//! scanner does not mark it low-confidence, "needs review" ([FR-SC-31]), and it
+//! is not on a dev-only dependency ([FR-SC-30]). A report's own
 //! freshness does not decide it, so a member whose only report is a `--path`
 //! scan still counts the findings in files nothing has touched. Everything
 //! else is tallied in [`excluded`](MemberSecurity::excluded), so the counted
-//! findings and the excluded ones add up to every stored finding. How many
+//! findings and the excluded ones add up to every stored finding, one advisory
+//! several scanners report counted once ([FR-SC-29]). How many
 //! reports are fresh is its own figure ([`reports_fresh`](MemberSecurity::reports_fresh)
 //! of [`reports_stored`](MemberSecurity::reports_stored)).
 //!
@@ -25,6 +28,9 @@
 //!
 //! [FR-SC-16]: ../../../docs/specs/requirements/FR-SC-16.md
 //! [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+//! [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+//! [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+//! [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
 //! [BR-66]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [S-674]: ../../../docs/planning/journal.md#s-674-the-workspace-rolls-security-up-per-member
 //! [S-760]: ../../../docs/planning/journal.md#s-760-one-freshness-definition-across-the-security-surfaces
@@ -92,8 +98,8 @@ impl SeverityCounts {
 }
 
 /// The stored findings the counts leave out, by why. Each is left out for the
-/// first reason that holds, in this order — suppressed, not fresh, test code —
-/// so the buckets never share a finding.
+/// first reason that holds, in this order — suppressed, not fresh, test code,
+/// dev-only dependency, needs review — so the buckets never share a finding.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct Excluded {
     /// Unsuppressed findings whose own file changed since the scan.
@@ -105,6 +111,16 @@ pub struct Excluded {
     ///
     /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
     pub test: usize,
+    /// Fresh, unsuppressed findings left out because they sit on a dev-only
+    /// dependency ([FR-SC-30]): "N more in dev-only dependencies".
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+    pub dev: usize,
+    /// Fresh, unsuppressed production-code findings their scanner marks
+    /// low-confidence ([FR-SC-31]): "N more need review".
+    ///
+    /// [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
+    pub needs_review: usize,
 }
 
 impl Excluded {
@@ -114,6 +130,8 @@ impl Excluded {
             LeftOut::Suppressed => &mut self.suppressed,
             LeftOut::NotFresh => &mut self.not_fresh,
             LeftOut::Test => &mut self.test,
+            LeftOut::Dev => &mut self.dev,
+            LeftOut::NeedsReview => &mut self.needs_review,
         } += 1;
     }
 
@@ -122,6 +140,8 @@ impl Excluded {
         self.not_fresh += other.not_fresh;
         self.suppressed += other.suppressed;
         self.test += other.test;
+        self.dev += other.dev;
+        self.needs_review += other.needs_review;
     }
 }
 
@@ -314,8 +334,8 @@ mod tests {
         let mut sum = SeverityCounts { critical: 1, high: 2, medium: 3, low: 4, info: 5, unrated: 6, total: 21 };
         sum.absorb(&SeverityCounts { critical: 10, high: 20, medium: 30, low: 40, info: 50, unrated: 60, total: 210 });
         assert_eq!(sum, SeverityCounts { critical: 11, high: 22, medium: 33, low: 44, info: 55, unrated: 66, total: 231 });
-        let mut excluded = Excluded { not_fresh: 1, suppressed: 2, test: 3 };
-        excluded.absorb(&Excluded { not_fresh: 10, suppressed: 20, test: 30 });
-        assert_eq!(excluded, Excluded { not_fresh: 11, suppressed: 22, test: 33 });
+        let mut excluded = Excluded { not_fresh: 1, suppressed: 2, test: 3, dev: 5, needs_review: 4 };
+        excluded.absorb(&Excluded { not_fresh: 10, suppressed: 20, test: 30, dev: 50, needs_review: 40 });
+        assert_eq!(excluded, Excluded { not_fresh: 11, suppressed: 22, test: 33, dev: 55, needs_review: 44 });
     }
 }

@@ -46,6 +46,7 @@ import type {
   MemberSecurityState,
   MemberStatus,
   WorkspaceReachabilityAnswer,
+  WorkspaceReferenceResolution,
   WorkspaceSecurityStateAnswer,
   WorkspaceStatus,
 } from "../../api/types.ts";
@@ -58,6 +59,7 @@ import {
   ErrorPanel,
   FigureNote,
   LoadingState,
+  Term,
   Widget,
   WidgetStack,
   type Column,
@@ -67,14 +69,15 @@ import {
   DASHBOARD_TEXT,
   members,
   reachability,
+  workspaceResolution,
   workspaceSecurityWidget,
 } from "../../copy/workspaceDashboard.copy.ts";
 import { WORKSPACE_SECURITY_TEXT } from "../../copy/workspaceSecurity.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
-import { resolutionStatement } from "../dashboard/dashboardModel.ts";
 import { EdgeRow } from "../graph/Legend.tsx";
+import { memberResolution } from "../dashboard/dashboardModel.ts";
 import { buildCoverageDashboard } from "./coverageModel.ts";
-import { CoveragePanel } from "./CoverageBoards.tsx";
+import { CoveragePanel, pct } from "./CoverageBoards.tsx";
 import { SeverityRow } from "../security/SeverityRow.tsx";
 import { ASSERTED_EDGE_TYPE } from "./serviceMapModel.ts";
 import { absentFigure, memberColumn } from "./memberSecurityRow.tsx";
@@ -176,6 +179,7 @@ function DashboardContent({
         degraded={status.degraded_rollup}
       />
       <ReachabilityCard answer={answer} />
+      <WorkspaceResolutionCard section={status.reference_resolution} />
       <MemberRoster status={status} answer={answer} />
     </>
   );
@@ -350,6 +354,56 @@ const PROMOTION_COLUMNS: Column<{ member: string; name: string; kind: string }>[
   { key: "kind", header: "Kind", cell: (c) => c.kind, sortValue: (c) => c.kind },
 ];
 
+// ── Reference resolution across the workspace (S-637, FR-RS-49) ──────────────
+
+/** *Reference resolution across the workspace* — the server's pooled figure: the
+ *  members' code references summed, then divided, where a reference into another
+ *  member counts as internal (S-637). It is a workspace figure under its own name
+ *  from workspace evidence, never a mean of the members' own figures (BR-56),
+ *  which the Members table states beside it. The figure never renders without its
+ *  population line, and an absent one is said, never drawn as 0% or 100%. */
+function WorkspaceResolutionCard({ section }: { section: WorkspaceReferenceResolution }) {
+  const figure = section.internal_resolution;
+  const cross = section.cross_member;
+  const unread = section.members.unread ?? [];
+  return (
+    <Widget
+      title={
+        <>
+          <Term term="referenceResolution">Reference resolution</Term> across the workspace
+        </>
+      }
+      copy={workspaceResolution}
+      figure={
+        <div className={styles.figure}>
+          {figure.lower_bound === null ? (
+            <p>{DASHBOARD_TEXT.workspaceResolutionAbsent(figure)}</p>
+          ) : (
+            <p>
+              <span className="mono">{pct(figure.lower_bound)}</span>{" "}
+              <FigureNote>{DASHBOARD_TEXT.workspaceResolutionUnit}</FigureNote>
+            </p>
+          )}
+          <FigureNote block>{DASHBOARD_TEXT.workspacePopulation(figure)}</FigureNote>
+          <FigureNote block>
+            {DASHBOARD_TEXT.workspaceCrossMember(
+              cross.named_by_another_member,
+              cross.type_in_another_member,
+              cross.bridge_bound,
+            )}
+          </FigureNote>
+          <FigureNote block>{DASHBOARD_TEXT.workspacePooled(section.members.read, section.members.members)}</FigureNote>
+          {unread.length > 0 && (
+            <FigureNote block>
+              {DASHBOARD_TEXT.workspaceUnread(unread.length)} <span className="mono">{unread.join(", ")}</span>.
+            </FigureNote>
+          )}
+        </div>
+      }
+    />
+  );
+}
+
 // ── The member roster (BR-56) ────────────────────────────────────────────────
 
 /** One member's own row. Every figure on it belongs to THAT member and is named
@@ -364,8 +418,10 @@ interface RosterRow {
   degraded: boolean;
   /** Why the open failed, when the fan-out said. */
   reason: string | null;
-  /** This member's OWN reference-resolution coverage as the composed
-   *  never-bare line ("40.0% (400 of 1000 refs)"), or `null` when unread. The
+  /** This member's OWN reference resolution over its internal candidates
+   *  (S-635, S-637) as the composed never-bare line ("40.0% (400 of 1,000
+   *  internal candidates; 1,200 code references, 200 provably external)"), its
+   *  absence in words, or `null` when unread. The
    *  denominator travels with the figure: two members on identical coverage over
    *  wildly different reference populations must not render identically
    *  (CR-111, FR-WS-05). */
@@ -411,7 +467,7 @@ function rosterRow(member: MemberStatus, tally: MemberReachability | null): Rost
     reason: member.degraded_reason ?? member.error ?? null,
     // Absent for a member with no result — NOT defaulted to 0, which would read
     // as "nothing resolves here" (NFR-CC-04).
-    resolution: member.result ? resolutionStatement(member.result) : null,
+    resolution: member.result?.internal_resolution ? memberResolution(member.result.internal_resolution) : null,
     tally,
   };
 }

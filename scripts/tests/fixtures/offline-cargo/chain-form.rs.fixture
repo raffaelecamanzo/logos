@@ -1,0 +1,9 @@
+fn chained() {
+    let bad = Command::new(cargo).arg("metadata").arg("--offline").output();
+    let good = Command::new(cargo)
+        .arg("metadata")
+        .arg("--offline")
+        .arg("--filter-platform")
+        .arg(host)
+        .output();
+}

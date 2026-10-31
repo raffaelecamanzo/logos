@@ -305,7 +305,7 @@ mod tests {
     }
 
     fn fresh() -> ScanState {
-        ScanState::Fresh { snapshot_head: "h".into(), version: "1".into(), findings: 0, suppressed: 0, not_fresh: 0, test: 0 }
+        ScanState::Fresh { snapshot_head: "h".into(), version: "1".into(), findings: 0, suppressed: 0, not_fresh: 0, test: 0, dev: 0, needs_review: 0, merged: 0 }
     }
 
     fn stale() -> ScanState {
@@ -317,6 +317,9 @@ mod tests {
             suppressed: 0,
             not_fresh: 0,
             test: 0,
+            dev: 0,
+            needs_review: 0,
+            merged: 0,
         }
     }
 
@@ -348,6 +351,8 @@ mod tests {
             total: 0,
             scope: ScopeFilter::default(),
             hidden_by_scope: 0,
+            hidden_needs_review: 0,
+            hidden_dev: 0,
             findings: Vec::new(),
             categories: Vec::new(),
             suppressions: Vec::new(),

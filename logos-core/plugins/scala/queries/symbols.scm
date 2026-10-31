@@ -45,6 +45,15 @@
 (function_declaration
   name: (identifier) @symbol.method)
 
+; A `def` of an `object` is called on the object itself (S-573): it takes no
+; instance receiver (`@item.receiver.none`, `extract::assoc`). That is what tells
+; an object's members from its companion class's, which share the object's name:
+; `Chain.empty()` binds among the object's members only.
+(object_definition
+  body: (template_body
+    [(function_definition name: (identifier) @item.receiver.none)
+     (function_declaration name: (identifier) @item.receiver.none)]))
+
 ; Member values — direct children of a class/object/trait body only.
 (template_body
   (val_definition
@@ -53,6 +62,21 @@
 (template_body
   (var_definition
     pattern: (identifier) @symbol.field))
+
+; Constructor parameters (S-575, FR-EX-28): a class's, case class's or trait's
+; parameters are its fields — `val`, `var`, `private` and plain alike, since a
+; plain one is in scope in every member body. Every parameter list counts
+; (`class A(a: Int)(implicit b: B)`), so the list is matched without its
+; field name, which would match the first list alone.
+(class_definition
+  (class_parameters
+    (class_parameter
+      name: (identifier) @symbol.field)))
+
+(trait_definition
+  (class_parameters
+    (class_parameter
+      name: (identifier) @symbol.field)))
 
 ; The file's package (S-518, CR-170, FR-RS-13). Not a declaration — its capture
 ; group is `module`, not `symbol`, so the declaration walk skips it. Chained

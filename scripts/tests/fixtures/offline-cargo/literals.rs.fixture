@@ -1,0 +1,29 @@
+// Literals that hold a quote must not open or close a string, and the line numbers
+// of what follows them stay true.
+fn char_quote() {
+    let q = '"';
+    let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+fn escaped_char_quote() {
+    let q = '\"';
+    let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+fn raw_odd_quote() {
+    let a = r#"one " quote"#; let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+fn raw_bytes() {
+    let b = br"bytes \"; let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+fn raw_two_hashes() {
+    let c = r##"two "# marks"##; let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+fn raw_two_lines() {
+    let d = r#"spans
+two lines"#;
+    let _ = cargo(&["tree", "--offline", "--target", "all"]);
+}
+/* outer /* inner */ still a comment
+   ["metadata", "--offline"] */
+fn after_comments() {
+    let _ = cargo(&["metadata", "--offline"]);
+}

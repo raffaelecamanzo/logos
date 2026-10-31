@@ -42,6 +42,10 @@ export const WORKSPACE_SECURITY_TEXT = {
   excluded: FINDING_COUNT_TEXT.excluded,
   /** The findings in test code, summed over the members read (FR-SC-28): in none of the totals. */
   testCode: (n: number) => `${FINDING_COUNT_TEXT.testCode(n)}, left out of every total above.`,
+  /** The findings their scanners mark low-confidence, summed over the members read (FR-SC-31): in none of the totals. */
+  needsReview: (n: number) => `${FINDING_COUNT_TEXT.needsReview(n)}, left out of every total above.`,
+  /** The findings on dev-only dependencies, summed over the members read (FR-SC-30): in none of the totals. */
+  devOnly: (n: number) => `${FINDING_COUNT_TEXT.devOnly(n)}, left out of every total above.`,
   /** Members that could not be opened or read. */
   unread: (n: number) =>
     `${n} ${plural(n, "member", "members")} could not be read, so every total here is over fewer than all members:`,

@@ -4,16 +4,17 @@
  * answers at once, the page follows the job over same-origin Server-Sent Events,
  * and every other view keeps answering meanwhile. `useCoverageRun` holds that
  * state for the Coverage tools widget, which renders two parts of it:
- * `RunControls` in its title row and `RunProgress` — the per-tool progress list
- * and the one polite `aria-live` line — above its table.
+ * `RunControls` in its title row and `RunProgress` — the one polite `aria-live`
+ * line — above its table. The run itself is the table's: each tool's State and
+ * Elapsed read it (`liveTools`, `useJobClock`) and the cause sits below it (S-803).
  *
  * - Run coverage posts the start. The first run asks for the execution consent:
  *   the server answers `409` with what it lacks, the dialog shows it, and the
  *   accepted start sends exactly the tools and the command text it showed.
  * - While the run goes the button is Cancel. The run is single-flight: a click
  *   from a tab that has not seen it yet joins it, and the line says so.
- * - Cancel kills the tool going with its whole process group; the list reads
- *   *cancelled* for every tool that did not settle.
+ * - Cancel kills the tool going with its whole process group; every tool that
+ *   did not settle reads *cancelled*.
  * - A run started before the page opened (another tab, a navigation away and
  *   back) is picked up on mount and followed the same way.
  * - A broken stream is not the end of the run: the job is read again and, while
@@ -31,7 +32,7 @@
  * from the same `409`, with the install lines and the dependency's exact command
  * and files beside the execution consent, in the same dialog; accepting sends
  * back exactly what it showed. The steps it reports before the tools are listed
- * above them (`prepareRows`), and Cancel stops whichever is going.
+ * on the tool's own row (`prepareRows`), and Cancel stops whichever is going.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -52,21 +53,18 @@ import type {
   CoverageToolStatus,
 } from "../../api/index.ts";
 import { Badge, Button, type BadgeTone } from "../../components/index.ts";
-import { COVERAGE_PREPARE_TEXT, COVERAGE_RUN_TEXT } from "../../copy/coverageView.copy.ts";
+import { COVERAGE_RUN_TEXT } from "../../copy/coverageView.copy.ts";
 import { CoverageConsentDialog } from "./CoverageConsentDialog.tsx";
 import {
   announcement,
   NO_RUN,
   prepareRows,
   progressRows,
-  progressText,
   runnable,
   withJob,
   withSteps,
   type PrepareRow,
-  type PrepareState,
   type ProgressRow,
-  type ProgressState,
   type RunView,
 } from "./coverageRunModel.ts";
 import styles from "./AnalyticsView.module.css";
@@ -348,21 +346,11 @@ export function RunButton({ run }: { run: CoverageRunHandle }) {
   );
 }
 
-const PROGRESS_TONE: Record<ProgressState, BadgeTone> = {
-  queued: "muted",
-  running: "orange",
-  ran: "green",
-  tests_failed: "orange",
-  not_installed: "muted",
-  failed: "red",
-  timed_out: "red",
-  cancelled: "muted",
-};
-
 /** Milliseconds since the run started, now: the last moment the server reported
  *  plus the time since it arrived, never moving back within one run. Ticks once a
- *  second while the run goes; the live line never carries it. */
-function useJobClock(view: RunView): number | null {
+ *  second while the run goes — the table's Elapsed cells count with it; the live
+ *  line never carries it. */
+export function useJobClock(view: RunView): number | null {
   const job = view.job;
   const id = job?.id ?? null;
   const reported = job === null ? null : Math.max(job.elapsed_ms, view.steps.at(-1)?.at_ms ?? 0);
@@ -388,33 +376,9 @@ function useJobClock(view: RunView): number | null {
   return base === null || base.id !== id ? null : base.jobMs + Math.max(0, now - base.at);
 }
 
-/** One progress row: the tool, its state in words and — while it runs — how long
- *  it has; a failed tool's error output in a disclosure. */
-function ProgressItem({ row, jobNow }: { row: ProgressRow; jobNow: number | null }) {
-  const elapsed =
-    row.state === "running" && row.startedMs !== null && jobNow !== null
-      ? COVERAGE_RUN_TEXT.elapsed(Math.max(0, Math.floor((jobNow - row.startedMs) / 1000)))
-      : null;
-  const failed = row.run?.outcome === "failed" ? row.run : null;
-  return (
-    <li>
-      <span className="mono">{row.tool}</span> <Badge tone={PROGRESS_TONE[row.state]}>{progressText(row.state)}</Badge>
-      {elapsed !== null && <span className="muted"> {elapsed}</span>}
-      {failed !== null && (
-        <details>
-          <summary>{COVERAGE_RUN_TEXT.stderr}</summary>
-          <pre className={`mono ${styles.stderr}`}>{failed.stderr}</pre>
-          {failed.log && <p className={`muted ${styles.fix}`}>{COVERAGE_RUN_TEXT.log(failed.log)}</p>}
-        </details>
-      )}
-    </li>
-  );
-}
-
-/** A refused request's alert, the polite live line — what changed last, and the
- *  end of the run — and the per-tool progress list of the run followed. */
+/** A refused request's alert and the polite live line — what changed last, and
+ *  the end of the run. The per-tool part of the run is the table's. */
 export function RunProgress({ run }: { run: CoverageRunHandle }) {
-  const jobNow = useJobClock(run.view);
   const { job } = run.view;
   return (
     <>
@@ -427,43 +391,7 @@ export function RunProgress({ run }: { run: CoverageRunHandle }) {
         {job && <Badge tone={jobTone(job)}>{job.state}</Badge>} <span>{announcement(run.view, run.rows)}</span>
         {run.joined && job?.state === "running" && <span> {COVERAGE_RUN_TEXT.joined}</span>}
       </p>
-      {run.rows.length + run.prepared.length > 0 && (
-        <ul className={styles.progress} aria-label="Coverage run progress">
-          {run.prepared.map((row) => (
-            <PrepareItem key={row.key} row={row} />
-          ))}
-          {run.rows.map((row) => (
-            <ProgressItem key={row.tool} row={row} jobNow={jobNow} />
-          ))}
-        </ul>
-      )}
     </>
-  );
-}
-
-const PREPARE_TONE: Record<PrepareState, BadgeTone> = {
-  running: "orange",
-  installed: "green",
-  already_present: "green",
-  added: "green",
-  no_rustup: "muted",
-  unavailable: "red",
-  pending: "muted",
-  refused: "orange",
-  failed: "red",
-  timed_out: "red",
-  cancelled: "muted",
-};
-
-/** One readying step: what it readies, its state in words, and its detail —
- *  why it failed, what to run by hand, or what was put back. */
-function PrepareItem({ row }: { row: PrepareRow }) {
-  return (
-    <li>
-      <span className="mono">{row.what}</span>{" "}
-      <Badge tone={PREPARE_TONE[row.state]}>{COVERAGE_PREPARE_TEXT.state[row.state]}</Badge>
-      {row.detail !== null && <p className={`muted ${styles.fix}`}>{row.detail}</p>}
-    </li>
   );
 }
 

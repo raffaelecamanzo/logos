@@ -49,9 +49,11 @@
 
 mod binder;
 pub(crate) use binder::{
-    is_class_like, FULLY_QUALIFIED_HEAD, GLOBAL_WILDCARD_ALIAS, SELF_TYPE_HEAD, STATIC_WILDCARD_ALIAS,
-    TRAIT_USE_ALIAS,
+    is_class_like, is_type_like, COMMONJS_EXPORTS, DEFAULT_EXPORT, FULLY_QUALIFIED_HEAD, GLOBAL_WILDCARD_ALIAS,
+    LOCAL_IMPORT_ALIAS, LOCAL_VALUE_ALIAS, MIXIN_EXTEND_ALIAS, MIXIN_PREPEND_ALIAS, PARTIAL_TYPE_ALIAS, SELF_TYPE_HEAD,
+    STATIC_WILDCARD_ALIAS, TRAIT_USE_ALIAS,
 };
+pub(crate) use binder::block_wildcard_alias;
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`
@@ -81,7 +83,24 @@ pub mod framework;
 /// its package and an external one never binds to a directory that merely
 /// shares its last segments. See its module docs.
 pub(crate) mod go_module;
+/// The `tsconfig.json`/`jsconfig.json` and workspace packages a tree declares
+/// (S-531, CR-173, FR-RS-02): what a bare TypeScript-family specifier binds
+/// through. The Go module twin for the TS family. See its module docs.
+pub(crate) mod ts_config;
+/// The load roots a tree declares (S-566, CR-179, FR-RS-34): each gem's
+/// `require_paths` from its `*.gemspec`, and the repository root — what a bare
+/// Ruby `require 'a/b'` binds against. The Go module twin for Ruby. See its
+/// module docs.
+pub(crate) mod load_path;
 pub(crate) mod grpc_key;
+/// Pure root-relative path helpers shared by the binder and the module,
+/// `tsconfig` (S-531) and load-path (S-566) discovery. A leaf of `resolve`.
+pub(crate) mod rel_path;
+/// The reference classes (S-635, FR-RS-49): each reported ledger row is a doc
+/// reference, a provably external code reference or an internal candidate —
+/// the populations of `status`'s internal-candidate headline. Reads only the
+/// graph. See its module docs.
+pub(crate) mod reference_classes;
 /// The package-shaped module key (S-465, CR-149, FR-RS-01): the ONE derivation
 /// of the package a file declares — and so of a type's fully-qualified name —
 /// from its path, for a language whose descriptor declares `[package_modules]`,
@@ -110,6 +129,11 @@ pub(crate) mod http_client_call;
 /// reconcile-and-commit algorithm the `framework` and `topics` passes both run,
 /// parameterised over how a desired edge names its endpoints. See its module docs.
 mod promote;
+/// Interface satisfaction by method set (S-529, CR-172, FR-RS-18): the
+/// `Implements` a language that writes no clause for it (Go) records from each
+/// type whose methods cover an in-repository interface's — reconciled on every
+/// run of [`run`]. See its module docs.
+mod method_set;
 /// The broker-topic promotion pass (S-256, CR-061, FR-WS-11, ADR-55): promotes the
 /// ledger-only broker publish/subscribe references S-254 captured to first-class
 /// `topic`/`producer`/`consumer` nodes joined by `publishes`/`subscribes` edges —
@@ -125,11 +149,11 @@ use rayon::prelude::*;
 
 use crate::config::{BindingPolicy, Resolution};
 use crate::graph_store::{
-    EdgeRow, GraphStore, ImplBlockRow, NodeArity, NodeItemFacts, NodeRow, RelationCounts, UnresolvedRefRow,
+    BatchWriter, EdgeRow, GraphStore, ImplBlockRow, LanguageRefCounts, LocalBindingRow, NodeArity, NodeItemFacts, NodeRow, RelationCounts, UnresolvedRefRow,
 };
 use crate::model::{EdgeKind, NodeId, RefForm};
 use crate::models::navigation::{
-    CallResidue, CallResidueReason, LanguageResolution, RelationResolution, ResidueScope,
+    CallResidue, CallResidueReason, LanguageResolution, ParseDamage, RelationResolution, ResidueScope,
 };
 use crate::models::pipeline::{RelationCoverage, ResolutionStats};
 use crate::plugin::LanguageRegistry;
@@ -147,6 +171,13 @@ use crate::runtime::Runtime;
 /// future tightening (a trailing `::`, case folding) then lands once instead of
 /// drifting between two copies.
 ///
+/// Which rows are asked is the caller's: a language whose `framework_detectors`
+/// are import-only (S-541, [FR-FW-03]) offers the framework pass its `Imports`
+/// rows alone, so a `next()` callback is never put to the `next` detector. The
+/// client-call arm asks every row — TypeScript's `fetch` detector is a plain
+/// call.
+///
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
 /// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
 /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
 pub(crate) fn matches_detector(target: &str, detector: &str) -> bool {
@@ -163,18 +194,28 @@ struct Snapshot {
     /// Every node's recorded self type (S-493, `nodes.self_type`).
     self_types: Vec<(NodeId, String)>,
     /// Every node's recorded arity facts (S-591; read by S-604 for
-    /// `nodes.takes_self`).
-    arities: Vec<NodeArity>,
+    /// `nodes.takes_self`), and each type's generic arity (S-602) —
+    /// [`arity_facts`].
+    arities: ArityFacts,
     /// Every file's recorded declared namespace (S-518, `files.namespace`).
     namespaces: Vec<(String, String)>,
     /// Every recorded `impl` block and node item fact (S-606) — the universe
     /// of the one associated-item lookup (S-607,
     /// [`binder::Index::with_associated_items`]); the item facts also name the
-    /// required signatures, which bind nothing ([`binder::bindable`]).
+    /// required signatures, which bind nothing ([`binder::bindable`]) — save
+    /// through a proven TypeScript receiver (S-537,
+    /// `binder::Index::with_declared_signatures`).
     associated: (Vec<ImplBlockRow>, Vec<NodeItemFacts>),
     /// The callables an implementing type never inherits from an interface
     /// (S-609; [`GraphStore::uninherited_members`]).
     uninherited: Vec<NodeId>,
+    /// The unexported functions, when the store records linkage and a loaded
+    /// language makes a link unit (S-584; [`GraphStore::unexported_functions`]).
+    /// The link-unit rung reads a link-unit file's alone.
+    file_local: Option<Vec<NodeId>>,
+    /// The link-unit files' local bindings (S-584, S-593 facts): what leaves a
+    /// call through a function-pointer parameter or local unbound.
+    link_unit_locals: Vec<LocalBindingRow>,
     /// file_id → project-relative path, for an incremental run to test a row's
     /// owning file against the change-set. Empty on a full index.
     file_paths: HashMap<i64, String>,
@@ -196,7 +237,10 @@ struct Snapshot {
 pub struct Delta {
     /// Project-relative paths re-extracted or removed this sync — plus any Go
     /// module descriptor (`go.mod`) the sync was handed, which is never indexed
-    /// but moves every Go import binding (S-439).
+    /// but moves every Go import binding (S-439), and any `.json` file — a
+    /// `tsconfig.json`, an `extends` base, a `package.json` — which can move
+    /// the TypeScript ones whether or not it is indexed (S-531), and any
+    /// `*.gemspec`, whose `require_paths` move the Ruby ones (S-566).
     pub changed_paths: HashSet<String>,
     /// Tokenized names this sync added or removed (see [`tokens`]).
     pub dirty_tokens: HashSet<String>,
@@ -210,6 +254,13 @@ pub struct Delta {
 /// Split `s` into lowercased identifier tokens — maximal runs of ASCII
 /// alphanumerics and `_`.
 ///
+/// The directory a project-relative path sits in, `""` at the root — the
+/// package of a language whose package is its directory (Go): where the
+/// method-set pass and a receiver read look a method's type up (S-529).
+pub(crate) fn dir_of(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
 /// The shared tokenizer of the incremental change-set: [`Delta::dirty_tokens`]
 /// is built by tokenizing the names a sync adds or removes, and a reference is
 /// re-bound when a token of its target (or of an `as`-alias it expands through)
@@ -224,7 +275,8 @@ pub(crate) fn tokens(s: &str) -> Vec<String> {
 }
 
 /// The required signatures the store records (S-606, `nodes.signature`): the
-/// nodes [`binder::bindable`] keeps out of every binding run.
+/// nodes [`binder::bindable`] keeps out of every binding run, which only a
+/// call on a proven TypeScript receiver reads, through a side map (S-537).
 pub(crate) fn signature_nodes(store: &dyn GraphStore) -> Result<HashSet<NodeId>> {
     Ok(signatures_of(&store.node_item_facts()?))
 }
@@ -241,6 +293,16 @@ pub(crate) fn associated_items(store: &dyn GraphStore) -> Result<(Vec<ImplBlockR
     Ok((store.impl_blocks()?, store.node_item_facts()?))
 }
 
+/// [`arity_facts`]' pair: the callables' facts, then the types' arities.
+pub(crate) type ArityFacts = (Vec<NodeArity>, Vec<(NodeId, u32)>);
+
+/// The arity facts the binder's filters read: each callable's parameter
+/// range and receiver fact (S-591, S-604, [`GraphStore::node_arities`]) and
+/// each type's generic arity (S-602, [`GraphStore::type_arities`]).
+pub(crate) fn arity_facts(store: &dyn GraphStore) -> Result<ArityFacts> {
+    Ok((store.node_arities()?, store.type_arities()?))
+}
+
 /// Run the resolution pass: bind every ledger row it can, persist the rest.
 ///
 /// See the module docs for the snapshot → parallel-compute → serial-commit
@@ -251,7 +313,11 @@ pub(crate) fn associated_items(store: &dyn GraphStore) -> Result<(Vec<ImplBlockR
 /// write their import specifiers as paths and which files each may resolve to
 /// ([`LanguageRegistry::specifier_target_extensions`]); the root supplies the
 /// `go.mod` above each indexed `.go` file ([`go_module`]) so a Go import path
-/// binds against the module that declares it. The pipeline always passes it.
+/// binds against the module that declares it, and the `tsconfig.json`,
+/// `jsconfig.json` and `package.json` a bare TypeScript specifier binds through
+/// ([`ts_config`], S-531), and the `*.gemspec` files whose `require_paths` a
+/// bare Ruby `require` binds against ([`load_path`], S-566). The pipeline
+/// always passes it.
 /// `None` is for a synthetic graph with no tree behind it: no `go.mod` is read,
 /// no import binds by path rules, and every import takes the member-path
 /// hierarchy — which reads a bare `react` as a name, so it is not what a real
@@ -273,16 +339,31 @@ pub fn run(
 ) -> Result<ResolutionStats> {
     let policy = resolution.policy;
     let want_file_paths = delta.is_some();
+    // The link-unit facts (S-584) are read only for a graph holding a file of
+    // a language that makes one: elsewhere the rung never runs.
+    let link_exts: Vec<String> = tree
+        .map(|(registry, _)| registry.link_unit_extensions().into_iter().collect())
+        .unwrap_or_default();
     let snap = runtime.submit_read(|store| {
+        let nodes = store.all_nodes()?;
+        let links_units = nodes.iter().filter_map(|n| n.file_path.as_deref()).any(|p| {
+            p.rsplit_once('.').is_some_and(|(_, ext)| link_exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+        });
         Ok(Snapshot {
-            nodes: store.all_nodes()?,
+            nodes,
             edges: store.all_edges()?,
             refs: store.unresolved_refs()?,
             self_types: store.node_self_types()?,
-            arities: store.node_arities()?,
+            arities: arity_facts(store)?,
             namespaces: store.file_namespaces()?,
             associated: associated_items(store)?,
             uninherited: store.uninherited_members()?,
+            file_local: if links_units { store.unexported_functions()? } else { None },
+            link_unit_locals: if links_units {
+                store.local_bindings_with_extensions(&link_exts)?
+            } else {
+                Vec::new()
+            },
             // The file_id → path map only an incremental run needs (to test a
             // row's owning file against the change-set); a full index skips it.
             file_paths: if want_file_paths {
@@ -297,17 +378,16 @@ pub fn run(
         })
     })?;
 
-    let (specifier_targets, go_modules) =
+    let (specifier_targets, go_modules, ts_resolution, load_path) =
         tree.map_or_else(Default::default, |(registry, root)| {
-            let go_files: std::collections::BTreeSet<&str> = snap
-                .nodes
-                .iter()
-                .filter_map(|n| n.file_path.as_deref())
-                .filter(|p| p.ends_with(".go"))
-                .collect();
+            let files: std::collections::BTreeSet<&str> =
+                snap.nodes.iter().filter_map(|n| n.file_path.as_deref()).collect();
+            let go_files = files.iter().copied().filter(|p| p.ends_with(".go"));
             (
                 registry.specifier_target_extensions(),
                 go_module::discover(root, go_files),
+                ts_config::discover(root, registry.tsconfig_extensions(), files.iter().copied()),
+                load_path::discover(root, registry.load_path_extensions(), files.iter().copied()),
             )
         });
     // A package-shaped language (CR-149) keys its files by their package, and a
@@ -321,13 +401,27 @@ pub fn run(
     });
     let (impl_blocks, item_facts) = &snap.associated;
     let signatures = signatures_of(item_facts);
+    // The languages whose types implement by method set (S-529), with their
+    // methods' self types, kept before the index takes them.
+    let method_set_scope = method_set::Scope::of(
+        tree.map(|(registry, _)| registry.method_set_extensions()).unwrap_or_default(),
+        &snap.nodes,
+        &snap.self_types,
+    );
     let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &signatures);
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
+        .with_type_arities(snap.arities.1.iter().copied(), &bind_nodes, &snap.refs)
         .with_self_types(snap.self_types)
-        .with_arities(&snap.arities)
+        .with_arities(&snap.arities.0)
         .with_associated_items(&bind_nodes, impl_blocks, item_facts)
         .with_uninherited(snap.uninherited)
+        .with_file_local(snap.file_local)
+        .with_link_unit_locals(snap.link_unit_locals)
+        .with_declared_signatures(&snap.nodes, &snap.edges, &signatures)
+        .with_trait_signatures(&snap.nodes, &snap.edges, &signatures)
         .with_path_specifiers(specifier_targets, go_modules)
+        .with_ts_resolution(ts_resolution)
+        .with_load_path(load_path)
         .with_imported_bindings(&snap.refs, policy);
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
@@ -347,7 +441,7 @@ pub fn run(
             // …and whether it moved a type of the hierarchy a supertype walk
             // climbs.
             let moved = Moved {
-                hierarchy: index.hierarchy_touched(&d.dirty_tokens),
+                hierarchy: index.hierarchy_moved(&d.dirty_tokens, &d.changed_paths),
                 import_roots: roots_moved,
             };
             // …and the names a renaming import elsewhere gives a dirty name,
@@ -392,6 +486,14 @@ pub fn run(
             .collect()
     });
 
+    // The method-set pass (S-529) decides every `Implements` out of a type of
+    // its languages, over the whole snapshot: a capture row of one restores
+    // nothing, and is spent below.
+    let method_sets = method_set_scope.plan(&snap.nodes, &snap.edges, &snap.refs, &snap.arities.0, &|row| {
+        binder::bind(row, &index, policy).into_targets()
+    });
+    method_sets.spend_captures(&mut outcomes);
+
     // A binding can move although neither endpoint's file changed — a rival
     // arriving, a supertype dropped, a submodule taking over a re-exported
     // name — and the edge its row no longer binds would outlive it. Every row
@@ -404,7 +506,10 @@ pub fn run(
         .filter(|r| r.form == RefForm::Symbol)
         .map(|r| r.id)
         .collect();
-    let stale = retract_unproduced(&snap.nodes, &snap.edges, &swept, &captures, &mut outcomes);
+    let mut stale = retract_unproduced(&snap.nodes, &snap.edges, &swept, &captures, &mut outcomes);
+    method_sets.keep_owned(&mut stale);
+    // …and the marker each surviving call edge of theirs carries (S-712).
+    let markers = swept_call_markers(&snap.nodes, &swept, &outcomes);
 
     // Stats are over the whole committed ledger (less its capture-before-delete
     // rows, below), not just the re-bound subset: a row this run touched uses its
@@ -419,7 +524,8 @@ pub fn run(
     // The capture rows this run deletes, so the committed ledger is a fresh
     // index's (CR-187, FR-SY-10) — and the stats count only what stays.
     let live: HashSet<&str> = snap.nodes.iter().map(|n| n.symbol.as_str()).collect();
-    let spent = spent_captures(&snap.refs, &swept, &live, final_bound);
+    let mut spent = spent_captures(&snap.refs, &swept, &live, final_bound);
+    spent.extend(&method_sets.captures);
     // The reported population also leaves out every capture-before-delete row
     // that stays (S-598, CR-195): each duplicates a reference its source file's
     // own row records, so counting it made a synced store's ratio differ from a
@@ -449,85 +555,20 @@ pub fn run(
         }
         let mut created = 0u64;
         for (ref_id, was_resolved, outcome) in &outcomes {
-            match outcome {
-                binder::Outcome::Bound {
-                    source,
-                    target,
-                    kind,
-                    payload,
-                } => {
-                    // Idempotent: a captured exact-symbol ref and the textual
-                    // ref for the same call legitimately bind the same edge. An
-                    // artifact bind carries its relation class onto the edge
-                    // (CR-011); code/doc/access binds pass `None`. An endpoint
-                    // a write since the snapshot deleted leaves the row for the
-                    // next pass, as an unbound one.
-                    match w.insert_edge_with_payload_if_live(
-                        *source,
-                        *target,
-                        *kind,
-                        payload.as_deref(),
-                    )? {
-                        Some(inserted) => {
-                            if inserted {
-                                created += 1;
-                            }
-                            if !was_resolved && !spent.contains(ref_id) {
-                                w.mark_ref_resolved(*ref_id, true)?;
-                            }
-                        }
-                        None => {
-                            if *was_resolved && !spent.contains(ref_id) {
-                                w.mark_ref_resolved(*ref_id, false)?;
-                            }
-                        }
-                    }
-                }
-                binder::Outcome::BoundMany {
-                    source,
-                    targets,
-                    kind,
-                    payload,
-                } => {
-                    // One reference naming a set: a Terraform module call's
-                    // `.tf` files (CR-011), a `dyn T` call's impls (S-281), a Go
-                    // import's package files (S-439). One edge per target, all
-                    // sharing the payload, all idempotent. `targets` is
-                    // non-empty, so the row is resolved — unless a write since
-                    // the snapshot deleted every endpoint.
-                    let mut live = false;
-                    for target in targets {
-                        if let Some(inserted) = w.insert_edge_with_payload_if_live(
-                            *source,
-                            *target,
-                            *kind,
-                            payload.as_deref(),
-                        )? {
-                            live = true;
-                            if inserted {
-                                created += 1;
-                            }
-                        }
-                    }
-                    if !spent.contains(ref_id) && live != *was_resolved {
-                        w.mark_ref_resolved(*ref_id, live)?;
-                    }
-                }
-                binder::Outcome::Unbound => {
-                    // A previously bound row whose target vanished flips back
-                    // to retry state — the ledger never lies (NFR-CC-04).
-                    if *was_resolved && !spent.contains(ref_id) {
-                        w.mark_ref_resolved(*ref_id, false)?;
-                    }
-                }
-            }
+            created += commit_outcome(w, *ref_id, *was_resolved, outcome, &spent)?;
+        }
+        // An edge a swept source keeps carries what its re-bound rows decide,
+        // as on a cold index — never what an earlier run left on it.
+        for ((source, target), marker) in &markers {
+            w.set_dispatch_marker(*source, *target, marker.as_deref())?;
         }
         // After the edges they restored are written, in the same transaction
         // (a spent capture's edge is never lost with its row).
         for ref_id in &spent {
             w.delete_unresolved_ref(*ref_id)?;
         }
-        Ok(created)
+        // The method-set relation (S-529), reconciled after the bound edges.
+        method_sets.commit(w).map(|inserted| created + inserted)
     })?;
 
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
@@ -608,13 +649,17 @@ fn swept_sources<'s>(
 /// The reference-bound edges out of the `swept` sources (S-519, S-596,
 /// [FR-SY-12]) that no re-bound row of theirs produces any more — what a moved
 /// binding leaves stale — with `outcomes` amended so that a capture row
-/// (`captures`) never restores one.
+/// (`captures`) of a swept source writes nothing.
 ///
 /// Every row of those sources was re-bound ([`swept_sources`]), so an edge none
 /// of them names has lost the row that bound it. A capture row stands in for
 /// its source's own row only while that row keeps its snapshot binding; once
 /// the row is re-bound it decides alone, as on a cold index, which holds no
-/// capture rows. Only the kinds a ledger row binds out of its own source are
+/// capture rows. So such a capture restores no edge — one they no longer
+/// produce stays retracted, and one they do they write themselves — and it
+/// carries no payload over theirs: a capture of an edge a since-deleted direct
+/// call left unmarked never unmarks the dispatch edge the fresh rows bind
+/// (S-712). Only the kinds a ledger row binds out of its own source are
 /// considered: containment and the framework pass's edges are other passes',
 /// and a `TracesTo` edge leaves the typed artifact that owns the row's source
 /// — the source or an ancestor — which rows of other, unswept sources (its
@@ -650,7 +695,7 @@ fn retract_unproduced(
         swept_node.contains(&edge.0) && !produced.contains(edge)
     };
     for (id, _, outcome) in outcomes.iter_mut() {
-        if captures.contains(id) && bound_edges(outcome).iter().any(stale) {
+        if captures.contains(id) && bound_edges(outcome).iter().any(|edge| swept_node.contains(&edge.0)) {
             *outcome = binder::Outcome::Unbound;
         }
     }
@@ -673,6 +718,52 @@ fn retract_unproduced(
         .collect()
 }
 
+/// The dispatch marker each `Calls` edge out of a `swept` source carries once
+/// the run commits (S-712, [CR-226] BR-76): `None` where any of the source's
+/// re-bound rows binds the edge unmarked — a direct call — and otherwise the
+/// smallest marker a trait fan-out of theirs stamps on it. Every row of a
+/// swept source was re-bound, so this is the edge's cold-index marker; the
+/// writer's yield rule cannot decide it alone, because it compares a fresh
+/// write with whatever payload an earlier run left on a surviving edge.
+/// Capture rows are left out: [`retract_unproduced`] has turned every one of
+/// a swept source `Unbound`.
+///
+/// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+fn swept_call_markers(
+    nodes: &[NodeRow],
+    swept: &HashSet<&str>,
+    outcomes: &[(i64, bool, binder::Outcome)],
+) -> BTreeMap<(NodeId, NodeId), Option<String>> {
+    let mut markers: BTreeMap<(NodeId, NodeId), Option<String>> = BTreeMap::new();
+    if swept.is_empty() {
+        return markers;
+    }
+    let swept_node: HashSet<NodeId> =
+        nodes.iter().filter(|n| swept.contains(n.symbol.as_str())).map(|n| n.id).collect();
+    let calls = outcomes.iter().flat_map(|(_, _, outcome)| match outcome {
+        binder::Outcome::Bound { source, target, kind: EdgeKind::Calls, payload } => {
+            vec![(*source, *target, payload.clone())]
+        }
+        binder::Outcome::BoundMany { source, targets, kind: EdgeKind::Calls, payload, dispatch } => targets
+            .iter()
+            .map(|&t| (*source, t, dispatch.as_ref().and_then(|d| d.payload_of(t)).or_else(|| payload.clone())))
+            .collect(),
+        _ => Vec::new(),
+    });
+    for (source, target, marker) in calls.filter(|(source, ..)| swept_node.contains(source)) {
+        markers
+            .entry((source, target))
+            .and_modify(|held| {
+                *held = match (held.take(), &marker) {
+                    (Some(a), Some(b)) => Some(a.min(b.clone())),
+                    _ => None,
+                }
+            })
+            .or_insert(marker);
+    }
+    markers
+}
+
 /// The capture-before-delete rows ([ADR-10]) a run deletes — every one that is
 /// **spent** (CR-187, [FR-SY-10]):
 ///
@@ -682,11 +773,15 @@ fn retract_unproduced(
 ///   so a store synced before this rule heals on its next run;
 /// - or its source is `swept`: every row of that source was re-bound this run
 ///   and decides its edges alone, as on a fresh index ([`retract_unproduced`]
-///   has already turned the capture `Unbound` if it would restore an edge
-///   they no longer produce);
+///   has already turned every capture of a swept source `Unbound`: the
+///   source's fresh rows write each edge they still produce);
 /// - or its source is no `live` node: the sync deleted or renamed it (its
 ///   file removed, or re-extracted without it), so no edge leaves it, and a
-///   source that returns brings fresh rows of its own.
+///   source that returns brings fresh rows of its own;
+/// - or it carries a [`EdgeKind::RoutesTo`] edge: the framework pass promotes
+///   that edge from the route's handler text on every sync and owns it, so a
+///   capture of it can neither restore a handler the sync deleted nor be needed
+///   to keep one it kept (S-526).
 ///
 /// A capture that cannot bind, from a live source that was not re-bound,
 /// stays unresolved: nothing else in the ledger may carry its edge, and it
@@ -708,7 +803,10 @@ fn spent_captures(
         .filter(|r| {
             let source = r.source_symbol.as_str();
             r.form == RefForm::Symbol
-                && (final_bound(r) || swept.contains(source) || !live.contains(source))
+                && (final_bound(r)
+                    || swept.contains(source)
+                    || !live.contains(source)
+                    || r.kind == EdgeKind::RoutesTo)
         })
         .map(|r| r.id)
         .collect()
@@ -731,6 +829,68 @@ fn bound_edges(o: &binder::Outcome) -> Vec<(NodeId, NodeId, EdgeKind)> {
     }
 }
 
+/// Commit one row's bind [`Outcome`](binder::Outcome) in the resolution
+/// batch: write the edges it produces, and flip the row's resolved flag when
+/// it moved — never for a `spent` capture row, which the batch deletes.
+/// Returns how many edges were created.
+///
+/// Every edge is idempotent: a captured exact-symbol ref and the textual ref
+/// for the same call legitimately bind the same edge. An artifact bind carries
+/// its relation class onto the edge (CR-011); code, doc and access binds pass
+/// `None`, and a trait fan-out's implementor edge its dispatch marker (S-712),
+/// which an unmarked bind of the same edge replaces in either order
+/// ([`BatchWriter::insert_edge_with_payload_if_live`]). An endpoint a write
+/// since the snapshot deleted leaves the row for the next pass, as an unbound
+/// one.
+fn commit_outcome(
+    w: &BatchWriter<'_>,
+    ref_id: i64,
+    was_resolved: bool,
+    outcome: &binder::Outcome,
+    spent: &HashSet<i64>,
+) -> Result<u64> {
+    let edges: Vec<(NodeId, NodeId, EdgeKind, Option<String>)> = match outcome {
+        binder::Outcome::Bound {
+            source,
+            target,
+            kind,
+            payload,
+        } => vec![(*source, *target, *kind, payload.clone())],
+        // One reference naming a set: a Terraform module call's `.tf` files
+        // (CR-011), a trait-typed call's impls (S-281, S-608), a Go import's
+        // package files (S-439). One edge per target, sharing the payload but
+        // for a dispatch marker. `targets` is non-empty, so the row is
+        // resolved — unless a write since the snapshot deleted every endpoint.
+        binder::Outcome::BoundMany {
+            source,
+            targets,
+            kind,
+            payload,
+            dispatch,
+        } => targets
+            .iter()
+            .map(|&t| {
+                let marker = dispatch.as_ref().and_then(|d| d.payload_of(t));
+                (*source, t, *kind, marker.or_else(|| payload.clone()))
+            })
+            .collect(),
+        // A previously bound row whose target vanished flips back to retry
+        // state — the ledger never lies (NFR-CC-04).
+        binder::Outcome::Unbound => Vec::new(),
+    };
+    let (mut created, mut live) = (0u64, false);
+    for (source, target, kind, payload) in &edges {
+        if let Some(inserted) = w.insert_edge_with_payload_if_live(*source, *target, *kind, payload.as_deref())? {
+            live = true;
+            created += u64::from(inserted);
+        }
+    }
+    if !spent.contains(&ref_id) && live != was_resolved {
+        w.mark_ref_resolved(ref_id, live)?;
+    }
+    Ok(created)
+}
+
 /// `true` when a bind [`Outcome`](binder::Outcome) produced at least one edge.
 fn is_bound(o: &binder::Outcome) -> bool {
     matches!(
@@ -750,14 +910,20 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    test would key on. They are a small minority, so re-bind them whenever
 ///    anything changed rather than reason about their normalization.
 /// 3. **Path-specifier fallback** (S-439) — an import written as a path binds
-///    against the file tree and the `go.mod` module declarations, and neither is
+///    against the file tree and the `go.mod` module declarations (a Ruby
+///    `require`, against the `*.gemspec` load roots, S-566), and neither is
 ///    a name a token test sees: `'.'` spells no token at all, a file added to a
 ///    Go module's root package shares none with the module path, and a `go.mod`
-///    carries no node. So every `Imports` row from a path-grammar file — and
+///    carries no node and a gemspec's `require_paths` are in no token a test
+///    sees. So every `Imports` row from a path-grammar file — and
 ///    every call recorded through one of its imports (S-440), which binds within
-///    that import's targets ([`is_import_scoped`]) — is re-bound whenever
+///    that import's targets ([`is_import_scoped`]), and in a structural-types
+///    language every type relation recorded through one (S-535,
+///    [`is_import_qualified_type_relation`]) — is re-bound whenever
 ///    anything changed: the same stance as the artifact fallback, for the same
-///    reason.
+///    reason. A multi-segment call of a lexical-constant language (Ruby's
+///    `Foo::bar`, S-565) is a call on a constant, bound by the constant rung
+///    and never through an import, so it is not re-selected here (S-566).
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
 ///    may have changed. Delegated to [`binder::Index::ref_affected`].
@@ -769,7 +935,10 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    names — `Leaf::start` reaching `Base.start` through a `Mid` that just
 ///    gained `extends Base`, or a Python `self.start()` through a base that
 ///    just gained `(Base)`. A language that records no supertype — Rust —
-///    keeps its selection.
+///    keeps its selection. A TypeScript type whose supertype is named through
+///    an import moves with that import's binding, so a changed module
+///    descriptor moves the hierarchy too (S-535,
+///    [`binder::Index::hierarchy_moved`]).
 /// 6. **Global wildcard** (S-518) — `delta.global_imports_moved`: a changed file
 ///    declared a C# `global using` before or after the sync, and `r` is from a
 ///    package-shaped file. The wildcard brings names into view in files the sync
@@ -794,7 +963,13 @@ fn is_affected(
         if delta.changed_paths.contains(path) {
             return true;
         }
-        if is_import_scoped(r) && index.is_path_specifier_file(path) {
+        if is_import_scoped(r)
+            && index.is_path_specifier_file(path)
+            && !(r.kind == EdgeKind::Calls && index.resolves_lexical_constants(path))
+        {
+            return true;
+        }
+        if is_import_qualified_type_relation(r) && index.is_path_specifier_file(path) && index.has_structural_types(path) {
             return true;
         }
         if moved.hierarchy && r.kind == EdgeKind::Calls && index.walks_hierarchy(path) {
@@ -822,13 +997,44 @@ struct Moved {
     import_roots: bool,
 }
 
+/// Whether a project-relative path names a **module descriptor**: a file that
+/// is never indexed (or need not be — a `*.gemspec` is a Ruby file since
+/// S-564), yet path-grammar imports bind through it,
+/// so a sync handed one must re-bind them ([`Delta::changed_paths`]). A Go
+/// `go.mod`, whose `module` line every Go import binds against (S-439); every
+/// `.json` file, which a bare TypeScript specifier may bind through, indexed or
+/// not (S-531, [`ts_config::is_descriptor`]); and every `*.gemspec`, whose
+/// `require_paths` a bare Ruby `require` binds against (S-566,
+/// [`load_path::is_descriptor`]).
+pub(crate) fn is_module_descriptor(rel: &str) -> bool {
+    rel == "go.mod" || rel.ends_with("/go.mod") || ts_config::is_descriptor(rel) || load_path::is_descriptor(rel)
+}
+
 /// Whether `r` binds against a path-grammar import's target — an `Imports` row
 /// itself (S-439), or a call recorded through one, `<import target>::<name>`
 /// (S-440). Such a call reads the import's binding, which moves with the file
-/// tree and the `go.mod` declarations exactly as the import does, so it is
-/// re-selected on the same terms. A single-segment call names no import.
+/// tree and the `go.mod`, `tsconfig.json` and `package.json` declarations
+/// (S-531) exactly as the import does, so it is
+/// re-selected on the same terms. A single-segment call names no import. A
+/// TypeScript call on a proven receiver (S-537) — `<import target>::T::m`, or
+/// `T::m` for a type the file declares — spells `::` too, so every sync
+/// re-selects it, whatever moved its type's members or hierarchy.
 fn is_import_scoped(r: &UnresolvedRefRow) -> bool {
     r.kind == EdgeKind::Imports || (r.kind == EdgeKind::Calls && r.target.contains("::"))
+}
+
+/// Whether `r` is a type relation a structural-types file (S-535) recorded
+/// through an import, `<import target>::<name>`: it binds within what that
+/// import binds to (`binder::Ctx::resolve_imported_type`), so it is
+/// re-selected on the same terms as a call through one
+/// ([`is_import_scoped`]). A capture-before-delete `Symbol` row names its
+/// target whole and is not one.
+fn is_import_qualified_type_relation(r: &UnresolvedRefRow) -> bool {
+    matches!(
+        r.kind,
+        EdgeKind::Extends | EdgeKind::Implements | EdgeKind::Instantiates | EdgeKind::TypeUses
+    ) && r.form == RefForm::Path
+        && r.target.contains("::")
 }
 
 /// Group a stream of `(relation payload, is-bound)` pairs into per-relation-class
@@ -946,8 +1152,35 @@ pub fn coverage(store: &dyn GraphStore) -> Result<ResolutionStats> {
 /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
 /// [resolution-engine]: ../../../docs/specs/architecture/components/resolution-engine.md
 pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolution>> {
-    Ok(store
-        .resolution_by_language()?
+    let (mut rows, _) = coverage_and_shared_headers(store)?;
+    // A relational answer states its denominator, not the parse (S-571).
+    for row in &mut rows {
+        row.parse_damage = None;
+    }
+    Ok(rows)
+}
+
+/// The language that reads a repository's `.h` headers, and how many of its
+/// files they are (S-582) — what [`coverage_and_shared_headers`] discloses.
+pub type SharedHeaders = (String, u64);
+
+/// [`coverage_by_language`]'s rows — each with its
+/// [`parse_damage`](LanguageResolution::parse_damage) (S-571, [FR-IX-14]) —
+/// with, from the same snapshot, the language that reads the `.h` headers and
+/// how many it holds, in a repository whose sources are both C and C++ (S-572,
+/// S-582, [FR-PL-07], [CR-182]) — what `status` discloses on that language's
+/// row. `None` when the repository holds one of the two alone, or neither.
+///
+/// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+/// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+/// [CR-182]: ../../../docs/requests/CR-182-c-is-declared-as-limited-support-and-header-ownership-is-disclosed.md
+///
+/// # Errors
+/// Returns an error if the graph cannot be read.
+pub fn coverage_and_shared_headers(store: &dyn GraphStore) -> Result<(Vec<LanguageResolution>, Option<SharedHeaders>)> {
+    let counts = store.resolution_by_language()?;
+    let headers = shared_headers(&counts);
+    let rows = counts
         .into_iter()
         .map(|row| LanguageResolution {
             language: row.language,
@@ -955,13 +1188,39 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
             calls: measured(row.calls),
             imports: measured(row.imports),
             call_residue: None,
+            header_ownership: None,
+            parse_damage: Some(ParseDamage::of(row.damaged_files, row.files, row.unrecorded_files)),
         })
-        .collect())
+        .collect();
+    Ok((rows, headers))
+}
+
+/// The language that reads the `.h` headers, and how many it holds, in a
+/// repository with both C and C++ sources (S-572, S-582, [FR-PL-07]) — where
+/// the per-repository rule decided something. C and C++ both claim `.h`; C
+/// reads it when the `.c` files outnumber the C++ sources, C++ otherwise, so
+/// in such a repository some headers may be the other language's (redis's 312
+/// are read as C beside its 8 vendored C++ files). Only the `.h` files, which
+/// is what the count states. `None` when either language has no file — a C or
+/// a C++ repository's headers are its own: the rule gives the headers to a
+/// language that has sources, so where both rows exist both hold some — or
+/// when no row, or both, hold `.h` files.
+///
+/// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+fn shared_headers(counts: &[LanguageRefCounts]) -> Option<SharedHeaders> {
+    let language = |name: &str| counts.iter().find(|row| row.language == name);
+    let (c, cpp) = (language("c")?, language("cpp")?);
+    match (c.header_files > 0, cpp.header_files > 0) {
+        (true, false) => Some((c.language.clone(), c.header_files)),
+        (false, true) => Some((cpp.language.clone(), cpp.header_files)),
+        _ => None,
+    }
 }
 
 /// Why each package-shaped language's unbound `Calls` rows stay unbound, by
 /// reason ([FR-RS-10], [S-468], [CR-150] §3.2 C) — and Rust's ([FR-RS-42],
-/// S-589) — the `call_residue` of the `status` row
+/// S-589), and the calls through a local value of any other language (S-594)
+/// — the `call_residue` of the `status` row
 /// ([`LanguageResolution::call_residue`]), keyed by `files.language`.
 ///
 /// Each unbound `Calls` row of a package-shaped file, or of a file whose
@@ -973,6 +1232,20 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 /// lookup decided is read off its own resolution — `external-type`,
 /// `name-not-in-scope`, `not-a-callable` — so `unclassified` holds only rows
 /// the binder binds now.
+///
+/// A language of any other model is counted too once one of its unbound rows
+/// is a bare call through a local value (S-594, [FR-RS-44]): extraction marks
+/// such a row for every language, so the readout carries `local-binding`
+/// wherever it occurs. Such a file is **not** re-walked — the index below is
+/// not the scopes its language binds with — so its row counts `local-binding`
+/// and `unbound`, and every other unbound row of the file is `unclassified`;
+/// nothing it holds reaches `external-type` or the targets the reference
+/// classes read ([FR-RS-49]), which are thus the same whether or not the
+/// language has a local-binding row.
+///
+/// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+///
 /// The index is [`run`]'s, built with the same package layout, minus the
 /// path-specifier and imported-binding scopes `run` chains on: those are read
 /// only for a path-grammar (TypeScript, JavaScript, Go) file, never for a
@@ -983,9 +1256,11 @@ pub fn coverage_by_language(store: &dyn GraphStore) -> Result<Vec<LanguageResolu
 ///
 /// [ADR-10]: ../../../docs/specs/architecture/decisions/ADR-10.md
 ///
-/// Empty — and nothing is read beyond the file listing and its declared
-/// namespaces — when no file is package-shaped or Rust, so a graph of
-/// path-grammar languages alone pays for none of it. A pure read that persists
+/// Empty — and nothing is read beyond the file listing, its declared
+/// namespaces and the ledger — when no file is package-shaped or Rust and no
+/// call is through a local value; and the index is built only when some file
+/// is package-shaped or Rust, so a graph of path-grammar languages alone pays
+/// for none. A pure read that persists
 /// nothing ([ADR-28]); it is `status`'s alone, because the relational answers
 /// attach their rows from the aggregate reads and must stay cheap.
 ///
@@ -1012,39 +1287,32 @@ pub(crate) fn call_residue_by_language(
 ) -> Result<BTreeMap<String, CallResidue>> {
     let layout = package_key::PackageLayout::from_registry(registry)
         .with_declared_namespaces(store.file_namespaces()?);
-    let files: HashMap<i64, String> = store
-        .indexed_files()?
-        .into_iter()
-        .filter(|f| layout.is_package_shaped(&f.path) || layout.peels_receivers(&f.path))
-        .map(|f| (f.id, f.path))
-        .collect();
+    let refs = store.unresolved_refs()?;
+    let files = residue_files(store, &layout, &refs)?;
     if files.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let mut paths: Vec<String> = files.values().cloned().collect();
-    paths.sort();
-    let mut language_of: HashMap<String, String> = HashMap::new();
-    // Chunked: the reader binds one parameter per path.
-    for chunk in paths.chunks(500) {
-        for (path, language) in store.file_languages(chunk)? {
-            if let Some(language) = language {
-                language_of.insert(path, language);
-            }
-        }
-    }
 
-    let (nodes, edges, refs) = (store.all_nodes()?, store.all_edges()?, store.unresolved_refs()?);
-    let (impl_blocks, item_facts) = associated_items(store)?;
-    let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures_of(&item_facts));
-    let index = binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
-        .with_self_types(store.node_self_types()?)
-        .with_arities(&store.node_arities()?)
-        .with_associated_items(&nodes, &impl_blocks, &item_facts)
-        .with_uninherited(store.uninherited_members()?);
-    let declared = index.declared_type_names();
+    let index = if files.values().any(|(_, walked)| *walked) {
+        let (nodes, edges) = (store.all_nodes()?, store.all_edges()?);
+        let (impl_blocks, item_facts) = associated_items(store)?;
+        let (arities, type_arities) = arity_facts(store)?;
+        let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures_of(&item_facts));
+        Some(
+            binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
+                .with_type_arities(type_arities, &nodes, &refs)
+                .with_self_types(store.node_self_types()?)
+                .with_arities(&arities)
+                .with_associated_items(&nodes, &impl_blocks, &item_facts)
+                .with_uninherited(store.uninherited_members()?),
+        )
+    } else {
+        None
+    };
+    let declared = index.as_ref().map(binder::Index::declared_type_names).unwrap_or_default();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
-    for language in language_of.values() {
+    for (language, _) in files.values() {
         out.entry(language.clone()).or_insert_with(|| CallResidue {
             unbound: 0,
             reasons: CallResidue::REPOSITORY_REASONS
@@ -1055,6 +1323,7 @@ pub(crate) fn call_residue_by_language(
             scope: ResidueScope::Repository,
             external_candidates: BTreeMap::new(),
             declared_types: declared.clone(),
+            external_type_targets: BTreeMap::new(),
         });
     }
     for r in &refs {
@@ -1065,24 +1334,31 @@ pub(crate) fn call_residue_by_language(
         if r.kind != EdgeKind::Calls || r.resolved || r.form == RefForm::Symbol {
             continue;
         }
-        let Some(language) = r
-            .file_id
-            .and_then(|id| files.get(&id))
-            .and_then(|path| language_of.get(path))
-        else {
+        let Some((language, walked)) = r.file_id.and_then(|id| files.get(&id)) else {
             continue;
         };
         let Some(residue) = out.get_mut(language) else {
             continue;
         };
         residue.unbound += 1;
-        let reason = match binder::residue(r, &index, policy) {
+        // A file not re-walked states its local-binding rows alone (S-594).
+        let residue_of = |r| match (&index, walked) {
+            (Some(index), true) => binder::residue(r, index, policy),
+            _ => (r.alias.as_deref() == Some(LOCAL_VALUE_ALIAS)).then_some(binder::Residue::LocalBinding),
+        };
+        let reason = match residue_of(r) {
             None => {
                 residue.unclassified += 1;
                 continue;
             }
             Some(binder::Residue::NoReceiverEvidence) => CallResidueReason::NoReceiverEvidence,
             Some(binder::Residue::ExternalType { candidates }) => {
+                *residue
+                    .external_type_targets
+                    .entry(r.target.clone())
+                    .or_default()
+                    .entry(candidates.clone())
+                    .or_default() += 1;
                 *residue.external_candidates.entry(candidates).or_default() += 1;
                 CallResidueReason::ExternalType
             }
@@ -1092,10 +1368,56 @@ pub(crate) fn call_residue_by_language(
             Some(binder::Residue::NoApplicableOverload) => CallResidueReason::NoApplicableOverload,
             Some(binder::Residue::NotACallable) => CallResidueReason::NotACallable,
             Some(binder::Residue::NameNotInScope) => CallResidueReason::NameNotInScope,
+            Some(binder::Residue::LocalBinding) => CallResidueReason::LocalBinding,
         };
         *residue.reasons.entry(reason).or_default() += 1;
     }
     Ok(out)
+}
+
+/// The files [`call_residue_by_language`] counts the rows of: file id → its
+/// language, and whether its rows are re-walked by the binder — every
+/// package-shaped and Rust file is; every other file of a language one of
+/// whose files records an unbound call through a local value (S-594) is
+/// counted, and not walked.
+fn residue_files(
+    store: &dyn GraphStore,
+    layout: &package_key::PackageLayout,
+    refs: &[crate::graph_store::UnresolvedRefRow],
+) -> Result<HashMap<i64, (String, bool)>> {
+    let local_value = |r: &&crate::graph_store::UnresolvedRefRow| {
+        r.kind == EdgeKind::Calls && !r.resolved && r.alias.as_deref() == Some(LOCAL_VALUE_ALIAS)
+    };
+    let local_files: HashSet<i64> = refs.iter().filter(local_value).filter_map(|r| r.file_id).collect();
+    let indexed = store.indexed_files()?;
+    let shaped = |path: &str| layout.is_package_shaped(path) || layout.peels_receivers(path);
+    let read: Vec<String> = indexed
+        .iter()
+        .filter(|f| shaped(&f.path) || !local_files.is_empty())
+        .map(|f| f.path.clone())
+        .collect();
+    let mut language_of: HashMap<String, String> = HashMap::new();
+    // Chunked: the reader binds one parameter per path.
+    for chunk in read.chunks(500) {
+        for (path, language) in store.file_languages(chunk)? {
+            if let Some(language) = language {
+                language_of.insert(path, language);
+            }
+        }
+    }
+    let local_languages: HashSet<&String> = indexed
+        .iter()
+        .filter(|f| local_files.contains(&f.id))
+        .filter_map(|f| language_of.get(&f.path))
+        .collect();
+    Ok(indexed
+        .iter()
+        .filter_map(|f| {
+            let language = language_of.get(&f.path)?;
+            let walked = shaped(&f.path);
+            (walked || local_languages.contains(language)).then(|| (f.id, (language.clone(), walked)))
+        })
+        .collect())
 }
 
 /// One class's raw counts, classified.

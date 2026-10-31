@@ -13,7 +13,17 @@ module_separator = "."
 # tree-sitter-c-sharp 0.23.5 is generated against ABI 15 (asserted at load).
 abi_version = 15
 
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
+
+# The optional member-access capability (S-523, CR-171, S-556, FR-EX-22,
+# FR-QM-11, ADR-39): Cohesion scores a class only in a language that declares
+# it. C#'s queries capture `this.x` and the bare forms — `_count`, `Name`,
+# `_log.Add(x)` — as `Accesses` edges (`queries/references.scm`, `@ref.access`
+# and `@ref.access.bare`), so its classes' LCOM4 has its shared-field links.
+# Stated ceilings: a field a class inherits or declares in another part of a
+# `partial` type, and a constructor's or accessor's body (neither is a node),
+# add no link.
+member_access = true
 
 # How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
 # a type (class, record, struct, interface, enum) is a call on the current instance — recorded with the
@@ -61,9 +71,23 @@ export_convention = "explicit-modifier"
 # `[TestMethod]` (MSTest). Feeds the unified `is_test` annotation (S-028).
 test_convention = "c-sharp-attributes"
 
+# The source pre-pass run before parsing (S-555, CR-177, FR-EX-23): each
+# `#if … #elif … #else … #endif` region is reduced to its first branch, the
+# other branches and the directive lines blanked to spaces, so every node keeps
+# the raw file's lines and columns. A type written two ways under `#if` (a base
+# list only `#if HAVE_ASYNC_DISPOSABLE`) otherwise parses as a class named after
+# the symbol, with its members hung off it or off the file. No symbol is
+# evaluated (`extract::preprocess`).
+preprocessor = "c-sharp"
+
 # The ratified C# framework set (FR-FW-03): ASP.NET Core — the `Microsoft.AspNetCore`
-# namespace prefix gates framework candidacy (FR-FW-04).
-framework_detectors = ["Microsoft::AspNetCore"]
+# namespace prefix gates framework candidacy (FR-FW-04), spelled in a `using` or,
+# for a file under a `global using`, in that file's directory (S-554,
+# `resolve::framework::admission`). The two endpoint-builder types are the same
+# evidence for a file that spells no `using` at all: the web SDK's implicit usings
+# bring `Microsoft.AspNetCore.Builder` / `.Routing` in, so the type a minimal API
+# is registered on is named with no namespace in front of it.
+framework_detectors = ["Microsoft::AspNetCore", "IEndpointRouteBuilder", "WebApplication"]
 
 # Canonical reference prefixes whose presence in a file's ledger makes the file an
 # outbound **HTTP client-call** candidate (S-346, CR-108, FR-WS-08) — the
@@ -98,28 +122,47 @@ http_client_detectors = ["System::Net::Http"]
 #
 # A namespace sees the types of the namespaces that enclose it (S-595, CR-192,
 # FR-RS-45): code in `A.B.C` names a type of `A.B` or `A` without a `using`, the
-# nearest namespace first and never the global one, before any `using` namespace
-# is read. Two types of one name in one enclosing namespace bind nothing.
+# nearest namespace first and never the global one, before any file-level
+# `using` namespace is read. Two types of one name in one enclosing namespace
+# bind nothing.
 #
-# Stated ceilings, shared with the same-namespace rung it extends: types are
-# indexed by name, so `Result<T>` and a non-generic `Result` are one name (C#
-# tells them apart by arity), and a `using` written inside a namespace block is
-# read like a file-level one — after the enclosing namespaces, where C# reads it
-# before the enclosing namespace it sits in. Where either decides the other way,
-# a name an enclosing namespace spells wins over the `using` that C# would pick.
+# A type name binds only a type of its own arity (S-602, CR-199): `Result` and
+# `Result<T>` are two types, as C# reads them. Each type declaration records its
+# type-parameter count (`queries/symbols.scm`, `@item.type_parameters`) and each
+# base type or `new` the count of type arguments it writes, and the
+# own-namespace, enclosing-namespace and `using`-namespace rungs admit only a
+# type of that count; two types of one name are ambiguous only when both match
+# it. A call through a type name (`Result.Make()`) records no count and binds as
+# before. Stated ceilings: a `using` alias and a path written qualified
+# (`X.Result<int>`, `Outer.Inner<T>`) are still read by name alone.
+#
+# A `using` inside a namespace block is read at that block's level (S-603,
+# CR-199): each `using` row records the namespace in force where it is written,
+# and the walk reads a level's types, then its block's `using`s, before the next
+# level out; a file-level `using` is read after every level. Two types one
+# block's `using`s supply bind nothing. A block is read early only when it
+# encloses every type of the file; one holding only some of them has its
+# `using`s read last, as before, and one holding none, nowhere. Stated ceilings:
+# a `using static` inside a block is read as a file-level one, and a `using`
+# alias, wherever it is written, first, as before.
 [module_model]
 kind = "namespace"
 enclosing_namespaces = true
+type_arity = true
 
 # Declared cross-file reach (S-570, CR-180, FR-PL-09): imports bind across
 # files through the declared namespace (S-518), and so do a type's supertypes
-# (S-522); calls bind only inside the file that wrote them.
+# (S-522) and the type a `new T()` constructs (S-553); so does a call on a type
+# name (`Helpers.Run()`, S-553), and a call on a variable whose type the file
+# declares (`_orderService.Add()`, S-558). A call on a receiver the file proves
+# no type for (`var x = Make()`, a conditional `x?.Run()`, a PascalCase property,
+# a chained call) binds in no file, which is why the level stays `partial`.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
 level = "partial"
-cross_file = ["imports", "type_relations"]
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -131,9 +174,18 @@ frameworks = "queries/frameworks.scm"
 # an ASP.NET Core `MapGet` registration — syntactically the same shape — is not
 # read as an outbound call.
 invocations = "queries/invocations.scm"
-# Captured `@fw.route.method` attribute name → HTTP method (S-057). ASP.NET Core
-# verb attributes; `[Route]` declares no single verb.
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
+# Captured `@fw.route.method` text → HTTP method (S-057, S-554). ASP.NET Core verb
+# attributes and the minimal-API `Map*` verb methods; `[Route]` declares no single
+# verb. `MapMethods` names its verbs in an argument, so it is not mapped.
 [framework_methods]
+MapGet = "GET"
+MapPost = "POST"
+MapPut = "PUT"
+MapDelete = "DELETE"
+MapPatch = "PATCH"
 HttpGet = "GET"
 HttpPost = "POST"
 HttpPut = "PUT"
@@ -145,7 +197,7 @@ Route = "ANY"
 # Captured `@invoke.http.method` text → HTTP method for the CLIENT side (S-346,
 # CR-108, FR-WS-08). The mechanism — normalizer, filter, exact-match lookup, and
 # why an empty table is a pass-through — is stated once on
-# `PluginManifest::invocation_methods`; why the FILTER half is what makes this
+# `extract::normalize_invocation_method`; why the FILTER half is what makes this
 # language's receiver-method anchor safe is stated once in the header of
 # `queries/invocations.scm`. This block records only what is C#-specific.
 #

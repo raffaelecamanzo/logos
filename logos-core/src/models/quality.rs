@@ -4,7 +4,7 @@
 //! `scan`, `gate`, `check_rules`, `evolution`, `dsm`, `doc_gaps`,
 //! `health`, `session_start`, `session_end`, `rescan`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::Serialize;
 
@@ -117,6 +117,12 @@ pub struct QualityReadout {
     ///
     /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
     pub depth_not_applicable: Option<GraphDimensionNotApplicable>,
+    /// The snapshot's [`MetricSnapshot::cohesion_not_applicable`], carried for
+    /// the same reason ([CR-252]): `Some` when Cohesion left the signal over too
+    /// few classes. `None` = Cohesion applied or had no class to score.
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub cohesion_not_applicable: Option<CohesionNotApplicable>,
     /// How many violations the last recorded run found in total, before any
     /// display cap — so a truncated list can say what it dropped.
     ///
@@ -293,7 +299,17 @@ pub mod absence {
     /// `unindexed` and `n/a` as written, so the relational answers speak three
     /// words of this list and coin one.
     ///
+    /// # The reference-resolution figures' spelling ([S-635], [FR-RS-49])
+    ///
+    /// `no-internal-candidates` is the one wording the internal-candidate
+    /// headline added: [`ReferenceFigureAbsence`]'s arm for a graph whose every
+    /// code reference is provably external. Its other arm reuses
+    /// `no-references-recorded` as written.
+    ///
     /// [`DenominatorAbsence`]: crate::models::navigation::DenominatorAbsence
+    /// [`ReferenceFigureAbsence`]: super::ReferenceFigureAbsence
+    /// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
     /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
     /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
@@ -309,6 +325,7 @@ pub mod absence {
         "no baseline",
         "no pass is stated",
         "no rules contract",
+        "no-internal-candidates",
         "no-language-recorded",
         "no-production-scope",
         "no-references-recorded",
@@ -817,6 +834,35 @@ impl CrossFileAbsence {
     }
 }
 
+/// Why a reference-resolution figure of `status` — the internal-candidate
+/// headline or the doc-reference figure ([FR-RS-49], [S-635]) — states no
+/// ratio: its denominator is empty, and a zero denominator reads absent, never
+/// `100%` ([NFR-CC-04]).
+///
+/// [`CrossFileAbsence`]'s shape: the same serde tagging (`tag = "cause"`,
+/// kebab-case), arms carrying what establishes them, and tags spelled in
+/// [`absence::SENTINELS`]. No arm names a command: indexing more code changes
+/// the population, not the reason a ratio over it is missing.
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+/// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "cause", rename_all = "kebab-case")]
+pub enum ReferenceFigureAbsence {
+    /// The graph records **no reference** of the figure's population — no code
+    /// reference for the headline, no doc reference for the doc figure.
+    NoReferencesRecorded,
+    /// The graph records code references and **every one** is provably
+    /// external, so none could bind to this graph and the headline has no
+    /// denominator. Not "nothing resolved": nothing here could have been.
+    NoInternalCandidates {
+        /// The code references, all provably external — `> 0` is what
+        /// separates this arm from [`NoReferencesRecorded`](Self::NoReferencesRecorded).
+        provably_external: u64,
+    },
+}
+
 /// Full architecture-quality scan result (FR-QM-01..06, S-020).
 ///
 /// The 0–10000 signal is the geometric-mean aggregate (ADR-12); `None` is the
@@ -1028,6 +1074,16 @@ impl WorstOffenders {
         "redundancy",
     ];
 
+    /// The dimensions whose entries are listed only when asked for by name
+    /// ([CR-252] H1): Equality's are the functions above the mean complexity —
+    /// the members of a distribution, judged against no threshold — so they
+    /// are no offenders, and the uncapped listing ([`OffenderListing`]) and
+    /// its length leave them out. The capped list, the score and the signal
+    /// keep them.
+    ///
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub const LISTED_ON_REQUEST: [&'static str; 1] = ["equality"];
+
     /// Each list paired with its [`DIMENSIONS`](Self::DIMENSIONS) name, in
     /// that order.
     pub fn lists(&self) -> [(&'static str, &[Offender]); 9] {
@@ -1069,6 +1125,21 @@ impl WorstOffenders {
             "equality" => Some(&mut self.equality),
             "redundancy" => Some(&mut self.redundancy),
             _ => None,
+        }
+    }
+
+    /// Flag every entry whose file is among `damaged` `partial_parse` (S-571,
+    /// [FR-IX-14]) — the one rule the computed lists and a snapshot's
+    /// read-back both apply, so they agree on which entries are flagged.
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    pub fn flag_partial_parse(&mut self, damaged: &HashSet<String>) {
+        for dimension in Self::DIMENSIONS {
+            if let Some(list) = self.list_mut(dimension) {
+                for offender in list {
+                    offender.partial_parse = damaged.contains(&offender.file);
+                }
+            }
         }
     }
 
@@ -1141,6 +1212,14 @@ pub struct Offender {
     /// for a dimension with no per-unit threshold (Uniqueness, Acyclicity,
     /// Depth, Equality, Redundancy).
     pub threshold: Option<i64>,
+    /// `true` when [`file`](Self::file)'s parse held an ERROR or MISSING node
+    /// (S-571, [FR-IX-14]): the entry's span and figures may be artefacts of
+    /// the misparse, not measurements. Flagged, never dropped. Elided when
+    /// `false`.
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial_parse: bool,
 }
 
 impl Offender {
@@ -1163,7 +1242,9 @@ impl Offender {
 /// offender the last snapshot recorded, uncapped, narrowed by path and
 /// dimension, in the order the capped lists use — dimension in
 /// [`WorstOffenders::DIMENSIONS`] order, then each list's computed order
-/// ([NFR-RA-06]). Read-only: it computes and persists nothing.
+/// ([NFR-RA-06]). Equality's entries are listed only under `--dimension
+/// equality` ([`WorstOffenders::LISTED_ON_REQUEST`]). Read-only: it computes
+/// and persists nothing.
 ///
 /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
@@ -1934,6 +2015,13 @@ pub struct SecurityDeltaEntry {
     ///
     /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
     pub confidence: String,
+    /// Every driver that reported one advisory merged into this entry, each
+    /// once, `scanner` first ([FR-SC-29]); absent for a finding one result
+    /// stands behind.
+    ///
+    /// [FR-SC-29]: ../../../docs/specs/requirements/FR-SC-29.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reporters: Vec<String>,
 }
 
 /// A suppressed finding of the branch security delta: the entry, and why.
@@ -1996,6 +2084,16 @@ impl WhereToStart {
             recorded: true,
             basis: Self::BASIS,
             ..Self::default()
+        }
+    }
+
+    /// Flag every unit whose file is among `damaged` `partial_parse` —
+    /// [`WorstOffenders::flag_partial_parse`]'s rule (S-571, [FR-IX-14]).
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    pub fn flag_partial_parse(&mut self, damaged: &HashSet<String>) {
+        for unit in &mut self.units {
+            unit.partial_parse = damaged.contains(&unit.file);
         }
     }
 
@@ -2084,6 +2182,13 @@ pub struct FixUnit {
     /// The [`OutlierMeasure`]s whose label this unit carries, in
     /// [`OutlierMeasure::MEASURES`] order; empty when none.
     pub outliers: Vec<&'static str>,
+    /// `true` when [`file`](Self::file)'s parse held an ERROR or MISSING node
+    /// — [`Offender::partial_parse`]'s flag (S-571, [FR-IX-14]). Elided when
+    /// `false`.
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub partial_parse: bool,
 }
 
 impl FixUnit {
@@ -2373,11 +2478,33 @@ pub struct MetricSnapshot {
     /// method meets all of CC ≥ `T_cc` ∧ LOC ≥ `T_loc` ∧ nesting ≥ `T_bn`.
     pub conciseness: MetricValue,
     /// Mean of `1/LCOM4` over production classes, floored at 0.01 (FR-QM-11,
-    /// CR-005); `None` = **n/a drop-out** (no applicable classes, ADR-21).
+    /// CR-005); `None` = **n/a drop-out** (no applicable classes, or fewer than
+    /// `cohesion_min_classes` of them, ADR-21).
     pub cohesion: Option<MetricValue>,
+    /// `Some` when Cohesion dropped out because it scored too few classes
+    /// ([FR-QM-11], [CR-252], metric semantics v9): at least one scoreable
+    /// class, but fewer than `[metric_thresholds] cohesion_min_classes`.
+    /// [`cohesion`](Self::cohesion) is then `None` — the same NULL + flag n/a
+    /// path a class-less repository takes — and this names why. `None` when
+    /// Cohesion applies, when no class is scoreable at all, and on a snapshot
+    /// read back from the store, whose row records the drop-out but not its
+    /// cause.
+    ///
+    /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+    /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+    pub cohesion_not_applicable: Option<CohesionNotApplicable>,
     /// `1 − god-container ratio` over class-like containers, floored at 0.01
     /// (FR-QM-12, CR-005); `None` = **n/a drop-out** (no class-like containers).
     pub focus: Option<MetricValue>,
+    /// How many production methods recording a self type (a Rust `impl`
+    /// method, a Go receiver method) Focus could not count toward a struct
+    /// ([FR-QM-12], [CR-166], metric semantics v9): the figure and its
+    /// denominator. `None` when no method records a self type, and on a
+    /// snapshot read back from the store, whose row does not record it.
+    ///
+    /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
+    /// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
+    pub focus_attribution: Option<MethodAttribution>,
     /// `1 − near-clone ratio`, floored at 0.01 (FR-QM-13, CR-005): production
     /// functions in any near-clone group (`clone_group IS NOT NULL`) over
     /// production functions.
@@ -2491,6 +2618,59 @@ impl GraphDimensionNotApplicable {
             reason: format!(
                 "{edges} of {min_edges} dependency edges — too few for community structure"
             ),
+        })
+    }
+}
+
+/// What Focus's method attribution could not place ([FR-QM-12], [CR-166],
+/// metric semantics v9): of the production methods that record the type they
+/// belong to (a Rust `impl` method, a Go receiver method), those that name no
+/// one `Struct` of their own crate or package — a type alias, an enum, a type
+/// from elsewhere, or a name two structs of that crate/package share. Such a
+/// method counts toward no container; the figure says how many, against how
+/// many were considered, so a reader can weigh the Focus value it qualifies.
+///
+/// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
+/// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct MethodAttribution {
+    /// Methods that reached no struct.
+    pub unattributed: u64,
+    /// Production methods that record a self type — the denominator.
+    pub denominator: u64,
+}
+
+/// Why Cohesion is not applicable on a snapshot that has classes to score
+/// ([FR-QM-11], [CR-252]): fewer scoreable classes than the
+/// `[metric_thresholds] cohesion_min_classes` minimum, carried with the two
+/// figures that establish it. A mean of `1/LCOM4` over one or two classes
+/// lets one class move the whole signal, so below the minimum the dimension
+/// leaves the aggregate and "where to start"; the LCOM4 offender list still
+/// lists its classes.
+///
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CohesionNotApplicable {
+    /// The scoreable classes counted against the minimum.
+    pub classes: u64,
+    /// The effective `cohesion_min_classes`.
+    pub min_classes: u64,
+    /// The rendered reason: `"<n> of <min_classes> classes — too few classes
+    /// to score"`.
+    pub reason: String,
+}
+
+impl CohesionNotApplicable {
+    /// The drop-out for `classes` scoreable classes under a minimum of
+    /// `min_classes`, or `None` when Cohesion applies (`classes ≥
+    /// min_classes`) or has nothing to score (`classes == 0`, the class-less
+    /// n/a that names no count). The single place the minimum is compared.
+    pub fn for_classes(classes: u64, min_classes: u64) -> Option<Self> {
+        (classes > 0 && classes < min_classes).then(|| Self {
+            classes,
+            min_classes,
+            reason: format!("{classes} of {min_classes} classes — too few classes to score"),
         })
     }
 }
@@ -3871,6 +4051,15 @@ pub struct LanguageDescriptor {
     /// [CR-180]: ../../../docs/requests/CR-180-scala-is-declared-as-limited-support-and-every-language-declares-its-reach.md
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reach: Option<LanguageReach>,
+    /// What a reader of the listing should know about how this language is
+    /// applied ([S-572], [FR-PL-07]) — the C and C++ rows state which of the
+    /// two reads a `.h` header in a given repository (S-582). Absent for a
+    /// language with nothing to disclose.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    /// [S-572]: ../../../docs/planning/journal.md#s-572-c-is-declared-symbols-only-and-header-ownership-is-disclosed
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A code language's declared cross-file reach, as `logos languages` states it

@@ -46,6 +46,14 @@ describe("glossary", () => {
     }
   });
 
+  it("defines 'Reference resolution' as a lower bound, naming where the gap is (S-636, FR-RS-49)", () => {
+    const { definition } = GLOSSARY.referenceResolution;
+    expect(definition).toMatch(/\blower bound\b/);
+    expect(definition).toMatch(/method calls on values of unknown type/);
+    // The noun "bound" is itself a glossed term: "lower bound" may not end a clause.
+    expect(findTermsInPlainText(definition)).toEqual([]);
+  });
+
   it("enforces the Health catalogue's terms (S-615) through the vocabulary rule", () => {
     for (const term of ["brainMethod", "godContainer", "nearClone"] as const) {
       expect(VOCABULARY_TERMS, term).toContain(term);

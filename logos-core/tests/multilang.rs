@@ -11,8 +11,8 @@
 //!   language's kinds, `Contains` scope edges, and a bound `Calls` edge
 //!   (FR-EX-05, UAT-EX-04);
 //! - framework route/component extraction works for each language's ratified
-//!   framework set — FastAPI + Django, Express + Next.js, net/http + Gin,
-//!   Spring (FR-FW-03, UAT-FW-01, UAT-FW-02);
+//!   framework set — FastAPI + Django, Express + Next.js + NestJS,
+//!   net/http + Gin, Spring (FR-FW-03, UAT-FW-01, UAT-FW-02);
 //! - a plain library in every language promotes nothing (FR-FW-04);
 //! - the per-language tests are feature-gated like the grammars themselves,
 //!   so a build that excludes a language excludes its tests (FR-PL-01's
@@ -89,6 +89,21 @@ fn edges_of(rt: &Runtime, kind: EdgeKind) -> Vec<(NodeId, NodeId)> {
             .collect())
     })
     .expect("read runs")
+}
+
+/// Every `RoutesTo` edge to a method as `(route name, handler name)`, sorted —
+/// ids differ between two indexes, names do not.
+fn route_handler_pairs(rt: &Runtime) -> Vec<(String, String)> {
+    let names: std::collections::HashMap<NodeId, String> = nodes_of(rt, NodeKind::Route)
+        .into_iter()
+        .chain(nodes_of(rt, NodeKind::Method))
+        .collect();
+    let mut pairs: Vec<(String, String)> = edges_of(rt, EdgeKind::RoutesTo)
+        .into_iter()
+        .map(|(route, handler)| (names[&route].clone(), names[&handler].clone()))
+        .collect();
+    pairs.sort();
+    pairs
 }
 
 /// Sorted route-node names (`"METHOD /path"`).
@@ -168,8 +183,10 @@ fn default_build_lists_all_five_languages_with_their_extensions() {
     assert_eq!(find("python").extensions, ["py", "pyi"]);
     #[cfg(feature = "lang-typescript")]
     {
-        assert_eq!(find("typescript").extensions, ["ts", "js", "mjs", "cjs"]);
-        assert_eq!(find("tsx").extensions, ["tsx", "jsx"]);
+        assert_eq!(find("typescript").extensions, ["ts"]);
+        assert_eq!(find("tsx").extensions, ["tsx"]);
+        // JavaScript is its own language over the TSX grammar (S-538).
+        assert_eq!(find("javascript").extensions, ["js", "mjs", "cjs", "jsx"]);
     }
     #[cfg(feature = "lang-go")]
     assert_eq!(find("go").extensions, ["go"]);
@@ -177,14 +194,10 @@ fn default_build_lists_all_five_languages_with_their_extensions() {
     assert_eq!(find("java").extensions, ["java"]);
     #[cfg(feature = "lang-c")]
     {
-        // C claims `.c` only — `.h` headers belong to the C++ plugin under the
-        // fixed ownership rule (S-056/S-058), so C must never claim `h`.
+        // C claims `.c` and shares `.h` with the C++ plugin: a repository whose
+        // C sources outnumber its C++ ones gives its headers to C (S-582).
         let c = find("c");
-        assert_eq!(c.extensions, ["c"]);
-        assert!(
-            !c.extensions.iter().any(|e| e == "h"),
-            "C must not claim `.h` — that extension is the C++ plugin's"
-        );
+        assert_eq!(c.extensions, ["c", "h"]);
     }
     // Kotlin (S-055): the verification preflight as a standing regression guard —
     // the grammar resolves, loads at the workspace ABI (not skipped below), and
@@ -194,7 +207,9 @@ fn default_build_lists_all_five_languages_with_their_extensions() {
     #[cfg(feature = "lang-c-sharp")]
     assert_eq!(find("c-sharp").extensions, ["cs"]);
     #[cfg(feature = "lang-ruby")]
-    assert_eq!(find("ruby").extensions, ["rb"]);
+    assert_eq!(find("ruby").extensions, ["rb", "rake", "ru", "gemspec"]);
+    #[cfg(feature = "lang-ruby")]
+    assert_eq!(find("ruby").filenames, ["Gemfile", "Rakefile"]);
     #[cfg(feature = "lang-php")]
     assert_eq!(find("php").extensions, ["php"]);
 
@@ -317,7 +332,7 @@ def callee():
         "UserStore",
         NodeKind::Class,
         "add",
-        NodeKind::Function, // v1 policy: every `def` is a Function (as Rust)
+        NodeKind::Method, // a class-body `def` is a Method (S-543, FR-EX-20)
         "caller",
         "callee",
         NodeKind::Function,
@@ -498,6 +513,722 @@ function helper() {
     assert_eq!(result.framework.components, 1);
 }
 
+// ── JavaScript: Express router modules and template paths (S-541, FR-FW-03) ──
+
+/// NodeBB's `src/routes/meta.js` shape: a module that registers its routes on
+/// the `app` it receives, and names nothing from `express`. It is a framework
+/// candidate through its `app` parameter, so its registrations are routes.
+#[cfg(feature = "lang-typescript")]
+const ROUTER_MODULE: &str = "\
+'use strict';
+
+module.exports = function (app, middleware, controllers) {
+\tconst routeHelpers = require('./helpers');
+\tapp.get('/sitemap.xml', routeHelpers.tryRoute(controllers.sitemap.render));
+\tapp.get('/robots.txt', routeHelpers.tryRoute(controllers.robots));
+\tapp.post('/inbox', [middleware.verify], routeHelpers.tryRoute(controllers.postInbox));
+};
+";
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn an_express_router_module_receiving_its_app_yields_routes() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/routes/meta.js", ROUTER_MODULE);
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.files_scanned, 1, "the module is a candidate");
+    assert_eq!(
+        route_names(rt),
+        ["GET /robots.txt", "GET /sitemap.xml", "POST /inbox"]
+    );
+}
+
+/// An `express.Router()` instance — NodeBB's `src/routes/write/*.js` spelling,
+/// `require('express').Router()` — keeps its file a candidate under import-only
+/// detectors: the `require` is the `Imports` row that names `express`.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn an_express_router_instance_module_yields_routes() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/routes/write/tags.js",
+        "\
+'use strict';
+
+const router = require('express').Router();
+
+function follow(req, res) {}
+
+router.put('/:tag/follow', follow);
+router.get('/config', (req, res) => res.json({}));
+
+module.exports = function () {
+\treturn router;
+};
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.files_scanned, 1);
+    assert_eq!(route_names(rt), ["GET /config", "PUT /:tag/follow"]);
+}
+
+/// NodeBB's `src/routes/feeds.js` passed the `next` detector only through its
+/// middleware's `next()` callback. JavaScript's detectors match import
+/// references alone, so a JavaScript file calling `next()` is no Next.js
+/// candidate — while one importing `next` still is.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_next_callback_does_not_make_a_file_a_framework_candidate() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/feeds.js",
+        "\
+function handle404(req, res, next) {
+\tif (req.params.slug) {
+\t\treturn next();
+\t}
+\tres.sendStatus(404);
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert_eq!(result.framework.files_scanned, 0, "a `next()` call names no framework");
+
+    write(
+        tmp.path(),
+        "src/Home.jsx",
+        "import Link from \"next/link\";\n\nexport function Home() {\n  return <Link href=\"/\">home</Link>;\n}\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let result = engine.index();
+    assert_eq!(result.framework.files_scanned, 1, "an import of `next` still does");
+    assert_eq!(result.framework.components, 1);
+}
+
+/// Receiver-parameter candidacy is the declaring language's alone: JavaScript
+/// names `app` and `router`, TypeScript names none, so a TypeScript module
+/// that registers on the `app` it receives, and imports nothing naming a
+/// framework, is not scanned.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_app_parameter_is_not_a_receiver_candidate() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/routes/meta.ts",
+        "function list(req, res) {}\n\nexport function register(app) {\n  app.get('/users', list);\n}\n",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.files_scanned, 0, "TypeScript declares no receiver parameter");
+    assert!(route_names(rt).is_empty());
+}
+
+/// TypeScript's import-equals form records no import row, so the TypeScript
+/// rows keep matching their detectors on every reference kind (S-541 review):
+/// an `import express = require("express")` app is still a candidate through
+/// its `express()` call, and keeps its routes.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_import_equals_express_app_keeps_its_routes() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/server.ts",
+        "\
+import express = require(\"express\");
+
+const app = express();
+
+export function listUsers(req: unknown, res: unknown): void {}
+
+app.get(\"/users\", listUsers);
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(result.framework.files_scanned, 1);
+    assert_eq!(route_names(rt), ["GET /users"]);
+}
+
+/// A template-literal path with a static `/` tail is a route
+/// (`` `${relativePath}/ping` ``, NodeBB's `src/routes/index.js`). Its leading
+/// interpolation is a prefix this pass does not resolve, so it stays in the
+/// route's name verbatim — and the handler the registration names is linked.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_template_literal_path_yields_a_route_with_its_prefix_unresolved() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/routes/index.js",
+        "\
+'use strict';
+
+function ping(req, res) {}
+
+module.exports = function (app, name) {
+\tconst relativePath = '';
+\tapp.get(`${relativePath}/ping`, ping);
+\tapp.get(`/api/${name}/config`, (req, res) => res.json({}));
+\tapp.get(`user${name}`, ping);
+};
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        ["GET ${relativePath}/ping", "GET /api/${name}/config"],
+        "a template that is neither a path nor opens with a reference is no route"
+    );
+    let route = node_id(rt, "GET ${relativePath}/ping", NodeKind::Route);
+    let ping = node_id(rt, "ping", NodeKind::Function);
+    assert!(edges_of(rt, EdgeKind::RoutesTo).contains(&(route, ping)));
+}
+
+/// Sync ≡ reindex for the receiver-parameter candidacy: a framework-free graph
+/// takes the incremental gate's skip path, so the gate's footprint probe must
+/// see a router module's `app` parameter the moment a sync adds one — or the
+/// synced graph would hold no routes while a fresh index holds three.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn syncing_in_a_router_module_equals_a_fresh_index() {
+    let live = TempDir::new().unwrap();
+    write(live.path(), "src/util.js", "function plain() {}\n");
+    let engine = Engine::start(live.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+    assert!(route_names(rt).is_empty());
+
+    write(live.path(), "src/routes/meta.js", ROUTER_MODULE);
+    let synced = engine.sync(&[std::path::PathBuf::from("src/routes/meta.js")]);
+    assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
+
+    let fresh = TempDir::new().unwrap();
+    write(fresh.path(), "src/util.js", "function plain() {}\n");
+    write(fresh.path(), "src/routes/meta.js", ROUTER_MODULE);
+    let cold = Engine::start(fresh.path()).expect("engine starts");
+    cold.index();
+
+    assert_eq!(route_names(rt), route_names(cold.runtime().unwrap()));
+    assert_eq!(route_names(rt).len(), 3);
+}
+
+// ── TypeScript: NestJS decorator routes (S-533, FR-FW-03, FR-FW-05) ──────────
+
+/// A NestJS controller end to end: the class decorator's prefix (positional,
+/// object `path:` and array forms) is joined onto each method decorator's path,
+/// a bare `@Get()` is the controller prefix itself, a method carrying further
+/// decorators between its route decorator and its name is still paired with
+/// that name, and every route links to its own handler method only.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_controller_routes_compose_prefix_and_link_handlers() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/users.controller.ts",
+        "\
+import { Body, Controller, Delete, Get, Post, UseGuards } from \"@nestjs/common\";
+
+@Controller(\"users\")
+export class UsersController {
+  @Post()
+  create(@Body() dto: unknown) {}
+
+  @Get()
+  findAll() {}
+
+  @Get(\":id\")
+  // a comment between the decorators of one member
+  @UseGuards(AuthGuard)
+  findOne() {}
+
+  @Delete(\"/:id\")
+  remove() {}
+
+  helper() {}
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/auth.controller.ts",
+        "\
+import { Controller, Get, Post } from \"@nestjs/common\";
+
+@Controller({ path: \"auth\", version: \"1\" })
+export class AuthController {
+  @Post(\"login\")
+  login() {}
+
+  @Get(\"me\")
+  me() {}
+}
+
+@Controller([\"a\", \"b\"])
+class TwinController {
+  @Get()
+  both() {}
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "DELETE /users/:id",
+            "GET /a",
+            "GET /auth/me",
+            "GET /b",
+            "GET /users",
+            "GET /users/:id",
+            "POST /auth/login",
+            "POST /users",
+        ]
+    );
+    assert_eq!(result.framework.routes, 8);
+    assert_eq!(result.framework.routes_not_composed, 0);
+
+    // Exact edge set: each route reaches its own method and nothing else.
+    let linked = |route: &str, handler: &str| {
+        (
+            node_id(rt, route, NodeKind::Route),
+            node_id(rt, handler, NodeKind::Method),
+        )
+    };
+    let mut expected = vec![
+        linked("POST /users", "create"),
+        linked("GET /users", "findAll"),
+        linked("GET /users/:id", "findOne"),
+        linked("DELETE /users/:id", "remove"),
+        linked("POST /auth/login", "login"),
+        linked("GET /auth/me", "me"),
+    ];
+    // `both` is registered at two prefixes: one handler, two routes.
+    expected.push(linked("GET /a", "both"));
+    expected.push(linked("GET /b", "both"));
+    let mut actual = edges_of(rt, EdgeKind::RoutesTo);
+    expected.sort();
+    actual.sort();
+    assert_eq!(actual, expected);
+}
+
+/// An unprefixed `@Controller()` serves from the root: a bare `@Get()` is
+/// `GET /` and a path written without its leading slash is rooted. A route
+/// decorator outside a file that imports `@nestjs/common` is not NestJS.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_unprefixed_controller_roots_its_paths_and_other_files_promote_nothing() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/health.controller.ts",
+        "\
+import { Controller, Get, Post } from \"@nestjs/common\";
+
+@Controller()
+export class HealthController {
+  @Get(\"health\")
+  check() {}
+
+  @Get()
+  root() {}
+}
+
+// An options object without a `path` states no prefix: no scope, so only the
+// rooting of the method path itself makes `versioned` an address.
+@Controller({ version: \"1\" })
+export class VersionedController {
+  @Get(\"versioned\")
+  one() {}
+}
+
+// An empty-string prefix is the root as well.
+@Controller(\"\")
+export class EmptyPrefixController {
+  @Post()
+  create() {}
+
+  @Get(\"empty\")
+  two() {}
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/elsewhere.ts",
+        "\
+import { Get } from \"some-other-lib\";
+
+export class Elsewhere {
+  @Get(\"/not-nest\")
+  run() {}
+}
+",
+    );
+
+    // A file the NestJS gate admits can still hold a call that only shares a
+    // capitalised verb with a decorator: `[framework_methods]` maps `Get`, and
+    // the unscoped Express pattern must not promote `client.Get("/users", cb)`.
+    write(
+        tmp.path(),
+        "src/not-express.ts",
+        "\
+import { Injectable } from \"@nestjs/common\";
+
+export function fetchAll(client: any, cb: any) {
+  client.Get(\"/users\", cb);
+  client.Delete(\"/k\", cb);
+}
+",
+    );
+    // One segment from matching the detector, each: `@nestjs/config` is a
+    // sibling package and `@nestjs/commonish` shares only a spelled prefix.
+    write(
+        tmp.path(),
+        "src/near-miss.ts",
+        "\
+import { ConfigModule } from \"@nestjs/config\";
+import { Get } from \"@nestjs/commonish\";
+
+export class NearMiss {
+  @Get(\"/near-miss\")
+  run() {}
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        ["GET /", "GET /empty", "GET /health", "GET /versioned", "POST /"]
+    );
+    assert_eq!(result.framework.routes, 5);
+    let mut expected = vec![
+        (node_id(rt, "POST /", NodeKind::Route), node_id(rt, "create", NodeKind::Method)),
+        (node_id(rt, "GET /empty", NodeKind::Route), node_id(rt, "two", NodeKind::Method)),
+        (node_id(rt, "GET /versioned", NodeKind::Route), node_id(rt, "one", NodeKind::Method)),
+        (node_id(rt, "GET /health", NodeKind::Route), node_id(rt, "check", NodeKind::Method)),
+        (node_id(rt, "GET /", NodeKind::Route), node_id(rt, "root", NodeKind::Method)),
+    ];
+    let mut actual = edges_of(rt, EdgeKind::RoutesTo);
+    expected.sort();
+    actual.sort();
+    assert_eq!(actual, expected);
+}
+
+/// A prefix or path that is not a written literal is never promoted at a
+/// partial address: a constant prefix refuses every route under it, and a
+/// constant method path refuses that one route and is not read as a bare
+/// `@Get()` — both are counted, none is dropped silently (NFR-RA-05).
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_non_literal_prefix_or_path_promotes_nothing_and_is_counted() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/dynamic.controller.ts",
+        "\
+import { Controller, Get } from \"@nestjs/common\";
+
+@Controller(PREFIX)
+export class DynamicController {
+  @Get(\"x\")
+  x() {}
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/paths.controller.ts",
+        "\
+import { Controller, Get } from \"@nestjs/common\";
+
+@Controller(\"paths\")
+export class PathsController {
+  @Get(ROUTES.one)
+  one() {}
+
+  @Get(\"two\")
+  two() {}
+
+  // A mixed list is judged per element: the literal is promoted, the constant
+  // is refused and counted.
+  @Get([ROUTES.two, \"three\"])
+  mixed() {}
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/options.controller.ts",
+        "\
+import { Controller, Get } from \"@nestjs/common\";
+
+@Controller({ path: OPTIONS_PREFIX })
+export class OptionsController {
+  @Get(\"y\")
+  y() {}
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /paths/three", "GET /paths/two"]);
+    assert_eq!(result.framework.routes, 2);
+    // `PREFIX`, `ROUTES.one`, `ROUTES.two` and `{ path: OPTIONS_PREFIX }`.
+    assert_eq!(result.framework.routes_not_composed, 4);
+}
+
+/// The TSX grammar ships its own copy of the query: a controller in a `.tsx`
+/// file extracts the same way.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_routes_are_extracted_from_tsx() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/cats.controller.tsx",
+        "\
+import { All, Controller, Get, Head, Options, Patch, Put } from \"@nestjs/common\";
+
+@Controller(\"cats\")
+export class CatsController {
+  @Get()
+  findAll() {}
+
+  @Get(\":name\")
+  findOne() {}
+
+  @Put(\":id\")
+  put() {}
+
+  @Patch(\":id\")
+  patch() {}
+
+  @Head(\"h\")
+  head() {}
+
+  @Options(\"o\")
+  opts() {}
+
+  @All(\"any\")
+  all() {}
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    // The TSX descriptor's own `[framework_methods]` table: every verb.
+    assert_eq!(
+        route_names(rt),
+        [
+            "ANY /cats/any",
+            "GET /cats",
+            "GET /cats/:name",
+            "HEAD /cats/h",
+            "OPTIONS /cats/o",
+            "PATCH /cats/:id",
+            "PUT /cats/:id",
+        ]
+    );
+    assert_eq!(result.framework.routes, 7);
+}
+
+/// Every route decorator the descriptor maps, an array path, an array `path:`
+/// in the options object and an empty-string path — each read by the one pattern
+/// that owns it, so dropping a table key or an alternative of a pattern changes
+/// this exact set.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_every_verb_array_path_and_options_prefix_is_read() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/verbs.controller.ts",
+        "\
+import { All, Controller, Get, Head, Options, Patch, Put } from \"@nestjs/common\";
+
+@Controller(\"v\")
+export class VerbsController {
+  @Put(\":id\")
+  put() {}
+
+  @Patch(\":id\")
+  patch() {}
+
+  @Head(\"\")
+  head() {}
+
+  @Options(\"o\")
+  opts() {}
+
+  @All(\"any\")
+  all() {}
+
+  @Get([\"a\", \"b\"])
+  many() {}
+}
+
+@Controller({ path: [\"p\", \"q\"] })
+export class ArrayPrefixController {
+  @Get(\"z\")
+  z() {}
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "ANY /v/any",
+            "GET /p/z",
+            "GET /q/z",
+            "GET /v/a",
+            "GET /v/b",
+            "HEAD /v",
+            "OPTIONS /v/o",
+            "PATCH /v/:id",
+            "PUT /v/:id",
+        ]
+    );
+    assert_eq!(result.framework.routes, 9);
+    assert_eq!(result.framework.routes_not_composed, 0);
+    let pair = |route: &str, handler: &str| (route.to_string(), handler.to_string());
+    assert_eq!(
+        route_handler_pairs(rt),
+        [
+            pair("ANY /v/any", "all"),
+            pair("GET /p/z", "z"),
+            pair("GET /q/z", "z"),
+            pair("GET /v/a", "many"),
+            pair("GET /v/b", "many"),
+            pair("HEAD /v", "head"),
+            pair("OPTIONS /v/o", "opts"),
+            pair("PATCH /v/:id", "patch"),
+            pair("PUT /v/:id", "put"),
+        ]
+    );
+}
+
+/// The TSX plugin ships its own descriptor and its own copy of the query; the
+/// copy is meant to be identical to the TypeScript one but for two header lines,
+/// and nothing else pins that (the embedded-asset table pins each file's bytes,
+/// not their equality).
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn the_tsx_framework_query_matches_the_typescript_one_but_for_its_header() {
+    let body = |lang: &str| -> Vec<String> {
+        let path = format!(
+            "{}/plugins/{lang}/queries/frameworks.scm",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            // Line 1 names the grammar, line 6 the on-disk override path.
+            .enumerate()
+            .filter(|(i, _)| *i != 0 && *i != 5)
+            .map(|(_, line)| line.to_string())
+            .collect()
+    };
+    let (ts, tsx) = (body("typescript"), body("tsx"));
+    assert!(ts.len() > 100, "the query body was read: {} lines", ts.len());
+    assert_eq!(ts, tsx);
+}
+
+/// Sync ≡ reindex for a NestJS controller (S-533): after the prefix and a
+/// handler are edited and synced, the routes and their handler links are exactly
+/// what a cold index of the edited tree produces — the old prefix's routes are
+/// retired and nothing stale is kept.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn nestjs_sync_after_an_edit_equals_a_fresh_index() {
+    fn controller(prefix: &str, handler: &str) -> String {
+        format!(
+            "\
+import {{ Controller, Get, Post }} from \"@nestjs/common\";
+
+@Controller(\"{prefix}\")
+export class ItemsController {{
+  @Get()
+  {handler}() {{}}
+
+  @Post(\"bulk\")
+  bulk() {{}}
+}}
+"
+        )
+    }
+    let live = TempDir::new().unwrap();
+    write(live.path(), "src/items.controller.ts", &controller("items", "list"));
+    let engine = Engine::start(live.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.index();
+    assert_eq!(route_names(rt), ["GET /items", "POST /items/bulk"]);
+
+    write(live.path(), "src/items.controller.ts", &controller("things", "all"));
+    let synced = engine.sync(&[std::path::PathBuf::from("src/items.controller.ts")]);
+    assert_eq!(synced.framework.routes, 2);
+
+    let fresh = TempDir::new().unwrap();
+    write(fresh.path(), "src/items.controller.ts", &controller("things", "all"));
+    let cold = Engine::start(fresh.path()).expect("engine starts");
+    cold.index();
+    let cold_rt = cold.runtime().unwrap();
+
+    assert_eq!(route_names(rt), ["GET /things", "POST /things/bulk"]);
+    assert_eq!(route_names(rt), route_names(cold_rt));
+    assert_eq!(route_handler_pairs(rt), route_handler_pairs(cold_rt));
+    assert_eq!(
+        route_handler_pairs(rt),
+        [
+            ("GET /things".to_string(), "all".to_string()),
+            ("POST /things/bulk".to_string(), "bulk".to_string()),
+        ]
+    );
+}
+
 // ── Go: extraction parity + net/http and Gin promotion (FR-FW-03) ────────────
 
 #[cfg(feature = "lang-go")]
@@ -675,12 +1406,13 @@ end
     let rt = engine.runtime().unwrap();
     let result = engine.index();
 
-    // The Rails routing DSL verbs promote with their path; the controller#action
-    // handler string is not a resolvable symbol, so no RoutesTo edge is
-    // fabricated (NFR-RA-05) — the route nodes still exist. The `resources`-style
-    // macros are deliberately not expanded.
+    // The Rails routing DSL verbs inside `draw` promote with their path, and a
+    // `controller#action` handler links to that controller's action (S-567);
+    // `create` is declared nowhere, so its route keeps its node with no edge
+    // (NFR-RA-05). The `resources`-style macros are deliberately not expanded.
     assert_eq!(route_names(rt), ["GET /users", "POST /users"]);
     assert_eq!(result.framework.routes, 2);
+    assert_eq!(route_handler_pairs(rt), [("GET /users".to_string(), "index".to_string())]);
 
     // The controller class is the wired building block (FR-FW-02).
     let component = node_id(rt, "UsersController", NodeKind::Component);
@@ -1538,14 +2270,15 @@ static int hidden(void) {
         "the intra-file call must bind: caller --Calls--> callee"
     );
 
-    // C extracts no class-like containers — the honesty posture (NFR-CC-04).
+    // C extracts no Class — the honesty posture (NFR-CC-04) — and, with no
+    // `struct` in the fixture, no Struct either (a bodied one is, S-582).
     assert!(
         nodes_of(rt, NodeKind::Class).is_empty(),
         "C emits no Class nodes"
     );
     assert!(
         nodes_of(rt, NodeKind::Struct).is_empty(),
-        "C emits no Struct nodes — Cohesion/Focus stay n/a, never a fabricated score"
+        "a C file with no `struct` body emits no Struct node"
     );
 }
 
@@ -1579,8 +2312,7 @@ fun callee(): List<String> {
     let rt = engine.runtime().unwrap();
     engine.index();
 
-    // Kotlin models member and free functions with one node, so v1 policy maps
-    // every `fun` to Function (as Rust collapses its impl methods): the member
+    // A member `fun` is a Method and a free one a Function (S-559): the member
     // half nests one level deeper — module ∋ class ∋ member fn — with the free
     // intra-file call bound.
     assert_parity_shape(
@@ -1589,7 +2321,7 @@ fun callee(): List<String> {
         "Store",
         NodeKind::Class,
         "add",
-        NodeKind::Function,
+        NodeKind::Method,
         "caller",
         "callee",
         NodeKind::Function,
@@ -1624,10 +2356,10 @@ class UserController {
     assert_eq!(route_names(rt), ["GET /users"]);
     assert_eq!(result.framework.routes, 1);
 
-    // The handler is the controller function (Kotlin's uniform fun→Function).
+    // The handler is the controller's member `fun`, a Method (S-559).
     let routes_to = edges_of(rt, EdgeKind::RoutesTo);
     let get_users = node_id(rt, "GET /users", NodeKind::Route);
-    let list_users = node_id(rt, "listUsers", NodeKind::Function);
+    let list_users = node_id(rt, "listUsers", NodeKind::Method);
     assert!(routes_to.contains(&(get_users, list_users)));
 
     // The stereotype-annotated class is the wired building block (FR-FW-02),
@@ -1681,7 +2413,7 @@ class UserController {
 
     // Exact edge set, not containment: a spurious extra link would fail here.
     let route = node_id(rt, "ANY /v1/users", NodeKind::Route);
-    let handler = node_id(rt, "listUsers", NodeKind::Function);
+    let handler = node_id(rt, "listUsers", NodeKind::Method);
     assert_eq!(edges_of(rt, EdgeKind::RoutesTo), [(route, handler)]);
     assert_eq!(result.framework.components, 1);
 }
@@ -1775,12 +2507,12 @@ class UserApiController : UserApi {
     );
     // The overrides exist and carry the same names as the declarations, so the
     // binding below has something it could have been ambiguous against.
-    let functions = nodes_with_files(rt, NodeKind::Function);
-    let overrides = functions
+    let methods = nodes_with_files(rt, NodeKind::Method);
+    let overrides = methods
         .iter()
         .filter(|(_, _, file)| file.as_deref() == Some("src/UserApiController.kt"))
         .count();
-    assert_eq!(overrides, 3, "{functions:?}");
+    assert_eq!(overrides, 3, "{methods:?}");
 
     // Every route links to exactly one handler, and it is the *annotated*
     // declaration in the interface file — not the same-named override, and not
@@ -1797,7 +2529,7 @@ class UserApiController : UserApi {
         let bound: Vec<&(NodeId, String, Option<String>)> = routes_to
             .iter()
             .filter(|(from, _)| *from == route_id)
-            .filter_map(|(_, to)| functions.iter().find(|(id, _, _)| id == to))
+            .filter_map(|(_, to)| methods.iter().find(|(id, _, _)| id == to))
             .collect();
         assert_eq!(bound.len(), 1, "{route}: {bound:?}");
         assert_eq!(bound[0].1, handler, "{route}");
@@ -2249,6 +2981,90 @@ class User extends Model {}
     assert_eq!(result.framework.components, 1);
 }
 
+/// Laravel route groups and Symfony `#[Route]` attributes end to end (S-549,
+/// [FR-FW-03], [FR-FW-05]): a Laravel route inside nested `prefix()` groups is
+/// promoted at its rooted, accumulated path with a single-segment path kept and
+/// `apiResource` left out, and a Symfony controller's attribute routes compose
+/// the class prefix and link `RoutesTo` the methods they decorate.
+///
+/// [FR-FW-03]: ../../docs/specs/requirements/FR-FW-03.md
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+#[cfg(feature = "lang-php")]
+#[test]
+fn laravel_groups_and_symfony_attribute_routes_are_promoted() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "routes/api.php",
+        "<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::prefix('api')->middleware('api')->group(static function (): void {
+    Route::get('ping', static fn () => null);
+    Route::middleware('auth')->group(static function (): void {
+        Route::get('me', [ProfileController::class, 'show']);
+        Route::apiResource('albums', AlbumController::class);
+    });
+    Route::middleware('os.auth')->prefix('os/s3')->group(static function (): void {
+        Route::post('song', [S3SongController::class, 'put']);
+    });
+});
+",
+    );
+    write(
+        tmp.path(),
+        "src/Controller/BlogController.php",
+        "<?php
+namespace App\\Controller;
+
+use Symfony\\Bundle\\FrameworkBundle\\Controller\\AbstractController;
+use Symfony\\Component\\Routing\\Attribute\\Route;
+
+#[Route('/blog', name: 'blog_')]
+class BlogController extends AbstractController
+{
+    #[Route('/{slug}', name: 'show', methods: ['GET'])]
+    public function show(string $slug) {}
+
+    #[Route(path: '/{slug}/edit', methods: ['POST'])]
+    public function edit(string $slug) {}
+}
+",
+    );
+    // The same attribute in a file that imports neither framework is no route
+    // (the FR-FW-04 candidacy gate). The file imports *a* `Route`, so it has a
+    // ledger row and reaches the gate; only the detector keeps it out.
+    write(
+        tmp.path(),
+        "src/Plain.php",
+        "<?php\nuse App\\Routing\\Route;\n\nclass Plain { #[Route('/nope')] public function nope() {} }\n",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "GET /api/me",
+            "GET /api/ping",
+            "GET /blog/{slug}",
+            "POST /api/os/s3/song",
+            "POST /blog/{slug}/edit",
+        ]
+    );
+    assert_eq!(result.framework.routes, 5);
+
+    let routes_to = edges_of(rt, EdgeKind::RoutesTo);
+    for (route, method) in [("GET /blog/{slug}", "show"), ("POST /blog/{slug}/edit", "edit")] {
+        let edge = (node_id(rt, route, NodeKind::Route), node_id(rt, method, NodeKind::Method));
+        assert!(routes_to.contains(&edge), "{route} routes to {method}: {routes_to:?}");
+    }
+    // A Laravel handler is an array, not a provable name: no edge is guessed.
+    assert_eq!(routes_to.len(), 2, "{routes_to:?}");
+}
+
 #[cfg(feature = "lang-php")]
 #[test]
 fn html_interleaved_php_still_extracts_its_symbols() {
@@ -2350,4 +3166,286 @@ fn plain_libraries_in_every_language_promote_nothing() {
     assert!(nodes_of(rt, NodeKind::Route).is_empty());
     assert!(nodes_of(rt, NodeKind::Component).is_empty());
     assert_eq!(result.framework.files_scanned, 0);
+}
+
+/// Spring's functional `coRouter` DSL end to end on Kotlin (S-561, [CR-178],
+/// [FR-FW-03]): the router class takes its handlers as constructor properties
+/// from another package, so `talkHandler::find` links only through the type the
+/// class declares for the property, and each `nest` prefix is joined onto the
+/// registrations under it.
+///
+/// [CR-178]: ../../docs/requests/CR-178-kotlin-calls-declarations-accesses-routes-and-typed-receivers-resolve.md
+/// [FR-FW-03]: ../../docs/specs/requirements/FR-FW-03.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn spring_functional_routes_link_to_handlers_through_their_declared_types_from_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/app/handlers/TalkHandler.kt",
+        "\
+package app.handlers
+
+import org.springframework.stereotype.Component
+
+@Component
+class TalkHandler {
+    suspend fun find(req: ServerRequest): ServerResponse = ok()
+    suspend fun findAll(req: ServerRequest): ServerResponse = ok()
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/app/handlers/AdminTalkHandler.kt",
+        "\
+package app.handlers
+
+import org.springframework.stereotype.Component
+
+@Component
+class AdminTalkHandler(private val service: Service) {
+    companion object {
+        const val LIST_URI = \"/admin/talks\"
+    }
+
+    suspend fun adminTalks(req: ServerRequest): ServerResponse = ok()
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/app/web/Routes.kt",
+        "\
+package app.web
+
+import app.handlers.AdminTalkHandler
+import app.handlers.TalkHandler
+import org.springframework.web.reactive.function.server.coRouter
+
+class Routes(
+    private val talkHandler: TalkHandler,
+    private val adminTalkHandler: AdminTalkHandler,
+) {
+    fun router() = coRouter {
+        (accept(APPLICATION_JSON) and \"/api\").nest {
+            \"/talk\".nest {
+                GET(\"/{id}\", talkHandler::find)
+            }
+            GET(\"/talks\", talkHandler::findAll)
+        }
+        accept(TEXT_HTML).nest {
+            GET(\"/admin/talks\", adminTalkHandler::adminTalks)
+            GET(\"/inline\") { ok().build() }
+        }
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "GET /admin/talks",
+            "GET /api/talk/{id}",
+            "GET /api/talks",
+            "GET /inline",
+        ]
+    );
+    assert_eq!(result.framework.routes, 4);
+    assert_eq!(result.framework.routes_not_composed, 0);
+    // The lambda registration names no handler; the other three bind exactly.
+    assert_eq!(
+        route_handler_pairs(rt),
+        [
+            ("GET /admin/talks".to_string(), "adminTalks".to_string()),
+            ("GET /api/talk/{id}".to_string(), "find".to_string()),
+            ("GET /api/talks".to_string(), "findAll".to_string()),
+        ]
+    );
+}
+
+/// Ktor's `routing { route("/p") { get("/x") { } } }` end to end (S-561,
+/// [CR-178], [FR-FW-03]): `io::ktor` is a Kotlin framework detector, so a file
+/// importing only Ktor is a candidate, and a `route` prefix is joined onto what
+/// is registered under it.
+///
+/// [CR-178]: ../../docs/requests/CR-178-kotlin-calls-declarations-accesses-routes-and-typed-receivers-resolve.md
+/// [FR-FW-03]: ../../docs/specs/requirements/FR-FW-03.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn ktor_routes_carry_their_prefixes_from_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/Server.kt",
+        "\
+import io.ktor.server.application.Application
+import io.ktor.server.response.respondText
+import io.ktor.server.routing.get
+import io.ktor.server.routing.route
+import io.ktor.server.routing.routing
+
+fun Application.module() {
+    routing {
+        get(\"/health\") { call.respondText(\"ok\") }
+        route(\"/api\") {
+            route(\"/v1\") {
+                get(\"/users\") { call.respondText(\"[]\") }
+            }
+            get { call.respondText(\"api\") }
+        }
+    }
+}
+",
+    );
+    // A Kotlin file that names no framework contributes nothing, whatever it
+    // calls `get` (FR-FW-04).
+    write(
+        tmp.path(),
+        "src/Plain.kt",
+        "\
+fun lookup(cache: Cache) { cache.get(\"/a/b\") { 1 } ; get(\"/loose\") { 2 } }
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /api", "GET /api/v1/users", "GET /health"]);
+    assert_eq!(result.framework.routes, 3);
+    assert_eq!(result.framework.files_scanned, 1);
+    // A Ktor handler is a lambda: the routes link to nothing.
+    assert!(edges_of(rt, EdgeKind::RoutesTo).is_empty());
+}
+
+/// A mapping written without a leading slash is a route at the rooted path, in
+/// Java and Kotlin alike (S-561, [CR-178], [FR-FW-05]) — and with a prefix that
+/// was written without one too.
+///
+/// [CR-178]: ../../docs/requests/CR-178-kotlin-calls-declarations-accesses-routes-and-typed-receivers-resolve.md
+/// [FR-FW-05]: ../../docs/specs/requirements/FR-FW-05.md
+#[cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
+#[test]
+fn spring_mappings_written_without_a_leading_slash_are_rooted_in_java_and_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/VetController.kt",
+        "\
+import org.springframework.web.bind.annotation.GetMapping
+import org.springframework.web.bind.annotation.RestController
+
+@RestController
+class VetController {
+    @GetMapping(\"vets.xml\")
+    fun showResourcesVetList(): String {
+        return \"\"
+    }
+
+    @GetMapping(\"/vets.html\")
+    fun showVetList(): String {
+        return \"\"
+    }
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/OwnerController.java",
+        "\
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping(\"owners\")
+class OwnerController {
+    @GetMapping(\"find\")
+    String find() { return \"\"; }
+
+    @GetMapping(\"/new\")
+    String create() { return \"\"; }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.index();
+
+    assert_eq!(
+        route_names(rt),
+        [
+            "GET /owners/find",
+            "GET /owners/new",
+            "GET /vets.html",
+            "GET /vets.xml",
+        ]
+    );
+    assert_eq!(result.framework.routes, 4);
+    assert_eq!(
+        route_handler_pairs(rt),
+        [
+            ("GET /owners/find".to_string(), "find".to_string()),
+            ("GET /owners/new".to_string(), "create".to_string()),
+            ("GET /vets.html".to_string(), "showVetList".to_string()),
+            ("GET /vets.xml".to_string(), "showResourcesVetList".to_string()),
+        ]
+    );
+}
+
+/// A handler reference on a typed property binds to a function or method of
+/// that type and to nothing else (S-561): a property of the same name is not a
+/// handler, so the route keeps its node and gets no edge ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../docs/specs/requirements/NFR-RA-05.md
+#[cfg(feature = "lang-kotlin")]
+#[test]
+fn a_typed_handler_reference_never_binds_a_property_from_kotlin() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/app/Handlers.kt",
+        "\
+package app
+
+class TalkHandler {
+    val find: Int = 1
+    fun findAll(req: ServerRequest): ServerResponse = ok()
+}
+",
+    );
+    write(
+        tmp.path(),
+        "src/app/Routes.kt",
+        "\
+package app
+
+import org.springframework.web.reactive.function.server.coRouter
+
+class Routes(private val talkHandler: TalkHandler) {
+    fun router() = coRouter {
+        GET(\"/prop\", talkHandler::find)
+        GET(\"/fn\", talkHandler::findAll)
+    }
+}
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let _ = engine.index();
+
+    assert_eq!(route_names(rt), ["GET /fn", "GET /prop"]);
+    assert_eq!(
+        route_handler_pairs(rt),
+        [("GET /fn".to_string(), "findAll".to_string())],
+        "the property `find` is no handler"
+    );
 }

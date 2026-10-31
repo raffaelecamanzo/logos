@@ -85,6 +85,13 @@
 //! - **Checkov 3.2** takes `--file` for a file and `--directory` for a
 //!   directory; given both, it runs the directories and passes the files into
 //!   each, so a scoped run is one run per path with the flag for its kind.
+//!   `--skip-framework` is an appended `nargs="+"` list of runner names;
+//!   `secrets` is one of them (`CheckType.SECRETS`; both read from the 3.2.0,
+//!   3.2.255 and 3.2.533 wheels: the minimum, the fixture version and the
+//!   managed pin), and a flag follows it in the template, so it takes no path.
+//!   With Gitleaks enabled and installed Checkov is given
+//!   `--skip-framework secrets` ([`Arg::SkipSecrets`], S-813), in a scoped run
+//!   as in a full one; otherwise it keeps its `secrets` framework.
 //! - **Trivy, OSV-Scanner and Dependency-Check** resolve a whole manifest or
 //!   lockfile tree; **CodeQL** analyses a database of every file. None has a
 //!   path position: a scoped scan reports the three *whole-manifest only* and
@@ -225,9 +232,14 @@ pub(crate) enum Arg {
     ///
     /// [FR-SC-27]: ../../../docs/specs/requirements/FR-SC-27.md
     NvdKeyFile,
+    /// `--skip-framework secrets` when Gitleaks runs in this project
+    /// ([`Fill::gitleaks_runs`]); nothing otherwise. Checkov's only: its
+    /// `secrets` framework reports the same hardcoded secrets as Gitleaks and
+    /// would list each twice, so Gitleaks owns them while it is there.
+    SkipSecrets,
 }
 
-use Arg::{Database, Extra, Ignored, Language, Lit, NvdKeyFile, Out, Paths, PinnedConfig, Unignored};
+use Arg::{Database, Extra, Ignored, Language, Lit, NvdKeyFile, Out, Paths, PinnedConfig, SkipSecrets, Unignored};
 
 /// How [`Arg::Ignored`] passes the ignored directories — the shapes the
 /// [module docs](self) record per scanner and tested version.
@@ -703,6 +715,7 @@ pub static REGISTRY: [Scanner; 9] = [
             Out,
             Lit("--soft-fail"),
             Lit("--quiet"),
+            SkipSecrets,
             Lit("--skip-path"),
             Lit(".logos"),
             Ignored(Exclusion::Repeat { flag: "--skip-path", spell: Spelling::RootRegex }),
@@ -837,6 +850,9 @@ pub(crate) struct Fill<'a> {
     /// The private file holding the NVD API key, when Logos hands one over
     /// (only read by [`Arg::NvdKeyFile`]).
     pub nvd_key_file: Option<&'a Path>,
+    /// Whether Gitleaks is enabled and has a copy to run, so owns the secrets
+    /// (only read by [`Arg::SkipSecrets`]).
+    pub gitleaks_runs: bool,
 }
 
 impl Scanner {
@@ -864,6 +880,11 @@ impl Scanner {
                     if let Some(file) = fill.nvd_key_file {
                         argv.push(OsString::from("--propertyfile"));
                         argv.push(file.as_os_str().to_owned());
+                    }
+                }
+                SkipSecrets => {
+                    if fill.gitleaks_runs {
+                        argv.extend(["--skip-framework", "secrets"].map(OsString::from));
                     }
                 }
                 Ignored(_) if fill.scope.is_some() => {}

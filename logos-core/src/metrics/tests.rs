@@ -11,7 +11,7 @@ use crate::graph_store::{EdgeRow, FunctionMetricRow, NodeRow};
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 
-use super::compute;
+use super::{compute, ContainerLinks};
 
 // ── snapshot builders (the hydrate test conventions) ─────────────────────────
 
@@ -33,6 +33,18 @@ fn edge(source: i64, target: i64, kind: EdgeKind) -> EdgeRow {
         source: NodeId(source),
         target: NodeId(target),
         kind,
+        dispatch: false,
+    }
+}
+
+/// A `calls` edge the store reads as dispatch: a trait call's fan-out to one
+/// of the trait method's implementations ([FR-QM-20]).
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+fn dispatch_edge(source: i64, target: i64) -> EdgeRow {
+    EdgeRow {
+        dispatch: true,
+        ..edge(source, target, EdgeKind::Calls)
     }
 }
 
@@ -49,6 +61,7 @@ fn func(id: i64, cc: Option<i64>, dead: Option<bool>, dup: Option<bool>) -> Func
         max_nesting_depth: None,
         clone_group: None,
         has_body: None,
+        unbound_accesses: Vec::new(),
     }
 }
 
@@ -71,6 +84,7 @@ fn func_struct(
         max_nesting_depth,
         clone_group: clone_group.map(NodeId),
         has_body: None,
+        unbound_accesses: Vec::new(),
     }
 }
 
@@ -87,8 +101,23 @@ fn member_access() -> HashSet<String> {
     ["java", "ts", "tsx", "php", "rs"].map(String::from).into()
 }
 
+/// The default thresholds with `cohesion_min_classes = 1`: Cohesion scores any
+/// number of classes, as it did before metric semantics v9 ([CR-252]). The
+/// fixtures that pin LCOM4 itself score one or two classes, so [`run`] and its
+/// siblings compute under this; the minimum is pinned at its default by its
+/// own tests.
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+fn lcom4_thresholds() -> super::Thresholds {
+    super::Thresholds {
+        cohesion_min_classes: 1,
+        ..super::Thresholds::default()
+    }
+}
+
 /// Compute over a node/edge snapshot through the real `ExcludeContains` view,
-/// with no test scope (the production-scope path is exercised by [`run_scoped`]).
+/// with no test scope (the production-scope path is exercised by [`run_scoped`]),
+/// under [`lcom4_thresholds`].
 fn run(
     nodes: &[NodeRow],
     edges: &[EdgeRow],
@@ -108,7 +137,7 @@ fn offenders_of(
     cap: usize,
 ) -> crate::models::quality::WorstOffenders {
     let view = build_view(Granularity::ExcludeContains, nodes, edges);
-    super::all_offenders(&view, nodes, edges, functions, test_ids, thresholds, &member_access()).capped(cap)
+    super::all_offenders(&view, nodes, edges, &ContainerLinks::default(), functions, test_ids, thresholds, &member_access()).capped(cap)
 }
 
 /// Compute with an explicit `is_test` node set excluded from the production
@@ -129,9 +158,10 @@ fn run_scoped(
         &view,
         nodes,
         edges,
+        &ContainerLinks::default(),
         functions,
         &test_ids,
-        super::Thresholds::default(),
+        lcom4_thresholds(),
         &member_access(),
     )
 }
@@ -355,19 +385,21 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 8 ([CR-171]): graph dimensions that
-/// need cross-module edges and Cohesion that needs `member_access` change what
-/// the signal measures, so the constant advanced 7 → 8 **once** for the whole
-/// CR and the first post-upgrade gate auto-re-baselines ([FR-GV-10]) exactly
-/// as the v2..v7 bumps did (v7 was [CR-163]'s declarative-code fixes, v6
+/// The metric-semantics version pins at 9 ([CR-252]): Cohesion linking
+/// inherited members and needing `cohesion_min_classes` classes changes what
+/// the signal measures, so the constant advanced 8 → 9 **once** for the
+/// sprint and the first post-upgrade gate auto-re-baselines ([FR-GV-10])
+/// exactly as the v2..v8 bumps did (v8 was [CR-171]'s graph-dimension and
+/// `member_access` gates, v7 [CR-163]'s declarative-code fixes, v6
 /// [CR-156]'s small-graph Modularity drop-out).
 ///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
-fn metric_semantics_version_is_v8() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 8);
+fn metric_semantics_version_is_v9() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 9);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
@@ -1215,6 +1247,164 @@ fn cohesion_drops_out_when_no_class_exists() {
     );
 }
 
+// ── CR-252 / S-816: inherited-member links and the class minimum (v9) ─────────
+
+/// A method row whose own-receiver accesses `names` bound to no field — what
+/// the store reads from its unresolved `Accesses` rows.
+fn method_unbound(id: i64, names: &[&str]) -> FunctionMetricRow {
+    FunctionMetricRow {
+        unbound_accesses: names.iter().map(|n| n.to_string()).collect(),
+        ..func(id, Some(1), Some(false), Some(false))
+    }
+}
+
+/// A `.tsx` component class (id 1) whose `render` (2) and `componentDidUpdate`
+/// (3) both read `this.state` and whose `label` (4) reads `this.title`; the
+/// class declares neither name. `declared` adds a member node of that name
+/// (id 5) to the class.
+fn inherited_state_class(declared: Option<(&str, NodeKind)>) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let mut nodes = vec![
+        node(1, "Panel", NodeKind::Class, Some("ui/Panel.tsx")),
+        node(2, "render", NodeKind::Method, Some("ui/Panel.tsx")),
+        node(3, "componentDidUpdate", NodeKind::Method, Some("ui/Panel.tsx")),
+        node(4, "label", NodeKind::Method, Some("ui/Panel.tsx")),
+    ];
+    let mut edges = vec![
+        edge(1, 2, EdgeKind::Contains),
+        edge(1, 3, EdgeKind::Contains),
+        edge(1, 4, EdgeKind::Contains),
+    ];
+    if let Some((name, kind)) = declared {
+        nodes.push(node(5, name, kind, Some("ui/Panel.tsx")));
+        edges.push(edge(1, 5, EdgeKind::Contains));
+    }
+    let functions = vec![
+        method_unbound(2, &["props", "state"]),
+        method_unbound(3, &["state"]),
+        method_unbound(4, &["title"]),
+    ];
+    (nodes, edges, functions)
+}
+
+/// Two methods accessing `this.state` in a class that declares no `state`
+/// share one LCOM4 component ([CR-252], [FR-QM-11]): `render` and
+/// `componentDidUpdate` are one component, `label` another — LCOM4 2, where
+/// v8 read 3. A name read by one method alone (`props`, `title`) links nothing.
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+#[test]
+fn methods_sharing_an_inherited_member_are_one_lcom4_component() {
+    let (nodes, edges, functions) = inherited_state_class(None);
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(r.cohesion.expect("one scoreable class under a minimum of 1").raw, 0.5, "LCOM4 2");
+    let w = offenders_of(&nodes, &edges, &functions, &HashSet::new(), lcom4_thresholds(), 10);
+    assert_eq!(w.cohesion.iter().map(|o| o.detail.as_str()).collect::<Vec<_>>(), ["LCOM4 2"]);
+}
+
+/// A name the class declares never links as an inherited member, so
+/// declared-field links stay exactly the `Accesses` edges ([CR-252]): with a
+/// `state` field declared but no `Accesses` edge to it, `render` and
+/// `componentDidUpdate` stay apart (LCOM4 3), and a declared method named
+/// `state` does not link them either.
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+#[test]
+fn a_declared_member_name_never_links_as_an_inherited_one() {
+    let (nodes, edges, functions) = inherited_state_class(Some(("state", NodeKind::Field)));
+    let r = run(&nodes, &edges, &functions);
+    assert_eq!(r.cohesion.expect("scored").raw, 1.0 / 3.0, "a declared field links only through Accesses");
+
+    // The same field, with the bound accesses the binder records: one component
+    // for the two readers, exactly as before v9.
+    let mut bound = edges.clone();
+    bound.extend([edge(2, 5, EdgeKind::Accesses), edge(3, 5, EdgeKind::Accesses)]);
+    assert_eq!(run(&nodes, &bound, &functions).cohesion.expect("scored").raw, 0.5);
+
+    // A declared member of another kind (`state()` as a method — bodied, so a
+    // fourth component of its own) does not make the readers one either.
+    let (nodes, edges, mut functions) = inherited_state_class(Some(("state", NodeKind::Method)));
+    functions.push(method_unbound(5, &[]));
+    assert_eq!(run(&nodes, &edges, &functions).cohesion.expect("scored").raw, 0.25, "LCOM4 4");
+}
+
+/// `n` `.tsx` classes, each with two methods that share no member (LCOM4 2).
+fn split_tsx_classes(n: i64) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let (mut nodes, mut edges, mut functions) = (Vec::new(), Vec::new(), Vec::new());
+    for i in 0..n {
+        let (class, a, b) = (100 * (i + 1), 100 * (i + 1) + 1, 100 * (i + 1) + 2);
+        let file = format!("ui/C{i}.tsx");
+        nodes.extend([
+            node(class, &format!("C{i}"), NodeKind::Class, Some(&file)),
+            node(a, "a", NodeKind::Method, Some(&file)),
+            node(b, "b", NodeKind::Method, Some(&file)),
+        ]);
+        edges.extend([edge(class, a, EdgeKind::Contains), edge(class, b, EdgeKind::Contains)]);
+        functions.extend([func(a, Some(1), Some(false), Some(false)), func(b, Some(1), Some(false), Some(false))]);
+    }
+    (nodes, edges, functions)
+}
+
+/// Compute under the documented default thresholds (`cohesion_min_classes`
+/// 5), not [`lcom4_thresholds`].
+fn run_default(nodes: &[NodeRow], edges: &[EdgeRow], functions: &[FunctionMetricRow]) -> crate::models::quality::MetricSnapshot {
+    let view = build_view(Granularity::ExcludeContains, nodes, edges);
+    compute(&view, nodes, edges, &ContainerLinks::default(), functions, &HashSet::new(), super::Thresholds::default(), &member_access())
+}
+
+/// Below `cohesion_min_classes` (default 5) Cohesion is n/a with the reason
+/// "too few classes" and leaves the aggregate, while the LCOM4 offender list
+/// still lists every class at LCOM4 ≥ 2; at the minimum it is scored
+/// ([CR-252], [FR-QM-11]).
+///
+/// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+#[test]
+fn cohesion_needs_cohesion_min_classes_classes_to_score() {
+    let (nodes, edges, functions) = split_tsx_classes(2);
+    let r = run_default(&nodes, &edges, &functions);
+    assert!(r.cohesion.is_none(), "2 of 5 classes: Cohesion is not applicable");
+    let na = r.cohesion_not_applicable.as_ref().expect("the drop-out names its cause");
+    assert_eq!((na.classes, na.min_classes), (2, 5));
+    assert!(na.reason.contains("too few classes"), "{}", na.reason);
+    let terms = super::signal_terms(&r).expect("the graph has nodes");
+    assert!(terms.all().all(|(name, _)| name != "cohesion"), "Cohesion left the aggregate");
+    // The aggregate is what the same graph scores with no class to score, and
+    // not what it scores with the two classes' 0.5 in the mean.
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let none_scoreable = HashSet::new();
+    let classless = compute(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), super::Thresholds::default(), &none_scoreable);
+    assert_eq!(r.aggregate_signal, classless.aggregate_signal);
+    assert_ne!(r.aggregate_signal, run(&nodes, &edges, &functions).aggregate_signal, "Cohesion 0.5 would move it");
+    let w = offenders_of(&nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), 10);
+    assert_eq!(w.cohesion.len(), 2, "both LCOM4 2 classes are still offenders");
+
+    let (nodes, edges, functions) = split_tsx_classes(5);
+    let r = run_default(&nodes, &edges, &functions);
+    assert_eq!(r.cohesion.expect("5 of 5 classes: scored").raw, 0.5);
+    assert!(r.cohesion_not_applicable.is_none());
+
+    // A lower minimum is honoured: 2 classes score under `cohesion_min_classes = 2`.
+    let (nodes, edges, functions) = split_tsx_classes(2);
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let t = super::Thresholds { cohesion_min_classes: 2, ..super::Thresholds::default() };
+    let r = compute(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), t, &member_access());
+    assert_eq!(r.cohesion.expect("2 of 2").raw, 0.5);
+}
+
+/// With no scoreable class at all Cohesion is the plain n/a it always was: no
+/// "too few classes" reason, whatever the minimum ([FR-QM-11]).
+///
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+#[test]
+fn a_classless_cohesion_drop_out_names_no_class_count() {
+    let nodes = [node(1, "S", NodeKind::Struct, Some("a.rs")), node(2, "m", NodeKind::Method, Some("a.rs"))];
+    let edges = [edge(1, 2, EdgeKind::Contains)];
+    let r = run_default(&nodes, &edges, &[func(2, Some(2), Some(false), Some(false))]);
+    assert!(r.cohesion.is_none());
+    assert!(r.cohesion_not_applicable.is_none());
+}
+
 /// Two classes with two methods each and no shared field (LCOM4 2 each): one
 /// in `split_file`, one in `whole_file`, whose methods share a field (LCOM4 1).
 fn two_language_classes(split_file: &str, whole_file: &str) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
@@ -1249,12 +1439,12 @@ fn run_with_member_access(
 ) -> crate::models::quality::MetricSnapshot {
     let view = build_view(Granularity::ExcludeContains, nodes, edges);
     let declared: HashSet<String> = member_access.iter().map(|e| e.to_string()).collect();
-    compute(&view, nodes, edges, functions, &HashSet::new(), super::Thresholds::default(), &declared)
+    compute(&view, nodes, edges, &ContainerLinks::default(), functions, &HashSet::new(), lcom4_thresholds(), &declared)
 }
 
 /// Cohesion counts a class only when its language declares `member_access`
-/// ([CR-171], [FR-QM-11]): beside a Java class, a Ruby class is not scored —
-/// the mean is the Java class's alone — and the low-cohesion list names only
+/// ([CR-171], [FR-QM-11]): beside a Java class, a class whose extension is outside
+/// the declared set (`.rb` here) is not scored — the mean is the Java class's alone — and the low-cohesion list names only
 /// the Java class. Focus, which needs no field access, still counts both.
 ///
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
@@ -1274,29 +1464,29 @@ fn cohesion_scores_only_classes_of_member_access_languages() {
 
     let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
     let java: HashSet<String> = HashSet::from(["java".to_string()]);
-    let offenders = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), &java);
+    let offenders = super::all_offenders(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), super::Thresholds::default(), &java);
     assert_eq!(offenders.cohesion.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(), ["Split"]);
     let swapped = two_language_classes("app/split.rb", "app/Whole.java");
     let (n, e, f) = (&swapped.0, &swapped.1, &swapped.2);
     let view = build_view(Granularity::ExcludeContains, n, e);
     assert!(
-        super::all_offenders(&view, n, e, f, &HashSet::new(), super::Thresholds::default(), &java)
+        super::all_offenders(&view, n, e, &ContainerLinks::default(), f, &HashSet::new(), super::Thresholds::default(), &java)
             .cohesion
             .is_empty(),
         "a low-cohesion class of an undeclared language is no Cohesion offender"
     );
 }
 
-/// The real registry's `member_access` set: JavaScript, which the TypeScript
-/// grammars parse but carve out (`member_access_excluded_extensions`), never
-/// makes Cohesion applicable — a repository whose only classes are `.js` or
-/// `.jsx` reports it not applicable, as lobsters' one JS class did not before
-/// the carve-out — while a `.ts` or `.tsx` class is scored ([CR-171] AC 3).
+/// The real registry's `member_access` set: JavaScript declares `member_access`
+/// (S-542; S-538 had it declare none, as the TypeScript grammars carving it out
+/// before it did, because a JS class's `this.x` fields went undeclared), so a
+/// `.js`, `.mjs`, `.cjs` or `.jsx` class is scored like a `.ts` or `.tsx` one
+/// ([CR-171] AC 3: only a language that declares it is scored).
 ///
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[cfg(all(feature = "lang-typescript", feature = "lang-java", feature = "lang-php"))]
 #[test]
-fn a_javascript_class_never_makes_cohesion_applicable_while_a_typescript_class_does() {
+fn a_javascript_class_makes_cohesion_applicable_as_a_typescript_class_does() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let declared = crate::plugin::LanguageRegistry::load(tmp.path())
         .expect("embedded grammars load")
@@ -1304,23 +1494,24 @@ fn a_javascript_class_never_makes_cohesion_applicable_while_a_typescript_class_d
     let cohesion = |split: &str, whole: &str| {
         let (nodes, edges, functions) = two_language_classes(split, whole);
         let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
-        compute(&view, &nodes, &edges, &functions, &HashSet::new(), super::Thresholds::default(), &declared)
+        compute(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), lcom4_thresholds(), &declared)
             .cohesion
             .map(|c| c.raw)
     };
-    // JavaScript only — every carved-out extension: not applicable.
-    assert_eq!(cohesion("app/Split.js", "app/whole.jsx"), None, "js + jsx");
-    assert_eq!(cohesion("lib/split.mjs", "lib/whole.cjs"), None, "mjs + cjs");
-    // A TypeScript class beside them is scored, alone.
-    assert_eq!(cohesion("app/Split.ts", "app/whole.jsx"), Some(0.5), "the ts class (LCOM4 2) alone");
-    assert_eq!(cohesion("app/split.js", "app/Whole.tsx"), Some(1.0), "the tsx class (LCOM4 1) alone");
+    // JavaScript only — every extension of the `javascript` plugin: scored, over both classes.
+    assert_eq!(cohesion("app/Split.js", "app/whole.jsx"), Some(0.75), "js + jsx");
+    assert_eq!(cohesion("lib/split.mjs", "lib/whole.cjs"), Some(0.75), "mjs + cjs");
+    // A JavaScript class beside a TypeScript one is scored with it, not dropped.
+    assert_eq!(cohesion("app/Split.ts", "app/whole.jsx"), Some(0.75), "the ts class (LCOM4 2) and the jsx class (LCOM4 1)");
+    assert_eq!(cohesion("app/split.js", "app/Whole.tsx"), Some(0.75), "the js class (LCOM4 2) and the tsx class (LCOM4 1)");
     assert_eq!(cohesion("app/Split.ts", "app/Whole.tsx"), Some(0.75), "both TypeScript classes");
 }
 
-/// C++ (ccache) and Ruby (lobsters) declare no `member_access`: a repository
-/// whose classes are all theirs reports Cohesion not applicable — the
-/// class-less drop-out, never a score from calls alone — while Focus still
-/// applies ([CR-171] AC 3).
+/// A language outside the `member_access` set — Ruby (lobsters) was one until
+/// S-569 and C++ (ccache) until S-580, so the set here omits `cpp` and `rb` to
+/// stand for one: a repository whose classes are all in it reports Cohesion not
+/// applicable — the class-less drop-out, never a score from calls alone — while
+/// Focus still applies ([CR-171] AC 3).
 ///
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
@@ -1512,6 +1703,7 @@ fn a_mapstruct_mapper_scores_lcom4_over_its_bodied_methods_and_is_not_god() {
     let god = super::god_containers(
         &nodes,
         &edges,
+        &ContainerLinks::default(),
         &functions,
         &HashSet::new(),
         super::Thresholds::default(),
@@ -1600,6 +1792,7 @@ fn a_25_bodied_method_container_is_still_god_as_class_or_struct() {
         let god = super::god_containers(
             &nodes,
             &edges,
+            &ContainerLinks::default(),
             &functions,
             &HashSet::new(),
             super::Thresholds::default(),
@@ -1629,8 +1822,8 @@ fn a_null_has_body_counts_as_bodied() {
 }
 
 /// A class whose methods are **all** bodyless — a pure `abstract` class, or a
-/// C++ class whose members are all defined out of line (S-500 records each
-/// in-class prototype as bodyless) — scores what remains: zero bodied methods.
+/// C++ class whose members are all defined out of line in another file (S-500
+/// records each in-class prototype as bodyless) — scores what remains: zero bodied methods.
 /// Cohesion treats it as unscoreable, exactly like a method-less class (here
 /// the only class, so Cohesion is n/a), and Focus still counts it, god only by
 /// span ([CR-163] §3.2 C/D; the S-502 decision).
@@ -1664,12 +1857,63 @@ fn a_class_with_no_bodied_method_is_unscoreable_for_cohesion_and_god_only_by_spa
     let god = super::god_containers(
         &nodes,
         &edges,
+        &ContainerLinks::default(),
         &functions,
         &HashSet::new(),
         super::Thresholds::default(),
     );
     assert_eq!(god.len(), 1);
     assert_eq!((god[0].id, god[0].method_count), (NodeId(2), 0));
+}
+
+/// A trait in `file` with `bodied` bodied methods sharing no field (ids
+/// `base + 1..`) and `bodyless` abstract declarations after them, as a
+/// node/edge/function snapshot; the trait is `base`.
+fn trait_with(base: i64, file: &str, bodied: i64, bodyless: i64) -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let mut nodes = vec![node_span(base, &format!("T{base}"), NodeKind::Trait, Some(file), 1, 40)];
+    let mut edges = Vec::new();
+    let mut functions = Vec::new();
+    for m in 1..=bodied + bodyless {
+        let id = base + m;
+        nodes.push(node(id, &format!("m{id}"), NodeKind::Method, Some(file)));
+        edges.push(edge(base, id, EdgeKind::Contains));
+        functions.push(method_body(id, Some(m <= bodied)));
+    }
+    (nodes, edges, functions)
+}
+
+/// S-575 ([FR-QM-11], CR-183): a Scala trait with a bodied method is a
+/// container — Focus counts it, god by its 20 bodied methods, and Cohesion
+/// scores it over those methods (LCOM4 20, none sharing a field) — while a
+/// Scala trait of abstract declarations only is no container at all, and a
+/// Rust trait with default bodies never is one: Rust declares no
+/// `bodied_traits_are_containers`. `rs` is in the `member_access` set passed
+/// here, so only the container rule keeps the Rust trait out.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn a_bodied_scala_trait_is_a_container_and_an_abstract_one_or_a_rust_trait_is_not() {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut functions = Vec::new();
+    for (base, file, bodied, bodyless) in [
+        (100, "src/main/scala/app/Svc.scala", 20, 1),
+        (200, "src/main/scala/app/Port.scala", 0, 30),
+        (300, "src/lib.rs", 25, 0),
+    ] {
+        let (n, e, f) = trait_with(base, file, bodied, bodyless);
+        nodes.extend(n);
+        edges.extend(e);
+        functions.extend(f);
+    }
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let scala: HashSet<String> = ["scala", "rs"].map(String::from).into();
+    let r = compute(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), lcom4_thresholds(), &scala);
+    let focus = r.focus.expect("the bodied Scala trait is a container");
+    assert_eq!(focus.raw, 1.0, "one container, the Scala trait, god by its 20 bodied methods");
+    let cohesion = r.cohesion.expect("the bodied Scala trait is scored");
+    assert!((cohesion.raw - 1.0 / 20.0).abs() < 1e-12, "LCOM4 over its 20 bodied methods: {}", cohesion.raw);
+    let god = super::god_containers(&nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), super::Thresholds::default());
+    assert_eq!(god.iter().map(|g| (g.id, g.method_count)).collect::<Vec<_>>(), [(NodeId(100), 20)]);
 }
 
 // ── CR-163 E / FR-QM-13: the Uniqueness offender list is ranked by mass ──────
@@ -1970,9 +2214,9 @@ fn thresholds_hash_is_stable_and_changes_with_tuning() {
         ..default_t
     };
 
-    let a = compute(&view, &[], &[], &funcs, &no_tests, default_t, &member_access());
-    let b = compute(&view, &[], &[], &funcs, &no_tests, default_t, &member_access());
-    let c = compute(&view, &[], &[], &funcs, &no_tests, raised, &member_access());
+    let a = compute(&view, &[], &[], &ContainerLinks::default(), &funcs, &no_tests, default_t, &member_access());
+    let b = compute(&view, &[], &[], &ContainerLinks::default(), &funcs, &no_tests, default_t, &member_access());
+    let c = compute(&view, &[], &[], &ContainerLinks::default(), &funcs, &no_tests, raised, &member_access());
 
     assert!(!a.thresholds_hash.is_empty(), "the hash is recorded");
     assert_eq!(
@@ -1992,23 +2236,26 @@ fn thresholds_hash_is_stable_and_changes_with_tuning() {
 }
 
 /// CR-013 / FR-QM-14: the near-clone parameters join the hashed effective set,
-/// but the **default-set hash stays byte-identical to the pre-CR-013 build** —
+/// but **at their defaults they leave the default-set hash where it was** —
 /// the clone keys are folded in append-on-divergence, so an untuned repo never
 /// spuriously re-baselines on upgrade. Tuning either key moves the hash; setting
-/// either key back to its documented default leaves the hash unchanged.
+/// either key back to its documented default leaves the hash unchanged. (The
+/// default canonical form itself gained `cohesion_min_classes` in v9, CR-252 —
+/// pinned by `cohesion_min_classes_is_always_in_the_hash`.)
 #[test]
 fn clone_thresholds_join_the_hash_without_moving_the_default() {
     use super::Thresholds;
 
-    // The exact pre-CR-013 canonical form: the six structural keys only.
-    let pre_cr = "t_nest=4;t_cc=15;t_loc=100;t_bn=3;t_m=20;t_span=500";
-    let expected = blake3::hash(pre_cr.as_bytes()).to_hex().to_string();
+    // The default canonical form: the six structural keys and, since v9, the
+    // Cohesion class minimum — no clone or duplicate key.
+    let default_form = "t_nest=4;t_cc=15;t_loc=100;t_bn=3;t_m=20;t_span=500;cohesion_min_classes=5";
+    let expected = blake3::hash(default_form.as_bytes()).to_hex().to_string();
 
     let default = Thresholds::default();
     assert_eq!(
         default.hash(),
         expected,
-        "the default-set hash is byte-identical to the pre-CR-013 build (FR-QM-14)"
+        "the default-set hash carries no clone or duplicate key (FR-QM-14)"
     );
 
     // Setting the clone keys to their documented defaults is a no-op for the hash.
@@ -2090,6 +2337,30 @@ fn clone_thresholds_join_the_hash_without_moving_the_default() {
         .hash(),
         "two different duplicate_min_tokens values hash differently"
     );
+}
+
+/// CR-252: `cohesion_min_classes` is always in the hashed effective set, its
+/// default included, so the v9 default set hashes apart from v8's and a
+/// baseline taken before resets once ([FR-QM-14], [FR-GV-10]); tuning it moves
+/// the hash again, by value.
+///
+/// [FR-QM-14]: ../../../docs/specs/requirements/FR-QM-14.md
+/// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
+#[test]
+fn cohesion_min_classes_is_always_in_the_hash() {
+    use super::Thresholds;
+
+    let v8_default = "t_nest=4;t_cc=15;t_loc=100;t_bn=3;t_m=20;t_span=500";
+    let default = Thresholds::default();
+    assert_ne!(
+        default.hash(),
+        blake3::hash(v8_default.as_bytes()).to_hex().to_string(),
+        "the v9 default set does not hash as v8's did"
+    );
+    let tuned = |n| Thresholds { cohesion_min_classes: n, ..default }.hash();
+    assert_eq!(tuned(5), default.hash(), "5 is the default");
+    assert_ne!(tuned(3), default.hash(), "a cohesion_min_classes edit moves the hash");
+    assert_ne!(tuned(3), tuned(4), "the hash carries the value");
 }
 
 // ── UAT-QM-07: metric-neutrality across the extended set ─────────────────────
@@ -2796,7 +3067,7 @@ fn every_offender_carries_its_identity_measure_value_and_met_threshold() {
         .expect("global symbol parses");
     let t = super::Thresholds::default();
     let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
-    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    let all = super::all_offenders(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), t, &member_access());
     assert!(all.recorded && all.values_recorded);
 
     let expected: [(&str, &str, Option<i64>); 9] = [
@@ -2870,6 +3141,7 @@ fn an_acyclicity_value_is_the_cycle_symbol_count() {
         &view,
         &nodes,
         &edges,
+        &ContainerLinks::default(),
         &functions,
         &HashSet::new(),
         super::Thresholds::default(),
@@ -2899,7 +3171,7 @@ fn a_god_container_names_the_measure_it_crossed_under_the_thresholds_in_force() 
         ..super::Thresholds::default()
     };
     let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
-    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    let all = super::all_offenders(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), t, &member_access());
     let focus: Vec<_> = all.focus.iter().map(|o| (o.name.as_str(), o.measure, o.value, o.threshold)).collect();
     assert_eq!(
         focus,
@@ -2920,7 +3192,7 @@ fn the_capped_lists_are_the_head_of_the_uncapped_ones() {
     let (nodes, edges, functions) = every_list_fixture();
     let t = super::Thresholds::default();
     let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
-    let all = super::all_offenders(&view, &nodes, &edges, &functions, &HashSet::new(), t, &member_access());
+    let all = super::all_offenders(&view, &nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), t, &member_access());
     let capped = offenders_of(&nodes, &edges, &functions, &HashSet::new(), t, 1);
     let mut cut = 0;
     for ((dimension, head), (_, full)) in capped.lists().into_iter().zip(all.lists()) {
@@ -3508,4 +3780,313 @@ fn every_signal_term_is_named_by_its_own_dimension() {
         .map(|(n, v)| (n.to_string(), v))
         .collect();
     assert_eq!(named, expected);
+}
+
+// ── Partial types (S-557, FR-RS-29) ──────────────────────────────────────────
+
+/// A C# partial class `Foo` in two parts — part 1 (`a/Foo.cs`, lines 1–100)
+/// with 12 bodied methods 100..112, part 2 (`b/Foo.cs`, lines 1–60) with 12
+/// bodied methods 200..212 — beside a plain class `Bar` with one. Each part
+/// alone stays under `T_m` = 20; the type has 24. Method 100 calls 200 and
+/// every other method is alone, so the type's 24 methods are 23 components.
+fn partial_foo() -> (Vec<NodeRow>, Vec<EdgeRow>, Vec<FunctionMetricRow>) {
+    let mut nodes = vec![
+        node_span(1, "Foo", NodeKind::Class, Some("a/Foo.cs"), 1, 100),
+        node_span(2, "Foo", NodeKind::Class, Some("b/Foo.cs"), 1, 60),
+        node_span(3, "Bar", NodeKind::Class, Some("Bar.cs"), 1, 10),
+        node(300, "run", NodeKind::Method, Some("Bar.cs")),
+    ];
+    let mut edges = vec![edge(3, 300, EdgeKind::Contains), edge(100, 200, EdgeKind::Calls)];
+    let mut functions = vec![method_body(300, Some(true))];
+    for (part, ids, file) in [(1, 100..112, "a/Foo.cs"), (2, 200..212, "b/Foo.cs")] {
+        for id in ids {
+            nodes.push(node(id, &format!("m{id}"), NodeKind::Method, Some(file)));
+            edges.push(edge(part, id, EdgeKind::Contains));
+            functions.push(method_body(id, Some(true)));
+        }
+    }
+    // The later part's link to the first (S-557): an `Extends` edge, as the
+    // binder records it, which the metrics read through `partial_type_links`.
+    edges.push(edge(2, 1, EdgeKind::Extends));
+    nodes.sort_by_key(|n| n.id);
+    edges.sort_by_key(|e| (e.source, e.target));
+    (nodes, edges, functions)
+}
+
+/// The container links of just `links` as partial type links.
+fn partial(links: &[(NodeId, NodeId)]) -> ContainerLinks {
+    ContainerLinks {
+        partial_types: links.to_vec(),
+        ..ContainerLinks::default()
+    }
+}
+
+/// Compute over `partial_foo` with `links` as its partial type links and `cs`
+/// as the one `member_access` language.
+fn run_partial(links: &[(NodeId, NodeId)]) -> crate::models::quality::MetricSnapshot {
+    let (nodes, edges, functions) = partial_foo();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let cs: HashSet<String> = ["cs".to_string()].into();
+    compute(&view, &nodes, &edges, &partial(links), &functions, &HashSet::new(), lcom4_thresholds(), &cs)
+}
+
+/// Focus counts a partial type once, over the union of its parts ([FR-RS-29]):
+/// two containers, one god by its 24 methods, where the parts read as two
+/// non-god containers of 12. The `no_god_containers` set agrees, naming the
+/// first part with the union's methods and span.
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+#[test]
+fn focus_counts_the_union_of_a_partial_types_parts() {
+    let links = [(NodeId(2), NodeId(1))];
+    assert_eq!(run_partial(&[]).focus.expect("containers exist").raw, 0.0, "3 containers, none god");
+    assert_eq!(run_partial(&links).focus.expect("containers exist").raw, 0.5, "2 containers, Foo god");
+
+    let (nodes, edges, functions) = partial_foo();
+    let god = super::god_containers(&nodes, &edges, &partial(&links), &functions, &HashSet::new(), super::Thresholds::default());
+    assert_eq!(
+        god,
+        vec![super::GodContainer {
+            id: NodeId(1),
+            method_count: 24,
+            span: 160,
+        }]
+    );
+    // An `Extends` edge alone unites nothing: a supertype is no part.
+    let god = super::god_containers(&nodes, &edges, &ContainerLinks::default(), &functions, &HashSet::new(), super::Thresholds::default());
+    assert!(god.is_empty(), "{god:?}");
+}
+
+/// Cohesion reads the union too ([FR-RS-29]): one class whose 24 methods are 23
+/// components (the call from part 1 to part 2 links two), where the parts read
+/// as LCOM4 12 and 12 beside `Bar`'s 1.
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+#[test]
+fn cohesion_reads_the_union_of_a_partial_types_parts() {
+    let separate = run_partial(&[]).cohesion.expect("scoreable").raw;
+    assert_eq!(separate, (1.0 / 12.0 + 1.0 / 12.0 + 1.0) / 3.0);
+    let united = run_partial(&[(NodeId(2), NodeId(1))]).cohesion.expect("scoreable").raw;
+    assert_eq!(united, (1.0 / 23.0 + 1.0) / 2.0);
+}
+
+/// A part outside the production scope is no part of the container
+/// ([FR-QM-08]): with the later part in test scope, the first part is scored
+/// alone (12 methods, not god); with the first part in test scope, the later
+/// part keeps its own container and its methods — a link to a container that
+/// is not there joins nothing.
+///
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[test]
+fn a_part_outside_the_production_scope_joins_no_container() {
+    let (nodes, edges, functions) = partial_foo();
+    let links = [(NodeId(2), NodeId(1))];
+    let cs: HashSet<String> = ["cs".to_string()].into();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &edges);
+    let later_in_tests: HashSet<NodeId> = [NodeId(2)].into();
+    let god = super::god_containers(&nodes, &edges, &partial(&links), &functions, &later_in_tests, super::Thresholds::default());
+    assert!(god.is_empty(), "{god:?}");
+    let scored = |test_ids: &HashSet<NodeId>, links: &[(NodeId, NodeId)]| {
+        compute(&view, &nodes, &edges, &partial(links), &functions, test_ids, lcom4_thresholds(), &cs)
+            .cohesion
+            .expect("scoreable")
+            .raw
+    };
+    let first_in_tests: HashSet<NodeId> = [NodeId(1)].into();
+    assert_eq!(scored(&first_in_tests, &links), scored(&first_in_tests, &[]));
+    assert_eq!(scored(&first_in_tests, &links), (1.0 / 12.0 + 1.0) / 2.0);
+}
+
+// ── S-510: Rust impl / Go receiver methods count toward their struct ─────────
+
+/// A function row with a recorded `has_body`.
+fn func_body(id: i64, has_body: bool) -> FunctionMetricRow {
+    FunctionMetricRow {
+        has_body: Some(has_body),
+        ..func(id, Some(1), Some(false), Some(false))
+    }
+}
+
+/// `typed` as the container links of methods already attributed (`Some`) or not.
+fn typed(methods: &[(i64, Option<i64>)]) -> ContainerLinks {
+    ContainerLinks {
+        typed_methods: methods.iter().map(|&(m, owner)| (NodeId(m), owner.map(NodeId))).collect(),
+        ..ContainerLinks::default()
+    }
+}
+
+/// Thresholds under which three counted methods make a container god.
+fn three_methods_are_god() -> super::Thresholds {
+    super::Thresholds {
+        god_methods: 3,
+        ..super::Thresholds::default()
+    }
+}
+
+/// What the Focus attribution counts: attributed methods join their struct's
+/// bodied count only when they are production and bodied — a test method is no
+/// part of the count nor of its denominator, a bodyless one is in the
+/// denominator but not the count — and a method whose owner is not a production
+/// container, or whose attribution found none, is unattributed. With `S` at
+/// two bodied methods (the third, bodyless, and the fourth, a test, would make
+/// it god under `god_methods = 3`) it is not god.
+#[test]
+fn an_attributed_method_counts_only_when_production_and_bodied() {
+    let nodes = vec![
+        node(1, "S", NodeKind::Struct, Some("a.rs")),
+        node(2, "T", NodeKind::Struct, Some("a.rs")), // a struct in test scope
+        node(10, "m10", NodeKind::Method, Some("a.rs")),
+        node(11, "m11", NodeKind::Method, Some("a.rs")),
+        node(12, "m12", NodeKind::Method, Some("a.rs")), // a test method
+        node(13, "m13", NodeKind::Method, Some("a.rs")), // bodyless
+        node(14, "m14", NodeKind::Method, Some("a.rs")), // no owner found
+        node(15, "m15", NodeKind::Method, Some("a.rs")), // owner is a test struct
+    ];
+    let functions = vec![
+        func_body(10, true),
+        func_body(11, true),
+        func_body(12, true),
+        func_body(13, false),
+        func_body(14, true),
+        func_body(15, true),
+    ];
+    let links = typed(&[(10, Some(1)), (11, Some(1)), (12, Some(1)), (13, Some(1)), (14, None), (15, Some(2))]);
+    let test_ids: HashSet<NodeId> = [NodeId(2), NodeId(12)].into();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &[]);
+
+    let god = super::god_containers(&nodes, &[], &links, &functions, &test_ids, three_methods_are_god());
+    assert!(god.is_empty(), "two counted methods are under three: {god:?}");
+    let r = compute(&view, &nodes, &[], &links, &functions, &test_ids, three_methods_are_god(), &member_access());
+    let reach = r.focus_attribution.expect("methods record a self type");
+    assert_eq!(
+        (reach.unattributed, reach.denominator),
+        (2, 5),
+        "m10, m11, m13 attributed; m14 and m15 not; the test method m12 is no part of it"
+    );
+    assert_eq!(r.focus.expect("S is a container").raw, 0.0);
+}
+
+/// A method attributed to a later part of a partial type joins the first
+/// part's container ([FR-RS-29]).
+///
+/// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
+#[test]
+fn a_method_attributed_to_a_later_part_counts_toward_the_first() {
+    let nodes = vec![
+        node(1, "Foo", NodeKind::Struct, Some("a.rs")),
+        node(2, "Foo", NodeKind::Struct, Some("b.rs")),
+        node(10, "m10", NodeKind::Method, Some("b.rs")),
+    ];
+    let functions = vec![func_body(10, true)];
+    let links = ContainerLinks {
+        partial_types: vec![(NodeId(2), NodeId(1))],
+        typed_methods: vec![(NodeId(10), Some(NodeId(2)))],
+    };
+    let one_is_god = super::Thresholds {
+        god_methods: 1,
+        ..super::Thresholds::default()
+    };
+    let god = super::god_containers(&nodes, &[], &links, &functions, &HashSet::new(), one_is_god);
+    assert_eq!(
+        god,
+        vec![super::GodContainer {
+            id: NodeId(1),
+            method_count: 1,
+            span: 0
+        }]
+    );
+}
+
+/// No method records a self type: nothing is reported, not a 0-of-0.
+#[test]
+fn no_typed_method_reports_no_attribution() {
+    let nodes = vec![node(1, "S", NodeKind::Struct, Some("a.rs"))];
+    let r = run(&nodes, &[], &[]);
+    assert!(r.focus_attribution.is_none());
+}
+
+/// `attribute`'s edges, on hand-built rows: a node that is no method is
+/// skipped; a method with no file is unattributed but kept; a method with no
+/// line is not in an impl, so is scoped to its directory (the struct beside it
+/// is a candidate, the one in a subdirectory is not).
+#[test]
+fn attribute_handles_a_missing_file_a_missing_line_and_a_non_method() {
+    use super::attribution::attribute;
+    use crate::graph_store::ImplBlockRow;
+
+    let method = |id: i64, file: Option<&str>, line: Option<i64>| NodeRow {
+        start_line: line,
+        end_line: line,
+        ..node(id, &format!("m{id}"), NodeKind::Method, file)
+    };
+    let nodes = vec![
+        node(1, "S", NodeKind::Struct, Some("src/b.rs")),
+        node(2, "U", NodeKind::Struct, Some("src/sub/c.rs")),
+        node(3, "f", NodeKind::Function, Some("src/a.rs")), // a function with a self type
+        method(4, None, Some(3)),
+        method(5, Some("src/a.rs"), None),
+        method(6, Some("src/a.rs"), None),
+        method(7, Some("src/a.rs"), Some(3)),
+    ];
+    let blocks = vec![ImplBlockRow {
+        file_path: "src/a.rs".to_string(),
+        start_line: 1,
+        end_line: 9,
+        self_type: "S".to_string(),
+        self_ref: false,
+        trait_path: None,
+        deref_target: None,
+    }];
+    let self_types: Vec<(NodeId, String)> = [(3, "S"), (4, "S"), (5, "S"), (6, "U"), (7, "U")]
+        .map(|(id, t)| (NodeId(id), t.to_string()))
+        .into();
+    assert_eq!(
+        attribute(&nodes, &self_types, &blocks),
+        vec![
+            (NodeId(4), None),            // no file
+            (NodeId(5), Some(NodeId(1))), // no line → directory `src`, where S sits
+            (NodeId(6), None),            // no line → directory `src`, U is in `src/sub`
+            (NodeId(7), Some(NodeId(2))), // in the impl → crate (`""`), U is in it
+        ],
+        "the function carrying a self type (3) is no member"
+    );
+}
+
+// ── FR-QM-20: a dispatch edge is no dependency ───────────────────────────────
+
+/// The metric graph skips a dispatch edge ([FR-QM-20], CR-226): `alpha` calls
+/// `beta`'s implementation only through a trait, while `beta` calls back into
+/// `alpha`. Scored with the dispatch edge, every graph dimension equals the
+/// same graph without it — no cross-module cycle, two module layers — and the
+/// same edge as a direct call restores the cycle.
+///
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
+#[test]
+fn the_graph_dimensions_skip_a_dispatch_edge_and_a_direct_call_is_scored() {
+    let nodes = [
+        node(1, "by_dyn", NodeKind::Function, Some("alpha/a.rs")),
+        node(2, "m", NodeKind::Method, Some("beta/b.rs")),
+    ];
+    let back = edge(2, 1, EdgeKind::Calls);
+
+    let dispatched = run(&nodes, &[dispatch_edge(1, 2), back], &[]);
+    let without = run(&nodes, &[back], &[]);
+    assert_eq!(dispatched.acyclicity.raw, 0.0, "no cross-module cycle through a trait");
+    assert_eq!(dispatched.depth.raw, 2.0, "beta → alpha is two module layers");
+    for (got, want, dimension) in [
+        (&dispatched.modularity, &without.modularity, "modularity"),
+        (&dispatched.acyclicity, &without.acyclicity, "acyclicity"),
+        (&dispatched.depth, &without.depth, "depth"),
+    ] {
+        assert_eq!(
+            (got.raw, got.normalized),
+            (want.raw, want.normalized),
+            "{dimension} scores as if the dispatch edge were absent"
+        );
+    }
+    assert_eq!(dispatched.cross_module_edge_count, without.cross_module_edge_count);
+
+    let direct = run(&nodes, &[edge(1, 2, EdgeKind::Calls), back], &[]);
+    assert_eq!(direct.acyclicity.raw, 1.0, "a direct call is a dependency: the cycle returns");
+    assert_eq!(direct.depth.raw, 1.0, "the cycle condenses to one layer");
 }

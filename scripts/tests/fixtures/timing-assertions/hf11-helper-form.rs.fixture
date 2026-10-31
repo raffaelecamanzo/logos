@@ -1,0 +1,17 @@
+// The same assertion with its band scaled through the one helper: 230 ms at the
+// default tolerance.
+#[test]
+fn runtime_open_stays_within_its_store_and_pool_regression_band() {
+    use std::time::Instant;
+
+    let start = Instant::now();
+    let runtime = Runtime::open(&db).expect("runtime opens");
+    let elapsed = start.elapsed();
+
+    assert_eq!(runtime.db_path(), db.as_path());
+    let band = crate::perf::scaled_ms(200);
+    assert!(
+        elapsed < band,
+        "Runtime::open took {elapsed:?}, over its {band:?} store-and-pool regression band"
+    );
+}

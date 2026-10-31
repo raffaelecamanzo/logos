@@ -62,6 +62,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`security ingest`](#security-ingest-report) | ✅ | Ingest a SARIF 2.1.0 report from any tool into the evidence store |
 | [`security status`](#security-status) | ✅ | Each scanner's state — not installed, disabled, never run, stale or fresh — and the consent state |
 | [`security findings`](#security-findings) | ✅ | Stored findings with their OWASP categories and suppressions, filtered |
+| [`security reconfirm`](#security-reconfirm-fingerprint---evidence-symbol) | ✅ | Re-record a suppression's evidence hashes after its code changed, so the finding reads suppressed again |
 | [`security bless`](#security-bless) | ✅ | Write the stored findings to the checked-in `.logos/security-baseline.json`, the ratchet's baseline in every checkout (CLI-only) |
 
 ---
@@ -98,9 +99,9 @@ spelling before reading an empty answer as "nothing".
 the repository they run in, and refuse `--repo` as an unknown argument (exit 2):
 `index`, `sync`, `scan`, `check`, `gate`, `verify`, `doctor`, `session-start`,
 `session-end`, `coverage ingest`, `coverage run`, `coverage refresh`, `coverage install`, `security scan`, `security ingest`,
-`security bless`, `quality-report` and `hook`. Their
+`security bless`, `security reconfirm`, `quality-report` and `hook`. Their
 MCP twins — `scan`, `rescan`, `check_rules`, `bless_rules`, `verify`, `doctor`, `session_start`,
-`session_end`, `coverage_ingest`, `coverage_run`, `coverage_refresh`, `security_scan`, `security_ingest` — take no `repo` either, and say they act on
+`session_end`, `coverage_ingest`, `coverage_run`, `coverage_refresh`, `security_scan`, `security_ingest`, `security_reconfirm` — take no `repo` either, and say they act on
 the default member. `affected`, `implements`, `referencing-docs`, `doc-gaps`,
 `stats` and `languages` have no MCP twin that takes `repo`, so they answer for the
 repository they run in.
@@ -520,8 +521,10 @@ logos status --repo <MEMBER>       # under a workspace: that member's index
 ```
 
 Index health: file/node/edge counts, store size, unresolved-reference ledger,
-resolution coverage (both the single global figure and `resolution_by_language`,
-see below), last index/sync timestamps, a persisted monotonic
+reference resolution (the internal-candidate headline `internal_resolution`, the
+doc-reference figure `doc_resolution`, the deprecated global
+`resolution_coverage`, and `resolution_by_language`, see below), last index/sync
+timestamps, a persisted monotonic
 `graph_revision` (a counter bumped once per `index`/`sync` that actually
 changes the graph, and once when opening a store migrates it to the repository
 coordinate — a no-op `sync` leaves it untouched; consumers can compare
@@ -587,6 +590,54 @@ indexed *before* you enabled the workspace keeps reporting `0` until you
 re-index, and that is exactly the state in which the advice would be stale. See
 [`init --workspace`](#init--i---hooks---workspace---yes---exclude-glob) for the two states.
 
+#### `internal_resolution` and `doc_resolution`
+
+Every reported ledger row is classified once:
+
+- a **doc reference** — a code span or link in documentation, counted only in
+  `doc_resolution`;
+- a **provably external** code reference — unbound, and its target cannot name
+  anything this graph declares: no node name, renaming import alias, file or
+  directory name, file stem, declared namespace segment or file facade is the
+  target or a suffix of it after `::`, `.`, `/` or `\` (for an import, any one
+  of its segments), or the binder's residue walk classified it `external-type`
+  (`HashMap::new()` beside a repository `new`);
+- an **internal candidate** — every other code reference, bound or not.
+
+```jsonc
+"internal_resolution": { "resolved": 30827, "internal_candidates": 80154,
+  "provably_external": 31746, "code_references": 111900,
+  "lower_bound": 0.385, "absence": null },
+"doc_resolution": { "references": 37117, "resolved": 22850, "ratio": 0.616, "absence": null }
+```
+
+`internal_resolution.lower_bound` is `resolved / internal_candidates`, and it is a
+**lower bound**: the internal candidates still hold calls into libraries whose
+method names collide with names your code declares (`x.len()`, `v.get(…)` on a
+value of unknown type), which no name test can tell apart. Read it beside its
+population — `internal_candidates` of `code_references`, `provably_external`
+left out. An unexpected surge in `provably_external` for one language usually
+means a symbol the extractor misses, whose callers then look external.
+
+Only references a binder resolves by name are judged; an artifact binding, a
+route or a broker reference is always an internal candidate, and so is every Go
+import (an import of the module's own root package binds through `go.mod`, which
+the graph does not hold), and every call the binder proved is made through a
+local value (`callback()` where `callback` is a parameter): it binds nothing by
+design, and whether its name happens to be declared elsewhere decides nothing.
+Errors fall on the internal side, lowering the figure.
+
+A zero denominator is never `1.0`: `lower_bound` (or `ratio`) is `null` and
+`absence.cause` names why — `no-references-recorded` when the graph records no
+code (or no doc) reference, `no-internal-candidates` (with `provably_external`)
+when every code reference is provably external.
+
+`refs_total`, `refs_resolved`, `refs_unresolved` and `resolution_coverage` stay
+in the JSON unchanged, and are **deprecated**: their denominator mixes doc
+references with code and external code with internal, so it cannot reach `1.0`
+on a perfectly resolved repository. The headline enters neither the quality
+signal nor the gate.
+
 #### `resolution_by_language`
 
 One row per indexed language, in name order, each carrying **both** halves of the
@@ -599,6 +650,12 @@ figure rather than a bare number:
   "imports": { "references": 166,  "bound": 118, "same_file_edges": 0,
                "cross_file_edges": 118, "cross_file_absence": null } }
 ```
+
+On `status` each class also carries `provably_external`: how many of its unbound
+`references` are provably external, by the rules of
+[`internal_resolution`](#internal_resolution-and-doc_resolution) (the
+`external-type` rows of a `call_residue` included in `calls`). The rows a
+relational answer's `resolution_denominator` attaches leave it out.
 
 Exactly one of `cross_file_edges` and `cross_file_absence` is present. A language
 that binds nothing across a file boundary is reported as a **named state**, never
@@ -613,9 +670,37 @@ as a `0` that would read as a measurement:
 A global coverage number cannot express a per-language zero — that is why this
 row set exists. Read it before trusting a relational answer on a given language.
 
-**Java and Rust rows also say why a call stays unbound.** The Java row (and
-the PHP, C#, Kotlin and Scala rows) and the Rust row carry a `call_residue`
-object: `unbound` (the row's `calls.references − calls.bound`), the count per
+**The row that reads `.h` headers says how many it took.** C and C++ both claim the
+ambiguous `.h` extension, and each repository gives it to one: C when its `.c` files
+outnumber its C++ sources (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`), C++ otherwise
+(a repository of headers alone included). When a repository holds both C and C++
+sources — redis's 475 C files beside 8 vendored C++ ones — the row of the language
+that reads the headers carries `headers` (the `.h` files among its `files`) and a
+`note` stating the rule; `logos languages` shows the same note on the `c` and `cpp`
+rows. A repository with one of the two languages, or neither, has neither key.
+
+**Every row says how much of its parse was damaged.** `parse_damage` counts the
+row's files whose parse tree held a syntax error — an ERROR or MISSING node — and
+their share in percent, floored:
+
+```jsonc
+"parse_damage": { "files": 67, "unrecorded": 0, "share_percent": 32 }
+```
+
+Tree-sitter recovers from such an error, so the file is still indexed. Around the
+damage, though, a declaration's span and figures may come from the misparse —
+unexpanded C and C++ macros are the usual cause. The figure says "the parse
+contained errors", not "the file is unusable". A file indexed before logos.db
+migration 44 records neither until its next re-extraction, which the upgrade
+triggers: it is counted in `unrecorded`, never as clean, and the share is taken
+over the files that do record. The rows a relational answer's `resolution_denominator` attaches leave
+it out. When the share reaches 10% for a language holding at least 10% of the
+production callables, [`scan`](#scan) warns.
+
+**Java and Rust rows — and any row with a `local-binding` call — also say why
+a call stays unbound.** The Java row (and the PHP, C#, Kotlin and Scala rows),
+the Rust row, and the row of any language with a `local-binding` call carry a
+`call_residue` object: `unbound` (the row's `calls.references − calls.bound`), the count per
 reason below, and `unclassified` — so `unbound` equals the sum of the reasons
 plus `unclassified`. Its `scope` is `"repository"` for a plain `status` and
 `"workspace"` for `workspace status`: one repository cannot tell another
@@ -624,7 +709,7 @@ member's type from a library's, so only the workspace read has a
 
 ```jsonc
 "call_residue": { "unbound": 5,
-  "reasons": { "external-type": 1, "name-not-in-scope": 1, "no-applicable-overload": 0,
+  "reasons": { "external-type": 1, "local-binding": 0, "name-not-in-scope": 1, "no-applicable-overload": 0,
                "no-receiver-evidence": 1, "not-a-callable": 1, "overload-ambiguous": 0,
                "supertype-unreached": 1, "type-ambiguous": 0 },
   "unclassified": 0, "scope": "repository" }
@@ -633,14 +718,31 @@ member's type from a library's, so only the workspace read has a
 | `call_residue` reason | The call stays unbound because |
 |---|---|
 | `no-receiver-evidence` | the file proves no receiver type (a chained call, an untyped lambda parameter, a generic type variable, a bare call naming no import) |
-| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member — or, for a Rust path call, the path's head leaves the repository (`Vec::new()`, `serde_json::to_string(…)`) |
+| `external-type` | no file of this repository declares the receiver's type: the JDK, a library, a generated type, or (in a plain `status`) another member — or, for a Rust path call, the path's head leaves the repository (`Vec::new()`, `serde_json::to_string(…)`); for a call through a local import, the import's path reaches nothing here |
 | `type-in-another-member` | another workspace member declares the receiver's type (`workspace status` only) |
-| `overload-ambiguous` | the type, or the nearest supertype level holding an applicable method, declares two or more methods of that name whose parameter count admits the call, or two static imports each supply one — no argument type is read |
+| `overload-ambiguous` | the type, or the nearest supertype level holding an applicable method, declares two or more methods of that name whose parameter count admits the call, or two static imports each supply one — no argument type is read; or the file's imports of a name a local import binds disagree |
 | `no-applicable-overload` | methods of that name were found, and none admits the call's argument count — at no supertype level, and in no free function or import the language goes on to |
 | `type-ambiguous` | the type's name reaches two declarations (a `src/main` and a `src/test` class of one name) |
 | `supertype-unreached` | neither the type nor any supertype reached in the repository declares the name: the chain leaves the repository, stops at an interface, or cycles |
 | `not-a-callable` | the call names a repository declaration that is not a callable: an enum variant (`E::A(1)`) or a tuple-struct constructor (`W(1)`, `Self(1)`) — Rust |
-| `name-not-in-scope` | no rung reaches a repository callable of the name: a prelude or std function reached by a bare name (`drop`, `Some`), a closure or a local, an item the file does not import, a module that declares no such item — Rust |
+| `name-not-in-scope` | no rung reaches a repository callable of the name: a prelude or std function reached by a bare name (`drop`, `Some`), an item the file does not import, a module that declares no such item — Rust |
+| `local-binding` | a bare call names a parameter or a variable the caller's body binds where the call is (`var f = pick(); f()`, a parameter `f` called as `f()`, a Rust closure `let f = …; f()`): a call through a value, which the graph does not follow — every language but Java and Ruby, whose calls never name a value |
+
+**A local binding shadows the call.** A name the caller's body binds where the
+call is — declared before the call's statement, or hoisted (a JavaScript `var`
+or function, any Python local) — decides a bare call of that name before any
+other scope: a local import (`from m import f` inside a function, a block
+`using ns::f;`, a block `use`) is the call's target through that import
+alone, never the caller itself or a same-named function the import hides —
+and where the file imports the name more than once (two functions importing
+it from two modules) and the imports disagree, the call binds neither
+(`overload-ambiguous`); a local parameter or variable binds nothing and is counted
+`local-binding`; and a Go receiver name a `range`, `:=`, closure parameter or
+type switch rebinds is `other`, never the receiver. A nested function the graph
+records is still the call's target. Any language row holding a `local-binding`
+call carries a `call_residue`; on a row that has one for that reason alone (a
+JavaScript, Python, Go or C++ row), only `local-binding` is counted and every
+other unbound call is `unclassified`.
 
 On the Rust row every unbound call carries a reason, so `unclassified` reads `0`
 on a fresh index. A call to a type's method — `self.m()`, `Self::m()`, a method
@@ -668,7 +770,10 @@ the file re-exporting `T`, imports its name twice; `not-a-callable` for an enum
 variant. A trait-typed call — `self.m()` / `Self::m()` in a trait's default
 body, a receiver typed `&dyn Tr`, `impl Tr` or a generic parameter bounded by
 `Tr` (inline or in a `where` clause), a written `Tr::m(x)` — binds every impl
-of `Tr::m` plus the trait's default body; two bounds
+of `Tr::m` plus the trait's default body. Each edge to an impl is marked as
+reached by dispatch through `Tr::m` (shown as `via` by `callers`, `callees` and
+`impact`); the edge to the default body is not, nor is one the same caller also
+binds by a direct call; two bounds
 that each supply the method are `overload-ambiguous`, a method only a bound
 outside the repository (`Clone`, `Send`) can supply is `external-type`, and a
 trait with neither an impl nor a default of it is `supertype-unreached`. An
@@ -692,8 +797,9 @@ Java project, about 0.4 s on a Rust project of ~90,000 calls, and nothing on a
 project of other languages only. A one-shot `logos status` is a new process, so
 it always pays it.
 
-Every figure counted over the reference ledger — `refs_total`/`refs_resolved`,
-each language's `references` and `bound`, the per-relation coverage and the
+Every figure counted over the reference ledger — `internal_resolution`,
+`doc_resolution`, `refs_total`/`refs_resolved`, each language's `references`,
+`bound` and `provably_external`, the per-relation coverage and the
 `call_residue` counts — leaves out the capture-before-delete rows a `sync`
 writes for edges into a re-read file, because each one duplicates a reference
 its source already records. A synced store therefore reads the same figures as
@@ -853,6 +959,13 @@ callers of the class and names the module. Each alternative's `symbol` reaches i
 when passed back; a SCIP symbol or a name only one node carries has no
 `alternatives` key.
 
+A row reached through a trait-typed call's fan-out to an implementation carries
+`via: "<Trait>::<method>"` — for example `"via": "EventSink::emit"` on the caller
+of `sink.emit(…)` with `sink: &impl EventSink`. The caller reaches that
+implementation at run time but depends only on the trait. A row reached through
+the trait's own method, or through a direct call, has no `via` key, even when the
+same caller also reaches the implementation through the trait.
+
 ### `impact`
 
 ```bash
@@ -862,7 +975,9 @@ logos impact <SYMBOL> [--depth <N>] [--repo <MEMBER>]      # default depth 3
 Transitive closure in both directions, labeled: *upstream* (what breaks if
 this changes) and *downstream* (what this depends on). A bare name resolves as
 for `node` and the nodes it passed over are listed under `alternatives`
-(absent when none).
+(absent when none). An entry every shortest path reaches through a trait
+fan-out's edge to an implementation carries `via: "<Trait>::<method>"`, as on
+`callers` and `callees`.
 
 ### `impact-intersection`
 
@@ -1187,13 +1302,15 @@ logos languages --json
 
 The registered grammar table: name, extensions (and `filenames` for
 basename-claimed formats like `Dockerfile`/`Makefile`), module separator,
-capabilities, tree-sitter ABI version, and an `artifact` flag — plus, for each
+capabilities, tree-sitter ABI version, and an `artifact` flag — plus a `note` on a
+language with something to disclose (the `c` and `cpp` rows state which of the two
+reads a `.h` header in a given repository) and, for each
 code language, its declared **reach** (`reach.level`: `resolved`, `partial`,
 `same-file` or `symbols`; `reach.cross_file`: the relations it binds across
 files — see [usage.md](usage.md#language-support-what-each-language-binds-across-files))
 and any grammars skipped for ABI mismatch (`skipped` should be empty). A full `lang-all`
-build lists 24 plugins: the twelve code languages (thirteen grammar rows —
-TypeScript and TSX/JSX register separately), `markdown`, and the ten
+build lists 25 plugins: the code languages (fourteen rows — TypeScript, TSX and
+JavaScript register separately, JavaScript over the TSX grammar), `markdown`, and the ten
 `artifact: true` config/infra grammars (yaml, json, toml, dockerfile, makefile,
 shell, protobuf, graphql, terraform, sql).
 
@@ -1209,7 +1326,7 @@ logos serve --mcp --ui [--port <N>]                  # both surfaces in one proc
 
 At least one of `--mcp` / `--ui` is required. `--mcp` starts the MCP server
 over stdio (see [usage.md](usage.md#setting-up-the-mcp-server-ai-agents) for
-host setup, the 33-tool surface, and the stdout-purity / clean-teardown
+host setup, the 35-tool surface, and the stdout-purity / clean-teardown
 guarantees). `--ui` starts the localhost web dashboard (see
 [usage.md](usage.md#the-web-ui-dashboard)); it is not offered in the slim build
 (see the [build matrix](usage.md#build-matrix--dashboard-or-slim-headless)). The dashboard is a single embedded React SPA served at `/`,
@@ -1223,7 +1340,7 @@ manifest and config saves, the on-demand `verify` (`/api/v1/verify`), and the
 Security page's scan start and cancel (`/api/v1/security/scan`,
 `/api/v1/security/scan/cancel`), its scanner install start and cancel
 (`/api/v1/security/install`, `/api/v1/security/install/cancel`) and its suppression writes
-(`/api/v1/security/suppress`, `/api/v1/security/unsuppress`); every other non-GET
+(`/api/v1/security/suppress`, `/api/v1/security/unsuppress`, `/api/v1/security/reconfirm`); every other non-GET
 request is answered `405`. Combined
 `--mcp --ui` runs both on one engine and one watcher: stdout stays JSON-RPC-clean
 for the MCP host while the web surface logs to stderr.
@@ -1293,7 +1410,7 @@ endpoints under [`serve --ui`](#serve) (both live now) — so the
 coverage/service-map/impact numbers are always the same whichever way you reach
 them. The matching `xservice_*` and `workspace_*` MCP tools are served by
 `serve --mcp` started in a workspace (the build with the web UI): the host then
-sees 43 tools, the 34 single-root ones plus these nine, and the read-only tools
+sees 44 tools, the 35 single-root ones plus these nine, and the read-only tools
 take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
 `--standalone`, and the slim headless build, serve the one repository instead.
 
@@ -1336,6 +1453,38 @@ route and is counted in the run's `routes_not_composed`, so it is never dropped
 silently. Editing only the file that declares the constant re-folds the routes
 that use it on the next `logos sync`. Kotlin concatenated paths are neither folded
 nor counted yet.
+
+**Spring paths written without a leading slash, and Kotlin's functional routes.**
+Spring serves `@GetMapping("vets.xml")` from `/vets.xml`, so a Java or Kotlin
+mapping (and a class-level `@RequestMapping("v1")`) written without a leading `/`
+is a `route` at the rooted path; a `${property}/x` path is left as written, since
+the property may supply the slash. Kotlin also reads Spring's functional DSL —
+`router { }` / `coRouter { GET("/x", handler::m) }` with its `"/p".nest { }` and
+`(accept(JSON) and "/p").nest { }` prefixes — and Ktor's `routing { route("/p") {
+get("/x") { } } }`. A registration is a route only inside such a block, every
+enclosing `nest`/`route` prefix is joined outermost first, and a handler written
+`property::member` links through the type its class declares for the property.
+A prefix that is not a literal, a path built from a template or constant, and a
+`fun Route.users()` extension whose mount point is another file's produce **no**
+route and are counted in `routes_not_composed`. `RouterFunctions.route()` builder
+chains are not read.
+
+**Rails routes.** A Rails route is a verb call inside the block
+`Rails.application.routes.draw` takes — `get "/x" => "c#a"`, `get "/x", to: "c#a"`
+(or `:to =>`), and `root to: "c#a"` / `root "c#a"`, which is `GET` at the
+enclosing path. The same call outside that block (a test client's
+`get("/cgi/test")`) is not a route. `namespace :mod` and `scope "/p"` (or `path:`)
+prefixes are joined outermost first, and a route written `"/"` inside one is the
+prefix itself, as Rails serves it: `namespace :mod do get "/" => "a#index" end` is
+`GET /mod`, not `GET /mod/`. The handler `"c#a"` links to the instance
+method `a` of `CController`, inside the modules its `namespace` blocks (and any
+`module:` option) put it in — `namespace :mod do get "x" => "flagged#index" end`
+links `/mod/x` to `Mod::FlaggedController#index`. A `redirect(…)`, a class method,
+an action the controller only inherits, and a controller the repository does not
+declare link nothing; the route keeps its node. `resources`, `resource` and
+`concern` stay unexpanded: a registration inside their block sits under a path
+the file does not write, so it produces **no** route and is counted in
+`routes_not_composed`, as is one under a prefix that is not a literal.
 
 
 - **`route-providers`** — the workspace service map: every cross-service binding
@@ -1849,6 +1998,48 @@ output is byte-identical to before links were interpreted.
 A link is re-judged on every answer: rename its target and re-sync the member,
 and the link turns `invalid` (`no-match`) and its `live-via-asserted-link`
 roots disappear on the next query.
+
+##### `reference_resolution` — the workspace's own reference resolution
+
+Each member row carries its own
+[`internal_resolution`](#internal_resolution-and-doc_resolution), computed over
+that member's graph alone — so a call into a type only a sibling declares is
+**provably external** there: nothing that member declares could be what it names.
+`reference_resolution` is the **workspace-level** figure, from the members'
+populations **summed, then divided** — never a mean of their ratios — with two
+differences:
+
+- a reference whose target a name **another member** declares could be is an
+  **internal candidate** (`cross_member.named_by_another_member`), and so is a call
+  the member's binder proved `external-type` whose type another member declares
+  (`cross_member.type_in_another_member`: the rows of its call residue's
+  `type-in-another-member` whose name the member itself also declares — the rest
+  the name test already counted external, and they are re-read under
+  `named_by_another_member`);
+- an outbound call site (an HTTP client call, a gRPC stub call, a broker publish)
+  unbound in its own member that the cross-service coverage **bound** to another
+  member counts as **resolved** (`cross_member.bridge_bound`). A declared
+  `[[links]]` entry is a claim, not evidence, and resolves nothing here.
+
+```jsonc
+// logos workspace status --json
+"reference_resolution": {
+  "internal_resolution": { "resolved": 11, "internal_candidates": 15,
+    "provably_external": 1, "code_references": 16, "lower_bound": 0.733, "absence": null },
+  "cross_member": { "named_by_another_member": 2, "type_in_another_member": 1, "bridge_bound": 1 },
+  "members": { "members": 3, "read": 2, "unread": ["billing"],
+    "unread_reasons": { "billing": "…why its status could not be read…" } },
+  "summary": "lower bound 0.733 (11 of 15 internal candidates resolved; 16 code references, 1 provably external), summed over 2 of 3 members; 3 counted internal as another member's, 1 bound across members; not read: billing"
+}
+```
+
+It is a lower bound for the reason each member's is, and states the members it
+summed over: a member whose status could not be read adds nothing, is named in
+`members.unread` with its reason, and lends no names — a reference into it stays
+provably external. An empty population reads `lower_bound: null` with its
+`absence`, never `1.0`. The figure is advisory: it enters no quality signal and no
+gate. The human output, `--json`, MCP `workspace_status` and
+`GET /api/v1/workspace/status` print the one read-model.
 
 ##### The headline: `resolved_cross_service_edges` and `egress_resolution`
 
@@ -2588,18 +2779,36 @@ dragging each score (report-only; it never gates). Constraints declared in
 On a graph with fewer than 5 cross-module edges, Modularity, Acyclicity and
 Depth are not applicable: `--json` gives each one's reason in `metrics`, under
 `modularity_not_applicable`, `acyclicity_not_applicable` and
-`depth_not_applicable`, and the count as `cross_module_edge_count`. A language
+`depth_not_applicable`, and the count as `cross_module_edge_count`. With fewer
+scoreable classes than `[metric_thresholds] cohesion_min_classes` (default 5),
+Cohesion is not applicable and `metrics.cohesion_not_applicable` gives its
+reason and class count. `metrics.focus_attribution` counts the Rust `impl` and Go
+receiver methods Focus could not place on a struct (`unattributed`) of all those
+that record a type (`denominator`). A language
 that is at least 10% of the production callables and binds no call or import
 across files earns a `coverage: …` entry in `warnings`, as it does in `gate`
 and `session-start`; it never changes the exit code. Both are explained in
 [metrics.md](metrics.md#applicability-and-the-na-drop-out).
+
+A language at least 10% of whose files were extracted from a damaged parse, and
+which holds at least 10% of the production callables, earns a `parse damage: …`
+entry in `warnings` naming its damaged files and their share (the
+[`status` row's `parse_damage`](#resolution_by_language)); it never changes the
+exit code. A `worst_offenders` entry, and a `where_to_start` unit, whose file's
+parse was damaged carries `"partial_parse": true`: its span and figures may come
+from the misparse rather than measure the code. The entry is flagged, never
+dropped, and the flag is elided on every other entry. The flag is recorded with
+the snapshot, so `offenders`, [`improvements`](#improvements) and the Quality
+bundle (`GET /api/v1/health`) read back exactly what `scan` returned, even after
+the file is repaired, until the next snapshot. The web Quality page does not
+show the flag yet.
 
 Under a `rules.toml [review]` table, `warnings` also carries a [trend warning](configuration.md#review--the-branch-delta-gate)
 when Equality, Modularity, Acyclicity or Depth fell in each of the last
 `trend_window` recorded snapshots (default 2). It never changes the exit code.
 
 Since logos 1.9.0 the lists are **persisted with the snapshot** — by `scan`,
-`gate`, `session_start` and `session_end` alike — so the read-only Health page
+`gate`, `session_start` and `session_end` alike — so the read-only Quality page
 (`GET /api/v1/health`) shows exactly what the snapshot computed. `worst_offenders`
 carries a `recorded` boolean, always present:
 
@@ -2652,7 +2861,8 @@ the full lists.
 ### `offenders [--path <GLOB>] [--dimension <D>]`
 
 ```bash
-logos offenders --json [--repo <MEMBER>]               # every offender, every dimension
+logos offenders --json [--repo <MEMBER>]               # every offender, every dimension but equality
+logos offenders --dimension equality --json            # every above-average-complexity function
 logos offenders --path 'src/a/**' --dimension nesting --json
 ```
 
@@ -2673,6 +2883,10 @@ the same bytes, and a rerun on an unchanged store returns identical output.
 - `--dimension` keeps one of `nesting`, `conciseness`, `cohesion`, `focus`,
   `uniqueness`, `acyclicity`, `depth`, `equality` or `redundancy`. Modularity
   has no list.
+- Equality's entries are listed only under `--dimension equality`, which lists
+  every one. They are the functions with above-average complexity, judged
+  against no threshold, so they are not offenders. Without that flag, with or
+  without `--path`, the answer and its length leave them out.
 - Both filters together must both match. An unknown dimension, or a glob that
   does not compile or escapes the project root, exits **2**.
 
@@ -2835,6 +3049,10 @@ classified entries, ordered by class, path and line. An entry carries `status`,
 also carries `severity_reason`), `owasp`, `message`
 (the redacted text for a secret-class finding, which `redacted` flags),
 `path`, `start_line`, `end_line`, `freshness`, `reachability` and `confidence`.
+One advisory several scanners report on one lockfile, package and version is one
+entry, and also carries `reporters`, every scanner that reported it, `scanner`
+first: it is compared under each of them, so it is `introduced` only when no
+reporter's merge-base report holds it, and `resolved` only when none still does.
 `suppressed` lists the findings an unexpired ignore entry covers, apart, with each
 one's `reason` and `expires` and the class it would otherwise have. The merge-base
 tree is never scanned. With no stored report, or when the findings or the diff
@@ -3124,7 +3342,11 @@ rerun on an unchanged store returns identical output.
   exact-duplicate group (Redundancy) or a near-clone group (Uniqueness). Each
   carries its `kind`, `node_id`, `name`, `file`, `line`, `dimensions`,
   `points`, a `detail` describing the offending magnitude, and `outliers`: the
-  measures it is labelled an outlier on.
+  measures it is labelled an outlier on. A unit whose file's parse was damaged
+  when the snapshot was computed also carries `"partial_parse": true`: its
+  figures may come from the misparse (see [`scan`](#scan)). The key is absent
+  on every other unit. A group unit is judged by the file of the member that
+  names it.
 - **`node_id` survives a re-index.** For a class or a function it is the symbol
   id without its repository coordinate, the same identity an
   [`offenders`](#offenders---path-glob---dimension-d) entry carries; pass it to
@@ -3338,7 +3560,7 @@ dimension in decline, with `dimension`, `values` (oldest first, exact) and
 "trend": [{ "dimension": "equality", "values": [0.9123458410127743, 0.9081204475611208, 0.9033771926630519], "window": 2 }]
 ```
 
-`session-end` and the Health page (`GET /api/v1/health`) carry the same `trend`.
+`session-end` and the Quality page (`GET /api/v1/health`) carry the same `trend`.
 Without the table neither field is printed and the gate is exactly as above.
 
 Under the table the result also carries `attribution`: the signal's change from
@@ -4097,7 +4319,7 @@ stored. A secret-class finding's message is replaced before it is written, and
 every other message is stored with anything shaped like a secret masked.
 Each command below except `security install`, `security uninstall` and
 `security bless` has an MCP twin returning the same payload (`security_scan`, `security_ingest`,
-`security_status`, `security_findings`).
+`security_status`, `security_findings`, `security_reconfirm`).
 
 ### `security scan [--consent] [--install] [--scanner <NAME>]… [--path <PATH>]…`
 
@@ -4252,7 +4474,12 @@ One state per registered scanner:
 `never_run` carries no count; `fresh` and `stale` carry `findings` — the
 report's fresh, unsuppressed findings in production code — and the rest by why,
 each finding once and in this order: `suppressed`, `not_fresh` (its file changed
-since the scan) and `test` (in test code, the "N more in test code"). A clean
+since the scan), `test` (in test code, the "N more in test code"), `dev` (on a
+package its lockfile marks dev-only, the "N more in dev-only dependencies"), `needs_review`
+(its scanner marks it low-confidence, the "N more need review") and `merged` (one
+advisory another scanner also reports on the same lockfile, package and version,
+counted once on its first reporter's row:
+[security.md](security.md#one-advisory-several-scanners)). A clean
 scan reads `fresh` with every count `0` and is never confused with a scanner
 that has not run. A stored report counts whether or not
 the scanner is installed here, so a report ingested from CI reads `fresh` or
@@ -4471,22 +4698,75 @@ ignore entry — a `fingerprint`, or a `path` glob with its `rule` and `scanner`
 with `suppressed`, the findings it suppresses now, flagged `expired` and
 `orphaned`; a finding's `suppression` names the entry under `by`. An entry that names a
 fingerprint a finding had before it was re-keyed (a Gitleaks finding's earlier,
-per-commit one, or an OSV-Scanner one from before history.db migration 10) still
-suppresses it and carries `should_name`, the fingerprint that finding has now
+per-commit one, an OSV-Scanner one from before history.db migration 10, or a
+dependency finding's from before migration 13) still suppresses it and carries `should_name`, the fingerprint that finding has now
 (the file is never rewritten). A Gitleaks
 finding lists in `commits` every commit its secret was found in, newest first,
 and a history-mode one carries `anchor` (`commit`, `short_commit`, `path`): the
 commit it is anchored to. Its `binding` is `historical`, with no `path` and an
 unbound `context`, when its secret is no longer on that line in today's tree.
 
-Every finding carries `code_scope`, `test` or `production`, and
+Every finding carries `code_scope`, `test`, `dev` or `production`, and
 `code_scope_reason`: `test_symbol` when the symbol around it is test code,
-`test_path` when its path is a test or fixture path, `null` for production
+`test_path` when its path is a test or fixture path, `dev_dependency` when its
+lockfile marks the package dev-only (below), `null` for production
 ([security.md](security.md#findings-in-test-code)). The listing keeps production
 code unless `--scope` says otherwise: `scope` names the scope listed and
 `hidden_by_scope` how many findings every other filter kept and the scope left
 out. `total` is still every stored finding. `--scope all` lists what earlier
 releases listed by default.
+
+One advisory OSV-Scanner, Trivy or Dependency-Check report on one lockfile, package
+and version under a shared advisory id is one finding, at the highest rating any
+of them gave, and carries `reporters`: each scanner's `scanner_name`,
+`scanner_version`, `fingerprint`, `rule_id` and `severity`, its own first. A
+finding one scanner alone reported has no `reporters`. `total` counts it once, and
+`--scanner` lists it under each reporter
+([security.md](security.md#one-advisory-several-scanners)).
+
+Every finding also carries `confidence` — `low`, `medium`, `high` or `unstated` —
+and `needs_review`, `true` for a `low` one. The default scope leaves a production
+finding that needs review out of the list and states how many in
+`hidden_needs_review` ("N more need review"); `--scope all` lists it, labelled
+(`--scope test` lists it only when it sits in test code). Each category's
+`needs_review_findings` is its production part that needs review, apart from
+`production_findings`
+([security.md](security.md#findings-that-need-review)).
+
+A finding on a package its `package-lock.json`, `npm-shrinkwrap.json` or pnpm
+lockfile marks `dev` reads `code_scope: "dev"` (`code_scope_reason:
+"dev_dependency"`); every other lockfile finding reads `production`. The default
+scope leaves it out and states how many in `hidden_dev` ("N more in dev-only
+dependencies"); `--scope all` lists it, labelled. Each category's `dev_findings` is
+its part on a dev-only dependency, apart from `production_findings`
+([security.md](security.md#findings-on-a-dev-only-dependency)).
+
+### `security reconfirm <FINGERPRINT> [--evidence <SYMBOL>]…`
+
+```bash
+logos security reconfirm 0a7c…e43                              # re-record every evidence symbol as it is now
+logos security reconfirm 0a7c…e43 --evidence DefaultCookieConfig   # …or record these symbols instead
+```
+
+Re-confirms a suppression whose [evidence](security.md#recording-what-a-verdict-rests-on-evidence-and-reconfirm)
+changed: it re-records the hash of each evidence symbol of the ignore entry that
+suppresses the finding with this fingerprint (or is the entry for it), keeping the
+entry's reason and expiry, and the finding reads suppressed again. Until then the
+finding reads *verdict out of date* and counts everywhere, the `[security]` gate
+and its caps included.
+
+`--evidence` records exactly the symbols it names (each a symbol identity, a
+canonical symbol or a bare name that names one symbol; for a fingerprint entry the finding's enclosing
+symbol is added) in place of the entry's own. It is how an entry that records no
+evidence gets its first, and how a deleted symbol is replaced. Exit 2 and no
+write when no entry suppresses the fingerprint, the entry records no evidence and
+none is named, a symbol no longer exists or is named by several symbols, the index
+is behind the file (run `sync <path>`), the entry is expired, or `.logos/security-ignore.toml` is malformed or
+not in the canonical spelling Logos writes. The payload is the entry written:
+`file`, `entry` (with its `evidence`) and `entries`. The MCP twin is
+`security_reconfirm`; both take no `--repo`/`repo` and act on the default member.
+The plugin guard asks before an agent runs the command or the tool, as it does
+before an agent edits the ignore file ([plugin.md](plugin.md)).
 
 ### `security bless`
 

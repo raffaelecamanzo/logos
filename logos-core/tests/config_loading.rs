@@ -421,6 +421,7 @@ god_methods = 30
 clone_similarity = 0.9
 clone_min_tokens = 80
 duplicate_min_tokens = 12
+cohesion_min_classes = 3
 ",
     );
     let rules = config::load_rules(&path).unwrap();
@@ -435,6 +436,8 @@ duplicate_min_tokens = 12
     assert_eq!(rules.metric_thresholds.clone_min_tokens, Some(80));
     // S-501: the exact-duplicate floor parses beside them.
     assert_eq!(rules.metric_thresholds.duplicate_min_tokens, Some(12));
+    // CR-252: the Cohesion class minimum parses beside them.
+    assert_eq!(rules.metric_thresholds.cohesion_min_classes, Some(3));
     // An omitted key stays None (the default is applied downstream).
     assert_eq!(rules.metric_thresholds.brain_complexity, None);
 }
@@ -487,6 +490,24 @@ fn non_positive_duplicate_min_tokens_fails_exit_2() {
     assert!(err
         .to_string()
         .contains("metric_thresholds.duplicate_min_tokens"));
+}
+
+/// CR-252: a non-positive `cohesion_min_classes` fails loud at load (exit 2),
+/// naming the key.
+#[test]
+fn non_positive_cohesion_min_classes_fails_exit_2() {
+    let dir = tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "rules.toml",
+        "[metric_thresholds]\ncohesion_min_classes = 0\n",
+    );
+    let err = config::load_rules(&path).unwrap_err();
+    assert!(matches!(err, ConfigError::InvalidValue { .. }));
+    assert_eq!(err.exit_code(), 2);
+    assert!(err
+        .to_string()
+        .contains("metric_thresholds.cohesion_min_classes"));
 }
 
 /// CR-005: a `max_clone_ratio` outside `[0.0, 1.0]` fails loud at load (exit 2),

@@ -36,9 +36,9 @@ import type {
   WorkspaceSecurityStateAnswer,
   WorkspaceStatus,
 } from "../../api/types.ts";
-import { EMPTY_COVERAGE } from "../../workspace/testFixtures.ts";
+import { EMPTY_COVERAGE, referenceResolution } from "../../workspace/testFixtures.ts";
 
-export { EMPTY_COVERAGE };
+export { EMPTY_COVERAGE, referenceResolution };
 
 /** The three-member roster these specs read as the workspace. */
 export const ROSTER: WorkspaceRoster = {
@@ -70,6 +70,14 @@ export function statusInfo(over: Partial<StatusInfo> = {}): StatusInfo {
     refs_resolved: 800,
     refs_unresolved: 200,
     resolution_coverage: 0.8,
+    internal_resolution: {
+      resolved: 600,
+      internal_candidates: 750,
+      provably_external: 150,
+      code_references: 900,
+      lower_bound: 0.8,
+      absence: null,
+    },
     total_line_count: 20_000,
     source_line_count: 15_000,
     test_line_count: 5_000,
@@ -313,9 +321,23 @@ export function workspaceStatus(over: Partial<WorkspaceStatus> = {}): WorkspaceS
     degraded_rollup: allOpened(),
     coverage: POPULATED_COVERAGE,
     topics: [],
+    reference_resolution: referenceResolution({}, 3),
     ...over,
   };
 }
+
+/** The workspace reference resolution with `web` unread (S-637): named, with
+ *  its reason, and summed over the two members read. */
+export const PARTIAL_REFERENCE_RESOLUTION = referenceResolution({
+  members: {
+    members: 3,
+    read: 2,
+    unread: ["web"],
+    unread_reasons: { web: "the store could not be opened" },
+  },
+  summary:
+    "lower bound 0.750 (600 of 800 internal candidates resolved; 1000 code references, 200 provably external), summed over 2 of 3 members; 15 counted internal as another member's, 4 bound across members; not read: web",
+});
 
 /** One member's row of `GET /api/v1/workspace/security/summary` (S-790). */
 export function securityRow(
@@ -537,6 +559,7 @@ export const WIDGET_STATES: Record<
       coverage: PARTIAL_COVERAGE,
       members: [memberStatus("api"), memberStatus("orders"), degradedMember("web")],
       degraded_rollup: oneDegraded("web"),
+      reference_resolution: PARTIAL_REFERENCE_RESOLUTION,
     }),
     reachability: reachabilityAnswer({
       coverage: coverageRider({ members_read: 2, members_total: 3 }),

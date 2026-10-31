@@ -194,13 +194,16 @@ fn a_failing_suite_that_writes_a_report_reads_tests_failed_and_is_ingested() {
     install(&w, "cargo-llvm-cov", 101);
     w.commit();
     let summary = w.run(None, true).expect("the run");
-    let ToolOutcome::TestsFailed { exit_code, reports, ingests } = outcome(&summary, "cargo-llvm-cov") else {
+    let ToolOutcome::TestsFailed { exit_code, reports, ingests, .. } = outcome(&summary, "cargo-llvm-cov") else {
         panic!("{summary:?}")
     };
     assert_eq!((*exit_code, reports.as_slice()), (Some(101), [".logos/coverage/rust.xml".to_string()].as_slice()));
     assert_eq!(ingests[0].matched_files, 1);
     assert_eq!(summary.exit_code(), 1, "the suite failed");
     assert_eq!(serde_json::to_value(&summary).unwrap()["tools"][0]["outcome"], "tests_failed");
+    // The run's payload carries no duration, and a quiet suite no cause key.
+    let tool = &serde_json::to_value(&summary).unwrap()["tools"][0];
+    assert!(tool.get("duration_ms").is_none() && tool.get("cause").is_none(), "{tool}");
     assert_eq!(row(&w.runner(), "cargo-llvm-cov")["state"], "tests_failed");
     assert_eq!(status(&w.root).unwrap().report_count, 1);
 }
@@ -318,9 +321,12 @@ fn a_cancelled_run_starts_nothing_more() {
         crate::jobs::this_run().expect("a foreground run").cancel();
         w.run(None, false).expect("the run")
     });
+    let runner = w.runner();
     for tool in ["cargo-llvm-cov", "go"] {
         assert!(matches!(outcome(&summary, tool), ToolOutcome::Cancelled), "{summary:?}");
-        assert_eq!(row(&w.runner(), tool)["state"], "cancelled");
+        assert_eq!(row(&runner, tool)["state"], "cancelled");
+        let last = last_run(&runner, tool);
+        assert!(last.get("cause").is_none() && last.get("duration_ms").is_none(), "a cancel states neither: {last}");
     }
     assert!(w.argvs("go").iter().all(|a| a.first().is_some_and(|x| x == "version")), "{:?}", w.argvs("go"));
     assert_eq!(summary.snapshot_id, None);
@@ -664,4 +670,176 @@ fn a_partial_ingest_is_named_in_the_failed_outcome() {
     assert_eq!((*exit_code, ingests.len()), (Some(0), 1), "{summary:?}");
     assert_eq!(summary.snapshot_id, Some(ingests[0].snapshot_id));
     assert_eq!(status(&w.root).unwrap().report_count, 1);
+}
+
+/// The `last_run` of `tool` in `runner`, which must have one.
+fn last_run<'a>(runner: &'a Value, tool: &str) -> &'a Value {
+    let last = &row(runner, tool)["last_run"];
+    assert!(last.is_object(), "{tool} has a last run: {runner}");
+    last
+}
+
+/// S-802: a tool that ran records how long its process ran — from its spawn
+/// to its end, which a stub that sleeps a second shows — and no cause; one
+/// that failed also records the masked excerpt of the end of its output,
+/// which `coverage status` carries and the whole output never reaches.
+#[test]
+fn a_run_records_how_long_it_ran_and_a_failure_records_why() {
+    let w = World::polyglot(&["cargo-llvm-cov", "go"]);
+    // The failing tool sleeps longer than the passing one, so that a duration
+    // that is a constant, or zero, or anyone's but the tool's own cannot pass.
+    w.failing_with("/bin/sleep 2", &format!("echo 'error: token={PLANTED} rejected'"));
+    w.stub_at(&w.bin.join("go"), "go", "go", 0, "/bin/sleep 1");
+    w.commit();
+    w.run(None, true).expect("the run");
+
+    let runner = w.runner();
+    let ran = last_run(&runner, "go");
+    let took = ran["duration_ms"].as_u64().unwrap_or_else(|| panic!("a duration: {ran}"));
+    let upper = crate::perf::scaled_ms(5000).as_millis() as u64;
+    assert!((1000..upper).contains(&took), "the tool slept a second: {took} ms");
+    assert!(ran.get("cause").is_none(), "a tool that ran has no cause: {ran}");
+
+    let failed = last_run(&runner, "cargo-llvm-cov");
+    let took = failed["duration_ms"].as_u64().unwrap_or_else(|| panic!("a duration: {failed}"));
+    let upper = crate::perf::scaled_ms(6000).as_millis() as u64;
+    assert!((2000..upper).contains(&took), "the tool slept two seconds: {took} ms");
+    let cause = failed["cause"].as_str().unwrap_or_else(|| panic!("a cause: {failed}"));
+    assert!(cause.starts_with("error: token=") && cause.contains(crate::history::security::mask::MASK), "{cause}");
+    assert!(!runner.to_string().contains(PLANTED), "the secret reached the status: {runner}");
+    let record = fs::read_to_string(w.root.join(".logos/coverage").join(LAST_RUN_FILE)).unwrap();
+    assert!(!record.contains(PLANTED), "the secret reached the record: {record}");
+}
+
+/// S-802: a failing suite that wrote its report records the failing test as
+/// its cause, masked, and the cause is in the run's payload too.
+#[test]
+fn a_failing_suite_records_the_failing_test_as_its_cause() {
+    let w = World::polyglot(&["cargo-llvm-cov"]);
+    w.stub_at(
+        &w.bin.join("cargo-llvm-cov"),
+        "cargo-llvm-cov",
+        "cargo-llvm-cov",
+        101,
+        &format!("/bin/sleep 1; echo 'failures:'; echo '    FAILED marker-test'; echo 'password={PLANTED}'; echo 'test result: FAILED. 0 passed; 1 failed'"),
+    );
+    w.commit();
+    let summary = w.run(None, true).expect("the run");
+    let ToolOutcome::TestsFailed { cause, .. } = outcome(&summary, "cargo-llvm-cov") else { panic!("{summary:?}") };
+    let cause = cause.as_deref().expect("the payload carries the cause");
+    assert!(cause.contains("FAILED marker-test") && cause.contains("test result: FAILED"), "{cause}");
+    assert!(!cause.contains(PLANTED), "{cause}");
+
+    let runner = w.runner();
+    let last = last_run(&runner, "cargo-llvm-cov");
+    assert_eq!((&last["outcome"], last["cause"].as_str()), (&Value::from("tests_failed"), Some(cause)), "{last}");
+    assert!(last["duration_ms"].as_u64().is_some_and(|ms| (1000..6000).contains(&ms)), "the tool slept a second: {last}");
+    assert!(!runner.to_string().contains(PLANTED), "{runner}");
+}
+
+/// S-802: a failing suite's cause is the bounded end of what it printed. On
+/// both streams, far past the bound, it is the labelled end of each — stdout's
+/// last lines, where the runner lists the failing test, and stderr's warning;
+/// on one stream alone, that stream's last lines. Either way it fits the bound
+/// a failed run's excerpt has, so a record of such causes stays readable.
+#[test]
+fn a_failing_suites_cause_is_the_bounded_end_of_what_it_printed() {
+    let flood = "/usr/bin/yes 'filler line of test output' | /usr/bin/head -c 20000; echo; echo 'FAILED marker-test'";
+    for (script, labelled) in [
+        (format!("{flood}; echo 'warning: slow test' >&2"), true),
+        (flood.to_string(), false),
+    ] {
+        let w = World::polyglot(&["cargo-llvm-cov"]);
+        w.stub_at(&w.bin.join("cargo-llvm-cov"), "cargo-llvm-cov", "cargo-llvm-cov", 101, &script);
+        w.commit();
+        let summary = w.run(None, true).expect("the run");
+        let ToolOutcome::TestsFailed { cause, .. } = outcome(&summary, "cargo-llvm-cov") else { panic!("{summary:?}") };
+        let cause = cause.as_deref().expect("a cause");
+        assert!(cause.contains("FAILED marker-test"), "{cause}");
+        assert_eq!(
+            cause.starts_with("stdout:\n") && cause.ends_with("\nstderr:\nwarning: slow test"),
+            labelled,
+            "{cause}"
+        );
+        assert!(cause.len() <= 1024 + '…'.len_utf8(), "bounded like a failure's excerpt: {} bytes", cause.len());
+    }
+}
+
+/// S-802: a tool's next run replaces its whole entry: a cause or a duration an
+/// earlier run recorded never lingers on a run that passed.
+#[test]
+fn a_passing_run_does_not_keep_the_cause_of_the_failure_before_it() {
+    let w = World::polyglot(&["cargo-llvm-cov"]);
+    w.silent("cargo-llvm-cov", "cargo-llvm-cov", "cargo-llvm-cov 0.6.13", "error: boom", 2);
+    w.commit();
+    w.run(None, true).expect("the failing run");
+    let runner = w.runner();
+    assert_eq!(last_run(&runner, "cargo-llvm-cov")["cause"], "error: boom");
+
+    install(&w, "cargo-llvm-cov", 0);
+    w.run(Some("cargo-llvm-cov"), false).expect("the passing run");
+    let runner = w.runner();
+    let last = last_run(&runner, "cargo-llvm-cov");
+    assert_eq!(last["outcome"], "ran");
+    assert!(last["duration_ms"].is_u64() && last.get("cause").is_none(), "nothing of the failure remains: {last}");
+}
+
+/// S-802: the custom entry records its duration and, when its command fails,
+/// the cause it printed, as a registry tool does.
+#[test]
+fn the_custom_entry_records_its_duration_and_cause() {
+    let w = World::polyglot(&["go"]);
+    w.repo_config("[coverage_ingest]\nrefresh_cmd = \"/bin/sleep 1; echo REAL_CAUSE >&2; exit 1\"\n");
+    w.commit();
+    w.run(Some("custom"), true).expect("the run");
+    let runner = w.runner();
+    let last = last_run(&runner, "custom");
+    assert_eq!(last["outcome"], "failed");
+    assert!(last["duration_ms"].as_u64().is_some_and(|ms| (1000..6000).contains(&ms)), "{last}");
+    assert!(last["cause"].as_str().is_some_and(|c| c.contains("REAL_CAUSE")), "{last}");
+}
+
+/// S-802: a tool that hits its limit records that it timed out and the limit
+/// it hit, and how long its process ran.
+#[test]
+fn a_timed_out_run_records_the_limit_it_hit() {
+    let w = World::polyglot(&["go"]);
+    w.stub_at(&w.bin.join("go"), "go", "go", 0, "/bin/sleep 60");
+    w.user_config("[coverage_ingest.tools.go]\ntimeout_secs = 1\n");
+    w.commit();
+    let summary = w.run(None, true).expect("the run");
+    assert!(matches!(outcome(&summary, "go"), ToolOutcome::TimedOut { after_secs: 1 }), "{summary:?}");
+
+    let runner = w.runner();
+    let last = last_run(&runner, "go");
+    assert_eq!(last["outcome"], "timed_out");
+    let cause = last["cause"].as_str().unwrap_or_else(|| panic!("a cause: {last}"));
+    assert!(cause.contains("1s limit"), "the cause states the limit: {cause}");
+    assert!(last["duration_ms"].as_u64().is_some_and(|ms| ms >= 1000), "{last}");
+}
+
+/// S-802: a record written by 1.21.2, with neither field, reads without
+/// error: its tools keep their last run, with both fields absent — never `0`
+/// or empty text — and a later run adds them beside the untouched old entry.
+#[test]
+fn a_record_written_before_the_fields_reads_with_both_absent() {
+    let w = World::polyglot(&["cargo-llvm-cov", "go"]);
+    install(&w, "go", 0);
+    install(&w, "cargo-llvm-cov", 0);
+    write(
+        &w.root.join(".logos/coverage").join(LAST_RUN_FILE),
+        r#"{"cargo-llvm-cov": {"outcome": "failed", "exit_code": 2, "head_sha": null, "finished_at": 7, "log": ".logos/coverage/cargo-llvm-cov.failed.log"}}"#,
+    );
+    let runner = w.runner();
+    let old = last_run(&runner, "cargo-llvm-cov");
+    assert_eq!((&old["outcome"], &old["finished_at"]), (&Value::from("failed"), &Value::from(7)), "{old}");
+    assert!(old.get("duration_ms").is_none() && old.get("cause").is_none(), "absent, not 0 or empty: {old}");
+    assert_eq!(row(&runner, "cargo-llvm-cov")["state"], "failed");
+
+    w.commit();
+    w.run(Some("go"), true).expect("the run");
+    let runner = w.runner();
+    assert!(last_run(&runner, "go")["duration_ms"].is_u64());
+    let old = last_run(&runner, "cargo-llvm-cov");
+    assert!(old.get("duration_ms").is_none() && old.get("cause").is_none(), "{old}");
 }

@@ -42,7 +42,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Serialize;
 
@@ -89,6 +89,12 @@ pub struct CoverageRunner {
     tools_dir: Option<PathBuf>,
 }
 
+/// How a tool's run ended, and how long its process ran: from its spawn to
+/// its end, the readying before and the reports' collection after left out.
+/// `None` when no process ran — it did not start, or the run was cancelled
+/// before it did — so that no duration is ever a made-up zero.
+type Timed = (RunOutcome, Option<Duration>);
+
 /// How one tool's run ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
@@ -96,8 +102,11 @@ pub enum RunOutcome {
     /// It exited 0 and wrote its reports.
     Ran { reports: Vec<PathBuf> },
     /// It exited non-zero but wrote reports: its tests failed, and the
-    /// reports are still evidence (CR-234 CRA-01).
-    TestsFailed { exit_code: Option<i32>, reports: Vec<PathBuf> },
+    /// reports are still evidence (CR-234 CRA-01). `cause` is a masked
+    /// excerpt of the end of what it printed, as a failure's is — where a
+    /// test runner lists the tests that failed ([`failure_cause`]); `None`
+    /// when it printed nothing.
+    TestsFailed { exit_code: Option<i32>, reports: Vec<PathBuf>, cause: Option<String> },
     /// It wrote no report, or could not be started; `stderr` is what it
     /// printed — each stream's head and tail ([`spawn`]) — or why it did not
     /// start. `cause` is the part of that the payload's excerpt is made from
@@ -226,25 +235,27 @@ impl CoverageRunner {
             Detection::Installed { binary, .. } => binary,
             detection => return Ok(RunOutcome::NotRun { detection }),
         };
-        Ok(self.run_installed(tool, &binary))
+        Ok(self.run_installed(tool, &binary).0)
     }
 
-    fn run_installed(&self, tool: &CoverageTool, binary: &Path) -> RunOutcome {
+    /// Run the installed `tool`: how it ended, and how long its process ran —
+    /// from its spawn to its end; `None` when no process ran.
+    fn run_installed(&self, tool: &CoverageTool, binary: &Path) -> Timed {
         // A symlink committed in place of `.logos` or of the output directory
         // would send every report and the init script outside the project.
         let out_dir = match real_output_dir(&self.root, OUTPUT_DIR) {
             Ok(dir) => dir,
-            Err(e) => return failed(format!("could not prepare {OUTPUT_DIR}: {e}")),
+            Err(e) => return (failed(format!("could not prepare {OUTPUT_DIR}: {e}")), None),
         };
         // A report an earlier run left must never be credited to this one.
         let (out, expected) = match self.prepare_report(tool, &out_dir) {
             Ok(prepared) => prepared,
-            Err(e) => return failed(format!("could not clear the previous report: {e}")),
+            Err(e) => return (failed(format!("could not clear the previous report: {e}")), None),
         };
         let init_script = out_dir.join(GRADLE_INIT_FILE);
         if tool.run.contains(&registry::Arg::InitScript) {
             if let Err(e) = write_new(&init_script, GRADLE_INIT_SCRIPT.as_bytes()) {
-                return failed(format!("could not write {}: {e}", init_script.display()));
+                return (failed(format!("could not write {}: {e}", init_script.display())), None);
             }
         }
         let extra = self.overrides.get(tool.name).map_or(&[][..], |o| o.extra_args.as_slice());
@@ -278,12 +289,24 @@ fn spawn_and_settle(
     launch: &Launch<'_>,
     reports: impl FnOnce() -> Vec<PathBuf>,
     no_report: &str,
-) -> RunOutcome {
+) -> Timed {
+    let spawned = Instant::now();
     let finished = match spawn::run(program, argv, launch) {
         Ok(finished) => finished,
-        Err(e) if e.kind() == io::ErrorKind::Interrupted => return RunOutcome::Cancelled,
-        Err(e) => return failed(format!("could not start {}: {e}", program.display())),
+        Err(e) if e.kind() == io::ErrorKind::Interrupted => return (RunOutcome::Cancelled, None),
+        Err(e) => return (failed(format!("could not start {}: {e}", program.display())), None),
     };
+    let took = spawned.elapsed();
+    (settle_run(&finished, launch, reports, no_report), Some(took))
+}
+
+/// How `finished` ended — see [`spawn_and_settle`].
+fn settle_run(
+    finished: &spawn::Finished,
+    launch: &Launch<'_>,
+    reports: impl FnOnce() -> Vec<PathBuf>,
+    no_report: &str,
+) -> RunOutcome {
     // A cancel during the run killed the group: whatever exit status that
     // left, and whatever reports some modules wrote before it, the run was
     // cancelled, and none of it is credited.
@@ -297,10 +320,10 @@ fn spawn_and_settle(
     let exit_code = status.code();
     match (status.success(), reports.is_empty()) {
         (true, false) => RunOutcome::Ran { reports },
-        (false, false) => RunOutcome::TestsFailed { exit_code, reports },
+        (false, false) => RunOutcome::TestsFailed { exit_code, reports, cause: cause_excerpt(finished) },
         (true, true) => RunOutcome::Failed { exit_code, stderr: no_report.to_string(), cause: None },
         (false, true) => {
-            RunOutcome::Failed { exit_code, stderr: failure_output(&finished), cause: failure_cause(&finished) }
+            RunOutcome::Failed { exit_code, stderr: failure_output(finished), cause: failure_cause(finished) }
         }
     }
 }
@@ -337,6 +360,15 @@ fn failure_cause(finished: &spawn::Finished) -> Option<String> {
         tail(&finished.stdout, CAUSE_STDOUT_LINES, CAUSE_STDOUT_BYTES),
         tail(&finished.stderr, CAUSE_STDERR_LINES, CAUSE_STDERR_BYTES)
     ))
+}
+
+/// The masked, bounded excerpt of why `finished` did not pass, as a failed
+/// run's payload carries it ([`failure_cause`] when both streams have text,
+/// else the one stream whole); `None` when it printed nothing. A suite that
+/// failed but wrote its report has this too: it names the failing tests.
+fn cause_excerpt(finished: &spawn::Finished) -> Option<String> {
+    let text = failure_cause(finished).unwrap_or_else(|| failure_output(finished));
+    Some(mask::excerpt(&text)).filter(|excerpt| !excerpt.is_empty())
 }
 
 /// The last `lines` lines of `text`, masked, and of those the last `bytes`

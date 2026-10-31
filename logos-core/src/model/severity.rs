@@ -27,13 +27,16 @@ pub enum Severity {
     Low,
     /// The report gave no rating: no CVSS score and only a default level,
     /// one the report left out (SARIF's default, `warning`) or one its
-    /// scanner writes on every result (OSV-Scanner's `warning`). It never
-    /// reads `medium` ([S-768]); [`reason`](Self::reason) says why.
+    /// scanner writes whatever the finding is (OSV-Scanner's `warning`,
+    /// Checkov's `error`: `history::security::parse::fixed_levels` is the
+    /// table). It never reads `medium` ([S-768], [S-811]);
+    /// [`reason`](Self::reason) says why.
     ///
     /// [S-768]: ../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
+    /// [S-811]: ../../../docs/planning/journal.md#s-811-no-scanners-constant-level-reads-as-a-severity
     Unrated,
-    /// A SARIF level `warning` the report states (OSV-Scanner's on every
-    /// result does not count), or a CVSS score below 7.0.
+    /// A SARIF level `warning` the report states (a level its scanner writes
+    /// whatever the finding is does not count), or a CVSS score below 7.0.
     Medium,
     /// SARIF level `error`, or a CVSS score below 9.0.
     High,

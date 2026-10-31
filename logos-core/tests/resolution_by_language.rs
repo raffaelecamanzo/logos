@@ -223,10 +223,15 @@ fn a_same_file_only_language_reads_differently_from_one_resolving_across_files()
 
     // The Imports class through the same composition, not only its store
     // counts: `use crate::util::run` is one reference, bound, across files.
-    // Rust is the control S-439 must leave byte-identical, so this is exact.
+    // Rust is the control S-439 must leave byte-identical, so this is exact —
+    // beside the status-only count S-635 adds, which is `0`: the one import
+    // is bound.
     assert_eq!(
         rust.imports,
-        RelationResolution::measured(1, 1, 0, 1),
+        RelationResolution {
+            provably_external: Some(0),
+            ..RelationResolution::measured(1, 1, 0, 1)
+        },
         "the Rust import reaches the readout as a cross-file figure: {rust:?}"
     );
 

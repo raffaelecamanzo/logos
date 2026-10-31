@@ -37,17 +37,18 @@ descriptors and a test fails when it drifts.
 |---|---|---|
 | Java | `resolved` | `calls`, `imports`, `type_relations` |
 | Rust | `resolved` | `calls`, `imports`, `type_relations` |
-| C# | `partial` | `imports`, `type_relations` |
-| Go | `partial` | `calls`, `imports` |
-| Kotlin | `partial` | `imports`, `type_relations` |
-| PHP | `partial` | `imports`, `type_relations` |
+| C | `partial` | `calls`, `imports` |
+| C# | `partial` | `calls`, `imports`, `type_relations` |
+| C++ | `partial` | `calls`, `imports`, `type_relations` |
+| Go | `partial` | `calls`, `imports`, `type_relations`, `member_access` |
+| JavaScript (incl. JSX) | `partial` | `calls`, `imports`, `type_relations` |
+| Kotlin | `partial` | `calls`, `imports`, `type_relations` |
+| PHP | `partial` | `calls`, `imports`, `type_relations` |
 | Python | `partial` | `calls`, `imports`, `type_relations` |
-| Scala | `partial` | `imports`, `type_relations` |
-| TSX (incl. JSX) | `partial` | `calls`, `imports` |
-| TypeScript (incl. JavaScript) | `partial` | `calls`, `imports` |
-| C | `same-file` | none |
-| C++ | `same-file` | none |
-| Ruby | `same-file` | none |
+| Ruby | `partial` | `calls`, `imports`, `type_relations` |
+| Scala | `partial` | `calls`, `imports`, `type_relations` |
+| TSX | `partial` | `calls`, `imports`, `type_relations` |
+| TypeScript | `partial` | `calls`, `imports`, `type_relations` |
 <!-- reach:end -->
 
 - `resolved` — calls, imports and type relations bind across files.
@@ -151,8 +152,13 @@ logos node UserService
 logos node user_summary_view
 ```
 
-Overall resolution health is in `logos status` (`refs_resolved` /
-`refs_unresolved` / `resolution_coverage`); the per-relation-class breakdown of
+Overall resolution health is in `logos status`: `internal_resolution`, the bound
+code references over those that could be internal — a lower bound, stated beside
+the provably external references it leaves out — and `doc_resolution` for the
+documentation's own references
+([commands](commands.md#internal_resolution-and-doc_resolution)). The older
+`refs_resolved` / `refs_unresolved` / `resolution_coverage` are kept, deprecated,
+and are what the note below explains. The per-relation-class breakdown of
 cross-artifact bindings is in `logos stats` (the `artifact_bindings` field, keyed
 by each relation's payload token), read live from the graph.
 
@@ -178,6 +184,40 @@ by each relation's payload token), read live from the graph.
 >   has one), a `super` call only through a proven base class, and a call on
 >   any other receiver binds **nowhere** unless the receiver's type is proven
 >   (Java's typed receivers, [FR-RS-10](../specs/requirements/FR-RS-10.md);
+>   C#'s, [FR-RS-30](../specs/requirements/FR-RS-30.md) — a field, parameter or
+>   local declared `T` or `T?`, a property read through `this.` or named in
+>   lowercase, `var x = new T()`, a typed `foreach` variable, or a
+>   primary-constructor parameter of a type with no base list;
+>   TypeScript's, [FR-RS-21](../specs/requirements/FR-RS-21.md) — a constructor
+>   parameter property or annotated field read through `this.`, or the one
+>   annotated parameter or variable, or `const x = new T()`, in scope at the call;
+>   Python's, [FR-RS-24](../specs/requirements/FR-RS-24.md) — an attribute the
+>   class annotates or constructs itself, read through `self.`, or the one
+>   annotated parameter or local, or `x = T(…)`, its function binds;
+>   PHP's, [FR-RS-27](../specs/requirements/FR-RS-27.md) — the one parameter
+>   typed `T` or `?T`, or `$x = new T()`, in scope at the call, or a typed or
+>   constructor-promoted property read through `$this->`;
+>   Kotlin's, [FR-RS-32](../specs/requirements/FR-RS-32.md) — the one
+>   parameter, typed local, `val x = T()`, typed lambda, `for`, `catch` or
+>   `when` variable, or property or constructor `val`/`var` of the caller's own
+>   class, object or companion declared `T` or `T?`, in scope at the call —
+>   never a top-level property, nor a class property read inside a lambda that
+>   may have its own receiver (anything but `let`, `forEach`, `map`, …); it
+>   binds among `T`'s own members, never its companion's, and a call no member
+>   of `T` answers still reaches the one extension of its name in scope;
+>   Scala's, [FR-RS-37](../specs/requirements/FR-RS-37.md) — a class
+>   parameter or member `val`/`var` declared `T`, read bare or through
+>   `this.`, a parameter or local `val` declared `T`, or `val x = new T(…)`,
+>   for a call with an argument list (a parameterless `x.m` may read a field);
+>   it binds among `T`'s own methods, never its companion `object`'s, which
+>   only a call written on the name (`T.m()`) reaches;
+>   C++'s, [FR-RS-39](../specs/requirements/FR-RS-39.md) — the one parameter,
+>   local, lambda, `catch`, `for` or condition variable, or data member of the
+>   caller's own class read by an inline method, in scope at the call: declared
+>   `T`, `T&` or `const T&` for `x.m()`, and `T*`, `std::unique_ptr<T>` or
+>   `std::shared_ptr<T>` for `p->m()` — never `auto`, a template parameter, or
+>   a member read by an out-of-line definition; it binds to `T`'s `m` or its
+>   nearest base's, as a written `T::m()` does;
 >   Rust's, [FR-RS-42](../specs/requirements/FR-RS-42.md), below).
 >   Where the caller sits — its file, class or module — is not evidence of what
 >   `x` is: an `other.foo()` inside a method `foo` never binds to that method
@@ -192,8 +232,15 @@ by each relation's payload token), read live from the graph.
 >   the `self` forms are `this.foo()`; `self.foo()` and `cls.foo()`;
 >   `$this->foo()`, `self::foo()` and `static::foo()`; and Ruby's `self.foo()`
 >   or a bare `foo()` inside a class — the `super` forms `super.foo()`,
->   `super().foo()`, `parent::foo()` and Ruby's `super`. None of these plugins
->   proves a base class yet, so their `super` calls stay unbound.
+>   `super().foo()`, `parent::foo()` and Ruby's `super`. A `super` call binds
+>   only through a base class the graph proves. In Ruby
+>   ([FR-RS-35](../specs/requirements/FR-RS-35.md)) a call on the instance —
+>   `self.foo()`, `foo()`, or a bare `foo` that no parameter or local of the
+>   method binds — and `super` bind along the class's ancestors: the modules it
+>   prepends, the class itself (every reopening of it), the modules it
+>   includes, then its superclass. Exactly one callable at the first level
+>   holding the name decides; two mixins defining it decide nothing, and a mixin
+>   the graph cannot see (`include Comparable`) stops the walk where it sits.
 >   In C#, Kotlin, Scala and C++ a bare call `foo()` written inside a class (or
 >   Kotlin/Scala `object`, Scala `trait`) is a call on the current instance,
 >   exactly like `this.foo()` / `this->foo()`: it binds to that type's own `foo`
@@ -201,7 +248,9 @@ by each relation's payload token), read live from the graph.
 >   itself (or one enclosing it) declares a local function or nested `def foo`,
 >   which the call then names, as the language's own scoping does; outside any
 >   type — a free function, a Scala 3 top-level `def`, an out-of-line C++
->   `Type::foo` definition — it is a plain call, bound by the file's scope.
+>   `Type::foo` definition whose class another file declares — it is a plain
+>   call, bound by the file's scope. An out-of-line definition in its class's
+>   own file is that class's member, so its calls are inside the type.
 >   `base.foo()` / `super.foo()` stay unbound (these plugins record no proven
 >   base class), and so does C++'s `Base::foo()`, which reads like any other
 >   qualified call. In a Kotlin chain `a.b.c()` only `c` is a call. One receiver
@@ -278,11 +327,13 @@ by each relation's payload token), read live from the graph.
 >   or variadic parameter (`b = 0`, `vararg`, `params`, `...`, `*args`) widens
 >   what a callable admits; a count logos cannot read — a spread `f(*xs)`, a
 >   Python `cls.m(…)` (which passes the instance itself to an instance method)
->   — and a callable whose parameters it cannot count (a C++ out-of-line
->   definition, whose defaults sit on a prototype) filter nothing. So an
+>   — and a callable whose parameters it cannot count (a C++ definition
+>   outside a class body, whose defaults may sit on a separate declaration —
+>   except an out-of-line member merged into its in-class declaration, which
+>   carries that declaration's range) filter nothing. So an
 >   own-class `inh(a)` no longer takes `inh(1, 2)`: the call binds the base
 >   class's `inh(a, b)` when the language records its classes' bases (Java,
->   Kotlin, C#, Python, PHP), and stays unbound in Scala, C++ and TypeScript,
+>   Kotlin, C#, Python, PHP, Scala), and stays unbound in C++ and TypeScript,
 >   which record none. A Kotlin unqualified call whose same-named members all
 >   mismatch goes on to the top-level function or import of that name, as
 >   Kotlin's resolution does — but only when the class's supertypes are all in
@@ -310,8 +361,14 @@ by each relation's payload token), read live from the graph.
 > **honest recall** of a never-fabricate, exactly-one-candidate resolver — not a
 > broken index. The number is a transparency signal only: it gates nothing and
 > never moves the quality signal ([FR-RS-04](../specs/requirements/FR-RS-04.md)).
-> To gauge *workspace-internal* resolution, look at the `refs_resolved` count and
-> the `artifact_bindings` breakdown rather than the raw ratio.
+> To gauge *workspace-internal* resolution, read `internal_resolution` — the bound
+> code references over those that could be internal, with the provably external
+> ones counted beside it — and `doc_resolution` for the documentation, rather than
+> this deprecated ratio ([commands](commands.md#internal_resolution-and-doc_resolution));
+> across a workspace, `logos workspace status`'s `reference_resolution` pools the
+> members and counts a reference into another member as internal
+> ([commands](commands.md#reference_resolution--the-workspaces-own-reference-resolution));
+> the `artifact_bindings` breakdown of `logos stats` covers cross-artifact bindings.
 
 All of this obeys **never-fabricate**: a reference binds only when exactly one
 candidate matches — an ambiguous template, a duplicate schema name, or a registry
@@ -434,7 +491,8 @@ logos review --base main --json            # the branch delta, per symbol, again
 ```
 
 `offenders` lists every offender behind `scan`'s top-ten `worst_offenders`, each
-with its symbol id, value and threshold. `review --base <ref>` compares the
+with its symbol id, value and threshold. Equality's above-average functions are
+not offenders and are listed only with `--dimension equality`. `review --base <ref>` compares the
 working tree with the merge-base of `HEAD` and the base and classifies each
 offender and each `check` violation as `new`, `worsened`, `improved`, `resolved`
 or `unchanged`, labelling each entry with how far the graph can be trusted on its
@@ -608,8 +666,9 @@ dialog shows:
 Every answer is kept in your user-level Logos config, never in the repository.
 
 Once you accept, the page runs a coverage job. The install or the dependency addition goes first,
-then every installed tool runs and its report is ingested. The progress list shows each step as it
-happens. Logos never commits: the dependency change stays in your working tree for you to review.
+then every installed tool runs and its report is ingested. The Coverage tools table shows each step
+as it happens: the tool's State reads `installing` or `adding dependency`, then `queued` and
+`running`. Logos never commits: the dependency change stays in your working tree for you to review.
 
 **Cancel** stops whichever step is running:
 
@@ -618,8 +677,8 @@ happens. Logos never commits: the dependency change stays in your working tree f
   (`package.json`, `pyproject.toml`, `pnpm-lock.yaml`, `uv.lock` and so on) exactly as they were.
   It also removes what the package manager had just installed of the added package itself: the
   `node_modules/@vitest/coverage-v8` package, or pytest-cov's package, dist-info and `.pth` hook in
-  the project's `.venv`. The progress list names everything that was put back. Packages the manager
-  pulled in alongside it, such as `coverage`, stay; on their own they measure nothing.
+  the project's `.venv`. The message area under the table names everything that was put back.
+  Packages the manager pulled in alongside it, such as `coverage`, stay; on their own they measure nothing.
 - No coverage tool runs after a cancel.
 
 Logos refuses to add a dependency, and changes nothing, when the project has no lockfile, has the
@@ -638,7 +697,8 @@ files its report matched. A missing tool or a failing suite never reads as 0 %.
 **Run coverage** on the widget's title row asks the execution consent the first time, in a dialog that
 says the run builds the project and runs its tests, which executes the project's own code. It names
 each tool and shows the custom command verbatim. Nothing starts until you allow it. The run is a job
-that a second click joins, with a per-tool progress list that follows it live, and **Cancel** kills
+that a second click joins, with the Coverage tools table following it live (State and Elapsed per tool, the cause of a
+failure below), and **Cancel** kills
 each tool's whole process group. A coverage run and a security scan can run side by side. The
 [command line](coverage.md#running-coverage-coverage-run-and-coverage-refresh) does the same with
 `logos coverage run`.
@@ -697,12 +757,12 @@ instead and `init -i` writes no `.mcp.json` entry. For manual wiring:
 claude mcp add logos -- /path/to/logos --project /path/to/project serve --mcp
 ```
 
-The host then sees **34 `logos:*` tools**, all live (43 when the server starts in a
+The host then sees **35 `logos:*` tools**, all live (44 when the server starts in a
 workspace: the nine `xservice_*`/`workspace_*` tools join them):
 
-| Navigation (11) | Quality & Governance (14) | Evidence tiers (9) |
+| Navigation (11) | Quality & Governance (14) | Evidence tiers (10) |
 |---|---|---|
-| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `bless_rules`, `offenders`, `review`, `improvements`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh`, `coverage_run`, `security_scan`, `security_ingest`, `security_status`, `security_findings` |
+| `search`, `node`, `callers`, `callees`, `impact`, `impact_intersection`, `precedent`, `branch_overlap`, `explore`, `context`, `status` | `scan`, `rescan`, `check_rules`, `bless_rules`, `offenders`, `review`, `improvements`, `health`, `doctor`, `verify`, `evolution`, `dsm`, `session_start`, `session_end` | `hotspots`, `coverage_ingest`, `coverage_status`, `coverage_refresh`, `coverage_run`, `security_scan`, `security_ingest`, `security_status`, `security_findings`, `security_reconfirm` |
 
 Each MCP tool is a thin twin of the CLI command of the same name and returns a
 byte-identical payload — `check_rules` is spelled `logos check` and `bless_rules`
@@ -711,9 +771,9 @@ the one deliberate MCP-only tool (it replays the last scan's parameters *within 
 server process*, which a one-shot CLI invocation has no equivalent of; use
 `logos scan`). The session gate is reachable from either surface:
 `logos session-start` / `logos session-end`, with a failing `session-end`
-exiting 1. The nine evidence-tier tools never move the `session_end` gate
+exiting 1. The ten evidence-tier tools never move the `session_end` gate
 signal, like their CLI counterparts. The five `hotspots` and `coverage_*` tools
-are **non-gated**; the four `security_*` tools reach the gate only through a
+are **non-gated**; the five `security_*` tools reach the gate only through a
 [`[security]` table](configuration.md#security--the-security-gate) in `rules.toml`.
 
 Server behavior guarantees:
@@ -840,7 +900,7 @@ the workspace manifest and config saves, the on-demand `verify`
 (`/api/v1/verify`), and the Security page's scan start and cancel
 (`/api/v1/security/scan`, `/api/v1/security/scan/cancel`), scanner install and
 its cancel (`/api/v1/security/install`, `/api/v1/security/install/cancel`) and
-suppression writes (`/api/v1/security/suppress`, `/api/v1/security/unsuppress`);
+suppression writes (`/api/v1/security/suppress`, `/api/v1/security/unsuppress`, `/api/v1/security/reconfirm`);
 those are additionally gated by a
 same-origin + per-session intent (CSRF) guard, so a request missing the `x-logos-intent` token or arriving cross-origin
 is rejected `403` before any handler runs. The whole React app — its hashed
@@ -895,11 +955,11 @@ honest empty state naming the producing command:
 The sidebar leads with what Logos is for — is the code healthy, secure and covered — and
 reads in three groups: **assess**, **explore**, **configure**.
 
-- **Group A — assess:** Dashboard `/`, Health `/health`, Security `/security` (the scanners, the findings in the graph, the OWASP Top 10 view, Run scan and triage: [security.md](security.md#the-security-page)), Coverage `/coverage`.
-- **Group B — explore:** Graph `/graph`, Rule findings `/gaps`, Files & Risk `/files`. The Architecture view is filed here, directly after Graph, but it is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Health.
+- **Group A — assess:** Dashboard `/`, Quality `/health` (the route keeps its path), Security `/security` (the scanners, the findings in the graph, the OWASP Top 10 view, Run scan and triage: [security.md](security.md#the-security-page)), Coverage `/coverage`.
+- **Group B — explore:** Graph `/graph`, Rule findings `/gaps`, Files & Risk `/files`. The Architecture view is filed here, directly after Graph, but it is hidden (see [Hidden widgets](#hidden-widgets)): `/architecture` and the retired `/dsm` bookmark land on Quality.
 - **Group C — configure:** Statistics `/statistics`, Config `/config`.
 - **Workspace scope (workspace mode only):** Workspace Dashboard `/workspace-dashboard`,
-  Workspace `/workspace`, Workspace Health `/workspace-health`, Security
+  Workspace `/workspace`, Workspace Quality `/workspace-health`, Security
   `/workspace-security` (every member's scanners and fresh findings, rolled up), Coverage
   `/workspace-coverage`, Workspace Statistics `/workspace-statistics`, Config
   `/workspace-config`, in that order. These answer for the **whole workspace**, not for the
@@ -945,7 +1005,7 @@ inside the boundary it governs and nothing outside that section is scoped by it.
 Service header is a column — the section label on its own row, the selector at full
 width beneath it — so the label stays readable however long the member name is. The
 Workspace section reads as one list (no divider between its groups), so the workspace
-entries read in one order: Dashboard, Workspace, Health, Security, Coverage, Statistics,
+entries read in one order: Dashboard, Workspace, Quality, Security, Coverage, Statistics,
 Config. The Service section keeps the three groups above, assess, explore, configure.
 Scope is a declared field on each navigation entry, not a path-prefix guess, so a
 view cannot silently fall into the wrong scope by being named differently.
@@ -963,19 +1023,25 @@ blank `?repo=` is unscoped. In a plain single repo the parameter is inert.
 The three workspace-scoped views answer questions the per-member views cannot:
 **Workspace Dashboard** leads with a **Security** widget (below), then renders the server's own composed cross-service
 edge-count/egress-rate line (never the count without the rate beside it) with
-coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Health** renders the degraded roll-up in
+coverage by intake (the per-arm board is hidden — see [Hidden widgets](#hidden-widgets)); **Workspace Quality** renders the degraded roll-up in
 words with a per-member table, the advisory governance findings and the topic
 inventory (the **Broker topics** widget, formerly *Promoted broker topics*),
 drawing every unopenable member as degraded and naming it; and
 **Workspace Statistics** sums telemetry over members. On the Workspace Dashboard,
-the Workspace tab's **Cross-service coverage** tab and Workspace Health, each
-widget states what it shows and why it matters (since S-613; Workspace Health's
+the Workspace tab's **Cross-service coverage** tab and Workspace Quality, each
+widget states what it shows and why it matters (since S-613; Workspace Quality's
 other four widgets since S-617). **Resolved cross-service edges** shows why the
 unresolved outbound calls did not resolve as a table of reason and count, largest
 reason first, whose counts sum to the unresolved figure; **Cross-service
 reachability** leads with the callables to keep because another service calls
-them; **Members** draws a member that could not be opened with a red *degraded*
-State badge and the reason beside it; and **Workspace rules** with no
+them; **Reference resolution across the workspace** states the members' code
+references pooled — summed, never averaged — where a call into another service's
+code counts as one that could link, with its population line and the members it
+summed over, naming any it could not read
+([commands](commands.md#reference_resolution--the-workspaces-own-reference-resolution));
+**Members** shows each member's own figure over its internal candidates, and draws
+a member that could not be opened with a red *degraded* State badge and the reason
+beside it; and **Workspace rules** with no
 rules declared says so and names `[[governance.boundaries]]` in
 `logos.workspace.toml` in that sentence. Every ratio on these views
 carries its denominator and its exclusion — a zero denominator renders the ratio
@@ -1127,14 +1193,14 @@ full path. Each of the two widgets says what it ranks and why it matters; when
 nothing is ranked yet the board says so and names `logos hotspots`, and a
 single-author history is stated as such. The
 **Co-change** and **Defect** headers explain themselves on hover and focus
-(CR-203). On **Health** (`/health`) the Quality-signal table carries a
+(CR-203). On **Quality** (`/health`) the Quality-signal table carries a
 **Score** column rendering each metric's normalized value as a CSP-safe `<meter>`
 bar — the same widget the Dashboard roll-ups use; applicability drop-outs
 (Cohesion/Focus) show a muted, right-aligned `n/a` with no bar (CR-042), and a
 not-applicable Modularity, Acyclicity or Depth (fewer than 5 cross-module edges)
 shows **not applicable** with its reason.
 
-Since logos 1.4.14 the Health page's two cards — the gate and the quality
+Since logos 1.4.14 the Quality page's two cards — the gate and the quality
 signal — are built from **one** read of the last persisted snapshot rather than two
 independent ones, so a `logos scan` landing while the page loads can no longer
 render two cards describing different generations of the same figures. The
@@ -1168,7 +1234,7 @@ what the comparison establishes. Where the ordering cannot be established at all
 takes precedence, and no fourth state was added.
 
 **Worst offenders are the ones the snapshot computed (since logos 1.9.0).** The
-Nesting, Conciseness, Cohesion, Focus and Uniqueness widgets on Health — and,
+Nesting, Conciseness, Cohesion, Focus and Uniqueness widgets on Quality — and,
 since CR-209, Acyclicity, Depth, Equality and Redundancy — list the
 offenders the last `scan`, `gate` or session snapshot persisted, in the order it
 computed them, read in the same single snapshot read as the signal and the gate.
@@ -1181,6 +1247,12 @@ and never infers the state from an empty list:
 | Recorded, none flagged | *No offenders flagged within thresholds.* — the only state that means a clean result |
 | Not recorded | *Offenders were not recorded for this snapshot; run `logos scan` to record them.* — a snapshot written before 1.9.0, or a store never scanned |
 
+Equality's list is not a list of offenders: Equality has no per-function
+threshold, so it shows the functions with above-average complexity, highest
+first, under the caption *Functions above the mean complexity*. The widget says
+they are not violations, counts them as "N above average", and reads *No function
+is above the mean complexity* when the list is empty (CR-252).
+
 A not-applicable dimension (Cohesion or Focus with no classes) keeps its `n/a`
 rendering in every state. After upgrading, the existing snapshot reads "not
 recorded" until the next `logos scan`. The same holds for the four CR-209 lists
@@ -1189,7 +1261,7 @@ reads "not recorded". One whose score is clean (no cycle, depth 1, an even
 spread, nothing dead or duplicated) reads "none flagged", which is then true.
 
 **Every dimension has a widget, and every widget explains itself (unreleased,
-CR-203, CR-206).** Health renders the Gate, the Quality signal, one widget per
+CR-203, CR-206).** Quality renders the Gate, the Quality signal, one widget per
 quality dimension — all ten, in the Quality signal table's order — and the Signal
 trend, each stating what it shows and why it matters. The Gate states its pass
 condition, *passes at ≥ baseline − ε*, with ε read from the gate result; a pass
@@ -1209,9 +1281,10 @@ scored and excluded, and the thresholds fingerprint with what a change to
 `[metric_thresholds]` does to the gate. Modularity carries no offender list in
 the payload: it scores the directory layout as a whole, and its widget says so,
 never an empty table. The other nine list their worst offenders (CR-209 added
-Acyclicity, Depth, Equality and Redundancy).
+Acyclicity, Depth, Equality and Redundancy), Equality as its above-average
+functions rather than as offenders.
 
-**Health's Where to start card (unreleased, S-505, FR-QM-17).** Above the dimension widgets, Health renders a **Where to start** card answering "what
+**Quality's Where to start card (unreleased, S-505, FR-QM-17).** Above the dimension widgets, Quality renders a **Where to start** card answering "what
 should I fix first?" from the snapshot it displays. It is a table of the ranked
 fix units with the columns **Rank**, **Unit**, **Dimension**, **Est. points** and
 **Outlier**. The unit is a function, a class or a duplicate or near-clone group,
@@ -1230,15 +1303,15 @@ yet.
 
 The dimension widgets below the card give the drill-downs. Redundancy lists its
 dead and duplicate functions, and its duplicate groups also appear in the card's
-ranking. Equality and Depth list their worst items and say that they carry no
-points, because splitting a function or a module has no single result.
+ranking. Equality lists its above-average functions and Depth its longest chains, and
+both say that they carry no points, because splitting a function or a module has no single result.
 Modularity says it has no per-unit attribution. Acyclicity lists its cycles, says
 the same about points, and links to the **Architecture** view while that view is
 not hidden (see [Hidden widgets](#hidden-widgets)): to its Cycles while that list
 is shown, and to the dependency matrix, whose cycle cells stay outlined, while it
 is not. In the current build the Architecture view is hidden, so no link appears
 and the cycles are listed inline; a link into a hidden view would land back on
-Health.
+Quality.
 
 **The same release stops the dashboard inventing an age it cannot establish.**
 Every relative age the SPA renders (`just now`, `5m ago`, `6d ago`) is derived
@@ -1255,7 +1328,7 @@ at an unknown age (the recorded time is implausibly old — check the store)
 ```
 
 Ordinary past ages render exactly as before. These are the same two strings the
-Health page's indeterminate branch above reuses — imported, not restated, so a
+Quality page's indeterminate branch above reuses — imported, not restated, so a
 future rewording changes both surfaces or neither. The **Architecture** view — the
 module dependency matrix (DSM) — is hidden from the web UI (CR-208; see
 [Hidden widgets](#hidden-widgets)); `logos dsm`, MCP `dsm` and
@@ -1374,9 +1447,9 @@ command or request away:
 |---|---|---|
 | Coverage by relation arm | Workspace Dashboard; the Workspace tab's **Cross-service coverage** panel | `GET /api/v1/workspace/status` (`coverage`); `logos workspace status`; MCP `workspace_status` |
 | Cross-service impact | The **Workspace** tab, which now has two tabs: Service map and Cross-service coverage | `GET /api/v1/workspace/impact`; `logos xservice impact`; MCP `xservice_impact` |
-| Non-gated tier callout | Health | **Files & Risk** in the sidebar; `logos hotspots` |
+| Non-gated tier callout | Quality | **Files & Risk** in the sidebar; `logos hotspots` |
 | Cycles band and cycle list | Architecture (inside the view, which is itself hidden — see the next row) | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
-| Dependency matrix — the whole **Architecture** view | The sidebar; `/architecture` and the retired `/dsm` bookmark land on **Health** | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
+| Dependency matrix — the whole **Architecture** view | The sidebar; `/architecture` and the retired `/dsm` bookmark land on **Quality** | `GET /api/v1/architecture`; `logos dsm`; MCP `dsm` |
 | Declared contracts | Workspace → **Service map** (the map's declared layer and its legend stay) | `GET /api/v1/workspace/status` (`coverage.declared_contracts`, `coverage.bound_external`); `logos workspace status`; `logos xservice route-providers` (`declared_contracts`, `bound_external`); MCP `workspace_status`; MCP `xservice_route_providers` |
 
 Each widget is hidden through one register in the SPA source
@@ -1497,7 +1570,7 @@ focusing, and filtering mutate no store and contact no external origin:
     divides the nodes table from the edges table. Every row traces to a real
     graph-element field — none fabricated ([FR-UI-08](../specs/requirements/FR-UI-08.md),
     [NFR-RA-05](../specs/requirements/NFR-RA-05.md)).
-- **Interactive tables.** Every data table (Rule findings, Health,
+- **Interactive tables.** Every data table (Rule findings, Quality,
   Files & Risk, Coverage, Graph Decisions & docs, and the
   Graph nodes/edges accessible tables) has sortable column headers — click to sort
   the **full dataset** first, then the page is sliced — and consistent pagination.

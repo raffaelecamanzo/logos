@@ -7,22 +7,45 @@
 
 name = "cpp"
 
-# The fixed `.h` → C++ ownership rule (FR-PL-07): C++ claims every C++ source and
-# header extension AND the ambiguous `.h` (the C plugin claims `.c` only). C is a
-# near-subset of C++ grammatically, so a pure-C header parsed by the C++ grammar
-# degrades to skipped constructs under never-fabricate, never wrong edges.
+# Disclosed beside this row of `logos languages` and, with the count, on the
+# row that reads the headers in `status` of a repository holding both C and
+# C++ sources (S-572, S-582, CR-185, FR-PL-07).
+note = "`.h` headers are read as C++ in a repository with at least as many C++ sources (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`) as C sources (`.c`), and as C otherwise."
+
+# The per-repository `.h` rule (S-582, FR-PL-07): C++ claims every C++ source and
+# header extension AND the ambiguous `.h`, which the C plugin shares
+# (`shared_extensions`). C++ reads `.h` unless the repository's `.c` files
+# outnumber its C++ sources; then the C plugin does.
 extensions = ["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"]
 
 # C++ joins namespace/class/member segments with `::` — the canonical ledger
 # separator, so reference paths need no rewriting.
 module_separator = "::"
 
+# An `#include` names a header by path (S-579, CR-184, FR-RS-38): only `/`
+# separates, and the header is named whole, extension included, so `hash.hpp`
+# beside `hash.cpp` is no ambiguity. A quoted `#include "x.h"` is read against
+# the including file's directory first; it and `#include <a/b.h>` are then read
+# against the include roots — every `include/` and `src/` directory, and every
+# directory holding an `include/` one — to exactly one file. A header no root
+# holds (`<vector>`) is a system header and stays external. A `using` beside
+# them is a member path (`references.scm`).
+import_specifier = "path"
+bare_specifiers = "include-roots"
+
 # tree-sitter-cpp 0.23 is generated against ABI 14 (asserted at load).
 abi_version = 14
 
 # No `frameworks` capability: C++ has no single dominant web framework to detect
 # (FR-FW-03). `symbols` + `references` drive nodes/edges.
-capabilities = ["symbols", "references"]
+capabilities = ["symbols", "references", "locals"]
+
+# A class's methods read its fields (S-580, FR-EX-22): `this->x` and a bare `x`
+# or `m_x` that no parameter or local of the method hides each record an
+# `Accesses` edge to the field the class declares, so a C++ class is scored for
+# Cohesion. A class declared in a header and defined in a source file is not
+# seen from the source (`queries/references.scm`).
+member_access = true
 
 # How an unqualified call is read (S-516, CR-169, FR-RS-12): a bare `m()` inside
 # a class or struct body is a call on the current instance — recorded with the
@@ -64,15 +87,27 @@ export_convention = "cpp-external-linkage"
 # `TEST_CASE`/`SCENARIO`). Feeds the unified `is_test` annotation (S-028).
 test_convention = "cpp-test-macros"
 
-# Declared cross-file reach (S-570, CR-180, FR-PL-09): declarations only —
-# nothing binds across files; a call to a function of the same file does bind
-# (stakeholder decision, Sprint 86 HF-3: C and C++ read `same-file`, not `symbols`).
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): an `#include` binds the
+# header it names, and a free or qualified call (`f()`, `ns::f()`, `Cls::sf()`)
+# and a base class (`class A : public B`) bind through the declarations the
+# includes make visible (S-579). A call on `this` binds among its class's
+# members and its bases', and so does a call on a receiver whose type the file
+# declares (S-581): `o.m()` on a parameter, local or data member declared `T`,
+# `T&` or `const T&`, and `p->m()` on one declared `T*`, `std::unique_ptr<T>` or
+# `std::shared_ptr<T>`, bind to `T`'s `m` or its nearest base's, across files.
+# A call on any other receiver — `auto`, a template parameter, a chain, a data
+# member read by an out-of-line method — binds nothing, which is why the level
+# stays `partial`.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
-level = "same-file"
+level = "partial"
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
 references = "queries/references.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"

@@ -12,7 +12,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CoverageJob } from "../../api/types.ts";
 import { COVERAGE_RUN_TEXT } from "../../copy/coverageView.copy.ts";
 import { installEventSources } from "../../test/eventSource.ts";
-import { useCoverageRun } from "./CoverageRunPanel.tsx";
+import { useCoverageRun, useJobClock } from "./CoverageRunPanel.tsx";
+import type { RunView } from "./coverageRunModel.ts";
 import {
   COMPLETED,
   COMPLETED_END,
@@ -425,5 +426,41 @@ describe("useCoverageRun shows a run ended only once the page's reload has settl
     await wait(30);
     expect(hook.result.current.view.job?.state).toBe("running");
     expect(onFinished).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useJobClock — the clock the Elapsed cells count with (S-803)", () => {
+  afterEach(() => vi.useRealTimers());
+  const view = (id: number, elapsed: number, lastStepAt?: number): RunView => ({
+    job: { ...RUNNING, id, elapsed_ms: elapsed, events: [] },
+    steps: lastStepAt === undefined ? [] : [{ seq: 0, at_ms: lastStepAt, event: { phase: "started", tool: "go" } }],
+  });
+  const clock = (initial: RunView) => {
+    vi.useFakeTimers();
+    return renderHook(({ v }) => useJobClock(v), { initialProps: { v: initial } });
+  };
+
+  it("starts from what the server reported and counts a second at a time", () => {
+    const { result } = clock(view(4, 5_000));
+    expect(result.current).toBe(5_000);
+    act(() => vi.advanceTimersByTime(3_000));
+    expect(result.current).toBe(8_000);
+  });
+
+  it("never moves back within one run: an older snapshot of the same job leaves it where it was", () => {
+    const { result, rerender } = clock(view(4, 5_000));
+    rerender({ v: view(4, 2_000) });
+    expect(result.current).toBe(5_000);
+  });
+
+  it("honours a step newer than the job's own elapsed time", () => {
+    const { result } = clock(view(4, 1_000, 4_000));
+    expect(result.current).toBe(4_000);
+  });
+
+  it("starts over for another job", () => {
+    const { result, rerender } = clock(view(4, 5_000));
+    rerender({ v: view(5, 100) });
+    expect(result.current).toBe(100);
   });
 });

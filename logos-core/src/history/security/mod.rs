@@ -40,7 +40,9 @@
 //! [S-049]: ../../../../docs/planning/journal.md#s-049-coverage-store-parsers-and-ingest-pipeline
 //! [S-663]: ../../../../docs/planning/journal.md#s-663-sarif-findings-are-ingested-into-the-evidence-store-anchored-and-redacted
 
+pub mod evidence;
 pub mod mask;
+mod merge;
 mod overlay;
 pub mod owasp;
 mod parse;
@@ -53,7 +55,13 @@ mod suppress;
 #[cfg(test)]
 mod anchor_tests;
 #[cfg(test)]
+mod engine_evidence_tests;
+#[cfg(test)]
+mod evidence_tests;
+#[cfg(test)]
 mod identity_tests;
+#[cfg(test)]
+mod merge_tests;
 #[cfg(test)]
 mod path_suppress_tests;
 #[cfg(test)]
@@ -71,11 +79,14 @@ use store::{FindingRow, ScannerBatch};
 
 pub use overlay::{path_findings, PathFindings};
 pub use owasp::{classify, OwaspEdition, OwaspReport};
-pub use parse::{ParsedFinding, ParsedRun, Region, SecurityFormat};
-pub use read::{latest_snapshots, read_at, read_baseline, read_latest};
+pub use parse::{PackageCoordinate, ParsedFinding, ParsedRun, Region, SecurityFormat};
+pub(crate) use parse::message_package;
+pub use read::{latest_snapshots, read_at, read_baseline, read_latest, stored_finding};
+pub use evidence::{ChangeKind, Evidence, EvidenceChange, EvidenceSource, EvidenceSymbol, GraphEvidence};
 pub use suppress::{
-    canonical_path, counts, label, parse_expires, project_location, suppress, unsuppress, EntryMatcher, EntryStatus,
-    IgnoreEntry, IgnoreFile, IgnoreWrite, Labelled, LabelledFinding, Selector, Suppression, IGNORE_FILE,
+    canonical_path, counts, entry_for, label, label_with, parse_expires, project_location, reconfirm, reconfirm_entry,
+    suppress, suppress_recording, suppress_with_evidence, unsuppress, EntryMatcher, EntryStatus, IgnoreEntry, IgnoreFile, IgnoreWrite, Labelled,
+    LabelledFinding, Selector, Suppression, IGNORE_FILE,
 };
 pub use suppress::{left_out, CodeScope, LeftOut};
 
@@ -121,10 +132,12 @@ impl Severity {
     /// (`error` high, `warning` medium, `note` low, `none` info). `level` is
     /// `None` when the result's level is no rating: SARIF's implicit default
     /// (no result level and no rule `defaultConfiguration.level`, which does
-    /// rate), or the level its scanner writes on every result ([`parse`]
-    /// decides). It reads `unrated`, never `medium` ([S-768]).
+    /// rate), or a level its scanner writes whatever the finding is ([`parse`]
+    /// decides, in `fixed_levels`). It reads `unrated`, never `medium`
+    /// ([S-768], [S-811]).
     ///
     /// [S-768]: ../../../../docs/planning/journal.md#s-768-osv-scanner-severities-are-never-made-up
+    /// [S-811]: ../../../../docs/planning/journal.md#s-811-no-scanners-constant-level-reads-as-a-severity
     pub(crate) fn from_sarif(cvss: Option<f64>, level: Option<&str>) -> Self {
         if let Some(score) = cvss {
             return if score >= 9.0 {
@@ -198,6 +211,56 @@ impl FindingBinding {
     }
 }
 
+/// How sure the scanner says it is of a finding ([FR-SC-31], history.db
+/// migration 12): read from the report by the per-scanner table in
+/// [`parse`], stored with the finding, never part of its identity. A scanner
+/// that states none, and every row stored before migration 12, is
+/// `unstated`: neither is read as a confidence.
+///
+/// [FR-SC-31]: ../../../../docs/specs/requirements/FR-SC-31.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScannerConfidence {
+    /// The scanner marks the finding low-confidence: it reads "needs review"
+    /// and is left out of the headline, but is gated like any other
+    /// ([BR-101](../../../../docs/specs/software-spec.md#328-security-findings)).
+    Low,
+    Medium,
+    High,
+    /// The report states no confidence for this scanner or this result.
+    #[default]
+    Unstated,
+}
+
+impl ScannerConfidence {
+    /// The lowercase wire token (the stored `confidence`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ScannerConfidence::Low => "low",
+            ScannerConfidence::Medium => "medium",
+            ScannerConfidence::High => "high",
+            ScannerConfidence::Unstated => "unstated",
+        }
+    }
+
+    /// The confidence a stored token names, or `None` for a token Logos never writes.
+    pub(crate) fn from_str_stored(token: &str) -> Option<Self> {
+        Some(match token {
+            "low" => ScannerConfidence::Low,
+            "medium" => ScannerConfidence::Medium,
+            "high" => ScannerConfidence::High,
+            "unstated" => ScannerConfidence::Unstated,
+            _ => return None,
+        })
+    }
+
+    /// Whether the finding reads "needs review": the scanner marks it `low`.
+    #[must_use]
+    pub fn needs_review(self) -> bool {
+        self == ScannerConfidence::Low
+    }
+}
+
 /// One stored finding as the reader returns it — the finding model every later
 /// security story consumes. It has no snippet field: none is stored
 /// ([FR-SC-03]).
@@ -215,6 +278,9 @@ pub struct SecurityFinding {
     pub rule_id: String,
     /// The normalised severity.
     pub severity: Severity,
+    /// What the scanner states of its own confidence ([`ScannerConfidence`]); `low`
+    /// reads "needs review".
+    pub confidence: ScannerConfidence,
     /// Sorted `CWE-<n>` identifiers; empty when the scanner gave none.
     pub cwes: Vec<String>,
     /// The rule message, or the fixed redacted text when [`redacted`](Self::redacted).
@@ -245,7 +311,9 @@ pub struct SecurityFinding {
     /// 7), and before an OSV-Scanner finding, or any unbound absolute path
     /// under the root, was keyed by its project-relative location (migration
     /// 10), and before a history-mode Gitleaks finding was keyed by its own
-    /// path rather than the file it bound to (migration 11). Every surface
+    /// path rather than the file it bound to (migration 11), and before a
+    /// dependency finding was keyed by its package (migration 13), each of
+    /// its repeated results' keys among them. Every surface
     /// still knows the finding by them — a fingerprint
     /// suppression, the ratchet's baseline and the branch delta — and
     /// [`suppress::label`] names the fingerprint an ignore entry written under
@@ -260,9 +328,85 @@ pub struct SecurityFinding {
     /// `"fresh"`, `"stale"` (the file moved since ingest) or `"n/a"` (no bound
     /// file), decided at read time.
     pub freshness: &'static str,
+    /// Every scanner finding this one merges, itself first, when one advisory
+    /// on one lockfile, package and version was reported more than once
+    /// ([FR-SC-29]; the reader merges them, see [`read_latest`]): what the
+    /// surfaces name as its reporters. Empty
+    /// for a finding one result alone stands behind — its scanner is
+    /// [`scanner_name`](Self::scanner_name) — and then absent from the payload.
+    ///
+    /// [FR-SC-29]: ../../../../docs/specs/requirements/FR-SC-29.md
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub reporters: Vec<Reporter>,
+}
+
+/// One scanner's stored finding within a merged one ([FR-SC-29]): kept whole
+/// enough that each surface still knows it by its own key and scanner. The
+/// evidence stays stored per scanner ([ADR-79]); only the read merges it.
+///
+/// [FR-SC-29]: ../../../../docs/specs/requirements/FR-SC-29.md
+/// [ADR-79]: ../../../../docs/specs/architecture/decisions/ADR-79.md
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Reporter {
+    /// The scanner that reported it (`tool.driver.name`).
+    pub scanner_name: String,
+    /// The scanner version recorded on its snapshot.
+    pub scanner_version: String,
+    /// Its fingerprint in that scanner's snapshot: an ignore entry, a baseline
+    /// and the branch delta all know the merged finding by it.
+    pub fingerprint: String,
+    /// The advisory id that scanner reports it under.
+    pub rule_id: String,
+    /// The severity that scanner gave it.
+    pub severity: Severity,
+    /// Its keys before a re-key, as [`SecurityFinding::legacy_fingerprints`].
+    /// Not serialised.
+    #[serde(skip)]
+    pub legacy_fingerprints: Vec<String>,
+    /// Its own freshness against that scanner's anchor: whether a file its
+    /// report anchors moved since that scan. Not serialised.
+    #[serde(skip)]
+    pub freshness: &'static str,
 }
 
 impl SecurityFinding {
+    /// Every `(scanner, rule)` that reported it: each of its
+    /// [`reporters`](Self::reporters), or its own scanner and rule when one
+    /// result alone stands behind it. What a suppression narrowed to a rule or
+    /// a scanner is matched against, member by member ([`suppress::label`]).
+    pub fn reported_by(&self) -> Vec<(&str, &str)> {
+        if self.reporters.is_empty() {
+            return vec![(self.scanner_name.as_str(), self.rule_id.as_str())];
+        }
+        self.reporters.iter().map(|r| (r.scanner_name.as_str(), r.rule_id.as_str())).collect()
+    }
+
+    /// Whether `scanner` (a driver name, ASCII case-insensitive) reported it,
+    /// alone or as one of its [`reporters`](Self::reporters).
+    pub fn reported_by_scanner(&self, scanner: &str) -> bool {
+        self.reported_by().iter().any(|(name, _)| name.eq_ignore_ascii_case(scanner))
+    }
+
+    /// Every key it is known by: its fingerprint, the ones it had before a
+    /// re-key, and each of its reporters' own ([FR-SC-29]), so an ignore
+    /// entry, a baseline or a merge-base report naming any member names it.
+    ///
+    /// [FR-SC-29]: ../../../../docs/specs/requirements/FR-SC-29.md
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.fingerprint.as_str())
+            .chain(self.legacy_fingerprints.iter().map(String::as_str))
+            .chain(
+                self.reporters
+                    .iter()
+                    .flat_map(|r| std::iter::once(r.fingerprint.as_str()).chain(r.legacy_fingerprints.iter().map(String::as_str))),
+            )
+    }
+
+    /// Whether it is known by `key` ([`keys`](Self::keys)).
+    pub fn known_by(&self, key: &str) -> bool {
+        self.keys().any(|k| k == key)
+    }
+
     /// Where the finding is: its bound path, else the path its report named,
     /// separator-normalised — the spelling its [`fingerprint`] and a scoped
     /// run's scope match use. `None` when the result had no location.
@@ -556,14 +700,33 @@ pub fn ingest_scoped(
                 (Some(_), Some(report)) => bind_report_path(root, &mapper, &mut anchors, report).path,
                 _ => path.clone(),
             };
-            let report_key = match f.commit {
-                Some(_) => occurrence(&mut seen, history_report_key(fingerprint(&f, &name, root, key_path.as_deref()))),
-                None => occurrence(&mut seen, fingerprint(&f, &name, root, key_path.as_deref())),
+            // A dependency result is keyed by its package and takes no
+            // occurrence suffix: an exact repeat has its very key and is one
+            // finding ([`collapse`]). The key it had before migration 13 —
+            // suffixed then, in report order, from the one sequence every
+            // other result of the scanner still counts in — is an old key,
+            // which the store records only on the scanner's first ingest since
+            // the migration ([`store`]): this report's order is that one's.
+            let (report_key, pre13) = match (&f.commit, &f.package) {
+                (Some(_), _) => {
+                    (occurrence(&mut seen, history_report_key(fingerprint(&f, &name, root, key_path.as_deref()))), None)
+                }
+                (None, Some(_)) => (
+                    fingerprint(&f, &name, root, key_path.as_deref()),
+                    Some(occurrence(&mut seen, pre13_fingerprint(&f, &name, root, key_path.as_deref()))),
+                ),
+                (None, None) => (occurrence(&mut seen, fingerprint(&f, &name, root, key_path.as_deref())), None),
             };
-            let mut old_keys: Vec<String> = pre10_fingerprints(&f, &name, pre11_bound.as_deref())
+            let pre10: Vec<String> = pre10_fingerprints(&f, &name, pre11_bound.as_deref())
                 .into_iter()
                 .map(|base| occurrence(&mut seen_pre10, base))
                 .collect();
+            // A dependency result's keys before migration 10 are suffixed in
+            // report order as its pre-13 one is, so they go the same way.
+            let (mut old_keys, pre13_keys) = match pre13 {
+                Some(pre13) => (Vec::new(), pre10.into_iter().chain([pre13]).collect()),
+                None => (pre10, Vec::new()),
+            };
             if f.commit.is_some() {
                 old_keys.push(occurrence(&mut seen_pre11, fingerprint(&f, &name, root, pre11_bound.as_deref())));
             }
@@ -579,13 +742,16 @@ pub fn ingest_scoped(
             }
             keyed.push(KeyedResult {
                 secret_key,
+                merges: f.package.is_some(),
                 report_key,
                 old_keys,
+                pre13_keys,
                 committed_at: f.committed_at,
                 row: FindingRow {
                     fingerprint: String::new(),
                     rule_id: f.rule_id,
                     severity: f.severity,
+                    confidence: f.confidence,
                     cwes: f.cwes,
                     message: f.message,
                     redacted: f.redacted,
@@ -597,7 +763,9 @@ pub fn ingest_scoped(
                     anchor_commit: f.commit.clone(),
                     commits: f.commit.into_iter().collect(),
                     legacy_fingerprints: Vec::new(),
+                    pre13_legacy: Vec::new(),
                     places: Vec::new(),
+                    package: f.package,
                 },
             });
         }
@@ -793,7 +961,8 @@ fn history_report_key(base: String) -> String {
 /// `base`, or — for its second and later occurrence in one report — `base`
 /// with an occurrence suffix, hashed. Two results with one identity in one
 /// report are two findings, never one silently dropped: the later ones take
-/// the suffix, in report order.
+/// the suffix, in report order. A dependency result's package key takes none:
+/// its repeats are one finding (history.db migration 13, [`collapse`]).
 fn occurrence(seen: &mut HashMap<String, usize>, base: String) -> String {
     let n = seen.entry(base.clone()).or_insert(0);
     *n += 1;
@@ -834,20 +1003,55 @@ fn occurrence(seen: &mut HashMap<String, usize>, base: String) -> String {
 ///   report's identity: 2.x writes `partialFingerprints.primaryLocationLineHash`
 ///   where 1.x wrote none, so a scanner version change would re-key it
 ///   (migration 10, CR-241).
+/// - A **dependency** result — one whose scanner names its package
+///   ([`ParsedFinding::package`]: OSV-Scanner, Trivy, Dependency-Check) — is
+///   keyed by its rule, its path and its package's name and version, in a
+///   namespace of its own, never by its region or the report's identity
+///   (migration 13, CR-252): the two results OSV-Scanner writes for one
+///   package matched by two records of one advisory are one key, and two
+///   packages sharing one advisory in one lockfile are two. Every other
+///   result keeps the key [`pre13_fingerprint`] gives it.
 ///
 /// [`pre10_fingerprints`] are the keys a result could have had before migration
-/// 10, which the ingest records as legacy fingerprints where they differ.
+/// 10, and [`pre13_fingerprint`] the one a dependency result had before
+/// migration 13, which the ingest records as legacy fingerprints where they
+/// differ.
 pub(crate) fn fingerprint(f: &ParsedFinding, scanner: &str, root: &Path, bound_path: Option<&str>) -> String {
-    let path = match bound_path {
+    match &f.package {
+        Some(package) => package_key(&f.rule_id, &key_path(f, root, bound_path), package),
+        None => pre13_fingerprint(f, scanner, root, bound_path),
+    }
+}
+
+/// The key [`fingerprint`] gave a result before history.db migration 13: its
+/// rule and path with the report's identity, else its region. It is still the
+/// key of every result but a dependency one, and that one's old key.
+fn pre13_fingerprint(f: &ParsedFinding, scanner: &str, root: &Path, bound_path: Option<&str>) -> String {
+    let identity: &[String] = if parse::is_osv_scanner(scanner) { &[] } else { &f.identity };
+    finding_key(&f.rule_id, &key_path(f, root, bound_path), identity, &f.region)
+}
+
+/// The path a key folds in: `bound_path` when there is one, else the report's
+/// own spelling with `root` taken off an absolute path under it; empty with no
+/// location ([`fingerprint`]).
+fn key_path(f: &ParsedFinding, root: &Path, bound_path: Option<&str>) -> String {
+    match bound_path {
         Some(bound) => bound.to_string(),
         None => f
             .report_path
             .as_deref()
             .map(|report| project_location(root, report).unwrap_or_else(|| normalise_report_path(report)))
             .unwrap_or_default(),
-    };
-    let identity: &[String] = if parse::is_osv_scanner(scanner) { &[] } else { &f.identity };
-    finding_key(&f.rule_id, &path, identity, &f.region)
+    }
+}
+
+/// A dependency result's key ([`fingerprint`], history.db migration 13): the
+/// rule, the path and the package's name and version, hashed in the
+/// `package` namespace, which no key from before the migration is in.
+fn package_key(rule_id: &str, path: &str, package: &parse::PackageCoordinate) -> String {
+    const SEP: char = '\u{1f}';
+    let canonical = format!("logos-finding-v1{SEP}package{SEP}{rule_id}{SEP}{path}{SEP}{}{SEP}{}", package.name, package.version);
+    blake3::hash(canonical.as_bytes()).to_hex().to_string()
 }
 
 /// The keys [`fingerprint`] could have given a result before history.db
@@ -946,7 +1150,11 @@ fn still_on_its_line(digests: Option<&mut secret::SecretDigests>, f: &ParsedFind
 struct KeyedResult {
     /// Its secret-keyed identity ([`secret_fingerprint`]); `None` when it has none.
     secret_key: Option<String>,
-    /// Its report-keyed identity ([`fingerprint`] with its occurrence suffix).
+    /// `true` for a dependency result, whose [`report_key`](Self::report_key)
+    /// is its package key: the results sharing it are one finding.
+    merges: bool,
+    /// Its report-keyed identity ([`fingerprint`], with its occurrence
+    /// suffix unless it [`merges`](Self::merges)).
     report_key: String,
     /// The identities it could have had before a re-key, each report-keyed one
     /// with its occurrence suffix: before history.db migration 10
@@ -955,6 +1163,12 @@ struct KeyedResult {
     /// keyed by the file its report path bound to today, report- and
     /// secret-keyed alike: what a row stored then is keyed by.
     old_keys: Vec<String>,
+    /// A dependency result's keys before migrations 10 and 13
+    /// ([`pre10_fingerprints`], [`pre13_fingerprint`]), each with its
+    /// occurrence suffix, in place of [`old_keys`](Self::old_keys): they name
+    /// the right finding only in the report order its stored rows were keyed
+    /// in ([`FindingRow::pre13_legacy`]).
+    pre13_keys: Vec<String>,
     /// Its commit's date, which orders a secret's commits.
     committed_at: Option<String>,
     /// The row, its fingerprint not yet set.
@@ -967,17 +1181,24 @@ struct KeyedResult {
 /// one does, so the finding is bound wherever the secret is still on its line
 /// ([S-767]) — with every report key among them, as keyed now and before
 /// migrations 10 and 11, and its secret key before migration 11, recorded as a
-/// legacy fingerprint. A result with no secret key is a finding of its own,
-/// keyed by its report, as every other scanner's, with its keys before
-/// migrations 10 and 11 recorded as legacy fingerprints where they differ:
-/// what re-keys a stored row ([`store`]). A key some finding of the
-/// report has as its own is never another's legacy fingerprint. In report
+/// legacy fingerprint. The dependency results that share a package key are
+/// one finding likewise, at the one that sorts first by position, with every
+/// key they had before migrations 10 and 13 — each repeat's old
+/// occurrence-suffixed one among them — as one the store records as a legacy
+/// fingerprint on the scanner's first ingest since migration 13 alone
+/// ([`FindingRow::pre13_legacy`]). A finding takes the
+/// highest severity of its results. Any other result is a
+/// finding of its own, keyed by its report, as every other scanner's, with
+/// its keys before migrations 10 and 11 recorded as legacy fingerprints where
+/// they differ: what re-keys a stored row ([`store`]). A key some finding of
+/// the report has as its own is never another's legacy fingerprint. In report
 /// order of each finding's first result.
 fn collapse(results: Vec<KeyedResult>) -> Vec<FindingRow> {
     let mut groups: Vec<Vec<KeyedResult>> = Vec::new();
     let mut by_key: HashMap<String, usize> = HashMap::new();
     for result in results {
-        match result.secret_key.clone() {
+        let merge_key = result.secret_key.clone().or_else(|| result.merges.then(|| result.report_key.clone()));
+        match merge_key {
             None => groups.push(vec![result]),
             Some(key) => match by_key.get(&key) {
                 Some(&at) => groups[at].push(result),
@@ -1010,13 +1231,18 @@ fn collapse(results: Vec<KeyedResult>) -> Vec<FindingRow> {
             }
             let mut legacy: BTreeSet<String> =
                 group.iter().flat_map(|r| std::iter::once(r.report_key.clone()).chain(r.old_keys.iter().cloned())).collect();
+            let mut pre13: BTreeSet<String> = group.iter().flat_map(|r| r.pre13_keys.iter().cloned()).collect();
+            let severity = group.iter().map(|r| r.row.severity).max();
             let places = group.iter().filter_map(|r| r.row.anchor_commit.clone().map(|c| (c, r.row.region))).collect();
             let place = group.iter().position(|r| r.row.binding != FindingBinding::Historical).unwrap_or(0);
             let first = group.swap_remove(place);
             let mut row = first.row;
             row.fingerprint = first.secret_key.unwrap_or(first.report_key);
+            row.severity = severity.unwrap_or(row.severity);
             legacy.remove(&row.fingerprint);
+            pre13.remove(&row.fingerprint);
             row.legacy_fingerprints = legacy.into_iter().collect();
+            row.pre13_legacy = pre13.into_iter().collect();
             row.commits = commits;
             row.places = places;
             row
@@ -1028,6 +1254,7 @@ fn collapse(results: Vec<KeyedResult>) -> Vec<FindingRow> {
     let current: std::collections::HashSet<String> = rows.iter().map(|row| row.fingerprint.clone()).collect();
     for row in &mut rows {
         row.legacy_fingerprints.retain(|old| !current.contains(old));
+        row.pre13_legacy.retain(|old| !current.contains(old));
     }
     rows
 }

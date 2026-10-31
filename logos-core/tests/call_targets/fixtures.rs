@@ -28,8 +28,9 @@ pub const PYTHON: Fixture = &[
 
 /// A Kotlin class constructed through a single-type import and from its own
 /// package; a class two source sets declare under one package, a name no
-/// declaration carries, a bare `Foo()` inside a class body, and a class beside
-/// a factory function of its name (`fun Job(s: String): Job`) stay unbound.
+/// declaration carries, and a class beside a factory function of its name
+/// (`fun Job(s: String): Job`) stay unbound; a bare `Foo()` inside a class that
+/// declares no `Foo` and inherits nothing constructs it (S-560).
 pub const KOTLIN: Fixture = &[
     ("src/main/kotlin/com/x/Foo.kt", "package com.x\n\nclass Foo\n"),
     ("src/main/kotlin/com/x/Make.kt", "package com.x\n\nfun make() = Foo()\n"),

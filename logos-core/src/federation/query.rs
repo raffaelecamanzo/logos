@@ -45,7 +45,9 @@ use super::bridge::{BridgeEdge, BridgeEndpoint, BridgeIntake, MemberContracts};
 use crate::graph_store::BuildManifestRow;
 
 use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
-use super::coverage::{cross_service_coverage, CrossServiceCoverage, ReferenceCoverage};
+use super::coverage::{coverage_and_bound_sites, CrossServiceCoverage, ReferenceCoverage};
+use super::reference_resolution::{self, WorkspaceReferenceResolution};
+use crate::resolve::reference_classes::MemberReferenceFacts;
 use super::declared_contracts::DeclaredContractRelation;
 use super::external_join::BoundExternal;
 use super::links::{self, LinkStatus};
@@ -164,6 +166,13 @@ fn fan<T>(
 /// facts yet is returned by name, apart, so the join names it unread with that
 /// reason rather than as a member with no manifests or no types.
 ///
+/// # And the facts its reference classes are re-read by
+/// The workspace reference resolution (S-637) re-reads each member's provably
+/// external and unbound rows. They are kept by the member's own status read
+/// ([`Engine::try_status_with_reference_facts`]) — the classification `status`
+/// already makes, never a second read — so they cost no walk either, and a
+/// member whose status was not read has none.
+///
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
@@ -171,7 +180,9 @@ fn fan<T>(
 fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>>, FactsWalked) {
     let mut walked = FactsWalked::default();
     let freshness = answer
-        .fan_out(|_, engine| (engine.try_status(), engine.build_manifests(), engine.type_facts()))
+        .fan_out(|_, engine| {
+            (engine.try_status_with_reference_facts(), engine.build_manifests(), engine.type_facts())
+        })
         .into_iter()
         .map(|scoped| split_status_and_facts(scoped, &mut walked))
         .collect();
@@ -182,7 +193,7 @@ fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>
 /// its build-manifest facts and its declared-type facts (`None`: not yet
 /// extracted), each with its own failure channel.
 type StatusAndFacts = (
-    anyhow::Result<StatusInfo>,
+    anyhow::Result<(StatusInfo, MemberReferenceFacts)>,
     anyhow::Result<Option<Vec<BuildManifestRow>>>,
     anyhow::Result<Option<MemberTypeFacts>>,
 );
@@ -196,6 +207,8 @@ struct FactsWalked {
     not_extracted: Vec<String>,
     types: Vec<MemberTypeFactsRead>,
     types_not_extracted: Vec<String>,
+    /// Each member's reference facts, read with its status (S-637).
+    references: BTreeMap<String, MemberReferenceFacts>,
 }
 
 /// One member of the freshness walk: its freshness row, with its build and
@@ -244,7 +257,10 @@ fn split_status_and_facts(
                  the build-dependency headline reports it unread: {err:#}"
             ),
         }
-        status
+        status.map(|(status, references)| {
+            walked.references.insert(member.clone(), references);
+            status
+        })
     });
     flatten_read(MemberScoped { member, value })
 }
@@ -1495,6 +1511,19 @@ pub struct WorkspaceStatus {
     /// [BR-75]: ../../../docs/specs/software-spec.md#327-workspace-federation
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<LinkStatus>,
+    /// The **workspace reference resolution** ([FR-RS-49], S-637): resolved code
+    /// references over internal candidates, from the members' populations
+    /// summed — never a mean of their ratios ([BR-56]). A reference whose
+    /// target another member declares is an internal candidate here, though
+    /// its own member counts it provably external, and an invocation call site
+    /// the bridge bound across members is resolved. States the members it
+    /// summed over and names each it could not read ([NFR-CC-04]). Each
+    /// member's own figure stays on its row, as `internal_resolution`.
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    /// [BR-56]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub reference_resolution: WorkspaceReferenceResolution,
 }
 
 /// The member-kind **candidate hint** on `workspace status` ([FR-WS-32]).
@@ -1720,9 +1749,10 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     // the unit "once per answer" is measured in. It is dropped with this call,
     // so the next one re-attempts.
     let answer = registry.answer();
-    let (mut freshness, build_facts) = fan_status(&answer);
+    let (mut freshness, mut build_facts) = fan_status(&answer);
     split_call_residue_across_members(&mut freshness);
-    let coverage = cross_service_coverage(&answer);
+    let (coverage, bound_sites) = coverage_and_bound_sites(&answer);
+    let reference_resolution = pool_reference_resolution(&freshness, std::mem::take(&mut build_facts.references), &bound_sites);
     let topics = workspace_topics(&answer);
     // Reads nothing when the manifest declares no link. Otherwise it computes the
     // evidence edges a link must not duplicate over this same answer — two more
@@ -1791,6 +1821,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         type_reference,
         exclusion: (!federation.exclusion.is_unset()).then(|| federation.exclusion.clone()),
         links,
+        reference_resolution,
     }
 }
 
@@ -1812,13 +1843,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn split_call_residue_across_members(freshness: &mut [MemberResult<StatusInfo>]) {
-    let declared: std::collections::HashSet<Vec<String>> = freshness
-        .iter()
-        .filter_map(|row| row.result.as_ref())
-        .flat_map(|info| &info.resolution_by_language)
-        .filter_map(|language| language.call_residue.as_ref())
-        .flat_map(|residue| residue.declared_types.iter().cloned())
-        .collect();
+    let declared = declared_types_of(freshness);
     for residue in freshness
         .iter_mut()
         .filter_map(|row| row.result.as_mut())
@@ -1827,6 +1852,41 @@ fn split_call_residue_across_members(freshness: &mut [MemberResult<StatusInfo>])
     {
         residue.split_by_workspace(&|fqn: &[String]| declared.contains(fqn));
     }
+}
+
+/// The workspace reference resolution (S-637) over the freshness walk's rows:
+/// each member's own figure, or the reason its status was not read, beside the
+/// facts read with it, the types every member read declares and the call sites
+/// the coverage tier bound.
+fn pool_reference_resolution(
+    freshness: &[MemberResult<StatusInfo>],
+    facts: BTreeMap<String, MemberReferenceFacts>,
+    bound_sites: &BTreeSet<super::coverage::BoundSite>,
+) -> WorkspaceReferenceResolution {
+    let roster: Vec<reference_resolution::MemberRead<'_>> = freshness
+        .iter()
+        .map(|row| reference_resolution::MemberRead {
+            member: &row.member,
+            own: row.result.as_ref().map(|status| &status.internal_resolution).ok_or_else(|| {
+                row.error.as_deref().unwrap_or("the member reported no index freshness")
+            }),
+        })
+        .collect();
+    reference_resolution::pool(&roster, facts, &declared_types_of(freshness), bound_sites)
+}
+
+/// Every fully-qualified name a top-level type of a member read declares, from
+/// the call residues its status states — what an `external-type` row's
+/// candidates are compared with, by the residue split and by the workspace
+/// reference resolution (S-637).
+fn declared_types_of(freshness: &[MemberResult<StatusInfo>]) -> std::collections::HashSet<Vec<String>> {
+    freshness
+        .iter()
+        .filter_map(|row| row.result.as_ref())
+        .flat_map(|info| &info.resolution_by_language)
+        .filter_map(|language| language.call_residue.as_ref())
+        .flat_map(|residue| residue.declared_types.iter().cloned())
+        .collect()
 }
 
 /// The `build_dependency` headline over the build relation the freshness walk's
@@ -2403,7 +2463,7 @@ mod tests {
         let mut walked = FactsWalked::default();
 
         let row = split_status_and_facts(
-            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new())), Ok(Some(MemberTypeFacts::default()))))),
+            scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(Some(Vec::new())), Ok(Some(MemberTypeFacts::default()))))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
@@ -2411,7 +2471,7 @@ mod tests {
         assert_eq!(walked.types.len(), 1, "declared types read are pushed, even when empty");
 
         let row =
-            split_status_and_facts(scoped(Ok((Ok(StatusInfo::default()), Ok(None), Ok(None)))), &mut walked);
+            split_status_and_facts(scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(None), Ok(None)))), &mut walked);
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "a store with no extracted facts is never counted read");
         assert_eq!(walked.not_extracted, ["api"], "…it is named apart");
@@ -2420,7 +2480,7 @@ mod tests {
 
         let row = split_status_and_facts(
             scoped(Ok((
-                Ok(StatusInfo::default()),
+                Ok((StatusInfo::default(), MemberReferenceFacts::default())),
                 Err(anyhow::anyhow!("store read failed")),
                 Err(anyhow::anyhow!("store read failed")),
             ))),
@@ -2436,7 +2496,7 @@ mod tests {
 
         // The two fact channels are independent: build facts read, type facts failed.
         let row = split_status_and_facts(
-            scoped(Ok((Ok(StatusInfo::default()), Ok(Some(Vec::new())), Err(anyhow::anyhow!("read failed"))))),
+            scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(Some(Vec::new())), Err(anyhow::anyhow!("read failed"))))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
@@ -2531,6 +2591,8 @@ mod tests {
                         calls: RelationResolution::measured(0, 0, 0, 0),
                         imports: RelationResolution::measured(0, 0, 0, 0),
                         call_residue: None,
+                        header_ownership: None,
+                        parse_damage: None,
                     })
                     .collect(),
                 ..StatusInfo::default()
@@ -3364,6 +3426,7 @@ mod tests {
             kind: NodeKind::Class,
             file: None,
             line: None,
+            via: None,
         };
         assert!(holds(Some(&row(&in_a.symbol)), SHARED), "the member's upgraded row holds it");
         assert!(holds(Some(&row(&in_a.symbol)), in_a.symbol.as_str()));
@@ -3544,7 +3607,7 @@ mod tests {
                 "a",
                 MemberScan::Fresh,
                 Some(counts(2, 1)),
-                Excluded { not_fresh: 0, suppressed: 1, test: 2 },
+                Excluded { not_fresh: 0, suppressed: 1, test: 2, dev: 2, needs_review: 6 },
                 &[("A01", Some(1)), ("A02", Some(0)), ("A03", None)],
             ),
             security_row(
@@ -3558,7 +3621,7 @@ mod tests {
                 "c",
                 MemberScan::Stale,
                 Some(counts(0, 2)),
-                Excluded { not_fresh: 4, suppressed: 0, test: 3 },
+                Excluded { not_fresh: 4, suppressed: 0, test: 3, dev: 1, needs_review: 1 },
                 &[("A01", None), ("A02", None), ("A03", None)],
             ),
             security_row("d", MemberScan::NeverRun, None, Excluded::default(), &[("A01", None), ("A02", None), ("A03", None)]),
@@ -3571,7 +3634,7 @@ mod tests {
         );
         assert_eq!((rolled.reports_fresh, rolled.reports_stored), (2, 3), "two of the three stored reports are fresh");
         assert_eq!(rolled.totals, counts(3, 3));
-        assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1, test: 5 }, "test code is summed apart");
+        assert_eq!(rolled.excluded, Excluded { not_fresh: 4, suppressed: 1, test: 5, dev: 3, needs_review: 7 }, "test code, dev-only and needs-review are summed apart");
         let names: Vec<&str> = rolled.members.iter().map(|m| m.member.as_str()).collect();
         assert_eq!(names, ["a", "b", "c", "d", "e"], "every row kept, in order");
 
@@ -3591,7 +3654,7 @@ mod tests {
     fn the_security_state_keeps_each_members_row_and_counts_the_fresh_ones() {
         let rows = vec![
             security_row("a", MemberScan::Fresh, Some(counts(2, 1)), Excluded::default(), &[]),
-            security_row("b", MemberScan::Stale, Some(counts(0, 2)), Excluded { not_fresh: 4, suppressed: 0, test: 3 }, &[]),
+            security_row("b", MemberScan::Stale, Some(counts(0, 2)), Excluded { not_fresh: 4, suppressed: 0, test: 3, dev: 1, needs_review: 1 }, &[]),
             security_row("c", MemberScan::NeverRun, None, Excluded::default(), &[]),
             MemberResult { member: "d".to_string(), result: None, error: Some("unable to open database file".into()) },
         ];
@@ -3684,6 +3747,8 @@ mod tests {
                             head_sha: None,
                             finished_at,
                             log: None,
+                            duration_ms: None,
+                            cause: None,
                         }),
                     })
                     .collect(),

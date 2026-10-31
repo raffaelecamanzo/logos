@@ -634,6 +634,57 @@ public class Heir extends Mailer {\n\
     public void h() { send(); }\n\
 }\n";
 
+/// An `app` class declaring its own `send`, so the name test leaves
+/// `mailer.send()` an internal candidate and only the binder proves it external.
+const NOTIFIER: &str = "package com.x.app;\n\npublic class Notifier {\n    public void send() {}\n}\n";
+
+/// **The workspace reference resolution re-reads an `external-type` row whose
+/// type another member declares** (S-637, FR-RS-49). `mailer.send()` names
+/// `send`, which `app` declares too, so `app`'s own figure counts it external
+/// only through the binder's `external-type`; the workspace, where `lib`
+/// declares `com.x.shared.Mailer`, counts it an internal candidate under
+/// `type_in_another_member` — from real extraction, not a hand-built fact.
+#[test]
+fn the_workspace_figure_counts_an_external_type_row_another_member_declares_internal() {
+    let ws = TempDir::new().unwrap();
+    let lib = ws.path().join("lib");
+    let app = ws.path().join("app");
+    git_init(&lib);
+    git_init(&app);
+    write(&lib, "src/main/java/com/x/shared/Mailer.java", SHARED_MAILER);
+    write(&app, "src/main/java/com/x/app/Consumer.java", CONSUMER);
+    write(&app, "src/main/java/com/x/app/Notifier.java", NOTIFIER);
+    for member in [&lib, &app] {
+        let engine = index(member);
+        let _ = engine.sync(&[] as &[PathBuf]);
+    }
+    let alone = java_residue(&Engine::start(&app).expect("engine starts"));
+    assert_eq!(nonzero(&alone), reasons(&[(R::ExternalType, 1)]), "the binder proves it external alone");
+
+    coordinate::detach(&app, "example.com/app");
+    write(
+        ws.path(),
+        "logos.workspace.toml",
+        "[workspace]\nname = \"w\"\nmembers = [\"lib\", \"app\"]\n",
+    );
+    let federation = discover(ws.path()).expect("discovers").expect("a workspace");
+    let registry = EngineRegistry::<Engine>::new(federation, RegistryMode::Lazy);
+    let status = workspace_status(&registry);
+    let section = &status.reference_resolution;
+    assert_eq!(section.cross_member.type_in_another_member, 1, "{section:?}");
+    let own_external: u64 = status
+        .members
+        .iter()
+        .filter_map(|m| m.status.result.as_ref())
+        .map(|info| info.internal_resolution.provably_external)
+        .sum();
+    assert_eq!(
+        section.internal_resolution.provably_external,
+        own_external - section.cross_member.named_by_another_member - 1,
+        "{section:?}"
+    );
+}
+
 #[test]
 fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only() {
     let ws = TempDir::new().unwrap();
@@ -927,6 +978,7 @@ fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
         residue["reasons"],
         serde_json::json!({
             "external-type": 0,
+            "local-binding": 0,
             "name-not-in-scope": 0,
             "no-applicable-overload": 0,
             "no-receiver-evidence": 1,

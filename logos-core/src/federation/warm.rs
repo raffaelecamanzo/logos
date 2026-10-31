@@ -790,7 +790,7 @@ mod tests {
             Ok(())
         });
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < crate::perf::scaled(Duration::from_secs(2)),
             "returns on drain, never idle-waits: {:?}",
             started.elapsed()
         );

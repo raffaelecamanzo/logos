@@ -296,10 +296,15 @@ function stubRun({
 }
 
 const pageReads = (calls: Call[]) => calls.filter((c) => c.method === "GET" && c.url === "/api/v1/coverage").length;
-const progressList = () =>
-  within(screen.getByRole("list", { name: "Coverage run progress" }))
-    .getAllByRole("listitem")
-    .map((li) => li.textContent?.replace(/ \d+ s$/, ""));
+/** Each listed tool and what its State cell reads: the run is the table's (S-803). */
+const toolStates = () =>
+  within(within(toolsWidget()).getByRole("table", { name: "Coverage tools" }))
+    .getAllByRole("row")
+    .slice(1)
+    .map((row) => {
+      const cells = row.querySelectorAll("td");
+      return `${cells[0].textContent} ${cells[2].textContent}`;
+    });
 const liveLine = (container: HTMLElement) => container.querySelector('[aria-live="polite"]')?.textContent ?? "";
 const toolsWidget = () => screen.getByRole("heading", { name: "Coverage tools" }).closest("[data-widget]") as HTMLElement;
 
@@ -338,15 +343,16 @@ describe("Run coverage on the Coverage page (S-739)", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
 
     await waitFor(() => expect(sources).toHaveLength(1));
-    expect(progressList()).toEqual(["vitest queued", "go queued", "custom queued"]);
+    expect(toolStates()).toEqual(["vitest queued", "maven not installed", "go queued", "custom queued"]);
+    expect(screen.queryByRole("list", { name: "Coverage run progress" })).toBeNull();
     expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.cancel })).toBeInTheDocument();
     act(() => {
       for (const step of EVENTS.slice(0, 3)) sources[0].emit("step", step);
     });
-    expect(progressList()).toEqual(["vitest ran — tests failed", "go queued", "custom queued"]);
+    expect(toolStates()).toEqual(["vitest ran — tests failed", "maven not installed", "go queued", "custom queued"]);
     expect(liveLine(container)).toContain("vitest: ran — tests failed.");
     act(() => sources[0].emit("step", EVENTS[7]));
-    expect(progressList()).toEqual(["vitest ran — tests failed", "go running", "custom queued"]);
+    expect(toolStates()).toEqual(["vitest ran — tests failed", "maven not installed", "go running", "custom queued"]);
   });
 
   it("starts nothing and records nothing when the dialog is cancelled", async () => {
@@ -367,7 +373,7 @@ describe("Run coverage on the Coverage page (S-739)", () => {
     render(<CoverageView />);
     await waitFor(() => expect(sources).toHaveLength(1));
     expect(sources[0].url).toBe("/api/v1/coverage/run");
-    expect(progressList()).toEqual(["vitest ran — tests failed", "maven not installed", "go running", "custom queued"]);
+    expect(toolStates()).toEqual(["vitest ran — tests failed", "maven not installed", "go running", "custom queued"]);
     expect(within(toolsWidget()).queryByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeNull();
   });
 
@@ -378,10 +384,10 @@ describe("Run coverage on the Coverage page (S-739)", () => {
     await userEvent.click(await within(await findToolsWidget()).findByRole("button", { name: COVERAGE_RUN_TEXT.run }));
     await waitFor(() => expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.joined));
     expect(sources).toHaveLength(1);
-    expect(progressList()).toContain("go running");
+    expect(toolStates()).toContain("go running");
   });
 
-  it("cancels the run: the list reads cancelled, the live line says so, and the page reloads", async () => {
+  it("cancels the run: the live line says so, the page reloads, and the rows read their stored state again", async () => {
     const sources = installEventSources();
     const calls = stubRun({ pages: [withRunner(populated())], current: RUNNING, posts: [{ body: { job: RUNNING } }] });
     const { container } = render(<CoverageView />);
@@ -393,12 +399,11 @@ describe("Run coverage on the Coverage page (S-739)", () => {
       sources[0].emit("step", GO_CANCELLED);
       sources[0].emit("end", { job: CANCELLED_END });
     });
-    await waitFor(() =>
-      expect(progressList()).toEqual(["vitest ran — tests failed", "maven not installed", "go cancelled", "custom cancelled"]),
-    );
-    expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.cancelled(["vitest"]));
+    await waitFor(() => expect(liveLine(container)).toContain(COVERAGE_RUN_TEXT.cancelled(["vitest"])));
     expect(sources[0].closed).toBe(true);
     await waitFor(() => expect(pageReads(calls)).toBe(2));
+    // Once the reload has landed (HF-6) the live states give way to the stored ones.
+    expect(toolStates()).toEqual(["vitest never run", "maven not installed", "go never run", "custom never run"]);
     expect(within(toolsWidget()).getByRole("button", { name: COVERAGE_RUN_TEXT.run })).toBeInTheDocument();
   });
 

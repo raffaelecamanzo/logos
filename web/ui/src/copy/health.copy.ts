@@ -209,6 +209,25 @@ export interface DimensionCopy extends CopyEntry {
   /** Present exactly for a dimension whose units never carry points in the Where
    *  to start card: it says why (S-505, FR-QM-17). */
   readonly unranked?: string;
+  /** Present exactly for a dimension whose list holds members of a distribution,
+   *  not units over a threshold: Equality's functions above the mean complexity
+   *  (CR-252). Its wording replaces the offender wording of a thresholded list. */
+  readonly members?: MemberListCopy;
+}
+
+/** The wording of a list of distribution members (CR-252): no entry in it is a
+ *  violation, so none of it says "offender" or "flagged". */
+export interface MemberListCopy {
+  /** The badge after the count, in place of "flagged" ("none …" when empty). */
+  readonly badge: string;
+  /** The table's caption, in place of "Worst offenders". */
+  readonly caption: string;
+  /** The table's first column, in place of "Offender". */
+  readonly header: string;
+  /** What the listed units are, said above the table. */
+  readonly listed: string;
+  /** The statement of a recorded, empty list. */
+  readonly none: string;
 }
 
 /** A share of a population, to one decimal place. A share that is not zero never
@@ -250,6 +269,14 @@ export const equality: DimensionCopy = {
   raw: (raw) => [gloss("gini"), ` ${raw.toFixed(2)} of function complexity (0 is even)`],
   unranked:
     "Not ranked in Where to start: splitting a function has no single result, so these functions have no stated points.",
+  members: {
+    badge: "above average",
+    caption: "Functions above the mean complexity",
+    header: "Function",
+    listed:
+      "These are the functions with above-average complexity, highest first. They are not violations: Equality has no per-function threshold, and these are the functions that make complexity uneven. logos offenders --dimension equality lists every one.",
+    none: "No function is above the mean complexity: complexity is spread evenly.",
+  },
 };
 
 export const redundancy: DimensionCopy = {
@@ -332,13 +359,14 @@ export const OFFENDER_STATEMENT = {
   "not-recorded": "Offenders were not recorded for this snapshot; run logos scan to record them.",
 } as const;
 
-/** The status badge for each offender state. */
-export function offenderBadge(state: DimensionOffenderState, listed: number): string | null {
+/** The status badge for each offender state; a list of distribution members
+ *  (CR-252) counts its units under its own word, never "flagged". */
+export function offenderBadge(state: DimensionOffenderState, listed: number, members?: MemberListCopy): string | null {
   switch (state) {
     case "listed":
-      return `${listed} flagged`;
+      return `${listed} ${members?.badge ?? "flagged"}`;
     case "none-flagged":
-      return "none flagged";
+      return `none ${members?.badge ?? "flagged"}`;
     case "not-recorded":
       return "not recorded";
     case "not-applicable":

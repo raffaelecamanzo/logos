@@ -120,8 +120,10 @@ const OFFENDER_BACKED = [
   "Acyclicity", "Depth", "Equality", "Redundancy",
   "Nesting", "Conciseness", "Cohesion", "Focus", "Uniqueness",
 ];
-/** The four CR-209 added — rendered exactly like the five CR-005 lists. */
+/** The four CR-209 added — rendered like the five CR-005 lists, Equality under its own labels (CR-252). */
 const CR209 = ["Acyclicity", "Depth", "Equality", "Redundancy"];
+/** Equality's table caption: its rows are the functions above the mean complexity, not offenders (CR-252). */
+const EQUALITY_CAPTION = "Functions above the mean complexity";
 
 /** Every rendered widget, in document order. */
 const frames = () => widgetsIn(document.body);
@@ -511,8 +513,11 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
     };
     for (const [name, rows] of Object.entries(expected)) {
       const w = widget(name);
-      expect(within(part(w, "title")!).getByText(`${rows.length} flagged`), name).toBeInTheDocument();
-      const table = within(w).getByRole("table", { name: "Worst offenders" });
+      // Equality's rows are above-average functions, not offenders (CR-252).
+      const [badge, caption] =
+        name === "Equality" ? [`${rows.length} above average`, EQUALITY_CAPTION] : [`${rows.length} flagged`, "Worst offenders"];
+      expect(within(part(w, "title")!).getByText(badge), name).toBeInTheDocument();
+      const table = within(w).getByRole("table", { name: caption });
       const cells = within(table)
         .getAllByRole("row")
         .slice(1)
@@ -532,9 +537,10 @@ describe("Dimension widgets (CR-203 items 14–19)", () => {
       expect(within(part(w, "title")!).getByText("not recorded"), name).toBeInTheDocument();
       expect(seen(w), name).not.toMatch(/none flagged/i);
     }
-    for (const name of ["Depth", "Equality", "Nesting"]) {
+    for (const name of ["Depth", "Nesting"]) {
       expect(within(part(widget(name), "title")!).getByText("none flagged"), name).toBeInTheDocument();
     }
+    expect(within(part(widget("Equality"), "title")!).getByText("none above average")).toBeInTheDocument();
   });
 
   it("no dimension widget carries an action line, at any score, listed or not (CR-206)", async () => {
@@ -608,13 +614,19 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
     stub(m);
     render(<HealthView />);
     await screen.findByText("Signal evolution");
-    for (const name of OFFENDER_BACKED) {
+    for (const name of OFFENDER_BACKED.filter((n) => n !== "Equality")) {
       const w = widget(name);
       expect(seen(part(w, "evidence"))).toMatch(NONE_FLAGGED);
       expect(seen(w)).not.toMatch(NOT_RECORDED);
       expect(within(w).queryByRole("table")).toBeNull();
       expect(within(part(w, "title")!).getByText("none flagged")).toBeInTheDocument();
     }
+    // Equality has no threshold to be within: its empty list says what it means (CR-252).
+    const equality = widget("Equality");
+    expect(seen(part(equality, "evidence"))).toMatch(/^No function is above the mean complexity/);
+    expect(seen(equality)).not.toMatch(/offenders|flagged/i);
+    expect(within(equality).queryByRole("table")).toBeNull();
+    expect(within(part(equality, "title")!).getByText("none above average")).toBeInTheDocument();
   });
 
   it("renders a not-recorded snapshot as 'not recorded' in every widget, never as a clean result", async () => {
@@ -693,9 +705,10 @@ describe("HealthView offender states (S-499, FR-QM-15 / NFR-CC-04)", () => {
     expect(within(rows[0]).getByText("src/lib.rs")).toBeInTheDocument();
     expect(within(rows[0]).getByText("nesting depth 6")).toBeInTheDocument();
     expect(within(part(nesting, "title")!).getByText("3 flagged")).toBeInTheDocument();
-    // CR-209: Equality lists the one function above the mean complexity.
+    // CR-209: Equality lists the one function above the mean complexity —
+    // labelled as what it is, never as flagged (CR-252).
     const equality = widget("Equality");
-    expect(within(part(equality, "title")!).getByText("1 flagged")).toBeInTheDocument();
+    expect(within(part(equality, "title")!).getByText("1 above average")).toBeInTheDocument();
     expect(within(equality).getByText("complexity 7")).toBeInTheDocument();
     // The other seven recorded dimensions flagged nothing.
     for (const name of OFFENDER_BACKED.filter((n) => n !== "Nesting" && n !== "Equality")) {
@@ -1193,7 +1206,8 @@ describe("the Redundancy, Equality and Depth drill-downs and the other two notes
     expect(THREE).toHaveLength(3);
     for (const name of THREE) {
       const evidence = part(widget(name), "evidence")!;
-      expect(within(evidence).getByRole("table", { name: "Worst offenders" }), name).toBeInTheDocument();
+      const caption = name === "Equality" ? EQUALITY_CAPTION : "Worst offenders";
+      expect(within(evidence).getByRole("table", { name: caption }), name).toBeInTheDocument();
       expect(within(evidence).getAllByRole("row").length, name).toBe(2);
     }
   });
@@ -1711,5 +1725,54 @@ describe("Gate trend note (FR-GV-27, S-785)", () => {
     const figure = seen(part(gate, "figure"));
     expect(figure).toContain(WARNING);
     expect(figure.indexOf(WARNING)).toBeLessThan(figure.indexOf("Describes the snapshot of 2025-09-19"));
+  });
+});
+
+// CR-252 H1 (S-815): Equality's list is its top 10 functions above the mean
+// complexity. They are no violations, and every word of the widget says so.
+describe("Equality lists its above-average functions as what they are (S-815, CR-252)", () => {
+  function withEquality(n: number): HealthModel {
+    const m = clone();
+    m.scan.worst_offenders = {
+      ...realOffenders.recordedEmpty,
+      equality: Array.from({ length: n }, (_, i) => ({
+        name: `branchy_${i}`,
+        file: "src/lib.rs",
+        line: i + 1,
+        detail: `complexity ${20 - i}`,
+      })),
+      nesting: [{ name: "deep", file: "src/lib.rs", line: 40, detail: "nesting depth 6" }],
+    };
+    return m;
+  }
+
+  it("says the listed functions have above-average complexity and are not violations", async () => {
+    stub(withEquality(10));
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const evidence = part(widget("Equality"), "evidence")!;
+    const statement = evidence.querySelector('[data-offender-state="members"]');
+    expect(statement).not.toBeNull();
+    expect(seen(statement)).toMatch(/above-average complexity/);
+    expect(seen(statement)).toMatch(/not violations/);
+    expect(seen(statement)).toMatch(/logos offenders --dimension equality/);
+    // The top 10, all of them, under its own caption and column.
+    const table = within(evidence).getByRole("table", { name: EQUALITY_CAPTION });
+    expect(within(table).getAllByRole("row")).toHaveLength(11);
+    expect(within(table).getByRole("columnheader", { name: /^Function/ })).toBeInTheDocument();
+    expect(within(table).queryByRole("columnheader", { name: /Offender/ })).toBeNull();
+    // Only the command's own name says "offenders".
+    expect(seen(widget("Equality"))).not.toMatch(/(?<!logos )offender|flagged|worst/i);
+  });
+
+  it("leaves every other dimension's offender wording as it was", async () => {
+    stub(withEquality(3));
+    render(<HealthView />);
+    await screen.findByText("Signal evolution");
+    const nesting = widget("Nesting");
+    expect(within(part(nesting, "title")!).getByText("1 flagged")).toBeInTheDocument();
+    const table = within(nesting).getByRole("table", { name: "Worst offenders" });
+    expect(within(table).getByRole("columnheader", { name: /^Offender/ })).toBeInTheDocument();
+    expect(nesting.querySelector('[data-offender-state="members"]')).toBeNull();
   });
 });

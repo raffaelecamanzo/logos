@@ -77,6 +77,7 @@ use crate::models::quality::{
     RatchetReport, RulesReport, ScanResult, SessionInfo, SignalAbsence, TemporalTier, VerifyCensus,
     VerifyReport, Violation, WhereToStart, WorstOffenders,
 };
+use crate::metrics::ContainerLinks;
 use crate::runtime::Runtime;
 
 /// The report tier's session-start payload rendering ([CR-095]) — a projection of
@@ -94,6 +95,12 @@ pub mod ratchet;
 ///
 /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 pub mod thin_graph;
+
+/// The parse-damage warning ([FR-IX-14], S-571): `scan` names each large
+/// language a tenth or more of whose files were extracted from a damaged parse.
+///
+/// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+pub mod parse_damage;
 
 /// The uncapped, per-symbol offender listing ([FR-QM-19], S-676).
 ///
@@ -659,6 +666,10 @@ pub(crate) struct EvalInput<'a> {
     pub compiled: &'a CompiledRules,
     pub nodes: &'a [NodeRow],
     pub edges: &'a [EdgeRow],
+    /// The container links ([`ContainerLinks`], S-557, S-510): the
+    /// `no_god_containers` budget counts a partial type once and an `impl` or
+    /// receiver method toward its struct, as Focus does.
+    pub links: &'a ContainerLinks,
     pub functions: &'a [FunctionConstraintRow],
     /// Function/method annotation rows ([FR-AN-04]) carrying `is_dead` /
     /// `is_duplicate` — the SAME rows the Redundancy metric reads ([FR-QM-05]),
@@ -759,6 +770,23 @@ fn coverage_warnings(runtime: &Runtime) -> Result<Vec<String>> {
     Ok(runtime
         .submit_read(|store| thin_graph::ThinGraph::read(store))?
         .warnings())
+}
+
+/// `scan`'s [`coverage_warnings`] and its [FR-IX-14] parse-damage warnings
+/// ([`parse_damage::warnings`]), from one read of the `status` rows and the
+/// production callables: the thin graph is the one `ThinGraph::read` builds,
+/// and the parse-damage warning asks it which languages are large enough to
+/// name.
+///
+/// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+fn scan_coverage_warnings(runtime: &Runtime) -> Result<Vec<String>> {
+    runtime.submit_read(|store| {
+        let (rows, _) = crate::resolve::coverage_and_shared_headers(store)?;
+        let thin = thin_graph::ThinGraph::from_rows(&rows, &store.production_callables_by_language()?);
+        let mut warnings = thin.warnings();
+        warnings.extend(parse_damage::warnings(&rows, &thin));
+        Ok(warnings)
+    })
 }
 
 /// Evaluate the architecture contract ([FR-GV-02]): constraints (point
@@ -969,11 +997,14 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
 /// counting it would make fan-in/out drift with the policy graph and break the
 /// byte-identical guarantee ([NFR-RA-06]) — `build_view` has no reason to know
 /// about this governance-specific self-reference fence, so it is applied here.
+/// A dispatch edge is dropped beside it: a call through a trait couples the
+/// caller to the trait, not to its implementations ([FR-QM-20]).
 /// Computed from the hydrated edge set, never persisted ([CR-002]: no
 /// migration).
 ///
 /// [FR-GV-11]: ../../../docs/specs/requirements/FR-GV-11.md
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
 /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
 /// [CR-002]: ../../../docs/requests/CR-002-extended-architecture-contracts.md
 /// [CR-065]: ../../../docs/requests/CR-065-module-grain-coupling-metric.md
@@ -1003,7 +1034,7 @@ fn check_coupling(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
         .edges
         .iter()
         .copied()
-        .filter(|e| e.kind != EdgeKind::ForbiddenDependency)
+        .filter(|e| e.kind != EdgeKind::ForbiddenDependency && !e.is_dispatch())
         .collect();
     let view = build_view(Granularity::Module, &nodes, &edges);
 
@@ -1407,6 +1438,7 @@ fn check_god_containers(
         for god in crate::metrics::god_containers(
             input.nodes,
             input.edges,
+            input.links,
             input.function_metrics,
             test_ids,
             input.thresholds,
@@ -1473,10 +1505,13 @@ fn check_layer_ordering(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
         // neither is an input here. Documentation edges (DocReference /
         // TracesTo) are also excluded: they are cross-kind links from docs
         // to code and must never trigger layer-ordering violations ([FR-DG-06]).
+        // A dispatch edge reaches an implementation through its trait: the
+        // caller depends on the trait, so it crosses no layer (FR-QM-20).
         if matches!(
             edge.kind,
             EdgeKind::Contains | EdgeKind::ForbiddenDependency
         ) || edge.kind.is_documentation()
+            || edge.is_dispatch()
         {
             continue;
         }
@@ -1852,7 +1887,7 @@ pub(crate) fn rematerialise(
         rules,
         &config.semantics.entry_points,
         &config.semantics.test_markers,
-        &registry.reachability_extensions(),
+        &crate::annotate::Reachability::of(registry),
         &ctx,
         false,
     )?;
@@ -1900,6 +1935,8 @@ fn materialise_and_evaluate(
 pub(crate) struct StoreFacts {
     pub nodes: Vec<NodeRow>,
     pub edges: Vec<EdgeRow>,
+    /// The container links, as the metrics read them (S-557, S-510).
+    pub links: ContainerLinks,
     pub functions: Vec<FunctionConstraintRow>,
     /// The is_dead/is_duplicate annotation rows for the FR-GV-11 redundancy
     /// budgets — the SAME query the Redundancy metric reads, so the budget and
@@ -1919,9 +1956,17 @@ impl StoreFacts {
     /// Read every fact in one checkout of `runtime`'s store.
     pub(crate) fn read(runtime: &Runtime) -> Result<Self> {
         runtime.submit_read(|store| {
+            let nodes = store.all_nodes()?;
+            let links = ContainerLinks::new(
+                store.partial_type_links()?,
+                &nodes,
+                &store.node_self_types()?,
+                &store.impl_blocks()?,
+            );
             Ok(Self {
-                nodes: store.all_nodes()?,
+                nodes,
                 edges: store.all_edges()?,
+                links,
                 functions: store.function_constraint_rows()?,
                 function_metrics: store.function_metrics()?,
                 annotations: store.annotation_nodes()?,
@@ -1945,6 +1990,7 @@ impl StoreFacts {
             view,
             &self.nodes,
             &self.edges,
+            &self.links,
             &self.function_metrics,
             &self.test_ids(),
             crate::metrics::Thresholds::default(),
@@ -1962,6 +2008,7 @@ impl StoreFacts {
             compiled,
             nodes: &self.nodes,
             edges: &self.edges,
+            links: &self.links,
             functions: &self.functions,
             function_metrics: &self.function_metrics,
             annotations: &self.annotations,
@@ -2137,9 +2184,11 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     if let Some(warning) = persistence.warning() {
         warnings.push(warning);
     }
-    // FR-QM-18: the languages the graph cannot see across files — advisory,
-    // never a verdict, from the helper every scoring surface shares.
-    warnings.extend(coverage_warnings(runtime)?);
+    // FR-QM-18: the languages the graph cannot see across files, and FR-IX-14:
+    // the large languages a tenth of whose files parsed damaged — advisory,
+    // never a verdict, both from one reading of the per-language rows and the
+    // production callables.
+    warnings.extend(scan_coverage_warnings(runtime)?);
     // FR-GV-27: under `[review]`, a distributional dimension in decline warns
     // over the series this scan just extended.
     if let Some(policy) = compiled.rules.review.as_ref() {
@@ -2377,7 +2426,13 @@ fn metric_snapshot_from_row(row: LatestMetricSnapshot) -> MetricSnapshot {
         nesting: req(row.nesting_raw, row.nesting_normalized),
         conciseness: req(row.conciseness_raw, row.conciseness_normalized),
         cohesion: opt(row.cohesion_applicable, row.cohesion_raw, row.cohesion_normalized),
+        // The row records that Cohesion dropped out, not why (CR-252): a
+        // too-few-classes drop-out reads back as the plain n/a.
+        cohesion_not_applicable: None,
         focus: opt(row.focus_applicable, row.focus_raw, row.focus_normalized),
+        // The row records Focus, not how many methods it left unattributed
+        // (S-510): a stored snapshot reads back without the figure.
+        focus_attribution: None,
         uniqueness: req(row.uniqueness_raw, row.uniqueness_normalized),
         thresholds_hash: row.thresholds_hash.unwrap_or_default(),
         node_count: row.node_count as u64,
@@ -2963,6 +3018,7 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
         modularity_not_applicable: metrics.modularity_not_applicable.clone(),
         acyclicity_not_applicable: metrics.acyclicity_not_applicable.clone(),
         depth_not_applicable: metrics.depth_not_applicable.clone(),
+        cohesion_not_applicable: metrics.cohesion_not_applicable.clone(),
         violation_count,
         check,
         warnings,
@@ -3966,12 +4022,14 @@ impl FromStr for DsmGranularity {
 }
 
 /// `dsm` — the dependency structure matrix ([FR-GV-07]): cell `(i, j)`
-/// counts dep edges `i → j`, rows ordered by layer order then name (so
+/// counts dep edges `i → j` — never a dispatch edge, which reaches an
+/// implementation through its trait ([FR-QM-20]) — rows ordered by layer order then name (so
 /// forward deps sit below the diagonal). At module granularity a Go package —
 /// a directory plus its `package` clause — is one row, not one row per file
 /// ([`go_dsm`]); every other language keeps the module rollup's rows.
 ///
 /// [FR-GV-07]: ../../../docs/specs/requirements/FR-GV-07.md
+/// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
 pub(crate) fn dsm(
     engine: &Engine,
     granularity: Option<DsmGranularity>,
@@ -4054,8 +4112,9 @@ pub(crate) fn dsm(
         );
         // Two files of one package depend on each other inside the package;
         // that is not a coupling between rows (the rollup drops the same
-        // self-loop one level down).
-        if src != dst {
+        // self-loop one level down). A pair reached only through a trait is
+        // no dependency either (FR-QM-20).
+        if src != dst && !edge.weight().is_dispatch() {
             matrix[src][dst] += edge.weight().weight;
         }
     }

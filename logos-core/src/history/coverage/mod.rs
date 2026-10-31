@@ -456,6 +456,18 @@ pub struct CoverageLastRun {
     /// For a failed run, its whole bounded output, root-relative: the payload
     /// carries only a masked excerpt.
     pub log: Option<String>,
+    /// How long the tool ran, in milliseconds: from its spawn to its end,
+    /// without any readying step before it. Absent in a record written
+    /// before it was kept, or when no process ran — never `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    /// Why the run did not pass — for `failed`, `tests_failed` and
+    /// `timed_out` alone: the masked excerpt of the end of what the tool
+    /// printed (it names the failing test), or the limit a timed out run hit.
+    /// Absent for every other end, in a record written before it was kept,
+    /// and when the tool printed nothing — never empty text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 /// One covered file's freshness-resolved coverage on the `status` surface

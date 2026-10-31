@@ -20,8 +20,8 @@
   height: 0.6rem;
 }
 
-/* The Coverage page's run (S-739): the title-row controls, the live line and the
-   per-tool progress list above the tools table. */
+/* The Coverage page's run (S-739): the title-row controls and the live line above
+   the tools table, and (S-803) the message area below it. */
 .controls {
   display: flex;
   gap: var(--space-2);
@@ -37,8 +37,8 @@
   color: var(--text-1);
 }
 
-.progress {
-  margin: 0 0 var(--space-3);
+.messages {
+  margin: var(--space-3) 0 0;
   padding-left: var(--space-4);
   line-height: var(--leading-base);
   color: var(--text-1);
@@ -49,7 +49,7 @@
   margin: var(--space-1) 0 0;
 }
 
-/* A failed tool's error output, in its disclosure. */
+/* A failed tool's cause, in the message area. */
 .stderr {
   margin: var(--space-1) 0 0;
   white-space: pre-wrap;

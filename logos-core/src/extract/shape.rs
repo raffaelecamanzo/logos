@@ -50,15 +50,21 @@ use crate::plugin::ExportConvention;
 ///
 /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
 /// [AR-05]: ../../../docs/specs/architecture.md#13-risk-register
-pub(super) fn is_exported(node: Node<'_>, name: &str, convention: ExportConvention) -> bool {
+pub(super) fn is_exported(node: Node<'_>, name: &str, convention: ExportConvention, source: &[u8]) -> bool {
     match convention {
         ExportConvention::All => true,
         // Rust: a `visibility_modifier` child (`pub`, `pub(crate)`, …).
         ExportConvention::VisibilityModifier => has_child_of_kind(node, "visibility_modifier"),
         // TS/JS: an `export_statement` ancestor. Walked (not just the parent)
-        // because `export const F = …` nests the declarator two levels down.
+        // because `export const F = …` nests the declarator two levels down. The
+        // declaration of `export default <expression>` is the statement itself
+        // (S-532), so the walk starts at the node. A JavaScript function assigned
+        // to `exports.y` / `module.exports.y` is the CommonJS export (S-539).
         ExportConvention::ExportStatement => {
-            let mut ancestor = node.parent();
+            if is_commonjs_export(node, source) {
+                return true;
+            }
+            let mut ancestor = Some(node);
             while let Some(n) = ancestor {
                 if n.kind() == "export_statement" {
                     return true;
@@ -88,24 +94,22 @@ pub(super) fn is_exported(node: Node<'_>, name: &str, convention: ExportConventi
         // to the translation unit and treat the first enclosing `static`
         // specifier as the file-local marker. `extern` and the unqualified
         // default both stay exported (the safe AR-05 direction: a merely-visible
-        // item as a root can only under-report dead code).
+        // item as a root can only under-report dead code). A `static`
+        // declaration of the name earlier in the file makes it file-local too
+        // (C11 §6.2.2: `static int f(void); … int f(void) { … }`), which the
+        // link-unit rung relies on to never offer it to another file (S-584).
         ExportConvention::NonStatic => {
             let mut current = Some(node);
             while let Some(n) = current {
                 if n.kind() == "translation_unit" {
                     break;
                 }
-                let mut cursor = n.walk();
-                let has_static = n
-                    .children(&mut cursor)
-                    .filter(|c| c.kind() == "storage_class_specifier")
-                    .any(|s| has_child_of_kind(s, "static"));
-                if has_static {
+                if has_static_storage(n) {
                     return false;
                 }
                 current = n.parent();
             }
-            true
+            !declared_static_before(node, name, source)
         }
         // C#: an explicit `public` among the declaration's flat `modifier`
         // children (S-057, CR-009). Unlike Java, tree-sitter-c-sharp does not
@@ -146,6 +150,34 @@ pub(super) fn is_exported(node: Node<'_>, name: &str, convention: ExportConventi
     }
 }
 
+/// `true` for an `assignment_expression` that assigns `exports.y` or
+/// `module.exports.y` — the declaration of a JavaScript function exported the
+/// CommonJS way (S-539, [FR-EX-18]). Only the JavaScript `symbols` layer
+/// declares on an assignment, so every other declaration is `false`.
+///
+/// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
+fn is_commonjs_export(node: Node<'_>, source: &[u8]) -> bool {
+    if node.kind() != "assignment_expression" {
+        return false;
+    }
+    let Some(object) = node
+        .child_by_field_name("left")
+        .filter(|left| left.kind() == "member_expression")
+        .and_then(|left| left.child_by_field_name("object"))
+    else {
+        return false;
+    };
+    let reads = |n: Option<Node<'_>>, text: &str| n.is_some_and(|n| n.utf8_text(source) == Ok(text));
+    match object.kind() {
+        "identifier" => reads(Some(object), "exports"),
+        "member_expression" => {
+            let module = object.child_by_field_name("object").filter(|o| o.kind() == "identifier");
+            reads(module, "module") && reads(object.child_by_field_name("property"), "exports")
+        }
+        _ => false,
+    }
+}
+
 /// `true` when a C++ declaration carries the `static` storage-class specifier
 /// (internal linkage). The captured name's parent (`node`) is the declarator or
 /// specifier; the `static` token lives on it or on its immediate declaration
@@ -181,17 +213,103 @@ fn cpp_in_anonymous_namespace(node: Node<'_>) -> bool {
     false
 }
 
-/// `true` when `node` has a direct `visibility_modifier` child whose keyword is
-/// `private` or `protected` (the only two that demote a PHP declaration below
-/// public). The keyword is the modifier's first child token, whose `kind()` is
-/// the literal text in tree-sitter.
+/// `true` when `node`'s [`php_visibility_owner`] has a direct `visibility_modifier`
+/// child whose keyword is `private` or `protected` (the only two that demote a PHP
+/// declaration below public). The keyword is the modifier's first child token,
+/// whose `kind()` is the literal text in tree-sitter.
 fn php_is_restricted(node: Node<'_>) -> bool {
+    let node = php_visibility_owner(node);
     let mut cursor = node.walk();
     let restricted = node
         .children(&mut cursor)
         .filter(|c| c.kind() == "visibility_modifier")
         .any(|m| matches!(m.child(0).map(|k| k.kind()), Some("private" | "protected")));
     restricted
+}
+
+/// The node that carries a PHP declaration's `visibility_modifier` (S-548): the
+/// declaration itself, except for the two captures whose declaration node is the
+/// element or variable holding the name, not the declaration carrying the
+/// modifier — a constant's `const_element`, whose modifier sits on the
+/// `const_declaration` holding it, and a promoted property's `$name` (also when
+/// by reference, under a `by_ref`), whose modifier sits on its
+/// `property_promotion_parameter`. An enum case has none and is public. A
+/// declared property's `$name` (`property_element`) is deliberately not
+/// followed: it has always read as exported, and that is not this story's to
+/// change.
+fn php_visibility_owner(node: Node<'_>) -> Node<'_> {
+    let owner = match node.kind() {
+        "const_element" => node.parent().filter(|p| p.kind() == "const_declaration"),
+        "variable_name" => node
+            .parent()
+            .and_then(|p| if p.kind() == "by_ref" { p.parent() } else { Some(p) })
+            .filter(|p| p.kind() == "property_promotion_parameter"),
+        _ => None,
+    };
+    owner.unwrap_or(node)
+}
+
+/// `true` when `node` carries a `static` storage-class specifier (C).
+fn has_static_storage(node: Node<'_>) -> bool {
+    let mut cursor = node.walk();
+    let found = node
+        .children(&mut cursor)
+        .filter(|c| c.kind() == "storage_class_specifier")
+        .any(|s| has_child_of_kind(s, "static"));
+    found
+}
+
+/// `true` when a file-scope `static` declaration of `name` precedes `node` in
+/// its translation unit (C11 §6.2.2, S-584): `static int f(void);` before
+/// `int f(void) { … }` gives the definition internal linkage. File scope is the
+/// translation unit's own children and those of the preprocessor blocks among
+/// them; the name is the identifier a declarator chain ends in.
+fn declared_static_before(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    let mut unit = node;
+    while let Some(parent) = unit.parent() {
+        unit = parent;
+    }
+    if unit.kind() != "translation_unit" || name.is_empty() {
+        return false;
+    }
+    let end = node.start_byte();
+    let mut stack = vec![unit];
+    while let Some(scope) = stack.pop() {
+        let mut cursor = scope.walk();
+        for child in scope.children(&mut cursor).filter(|c| c.start_byte() < end) {
+            if declares_static(child, name, source) {
+                return true;
+            }
+            if child.kind().starts_with("preproc_") {
+                stack.push(child);
+            }
+        }
+    }
+    false
+}
+
+/// `true` when `node` is a `static` declaration one of whose declarators
+/// names `name` ([`declared_static_before`]).
+fn declares_static(node: Node<'_>, name: &str, source: &[u8]) -> bool {
+    if node.kind() != "declaration" || !has_static_storage(node) {
+        return false;
+    }
+    let mut declarators = node.walk();
+    let declares = node
+        .children_by_field_name("declarator", &mut declarators)
+        .any(|d| declarator_name(d, source) == Some(name));
+    declares
+}
+
+/// The identifier a C declarator chain ends in (`f` of `*f(void)`, `x` of
+/// `x = 0`), followed through each `declarator` field.
+fn declarator_name<'s>(mut node: Node<'_>, source: &'s [u8]) -> Option<&'s str> {
+    loop {
+        if node.kind() == "identifier" {
+            return node.utf8_text(source).ok();
+        }
+        node = node.child_by_field_name("declarator")?;
+    }
 }
 
 /// `true` when `node` has a direct child of `kind` (named or anonymous).
@@ -354,7 +472,7 @@ mod tests {
                     .child_by_field_name("name")
                     .and_then(|c| c.utf8_text(source.as_bytes()).ok())
                     .unwrap_or("");
-                return is_exported(n, name, convention);
+                return is_exported(n, name, convention, source.as_bytes());
             }
             for i in (0..n.child_count()).rev() {
                 if let Some(c) = n.child(i) {
@@ -622,6 +740,33 @@ mod tests {
         );
     }
 
+    /// S-584: an earlier file-scope `static` declaration of the name makes a
+    /// definition file-local (C11 §6.2.2) — through a preprocessor block too —
+    /// and nothing else does: a non-`static` one, a `static` one of another
+    /// name, or one written after the definition.
+    #[cfg(feature = "lang-c")]
+    #[test]
+    fn an_earlier_static_declaration_makes_a_c_definition_file_local() {
+        let lang: tree_sitter::Language = tree_sitter_c::LANGUAGE.into();
+        let exported = |src: &str| {
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&lang).expect("grammar binds");
+            let tree = parser.parse(src, None).expect("source parses");
+            let root = tree.root_node();
+            let mut cursor = root.walk();
+            let def = root
+                .children(&mut cursor)
+                .find(|c| c.kind() == "function_definition")
+                .expect("a definition");
+            is_exported(def, "f", ExportConvention::NonStatic, src.as_bytes())
+        };
+        assert!(!exported("static int f(void);\nint f(void) { return 0; }\n"));
+        assert!(!exported("#ifdef X\nstatic char *f(int);\n#endif\nchar *f(int x) { return 0; }\n"));
+        assert!(exported("int f(void);\nint f(void) { return 0; }\n"));
+        assert!(exported("static int ff(void);\nint f(void) { return 0; }\n"));
+        assert!(exported("int f(void) { return 0; }\nstatic int f(void);\n"));
+    }
+
     /// FR-AN-01 / S-058: the C++ convention — external linkage unless `static`
     /// or in an anonymous namespace. Probed on the `function_declarator` (the
     /// node extraction passes: the captured name's parent) and the
@@ -805,5 +950,54 @@ function freeFn() {}
             ),
             "a class carries no visibility modifier → exported"
         );
+    }
+
+    /// S-548: a constant and a promoted property are captured as the element or
+    /// variable holding the name (`const_element`, the promoted `$name`), so the
+    /// keyword is read from the declaration holding it; an enum case carries none and is public.
+    #[cfg(feature = "lang-php")]
+    #[test]
+    fn php_visibility_reads_the_modifier_of_a_constant_and_a_promoted_property() {
+        use ExportConvention::PhpVisibility;
+        let lang: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP.into();
+        for (src, kind, want, what) in [
+            ("<?php class A { const X = 1; }", "const_element", true, "a modifier-less constant"),
+            ("<?php class A { public const X = 1; }", "const_element", true, "a public constant"),
+            ("<?php class A { private const X = 1; }", "const_element", false, "a private constant"),
+            ("<?php class A { protected const X = 1, Y = 2; }", "const_element", false, "a protected constant"),
+            ("<?php enum E { case On; }", "enum_case", true, "an enum case"),
+            (
+                "<?php class A { function __construct(public int $x) {} }",
+                "variable_name",
+                true,
+                "a public promoted property",
+            ),
+            (
+                "<?php class A { function __construct(private int $x) {} }",
+                "variable_name",
+                false,
+                "a private promoted property",
+            ),
+            (
+                "<?php class A { function __construct(protected readonly int $x) {} }",
+                "variable_name",
+                false,
+                "a protected promoted property",
+            ),
+            (
+                "<?php class A { function __construct(private array &$x) {} }",
+                "variable_name",
+                false,
+                "a private by-reference promoted property",
+            ),
+            (
+                "<?php class A { function __construct(public array &$x) {} }",
+                "variable_name",
+                true,
+                "a public by-reference promoted property",
+            ),
+        ] {
+            assert_eq!(probe(&lang, src, kind, PhpVisibility), want, "{what}: {src}");
+        }
     }
 }

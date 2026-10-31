@@ -209,6 +209,55 @@ fn a_poisoned_name_is_still_declared_and_an_undeclared_one_is_not() {
     assert!(!types.declares("Props"));
 }
 
+/// A declaration a language's query states (S-558) is read from the type it
+/// names INSTEAD of the walk's reading of the same name — not beside it, which
+/// would poison the name with the two disagreeing readings — and a name the walk
+/// never sees is added. `go`'s `var made` would read `var`; stated, it reads the
+/// field's `Props`. The array dimensions of a stated type are its own.
+#[test]
+fn a_stated_declaration_replaces_the_walks_reading_of_its_name() {
+    let source = "public class Caller {\n\
+          private Props api;\n\
+          private Other[] rows;\n\
+          void go() { var made = make(); for (String each : names) { } }\n\
+        }";
+    let tree = parse(source);
+    let root = tree.root_node();
+    let src = source.as_bytes();
+    let alone = DeclaredTypes::build(root, src);
+    assert_eq!(alone.get("made"), Some("var"));
+    assert!(!alone.declares("each"), "a for-each name has no `type` the walk reads");
+
+    let mut stated = Declarations::default();
+    stated.declare(node_with_text(root, src, "made"), node_with_text(root, src, "Props"));
+    stated.declare(node_with_text(root, src, "each"), node_with_text(root, src, "Other[]"));
+    let types = DeclaredTypes::build_with(root, src, &stated);
+    assert_eq!(types.get("made"), Some("Props"));
+    assert_eq!(types.get("each"), Some("Other[]"));
+    assert_eq!(types.field("made"), None, "a local is at no field position");
+    assert_eq!(types.get("api"), Some("Props"), "the walk reads everything else");
+}
+
+/// A callable's own scope is a build over that callable alone (S-467), so it
+/// reads only the stated declarations whose name lies inside it.
+#[test]
+fn a_stated_declaration_outside_the_walked_node_is_not_read() {
+    let source = "public class Caller {\n\
+          private Props api;\n\
+          void go() { var made = make(); }\n\
+        }";
+    let tree = parse(source);
+    let root = tree.root_node();
+    let src = source.as_bytes();
+    let body = node_with_text(root, src, "{ var made = make(); }");
+    let mut stated = Declarations::default();
+    stated.declare(node_with_text(root, src, "api"), node_with_text(root, src, "Props"));
+    stated.declare(node_with_text(root, src, "made"), node_with_text(root, src, "Props"));
+    let scope = DeclaredTypes::build_with(body, src, &stated);
+    assert_eq!(scope.get("made"), Some("Props"));
+    assert!(!scope.declares("api"), "the field lies outside the method body");
+}
+
 // ── The chain: accessor → field → owning class → prefix → canonical key ─────
 
 /// The positive case, end to end, and the key is **canonical**: the source

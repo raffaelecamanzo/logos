@@ -13,7 +13,8 @@
 ;
 ; v1 policy: `__construct` is captured like any other method — its name never
 ; collides with the class name (unlike a Java constructor), so a `new Class()`
-; reference stays an honest unresolved class reference, not an ambiguous one.
+; is an `Instantiates` row bound to the class itself, never to its constructor
+; (references.scm, S-547).
 
 (class_declaration
   name: (name) @symbol.class)
@@ -39,6 +40,55 @@
 (property_declaration
   (property_element
     name: (variable_name (name) @symbol.field)))
+
+; A constructor-promoted parameter is a property of its class
+; (`public function __construct(private Logger $log)`, S-548, FR-EX-21): a Field
+; named `log`, so `$this->log` binds to it like a declared property. Its
+; declaration is the `$log` variable, which `assign_parents` lifts out of the
+; constructor to the class (the parameter list is the method's `parameters`
+; field). A by-reference promotion (`private array &$rows`) wraps the variable in
+; `by_ref`; the name is the same. The match is anchored to a method of a named
+; class or trait, the only types that have a constructor to promote in: an
+; anonymous class is not a declaration, so its constructor's Field would be
+; owned by the enclosing function, and a promotion in a plain function or
+; closure is not valid PHP.
+(class_declaration
+  body: (declaration_list
+    (method_declaration
+      parameters: (formal_parameters
+        (property_promotion_parameter
+          name: [(variable_name (name) @symbol.field)
+                 (by_ref (variable_name (name) @symbol.field))])))))
+(trait_declaration
+  body: (declaration_list
+    (method_declaration
+      parameters: (formal_parameters
+        (property_promotion_parameter
+          name: [(variable_name (name) @symbol.field)
+                 (by_ref (variable_name (name) @symbol.field))])))))
+
+; A class, interface, trait or enum constant (S-548, FR-EX-21): a Constant under
+; its type, one per element of `const A = 1, B = 2;`. The name is the element's
+; FIRST child (`const A = B;` has a second `name`, its value, which is no
+; declaration), and the match is anchored to a named type's body, so a global
+; `const X = 1;` and an anonymous class's constant are not captured.
+(class_declaration
+  body: (declaration_list
+    (const_declaration (const_element . (name) @symbol.constant))))
+(interface_declaration
+  body: (declaration_list
+    (const_declaration (const_element . (name) @symbol.constant))))
+(trait_declaration
+  body: (declaration_list
+    (const_declaration (const_element . (name) @symbol.constant))))
+(enum_declaration
+  body: (enum_declaration_list
+    (const_declaration (const_element . (name) @symbol.constant))))
+
+; An enum case is a Constant under its enum (S-548, FR-EX-21).
+(enum_declaration
+  body: (enum_declaration_list
+    (enum_case name: (name) @symbol.constant)))
 
 ; The file's namespace (S-518, CR-170, FR-RS-13). Not a declaration — its
 ; capture group is `module`, not `symbol`, so the declaration walk skips it. The

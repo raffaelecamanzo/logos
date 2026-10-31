@@ -75,7 +75,7 @@
       "results": [
         {
           "ruleId": "CVE-2021-44228",
-          "level": "error",
+          "level": "warning",
           "message": {
             "text": "Critical severity - CVE-2021-44228 Improper Input Validation vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
           },
@@ -99,7 +99,7 @@
         },
         {
           "ruleId": "CVE-2021-45046",
-          "level": "error",
+          "level": "warning",
           "message": {
             "text": "Critical severity - CVE-2021-45046 Deserialization of Untrusted Data vulnerability in pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1"
           },

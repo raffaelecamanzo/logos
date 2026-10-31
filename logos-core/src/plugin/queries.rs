@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 use tree_sitter::{Language, Query};
 
 use super::error::PluginError;
-use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE, UNINHERITED_CAPTURE};
+use super::manifest::{NAMESPACE_CAPTURE, SUPERTYPE_CAPTURE, TYPE_PARAMETERS_CAPTURE, UNINHERITED_CAPTURE};
 
 /// A query whose source has been resolved (override-or-embedded), ready to
 /// compile.
@@ -114,6 +114,17 @@ pub fn compile(language: &Language, resolved: &ResolvedQuery) -> Result<Query, P
         file: resolved.file_label.clone(),
         detail: e.to_string(),
     })
+}
+
+/// The value the query pattern `pattern` sets for `key` with `#set!`, when it
+/// sets one — the one reading of a pattern setting, shared by every pass that
+/// declares one (a declaration's name, S-559; a handler's suffix, S-567).
+pub(crate) fn pattern_setting<'q>(query: &'q Query, pattern: usize, key: &str) -> Option<&'q str> {
+    query
+        .property_settings(pattern)
+        .iter()
+        .find(|p| &*p.key == key)
+        .and_then(|p| p.value.as_deref())
 }
 
 /// Capability → compiled query, each shared with every other plugin in the
@@ -234,6 +245,24 @@ fn first_uses() -> MutexGuard<'static, Vec<FirstUseCompile>> {
     FIRST_USES.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The descriptor keys a language declares whose queries must carry a capture,
+/// checked when the language compiles ([`check_capture`]).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CaptureChecks {
+    /// Whether the language declares the namespace module model (S-518), whose
+    /// `symbols` query must capture [`NAMESPACE_CAPTURE`].
+    pub(crate) namespace_model: bool,
+    /// Whether the language declares `implicit_call_falls_through` (S-592),
+    /// whose `references` query must capture [`SUPERTYPE_CAPTURE`].
+    pub(crate) falls_through: bool,
+    /// Whether the language declares `inherits_interface_bodies` (S-609),
+    /// whose `symbols` query must capture [`UNINHERITED_CAPTURE`].
+    pub(crate) interface_bodies: bool,
+    /// Whether the language declares `type_arity` (S-602), whose `symbols`
+    /// query must capture [`TYPE_PARAMETERS_CAPTURE`].
+    pub(crate) type_arity: bool,
+}
+
 /// One language's capability queries, compiled together as one unit — at load
 /// when any of them is an on-disk override, else on the language's first use
 /// (CR-197, [FR-PL-02], [FR-PL-04]).
@@ -252,15 +281,8 @@ pub(crate) struct LanguageQueries {
     grammar: String,
     /// The descriptor's label, named when the namespace check refuses.
     manifest_label: &'static str,
-    /// Whether the language declares the namespace module model (S-518), whose
-    /// `symbols` query must capture [`NAMESPACE_CAPTURE`].
-    namespace_model: bool,
-    /// Whether the language declares `implicit_call_falls_through` (S-592),
-    /// whose `references` query must capture [`SUPERTYPE_CAPTURE`].
-    falls_through: bool,
-    /// Whether the language declares `inherits_interface_bodies` (S-609),
-    /// whose `symbols` query must capture [`UNINHERITED_CAPTURE`].
-    interface_bodies: bool,
+    /// The descriptor keys whose captures the compile checks.
+    checks: CaptureChecks,
     /// Every capability's resolved source, in declaration order.
     resolved: Vec<ResolvedQuery>,
     /// The compiled unit — or the error that refused it — once compiled.
@@ -278,18 +300,14 @@ impl LanguageQueries {
     pub(crate) fn new(
         grammar: &str,
         manifest_label: &'static str,
-        namespace_model: bool,
-        falls_through: bool,
-        interface_bodies: bool,
+        checks: CaptureChecks,
         resolved: Vec<ResolvedQuery>,
         language: &Language,
     ) -> Result<Self, PluginError> {
         let queries = Self {
             grammar: grammar.to_string(),
             manifest_label,
-            namespace_model,
-            falls_through,
-            interface_bodies,
+            checks,
             resolved,
             compiled: OnceLock::new(),
         };
@@ -308,9 +326,7 @@ impl LanguageQueries {
         Self {
             grammar: String::new(),
             manifest_label: "",
-            namespace_model: false,
-            falls_through: false,
-            interface_bodies: false,
+            checks: CaptureChecks::default(),
             resolved: Vec::new(),
             compiled: OnceLock::from(Ok(queries)),
         }
@@ -399,14 +415,17 @@ impl LanguageQueries {
             compiled += usize::from(fresh);
             queries.insert(resolved.capability.clone(), query);
         }
-        if self.namespace_model {
+        if self.checks.namespace_model {
             check_capture(self.manifest_label, &queries, "symbols", NAMESPACE_CAPTURE, NAMESPACE_REASON)?;
         }
-        if self.falls_through {
+        if self.checks.falls_through {
             check_capture(self.manifest_label, &queries, "references", SUPERTYPE_CAPTURE, SUPERTYPE_REASON)?;
         }
-        if self.interface_bodies {
+        if self.checks.interface_bodies {
             check_capture(self.manifest_label, &queries, "symbols", UNINHERITED_CAPTURE, UNINHERITED_REASON)?;
+        }
+        if self.checks.type_arity {
+            check_capture(self.manifest_label, &queries, "symbols", TYPE_PARAMETERS_CAPTURE, TYPE_PARAMETERS_REASON)?;
         }
         Ok((queries, compiled))
     }
@@ -452,8 +471,22 @@ const UNINHERITED_REASON: &str =
     "`inherits_interface_bodies` requires the `symbols` query to capture `@item.uninherited`, \
      or a static or private interface member would read as inherited";
 
+/// A language whose types are told apart by their arity (S-602, [CR-199])
+/// must record its type declarations' type-parameter lists: its compiled
+/// `symbols` query captures `@item.type_parameters`. A declaration whose list
+/// is not captured records arity 0, so a language capturing none would read
+/// every generic type as a plain one, and its namespace rungs would bind a
+/// written `Result` to `Result<T>` and never bind `Result<int>` ([NFR-RA-05]).
+///
+/// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+const TYPE_PARAMETERS_REASON: &str =
+    "`[module_model]` `type_arity` requires the `symbols` query to capture `@item.type_parameters`, \
+     or every generic type would read as a plain one";
+
 /// A capture a descriptor key depends on ([`NAMESPACE_REASON`],
-/// [`SUPERTYPE_REASON`], [`UNINHERITED_REASON`]): the compiled `capability` query — embedded or an
+/// [`SUPERTYPE_REASON`], [`UNINHERITED_REASON`], [`TYPE_PARAMETERS_REASON`]):
+/// the compiled `capability` query — embedded or an
 /// on-disk override — carries `capture`, or the language's compile is
 /// refused, naming the descriptor and `reason`.
 fn check_capture(
@@ -503,9 +536,7 @@ mod tests {
                     LanguageQueries::new(
                         &grammar,
                         "toyunit/plugin.toml",
-                        false,
-                        false,
-                        false,
+                        CaptureChecks::default(),
                         resolved,
                         &language,
                     )
@@ -567,7 +598,7 @@ mod tests {
                     overridden: false,
                 })
                 .to_vec();
-            LanguageQueries::new("toyevent", "toyevent/plugin.toml", false, false, false, resolved, &language)
+            LanguageQueries::new("toyevent", "toyevent/plugin.toml", CaptureChecks::default(), resolved, &language)
                 .expect("no override, nothing compiles at construction")
         };
         let captured = Captured::default();

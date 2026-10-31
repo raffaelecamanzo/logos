@@ -226,6 +226,9 @@ async fn every_write_and_gate_tool_refuses_repo_rather_than_acting_on_the_defaul
         if tool == "security_ingest" {
             args["report"] = json!("report.sarif");
         }
+        if tool == "security_reconfirm" {
+            args["fingerprint"] = json!("0".repeat(64));
+        }
         let (code, message) = refusal(&client, tool, args).await;
         assert_eq!(code, ErrorCode::INVALID_PARAMS, "{tool}: {message}");
         assert!(message.contains("acts on the default member only"), "{tool}: {message}");

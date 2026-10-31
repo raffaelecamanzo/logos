@@ -48,6 +48,19 @@
   color: var(--text-1);
 }
 
+/* ── Graph card reference resolution (S-636) ─────────────────────────────────
+   The population line and the doc-reference figure, stacked above the stat list
+   at the body size, with the stat list's own spacing between them. */
+.resolutionLines {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-3);
+  color: var(--text-2);
+}
+.resolutionLines p {
+  margin: 0;
+}
+
 /* ── Graph card footnotes ─────────────────────────────────────────────────────
    Tight caption block: smaller than body text and with no inter-line gap, so the
    `*`/`**` references read as a compact legend rather than two spaced paragraphs. */

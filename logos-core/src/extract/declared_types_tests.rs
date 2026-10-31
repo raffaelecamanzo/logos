@@ -246,7 +246,7 @@ fn a_kotlin_class_interface_enum_and_object_are_named_by_their_package_in_both_t
         vec![
             (Ok("com.x.core.Svc"), "class", "main"),
             (Ok("com.x.core.Port"), "interface", "main"),
-            (Ok("com.x.core.Mode"), "class", "main"),
+            (Ok("com.x.core.Mode"), "enum", "main"),
             (Ok("com.x.core.Registry"), "class", "main"),
             (Ok("com.x.core.Point"), "class", "main"),
         ],

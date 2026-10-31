@@ -99,6 +99,11 @@ pub(crate) struct QueryHit {
     pub line: Option<u32>,
     /// 1-based rank within the ranked result set.
     pub rank: u32,
+    /// The trait method a relational hit was reached through,
+    /// `"<Trait>::<method>"` — the navigation row's `via` (S-712), absent from
+    /// the wire for every other hit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 impl QueryHit {
@@ -113,6 +118,7 @@ impl QueryHit {
             file: s.file.clone(),
             line: s.line,
             rank,
+            via: s.via.clone(),
         }
     }
 }
@@ -434,7 +440,24 @@ mod tests {
             kind,
             file: file.map(str::to_string),
             line: Some(1),
+            via: None,
         }
+    }
+
+    #[test]
+    fn a_hit_carries_its_rows_via_and_only_when_it_has_one() {
+        // S-712: a navigation row reached by dispatch keeps its `via` as a hit;
+        // any other hit serialises exactly as before, with no `via` key.
+        let direct = sym("s1", "by_impl", NodeKind::Function, Some("a.rs"));
+        let dispatched = SymbolRef {
+            via: Some("Tr::m".to_string()),
+            ..sym("s2", "by_dyn", NodeKind::Function, Some("a.rs"))
+        };
+        let hits = rank_hits([&direct, &dispatched]);
+        assert_eq!((hits[0].via.as_deref(), hits[1].via.as_deref()), (None, Some("Tr::m")));
+        let wire = serde_json::to_value(&hits).unwrap();
+        assert!(wire[0].get("via").is_none(), "{wire}");
+        assert_eq!(wire[1]["via"], "Tr::m");
     }
 
     #[test]

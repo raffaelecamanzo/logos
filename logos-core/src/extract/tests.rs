@@ -38,10 +38,13 @@ impl NoSymbolsPlugin {
                 module_separator: "::".to_string(),
                 import_specifier: crate::plugin::ImportSpecifier::Name,
                 specifier_extensions: Vec::new(),
+                bare_specifiers: crate::plugin::BareSpecifiers::External,
                 implicit_receiver: crate::plugin::ImplicitReceiver::None,
                 bare_calls_free_only: false,
                 overloaded_calls: false,
                 impl_block_lookup: false,
+                separate_call_namespace: false,
+                method_set_implements: false,
                 arity_unchecked_extensions: Vec::new(),
                 implicit_call_falls_through: false,
                 implicit_root_members: Vec::new(),
@@ -49,23 +52,40 @@ impl NoSymbolsPlugin {
                 call_targets: crate::plugin::CallTargets::default(),
                 supertype_kind_follows_target: false,
                 inherits_interface_bodies: false,
+                structural_types: false,
+                commonjs: false,
                 package_modules: None,
                 module_model: crate::plugin::ModuleModelKind::Path,
                 package_stems: Vec::new(),
                 import_roots: None,
                 enclosing_namespaces: false,
+                type_arity: false,
+                lexical_constants: false,
+                directory_packages: false,
+                link_unit: false,
+                companion_objects: false,
+                top_level_callables: false,
+                wildcards_outrank_package: false,
+                extension_functions: false,
+                file_facade: None,
+                companion_name: None,
+                global_function_fallback: false,
                 family: "mock".to_string(),
                 complexity_keywords: Vec::new(),
                 nesting_block_kinds: Vec::new(),
                 body_node_kinds: Vec::new(),
                 abi_version: 15,
                 framework_detectors: Vec::new(),
+                framework_detectors_import_only: false,
+                framework_receiver_parameters: Vec::new(),
                 http_client_detectors: Vec::new(),
                 framework_methods: std::collections::BTreeMap::new(),
                 invocation_methods: std::collections::BTreeMap::new(),
                 export_convention: crate::plugin::ExportConvention::All,
                 test_convention: crate::plugin::TestConvention::None,
+                preprocessor: crate::plugin::Preprocessor::None,
                 reachability: false,
+                entry_points: Vec::new(),
                 member_access: false,
                 member_access_excluded_extensions: Vec::new(),
                 documentation: false,
@@ -718,6 +738,70 @@ fn a_turbofish_call_in_a_macro_records_the_row_it_records_outside_one() {
         assert_eq!(calls(&format!("{call};")), want, "outside a macro: {call}");
         assert_eq!(calls(&format!("let _ = vec![{call}];")), want, "inside vec![]: {call}");
         assert_eq!(calls(&format!("assert!({call});")), want, "inside assert!(): {call}");
+    }
+}
+
+/// S-628 ([CR-205]): `gen`, `union` and `default` are keyword tokens inside a
+/// macro's token tree, not `identifier`s; a call named by one records the rows
+/// the same call records outside a macro.
+///
+/// [CR-205]: ../../../docs/requests/CR-205-qualified-self-calls-and-keyword-named-macro-calls-bind-as-rust-reads-them.md
+#[test]
+fn a_keyword_named_call_in_a_macro_records_the_rows_it_records_outside_one() {
+    type Row = (String, RefForm, Option<u32>, Option<crate::model::ReceiverShape>, Option<String>);
+    let calls_of = |k: &str, body: &str| -> Vec<Row> {
+        let src = format!("pub struct A;\nfn alpha(x: A) {{\n{body}\n}}\n");
+        let mut rows: Vec<Row> = extract_src("src/lib.rs", &src)
+            .refs
+            .into_iter()
+            .filter(|r| r.kind == EdgeKind::Calls && r.target.split("::").any(|seg| seg == k))
+            .map(|r| (r.target, r.form, r.arg_count, r.receiver, r.peeled))
+            .collect();
+        rows.sort_by(|a, b| (&a.0, a.1.as_i32()).cmp(&(&b.0, b.1.as_i32())));
+        rows.dedup();
+        rows
+    };
+    for k in ["gen", "union", "default"] {
+        for call in [format!("{k}(1)"), format!("T::{k}()"), format!("Default::{k}()"), format!("self.{k}()"), format!("x.{k}()"),
+            // The turbofish site, and a keyword that is not the path's last segment.
+            format!("T::{k}::<u8>()"), format!("a::{k}::b()"), format!("std::{k}::Default::{k}()")] {
+            let outside = calls_of(k, &format!("{call};"));
+            assert!(!outside.is_empty(), "outside a macro records a row: {call}");
+            for wrap in ["vec![{}]", "assert_eq!({}, 1)", "format!(\"x\", {})"] {
+                let inside = calls_of(k, &format!("let _ = {};", wrap.replace("{}", &call)));
+                assert_eq!(inside, outside, "inside {wrap}: {call}");
+            }
+        }
+    }
+}
+
+/// S-628: `auto`, `raw` and `safe` are `identifier` tokens already and still
+/// record; a keyword that opens a construct or names a declaration records no
+/// `Calls` row named by it (`default fn g()` still records `g`, as any `fn g()`
+/// in a token tree does).
+#[test]
+fn a_keyword_in_a_macro_that_names_no_call_records_no_keyword_call() {
+    let targets = |body: &str| -> Vec<String> {
+        let facts = extract_src("src/lib.rs", &format!("fn alpha() {{\n{body}\n}}\n"));
+        let mut t: Vec<String> = facts.refs.iter().filter(|r| r.kind == EdgeKind::Calls).map(|r| r.target.clone()).collect();
+        t.sort();
+        t
+    };
+    for k in ["auto", "raw", "safe"] {
+        assert_eq!(targets(&format!("let _ = vec![{k}(1)];")), [k], "{k}(1) still records");
+        assert_eq!(targets(&format!("let _ = vec![T::{k}()];")), [format!("T::{k}")], "T::{k}() still records");
+    }
+    // A keyword that sits before a `(` group but names nothing callable: the
+    // predicate must not widen to it.
+    for body in ["match (a, b) { _ => 1 }", "if (x) { 1 } else { 2 }", "while (c) {}", "return (1)", "let _: Vec<fn(u8)> = v"] {
+        assert!(targets(&format!("let _ = vec![{body}];")).is_empty(), "`{body}` records no call");
+    }
+    for body in ["gen { 1 }", "union U { a: u8 }", "default fn g()", "pub union U { a: u8 }", "impl Default for X { fn default() -> X { X } }", "fn gen(&self) -> u8", "pub fn union() -> u8 { 0 }"] {
+        let got = targets(&format!("let _ = vec![{body}];"));
+        assert!(
+            got.iter().all(|t| !matches!(t.as_str(), "gen" | "union" | "default")),
+            "`{body}` records no keyword-named call: {got:?}"
+        );
     }
 }
 
@@ -1685,10 +1769,10 @@ fn authorize(perms: HashMap<String, i32>) { let _ = perms.get("/admin/users"); }
 
 // ── S-343 / FR-WS-08 / CR-108: TypeScript + TSX HTTP client-call capture ─────
 //
-// Every assertion below runs against **both** TypeScript grammars. `.ts`/`.js`
-// and `.tsx`/`.jsx` are one language split across two tree-sitter `Language`s
-// (ADR-09) shipping two copies of the same query, so a rule proved in only one
-// leaves half the surface unproven.
+// Every assertion below runs against **both** TypeScript grammars. `.ts` and
+// `.tsx` are one language split across two tree-sitter `Language`s (ADR-09)
+// shipping two copies of the same query, so a rule proved in only one leaves half
+// the surface unproven. JavaScript runs the `tsx` copy itself (S-538).
 #[cfg(feature = "lang-typescript")]
 const TS_EXTENSIONS: [&str; 2] = ["ts", "tsx"];
 
@@ -2814,8 +2898,8 @@ fn a_non_normalizing_c_sharp_path_reaches_the_interpreter_as_a_static_path() {
 
 /// The `[invocation_methods]` **value** half, which no descriptor can exercise:
 /// a mistyped verb (`"GTE"`) captures nothing rather than inventing a method.
-/// Both `plugin.toml` and `PluginManifest::invocation_methods` state this;
-/// nothing else asserts it, because a real descriptor's values are all valid.
+/// `extract::normalize_invocation_method` states this; nothing else asserts
+/// it, because a real descriptor's values are all valid.
 #[test]
 #[cfg(feature = "lang-c-sharp")]
 fn a_table_value_that_is_not_an_http_verb_captures_nothing() {
@@ -2964,6 +3048,12 @@ const DYNAMIC_PATH_CASES: &[DynamicPathCase] = &[
         ext: "tsx",
         verb: "get",
         source: "export function call(url: string) { return axios.get(url); }\n",
+    },
+    DynamicPathCase {
+        plugin: "javascript",
+        ext: "js",
+        verb: "get",
+        source: "export function call(url) { return axios.get(url); }\n",
     },
     DynamicPathCase {
         plugin: "c-sharp",
@@ -3152,6 +3242,12 @@ const STATIC_PATH_CASES: &[StaticPathCase] = &[
     StaticPathCase {
         plugin: "tsx",
         ext: "tsx",
+        verb: "get",
+        source: "export function call() { return axios.get(\"/files/**\"); }\n",
+    },
+    StaticPathCase {
+        plugin: "javascript",
+        ext: "js",
         verb: "get",
         source: "export function call() { return axios.get(\"/files/**\"); }\n",
     },
@@ -5155,7 +5251,8 @@ fn a_ts_import_without_an_extension_is_recorded_as_the_same_relative_path() {
 #[cfg(feature = "lang-typescript")]
 #[test]
 fn a_js_require_is_a_path_specifier_too() {
-    // JavaScript rides the typescript grammar (`.js`/`.mjs`/`.cjs`).
+    // JavaScript (`.js`/`.mjs`/`.cjs`/`.jsx`) is its own plugin over the TSX
+    // grammar and queries (S-538).
     let src = "const util = require('./lib/util.js');\nconst express = require('express');\n";
     let facts = extract_lang("js", "server/app.js", src);
     assert_eq!(targets_only(&facts), [".::lib::util", "express"]);
@@ -5164,7 +5261,7 @@ fn a_js_require_is_a_path_specifier_too() {
 #[cfg(feature = "lang-typescript")]
 #[test]
 fn a_ts_package_import_is_unchanged_by_the_path_grammar() {
-    // A bare specifier names a package: no relative head, no stripping, and the
+    // A bare specifier keeps no relative head and is never stripped, and the
     // `::`-joined form the framework candidacy gate matches (`next`, `react`).
     let src = "import React from 'react';\nimport Link from 'next/link';\nimport '@tanstack/react-query';\nimport c from 'chart.js';\n";
     let facts = extract_lang("tsx", "web/ui/src/Page.tsx", src);
@@ -5273,24 +5370,30 @@ export function f(p: string) { navItemsFor(p); slug(p); api.get(p); return isApp
 
 #[cfg(feature = "lang-typescript")]
 #[test]
-fn a_ts_call_not_through_a_relative_import_keeps_its_bare_form() {
-    // A package import (`react`), a default import, a global, a method on a
-    // value, and a local declaration shadowing an imported name all record
-    // exactly what they recorded before S-440.
+fn a_ts_call_through_a_bare_specifier_is_qualified_and_the_rest_keep_their_bare_form() {
+    // A call through a bare specifier — a package (`react`) or a tsconfig alias
+    // (`@/lib/api`), which extraction cannot tell apart — is qualified like a
+    // relative one, and the binder decides it (S-531). A default import is
+    // recorded through its module's `default` (S-534). A global and a local
+    // declaration shadowing an imported name record exactly what they
+    // recorded before S-440; a method on an imported value is recorded through
+    // its import (S-536), which binds it only when the value is a class.
     let src = "import { useState } from 'react';\n\
+import { load } from '@/lib/api';\n\
 import Header from './Header';\n\
 import { local, obj } from './m';\n\
 function local() { return 1; }\n\
-export function f() { useState(); Header(); fetch('/x'); obj.run(); local(); }\n";
+export function f() { useState(); load(); Header(); fetch('/x'); obj.run(); local(); }\n";
     let facts = extract_lang("ts", "src/f.ts", src);
     assert_eq!(
         call_targets(&facts),
         [
-            ("Header".to_string(), RefForm::Path),
+            (".::Header::default".to_string(), RefForm::Path),
+            (".::m::obj::run".to_string(), RefForm::Path),
+            ("@::lib::api::load".to_string(), RefForm::Path),
             ("fetch".to_string(), RefForm::Path),
             ("local".to_string(), RefForm::Path),
-            ("run".to_string(), RefForm::Method),
-            ("useState".to_string(), RefForm::Path),
+            ("react::useState".to_string(), RefForm::Path),
         ]
     );
 }
@@ -5312,6 +5415,133 @@ function RuleFindingsCard() { return <p />; }\n";
             ("RuleFindingsCard".to_string(), RefForm::Path),
         ]
     );
+}
+
+// ── S-534 / FR-RS-19: re-exports, default exports and dynamic imports ──
+
+/// Every `Imports` ledger row the file records, as `(target, alias, form,
+/// exported)`, sorted.
+fn ts_import_rows(facts: &Facts) -> Vec<(String, Option<String>, RefForm, Option<bool>)> {
+    let mut out: Vec<_> = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Imports)
+        .map(|r| (r.target.clone(), r.alias.clone(), r.form, r.exported))
+        .collect();
+    out.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    out
+}
+
+/// One `Imports` row of [`ts_import_rows`].
+fn ts_import_row(target: &str, alias: Option<&str>, form: RefForm, exported: Option<bool>) -> (String, Option<String>, RefForm, Option<bool>) {
+    (target.to_string(), alias.map(str::to_string), form, exported)
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_default_import_call_is_recorded_through_the_module_default() {
+    // `import X from` and `{ default as X }` both name the module's `default`;
+    // a parameter shadowing the default import is a local value.
+    let src = "import Header from './Header';\n\
+import { default as Root, Footer } from './layout';\n\
+export function f() { Header(); Root(); Footer(); }\n\
+export function g(Header: () => void) { Header(); }\n";
+    for (ext, path) in [("ts", "src/f.ts"), ("tsx", "src/f.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            call_targets(&facts),
+            [
+                (".::Header::default".to_string(), RefForm::Path),
+                (".::layout::Footer".to_string(), RefForm::Path),
+                (".::layout::default".to_string(), RefForm::Path),
+                ("Header".to_string(), RefForm::Path),
+            ],
+            "{ext}: a default import is the module's `default`"
+        );
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn typescript_re_exports_are_imports_marked_exported() {
+    let src = "export * from './star';\n\
+export * as ns from './ns';\n\
+export { p, q as r, default, default as D } from './c';\n\
+export type { T } from './types';\n\
+export { x } from 'pkg';\n";
+    for (ext, path) in [("ts", "src/index.ts"), ("tsx", "src/index.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            ts_import_rows(&facts),
+            [
+                ts_import_row(".::c::default", Some("D"), RefForm::Path, Some(true)),
+                ts_import_row(".::c::default", Some("default"), RefForm::Path, Some(true)),
+                ts_import_row(".::c::p", Some("p"), RefForm::Path, Some(true)),
+                ts_import_row(".::c::q", Some("r"), RefForm::Path, Some(true)),
+                ts_import_row(".::ns", Some("ns"), RefForm::Path, None),
+                ts_import_row(".::star", None, RefForm::Glob, Some(true)),
+                ts_import_row(".::types::T", Some("T"), RefForm::Path, Some(true)),
+                ts_import_row("pkg::x", Some("x"), RefForm::Path, Some(true)),
+            ],
+            "{ext}: one row per re-exported name, a star a Glob, `* as ns` a plain import"
+        );
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn typescript_local_exports_under_another_name_record_the_module_s_export_alias() {
+    // `(target, alias, form, exported)` of each expected row.
+    type Row<'a> = (&'a str, Option<&'a str>, RefForm, Option<bool>);
+    let cases: [(&str, &[Row<'_>]); 8] = [
+        ("const App = () => 1;\nexport default App;\n", &[("App", Some("default"), RefForm::Path, Some(true))]),
+        ("export default function greet() { return 1; }\n", &[("greet", Some("default"), RefForm::Path, Some(true))]),
+        ("export default class K {}\n", &[("K", Some("default"), RefForm::Path, Some(true))]),
+        (
+            "function quiet() {}\nconst t = 1;\nexport { quiet as default, t, t as u };\n",
+            &[
+                ("quiet", Some("default"), RefForm::Path, Some(true)),
+                ("t", Some("u"), RefForm::Path, Some(true)),
+            ],
+        ),
+        // An imported name exported again is a re-export of what it names.
+        (
+            "import { a } from './x';\nimport b from './y';\nexport { a };\nexport default b;\n",
+            &[
+                (".::x", Some("x"), RefForm::Path, None),
+                (".::x::a", Some("a"), RefForm::Path, Some(true)),
+                (".::y", Some("y"), RefForm::Path, None),
+                (".::y::default", Some("default"), RefForm::Path, Some(true)),
+            ],
+        ),
+        // `export default <expression>` is the `default` symbol (S-532), and an
+        // anonymous declaration names nothing to alias.
+        ("export default registerAs('db', () => 1);\n", &[]),
+        ("export default function () { return 1; }\n", &[]),
+        ("export function plain() {}\nexport const k = 1;\n", &[]),
+    ];
+    for (src, expected) in cases {
+        for (ext, path) in [("ts", "src/m.ts"), ("tsx", "src/m.tsx")] {
+            let facts = extract_lang(ext, path, src);
+            let expected: Vec<_> = expected.iter().map(|&(t, a, f, e)| ts_import_row(t, a, f, e)).collect();
+            assert_eq!(ts_import_rows(&facts), expected, "{ext}: {src}");
+        }
+    }
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_dynamic_import_with_a_literal_specifier_is_an_import() {
+    let src = "const name = 'x';\n\
+export const routes = [\n  () => import('./routes/landing'),\n  () => import(`./routes/${name}`),\n  () => import(name),\n  () => load('./not-an-import'),\n];\n";
+    for (ext, path) in [("ts", "src/router.ts"), ("tsx", "src/router.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            ts_import_rows(&facts),
+            [ts_import_row(".::routes::landing", Some("landing"), RefForm::Path, None)],
+            "{ext}: a template, an expression and another call's string are not imports"
+        );
+    }
 }
 
 #[cfg(feature = "lang-go")]
@@ -5354,6 +5584,142 @@ fn a_rust_call_is_recorded_exactly_as_before_s440() {
             ("run".to_string(), RefForm::Method),
             ("util::go".to_string(), RefForm::Path),
         ]
+    );
+}
+
+// ── S-544 / FR-RS-23: a Python call through an imported module or class ─────
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_call_through_an_imported_module_or_class_is_recorded_through_its_import() {
+    // healthchecks' `from hc.lib import curl` → `curl.post()`, its URLconfs'
+    // `from . import views`, an `as` rename, a relative class import, a plain
+    // `import a.b` (which binds `a`), and the external `os`, whose call is
+    // recorded through its import all the same (binding it is the resolver's
+    // decision). `os.path.join` has an attribute receiver and `p.strip` a
+    // parameter one: both stay bare method names (FR-RS-06).
+    let src = "import os\nimport os.path\nimport hc.lib.curl as curl2\nfrom hc.lib import curl\n\
+from . import views\nfrom .models import Check\nfrom ..util import helpers as h\nimport pkg.sub\n\n\
+def f(p):\n    curl.post(p)\n    curl2.get(p)\n    views.add(p)\n    Check.for_project(p)\n    h.run()\n\
+    pkg.go()\n    os.getcwd()\n    os.path.join(p)\n    p.strip()\n";
+    let facts = extract_lang("py", "hc/integrations/pd/urls.py", src);
+    assert_eq!(
+        call_targets(&facts),
+        [
+            ("..::util::helpers::run".to_string(), RefForm::Path),
+            (".::models::Check::for_project".to_string(), RefForm::Path),
+            (".::views::add".to_string(), RefForm::Path),
+            ("hc::lib::curl::get".to_string(), RefForm::Path),
+            ("hc::lib::curl::post".to_string(), RefForm::Path),
+            ("join".to_string(), RefForm::Method),
+            ("os::getcwd".to_string(), RefForm::Path),
+            ("pkg::go".to_string(), RefForm::Path),
+            ("strip".to_string(), RefForm::Method),
+        ]
+    );
+    // A qualified row names the local binding it went through, which tells the
+    // binder its qualifier is an import path.
+    let local = |target: &str| facts.refs.iter().find(|r| r.target == target).and_then(|r| r.alias.as_deref());
+    assert_eq!(local("hc::lib::curl::get"), Some("curl2"));
+    assert_eq!(local("pkg::go"), Some("pkg"));
+    assert_eq!(local("join"), None);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_name_bound_locally_or_twice_is_no_import_qualifier() {
+    // Every Python binding form shadows an imported name for the scope it
+    // binds in — a parameter (plain, typed, defaulted, splat), a lambda
+    // parameter, an assignment, a loop or comprehension variable, a `with` or
+    // `except` target, a walrus, a `match` capture, a type parameter — and so
+    // does a module-level rebinding, a `global` one included, which Python,
+    // unlike TypeScript and Go, allows. A class body is no scope of its
+    // methods, so its `views = …` shadows the import for the body itself and
+    // its comprehensions, never inside `q`. A name two imports bind
+    // differently, and one the file declares, decide nothing: each such call
+    // keeps its bare method form, a missed edge, never a fabricated one.
+    let src = "from hc.lib import curl\nfrom . import views\nfrom . import helpers\nfrom . import badges\nfrom . import tz\n\
+try:\n    from . import fast as impl\nexcept ImportError:\n    from . import slow as impl\n\n\
+helpers = make()\n\n\
+def badges():\n    pass\n\n\
+def a(curl):\n    curl.p1()\n\n\
+def b(x: int, views: V):\n    views.p2()\n\n\
+def c(x=0, *curl):\n    curl.p3()\n\n\
+def d(**views):\n    views.p4()\n\n\
+def e(views: V = None):\n    views.p5()\n\n\
+lam = lambda curl: curl.p6()\n\n\
+def g():\n    curl = load()\n    curl.p7()\n\n\
+def h(items):\n    for views in items:\n        views.p8()\n    return [curl.p9() for curl in items]\n\n\
+def k():\n    with open() as views:\n        views.p10()\n\n\
+def m():\n    try:\n        pass\n    except E as curl:\n        curl.p11()\n\n\
+def n():\n    if (views := find()):\n        views.p12()\n\n\
+def o():\n    helpers.p13()\n    badges.p14()\n    impl.p15()\n\n\
+def r(v):\n    match v:\n        case curl:\n            curl.p18()\n        case [x, *views]:\n            views.p19()\n        case P(x=curl):\n            curl.p20()\n\n\
+def s():\n    with ctx() as (a, views):\n        views.p21()\n\n\
+def t[views]():\n    views.p22()\n\n\
+def u():\n    global tz\n    tz = make()\n\n\
+def w():\n    tz.p23()\n\n\
+class A:\n    views = 1\n    x = views.p16()\n    y = [curl.p17() for curl in items]\n\n    def q(self):\n        views.kept()\n        curl.kept()\n";
+    let facts = extract_lang("py", "hc/front/views_util.py", src);
+    let targets = call_targets(&facts);
+    let qualified: Vec<&str> = targets
+        .iter()
+        .filter(|(target, form)| *form == RefForm::Path && target.contains("::"))
+        .map(|(target, _)| target.as_str())
+        .collect();
+    // The two annotated parameters type their receiver by the annotation
+    // (S-546), never by the import: `V::p2`, `V::p5`.
+    assert_eq!(qualified, [".::views::kept", "V::p2", "V::p5", "hc::lib::curl::kept"]);
+    let bare: Vec<&str> = targets
+        .iter()
+        .filter(|(_, form)| *form == RefForm::Method)
+        .map(|(target, _)| target.as_str())
+        .collect();
+    let mut expected: Vec<String> = (1..=23).filter(|n| ![2, 5].contains(n)).map(|n| format!("p{n}")).collect();
+    expected.sort();
+    assert_eq!(bare, expected, "every other shadowed call keeps its bare method form");
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_unpacked_defaulted_or_augmented_name_shadows_an_import() {
+    // The binding forms a tuple, list or bare-tuple unpacking, a defaulted
+    // parameter and an augmented assignment write: each keeps its call bare.
+    let src = "from hc.lib import curl\n\n\
+def a():\n    x, curl = load()\n    curl.p1()\n\n\
+def b():\n    (x, curl) = load()\n    curl.p2()\n\n\
+def c():\n    [x, curl] = load()\n    curl.p3()\n\n\
+def d(curl=None):\n    curl.p4()\n\n\
+def e():\n    curl += 1\n    curl.p5()\n\n\
+def f(items):\n    for x, curl in items:\n        curl.p6()\n\n\
+def g():\n    curl.kept()\n";
+    let facts = extract_lang("py", "hc/front/unpack.py", src);
+    let targets = call_targets(&facts);
+    let qualified: Vec<&str> = targets
+        .iter()
+        .filter(|(target, _)| target.contains("::"))
+        .map(|(target, _)| target.as_str())
+        .collect();
+    assert_eq!(qualified, ["hc::lib::curl::kept"]);
+    let bare: Vec<&str> = targets
+        .iter()
+        .filter(|(_, form)| *form == RefForm::Method)
+        .map(|(target, _)| target.as_str())
+        .collect();
+    assert_eq!(bare, ["p1", "p2", "p3", "p4", "p5", "p6"]);
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_block_scoped_top_level_binding_does_not_shadow_an_import_file_wide() {
+    // A TypeScript top-level binding lives in its own block (`for (const api
+    // of …)`, `catch (api)`), never the file: only Python rebinds an imported
+    // name at file scope (S-544), so `api.get()` stays qualified.
+    let src = "import * as api from './api';\nfor (const api of []) { }\ntry { } catch (api) { }\n\
+export function f(p: string) { api.get(p); }\n";
+    assert_eq!(
+        call_targets(&extract_lang("ts", "src/a/f.ts", src)),
+        [(".::api::get".to_string(), RefForm::Path)]
     );
 }
 
@@ -5465,6 +5831,37 @@ interface One extends A {}\n";
 }
 
 #[test]
+#[cfg(feature = "lang-c-sharp")]
+fn a_partial_types_own_row_is_no_declared_superclass() {
+    // S-557: each part records an `Extends` row naming itself, aliased
+    // `partial`; it is neither the class's superclass nor a second one.
+    let src = "namespace App {\n\
+    partial class Sub : Base {}\n\
+    partial class Alone {}\n\
+}\n";
+    let facts = extract_lang("cs", "src/Sub.cs", src);
+    let symbol = |name: &str| {
+        facts
+            .nodes
+            .iter()
+            .find(|n| n.name == name && n.kind != NodeKind::Module)
+            .unwrap_or_else(|| panic!("node {name}"))
+            .symbol
+            .clone()
+    };
+    let mut partial_rows = facts
+        .refs
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Extends && r.alias.as_deref() == Some("partial"))
+        .map(|r| r.target.as_str())
+        .collect::<Vec<_>>();
+    partial_rows.sort_unstable();
+    assert_eq!(partial_rows, vec!["Alone", "Sub"]);
+    assert_eq!(declared_superclass(&facts.refs, &symbol("Sub")), Some("Base"));
+    assert_eq!(declared_superclass(&facts.refs, &symbol("Alone")), None);
+}
+
+#[test]
 fn a_rust_file_records_no_extends_instantiates_or_type_use_rows() {
     // The captures are Java's alone: Rust's only type relation stays the S-281
     // `Implements` row, byte-identical.
@@ -5479,12 +5876,16 @@ fn a_rust_file_records_no_extends_instantiates_or_type_use_rows() {
 
 // ── S-500 / FR-EX-11: the callable has-body fact ──────────────────────────────
 
-/// Fixtures for the four languages that declared no body node kind (Rust, Go,
-/// Python, C). Each carries functions, methods and — where the language has one
-/// — a bodyless signature that is **not** extracted as a node (a Go interface
-/// method, a C prototype). Rust declares `block` since S-606, which keeps every
+/// Fixtures for the four languages the S-500 byte-identity covers (Rust, Go,
+/// Python, C — all four declared no body node kind when it was taken; today only
+/// Python and C still declare none). Each carries functions, methods and — where the language has one
+/// — a bodyless signature (a Go interface method, a C prototype; only the C
+/// one is still no node). Rust declares `block` since S-606, which keeps every
 /// one of its callables bodied as before, and its trait's required
-/// `function_signature_item` is now a bodyless `Method` node (CR-202 F3).
+/// `function_signature_item` is now a bodyless `Method` node (CR-202 F3). Go
+/// declares `block` since S-525, which keeps every `func` bodied as before, and
+/// its interface method spec is a bodyless `Method` node and its struct field a
+/// `Field` node.
 const NO_BODY_KIND_FIXTURES: [(&str, &str, &str); 4] = [
     (
         "rs",
@@ -5531,19 +5932,32 @@ int helper(const int *xs, int n) {\n    int t = 0;\n    for (int i = 0; i < n; i
 /// partial flag and the warnings. The has-body fact and its token count are
 /// deliberately left out: this is the "before" half of the byte-identity
 /// comparison, so it must render only what the old graph carried. So are
-/// S-606's required-signature nodes and their `Contains` edges, which the old
-/// graph never held: every other node and edge must still render as it did.
+/// S-606's required-signature nodes and S-525's Go struct fields, with their
+/// `Contains` edges, which the old graph never held, S-543's Python Fields
+/// with theirs, and S-582's C Structs and Fields (`struct sq { double side; }`)
+/// with theirs: every other node and edge must still render as it did. A Python
+/// class-body def, a Method since S-543 in the descriptor slot it held as a
+/// Function, renders as that Function, so its symbol is still compared.
 fn pre_s500_rendering(facts: &Facts) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     writeln!(out, "{} {} partial={}", facts.path, facts.language, facts.partial).unwrap();
-    let signatures: HashSet<&LogosSymbol> = facts.nodes.iter().filter(|n| n.signature).map(|n| &n.symbol).collect();
-    for n in facts.nodes.iter().filter(|n| !n.signature) {
+    let later = |n: &&NodeFact| {
+        n.signature
+            || (matches!(facts.language.as_str(), "go" | "python") && n.kind == NodeKind::Field)
+            || (facts.language == "c" && matches!(n.kind, NodeKind::Struct | NodeKind::Field))
+    };
+    let kind = |n: &NodeFact| match n.kind {
+        NodeKind::Method if facts.language == "python" => NodeKind::Function,
+        other => other,
+    };
+    let signatures: HashSet<&LogosSymbol> = facts.nodes.iter().filter(later).map(|n| &n.symbol).collect();
+    for n in facts.nodes.iter().filter(|n| !later(n)) {
         writeln!(
             out,
             "N {} {} {} {}-{} m={:?} x={} fp={:?} te={} b={:?} nd={:?} sh={:?}",
             n.symbol.as_str(),
-            n.kind.as_str(),
+            kind(n).as_str(),
             n.name,
             n.start_line,
             n.end_line,
@@ -5564,8 +5978,16 @@ fn pre_s500_rendering(facts: &Facts) -> String {
     // this rendering — in the derived `Debug` form the digest was taken over.
     // An `Extends` row postdates it too: no Rust, Go, Python or C query
     // captured a supertype before S-522, which records the Python fixture's
-    // two bases.
-    for r in facts.refs.iter().filter(|r| r.kind != EdgeKind::Extends) {
+    // two bases. So does a Go receiver read (`s.side`): no Go query captured
+    // an access before S-529. A bare Python decorator (`@abc.abstractmethod`)
+    // is a call row from S-545. A C `#include` is an import row from S-584.
+    let later_ref = |r: &&RefFact| {
+        r.kind == EdgeKind::Extends
+            || (facts.language == "c" && r.kind == EdgeKind::Imports)
+            || (facts.language == "go" && r.kind == EdgeKind::Accesses)
+            || (facts.language == "python" && r.kind == EdgeKind::Calls && r.target == "abc::abstractmethod")
+    };
+    for r in facts.refs.iter().filter(|r| !later_ref(r)) {
         writeln!(
             out,
             "R RefFact {{ source: {:?}, target: {:?}, alias: {:?}, form: {:?}, kind: {:?}, line: {:?}, relation: {:?} }}",
@@ -5584,7 +6006,7 @@ fn pre_s500_rendering(facts: &Facts) -> String {
 const PRE_S500_DIGEST: &str = "25987e59b78f8651e8d3ffdf7996a40f978a08291440ddcacc2031a8c40f8717";
 
 #[test]
-fn languages_declaring_no_body_kind_extract_byte_identically_to_before() {
+fn the_s500_languages_extract_byte_identically_to_before() {
     let mut hasher = blake3::Hasher::new();
     for (ext, path, src) in NO_BODY_KIND_FIXTURES {
         let facts = extract_lang(ext, path, src);
@@ -5727,11 +6149,12 @@ int guarded(int x) try { return x; } catch (...) { return 0; }\n";
 }
 
 /// TypeScript's bodyless callables are separate node kinds — an overload is a
-/// `function_signature`, an abstract or interface member a
-/// `(abstract_)method_signature` — that the symbols query does not capture, so
-/// none reaches the graph as a callable at all. What does reach it — the
-/// overload set's implementation, a method, an arrow or function-expression
-/// binding — records a body.
+/// `function_signature`, an interface member a `method_signature`, an abstract
+/// member an `abstract_method_signature`. An overload is not captured, so the
+/// overload set's implementation is its one callable; an interface or abstract
+/// member is (S-532, FR-EX-16), recorded as a bodyless `Method` and a required
+/// signature. Everything else — the implementation, a method, an arrow or
+/// function-expression binding — records a body.
 #[test]
 #[cfg(feature = "lang-typescript")]
 fn typescript_overload_signatures_record_no_bodied_callable_and_implementations_do() {
@@ -5748,12 +6171,313 @@ export interface Port { send(m: string): void; }\n";
         assert!(has_body(&facts, "twice"), "{ext}: an expression-bodied arrow has a body");
         assert!(has_body(&facts, "named"), "{ext}: a function expression has a body");
         assert!(has_body(&facts, "label"), "{ext}: an implemented method has a body");
-        let names: Vec<String> = callable_bodies(&facts).into_iter().map(|(n, _, _)| n).collect();
-        assert!(
-            !names.iter().any(|n| n == "area" || n == "send"),
-            "{ext}: abstract and interface signatures are not callables: {names:?}"
-        );
+        assert!(!has_body(&facts, "area"), "{ext}: an abstract method has no body");
+        assert!(!has_body(&facts, "send"), "{ext}: an interface member has no body");
     }
+}
+
+/// The node named `name` — exactly one, so a fixture that declares it twice
+/// fails here rather than reading the wrong one.
+fn only_node<'a>(facts: &'a Facts, name: &str) -> &'a NodeFact {
+    let hits: Vec<&NodeFact> = facts.nodes.iter().filter(|n| n.name == name).collect();
+    assert_eq!(hits.len(), 1, "exactly one node named {name}: {:?}", facts.nodes.iter().map(|n| &n.name).collect::<Vec<_>>());
+    hits[0]
+}
+
+/// The parent a node's `Contains` edge names, as a symbol string.
+fn container_of<'a>(facts: &'a Facts, name: &str) -> &'a str {
+    let child = only_node(facts, name).symbol.as_str();
+    facts
+        .edges
+        .iter()
+        .find(|e| e.kind == EdgeKind::Contains && e.target.as_str() == child)
+        .map(|e| e.source.as_str())
+        .unwrap_or_else(|| panic!("{name} has a container"))
+}
+
+/// An `abstract class` is a `Class` and its abstract members are bodyless
+/// `Method`s under it, each a required signature its subclasses supply
+/// (S-532, FR-EX-16). A member with a body stays an ordinary method.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_abstract_class_and_its_abstract_members_are_declared() {
+    let src = "export abstract class UserRepository {\n\
+  abstract findById(id: string, opts?: number): User;\n\
+  abstract get size(): number;\n\
+  save(user: User): void { this.log(user); }\n\
+}\n";
+    for (ext, path) in [("ts", "src/repo.ts"), ("tsx", "src/repo.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        let class = only_node(&facts, "UserRepository");
+        assert_eq!(class.kind, NodeKind::Class, "{ext}");
+        assert!(class.exported, "{ext}: an exported abstract class is exported");
+        for abstract_member in ["findById", "size"] {
+            let m = only_node(&facts, abstract_member);
+            assert_eq!(m.kind, NodeKind::Method, "{ext}: {abstract_member}");
+            assert!(m.signature, "{ext}: {abstract_member} is a required signature");
+            assert!(!m.metrics.unwrap().has_body, "{ext}: {abstract_member} has no body");
+            assert_eq!(container_of(&facts, abstract_member), class.symbol.as_str(), "{ext}: {abstract_member} sits under its class");
+        }
+        let save = only_node(&facts, "save");
+        assert!(!save.signature && save.metrics.unwrap().has_body, "{ext}: an implemented method is not a signature");
+        assert_eq!(container_of(&facts, "save"), class.symbol.as_str(), "{ext}: save sits under its class");
+        let range = only_node(&facts, "findById").params.expect("an abstract method records its parameter range");
+        assert_eq!((range.min, range.max), (1, Some(2)), "{ext}: one required and one optional parameter");
+    }
+}
+
+/// An interface's method members are bodyless `Method`s under it, required
+/// signatures. A property, call, construct or index signature names no
+/// method and adds no node, and a type literal's member belongs to no
+/// interface (S-532, FR-EX-16).
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_interface_method_members_are_bodyless_methods() {
+    let src = "export interface Port {\n\
+  send(m: string, n?: number): void;\n\
+  readonly name: string;\n\
+  (x: number): void;\n\
+  new (x: number): Port;\n\
+  [k: string]: unknown;\n\
+}\n\
+export type Shape = { area(): number };\n";
+    for (ext, path) in [("ts", "src/port.ts"), ("tsx", "src/port.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        let port = only_node(&facts, "Port");
+        assert_eq!(port.kind, NodeKind::Interface, "{ext}");
+        let send = only_node(&facts, "send");
+        assert_eq!(send.kind, NodeKind::Method, "{ext}");
+        assert!(send.signature && !send.metrics.unwrap().has_body, "{ext}: a bodyless required signature");
+        assert_eq!(container_of(&facts, "send"), port.symbol.as_str(), "{ext}: under its interface");
+        let range = send.params.expect("an interface member records its parameter range");
+        assert_eq!((range.min, range.max), (1, Some(2)), "{ext}: one required and one optional parameter");
+        let methods: Vec<&str> = facts.nodes.iter().filter(|n| n.kind == NodeKind::Method).map(|n| n.name.as_str()).collect();
+        assert_eq!(methods, ["send"], "{ext}: only the method member is a Method — a type literal's `area` is not");
+        assert!(facts.nodes.iter().all(|n| n.name != "name"), "{ext}: a property signature adds no node");
+    }
+}
+
+/// A PascalCase binding wrapped in `forwardRef`/`memo` (bare or `React.`-
+/// qualified) or a `styled` tag is a component — a bodied `Function`. Any other
+/// top-level `const` is a `Constant`, `let`/`var` a `Variable`; a nested one
+/// and a destructuring one are neither (S-532, FR-EX-16).
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_wrapped_components_and_top_level_bindings_are_declared() {
+    let src = "import React, { memo, forwardRef } from 'react';\n\
+export const Button = React.forwardRef<HTMLButtonElement, Props>((props, ref) => null);\n\
+const Card = memo(function Card() { return null; });\n\
+const Tag = React.memo(() => null);\n\
+const Plain = forwardRef((p, r) => null);\n\
+const Box = styled.div`color: red;`;\n\
+const Fancy = styled(Box)`color: blue;`;\n\
+const Dialog = DialogPrimitive.Root;\n\
+export const API_URL = 'http://x';\n\
+const lowered = memo(() => null);\n\
+const NotReact = other.memo(() => null);\n\
+const Memoized = memoize(() => null);\n\
+const twice = (n: number) => n * 2;\n\
+let counter = 0;\n\
+export var legacy = 1;\n\
+var plain = 1;\n\
+export let shared = 1;\n\
+let lam = () => 1;\n\
+var fe = function () {};\n\
+export let ex = () => 2;\n\
+const Url = styled.make('x');\n\
+const Bare = styled(Box)({});\n\
+const { a, b } = require('x');\n\
+declare const ambient: number;\n\
+function work() { const inner = 1; let scratch = 2; return inner + scratch; }\n";
+    for (ext, path) in [("ts", "src/ui.ts"), ("tsx", "src/ui.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        let kind = |name: &str| only_node(&facts, name).kind;
+        for component in ["Button", "Card", "Tag", "Plain", "Box", "Fancy"] {
+            assert_eq!(kind(component), NodeKind::Function, "{ext}: {component} is a component");
+            assert!(has_body(&facts, component), "{ext}: {component} wraps an implementation");
+        }
+        assert_eq!(kind("Dialog"), NodeKind::Constant, "{ext}: an alias is a constant");
+        assert_eq!(kind("API_URL"), NodeKind::Constant, "{ext}");
+        assert_eq!(kind("lowered"), NodeKind::Constant, "{ext}: a lowercase wrapped binding is no component");
+        assert_eq!(kind("NotReact"), NodeKind::Constant, "{ext}: `other.memo` is not React's");
+        assert_eq!(kind("Memoized"), NodeKind::Constant, "{ext}: `memoize` is not `memo`");
+        assert_eq!(kind("twice"), NodeKind::Function, "{ext}: an arrow binding stays a function");
+        assert_eq!(kind("counter"), NodeKind::Variable, "{ext}");
+        assert_eq!(kind("legacy"), NodeKind::Variable, "{ext}");
+        assert_eq!(kind("plain"), NodeKind::Variable, "{ext}");
+        assert_eq!(kind("shared"), NodeKind::Variable, "{ext}");
+        for function in ["lam", "fe", "ex"] {
+            assert_eq!(kind(function), NodeKind::Function, "{ext}: a `let`/`var` function binding stays a function");
+            assert!(has_body(&facts, function), "{ext}: {function}");
+        }
+        assert_eq!(kind("Url"), NodeKind::Constant, "{ext}: an untagged `styled` call is no component");
+        assert_eq!(kind("Bare"), NodeKind::Constant, "{ext}: `styled(X)({{…}})` is no tagged template");
+        assert!(only_node(&facts, "Button").exported && only_node(&facts, "API_URL").exported && only_node(&facts, "legacy").exported, "{ext}");
+        assert!(!only_node(&facts, "Dialog").exported, "{ext}: an unexported alias is not exported");
+        for absent in ["a", "b", "ambient", "inner", "scratch"] {
+            assert!(facts.nodes.iter().all(|n| n.name != absent), "{ext}: {absent} is not a top-level binding");
+        }
+    }
+}
+
+/// `export default <expression>` is a symbol named `default`, exported; a
+/// default-exported declaration keeps its own name and adds no `default`
+/// (S-532, FR-EX-16).
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_default_exported_expression_is_a_default_symbol() {
+    let cases = [
+        ("export default registerAs('db', () => ({ host: 'h' }));\n", true),
+        ("export default { name: 'x' };\n", true),
+        ("export default foo;\n", true),
+        ("export default () => 1;\n", true),
+        ("export default function () {}\n", true),
+        ("export default function named() {}\n", false),
+        ("export default class Named {}\n", false),
+        ("export default abstract class Named {}\n", false),
+        ("export { x as default };\nconst x = 1;\n", false),
+    ];
+    // An ambient module's default export is not the file's: the file's keeps `default.`.
+    let ambient = "declare module 'm' { export default foo; }\nexport default bar;\n";
+    for (ext, path) in [("ts", "src/config.ts"), ("tsx", "src/config.tsx")] {
+        for (src, declares_default) in cases {
+            let facts = extract_lang(ext, path, src);
+            let defaults: Vec<&NodeFact> = facts.nodes.iter().filter(|n| n.name == "default").collect();
+            assert_eq!(defaults.len(), usize::from(declares_default), "{ext}: {src}");
+            if let [d] = defaults.as_slice() {
+                assert_eq!(d.kind, NodeKind::Constant, "{ext}: {src}");
+                assert!(d.exported, "{ext}: a default export is exported: {src}");
+                assert!(d.symbol.as_str().ends_with("default."), "{ext}: {}", d.symbol.as_str());
+            }
+        }
+        let facts = extract_lang(ext, path, ambient);
+        let defaults: Vec<&str> = facts.nodes.iter().filter(|n| n.name == "default").map(|n| n.symbol.as_str()).collect();
+        assert_eq!(defaults.len(), 1, "{ext}: only the file's own default export: {defaults:?}");
+        assert!(defaults[0].ends_with("/default."), "{ext}: {}", defaults[0]);
+    }
+}
+
+/// A declaration merge persists both declarations (S-512): an `interface X`
+/// and a `class X` or `abstract class X` each get a node, whichever comes first,
+/// and the interface — the declaration the graph already held — keeps its
+/// symbol with the abstract class declared before it (S-532).
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_interface_merged_with_a_class_persists_both() {
+    let before = "export interface Repo { find(): void }\nexport abstract class Repo { abstract load(): void }\n";
+    let after = "export abstract class Repo { abstract load(): void }\nexport interface Repo { find(): void }\n";
+    for (ext, path) in [("ts", "src/repo.ts"), ("tsx", "src/repo.tsx")] {
+        for src in [before, after] {
+            let facts = extract_lang(ext, path, src);
+            let kinds: Vec<NodeKind> = facts.nodes.iter().filter(|n| n.name == "Repo").map(|n| n.kind).collect();
+            assert_eq!(kinds.len(), 2, "{ext}: both declarations persist: {src}");
+            assert!(kinds.contains(&NodeKind::Class) && kinds.contains(&NodeKind::Interface), "{ext}: {src}");
+        }
+        let interface_symbol = |src: &str| {
+            let facts = extract_lang(ext, path, src);
+            let n = facts.nodes.iter().find(|n| n.name == "Repo" && n.kind == NodeKind::Interface).unwrap();
+            n.symbol.as_str().to_string()
+        };
+        // The interface was the only `Repo#` before the abstract class was
+        // captured, so it is ordinal 0 wherever the class sits.
+        assert_eq!(interface_symbol(after), interface_symbol("export interface Repo { find(): void }\n"), "{ext}");
+    }
+}
+
+/// Capturing the new declarations moves no symbol the graph already held
+/// (S-532, NFR-RA-06): the same source with the new constructs added before,
+/// between and after still extracts every symbol it extracted alone — the
+/// `Early` interface included, though an abstract class of its name now sits
+/// ahead of it. (The members of an abstract class are the exception: they were
+/// captured with no class to own them and now sit under it.)
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_new_declarations_leave_every_existing_symbol_unchanged() {
+    let base = "export function parse(x: string): number { return 1; }\n\
+export class Service { run(): void {} }\n\
+export interface Shape { size: number }\n\
+export interface Early { size: number }\n\
+export enum Color { Red }\n\
+export type Id = string;\n\
+export const twice = (n: number) => n * 2;\n\
+export default function main() {}\n";
+    let added = "export abstract class Early { abstract go(): void }\n\
+export const BUTTON = memo(() => null);\n\
+export default { start() {} };\n";
+    let interleaved = base.replacen("export enum Color", &format!("{added}export enum Color"), 1);
+    for (ext, path) in [("ts", "src/mod.ts"), ("tsx", "src/mod.tsx")] {
+        let alone: HashSet<String> = extract_lang(ext, path, base).nodes.iter().map(|n| n.symbol.as_str().to_string()).collect();
+        for src in [format!("{added}{base}"), format!("{base}{added}"), interleaved.clone()] {
+            let with: HashSet<String> = extract_lang(ext, path, &src).nodes.iter().map(|n| n.symbol.as_str().to_string()).collect();
+            let moved: Vec<&String> = alone.difference(&with).collect();
+            assert!(moved.is_empty(), "{ext}: symbols that moved: {moved:?}");
+        }
+    }
+}
+
+/// A value binding owns no scope (S-532, NFR-RA-06): a method of an object
+/// literal or class expression a top-level binding or a default export holds
+/// was file-scope before the binding was captured, and stays so — nesting it
+/// under the binding would rename it. So does a function declared inside a
+/// wrapped component (`memo(() => { const onClick = … })`); an arrow-bound
+/// function owns what it holds, as it always did.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_value_bindings_leave_the_methods_they_hold_at_file_scope() {
+    let src = "const registry = { handle() {} };\n\
+const Anon = class { member() {} };\n\
+export default { start() {} };\n\
+let held = { kept() {} };\n\
+export const fn = () => { return { inner() {} }; };\n\
+export const Wrapped = memo(() => { const onClick = () => 1; function local() {} return null; });\n";
+    for (ext, path) in [("ts", "src/mod.ts"), ("tsx", "src/mod.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        let module = facts.nodes.iter().find(|n| n.kind == NodeKind::Module).expect("file module").symbol.as_str();
+        for held in ["handle", "member", "start", "kept", "onClick", "local"] {
+            assert_eq!(container_of(&facts, held), module, "{ext}: {held} stays under the file");
+        }
+        // A function binding owns what it holds, as it always did.
+        assert_eq!(container_of(&facts, "inner"), only_node(&facts, "fn").symbol.as_str(), "{ext}");
+    }
+}
+
+/// A reference inside a value binding is the file's, not the binding's
+/// (S-532, NFR-RA-06): `const util = require('./util')` is a file import and
+/// `const cfg = load()` a file-level call, sourced from the file module as they
+/// were before the binding was captured. A component owns the references of its
+/// body, as every function does.
+#[test]
+#[cfg(feature = "lang-typescript")]
+fn typescript_references_in_a_value_binding_keep_the_file_as_their_source() {
+    let src = "const util = require('./lib/util.js');\n\
+const cfg = load();\n\
+var dep = require('./lib/dep');\n\
+export let late = loadAll();\n\
+export default setup(() => 1);\n\
+export const App = memo(() => helper());\n";
+    for (ext, path) in [("ts", "src/app.ts"), ("tsx", "src/app.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        let module = facts.nodes.iter().find(|n| n.kind == NodeKind::Module).expect("file module").symbol.as_str();
+        let app = only_node(&facts, "App").symbol.as_str();
+        let source_of = |target: &str| {
+            let rows: Vec<&str> = facts.refs.iter().filter(|r| r.target.contains(target)).map(|r| r.source.as_str()).collect();
+            assert!(!rows.is_empty(), "{ext}: a reference to {target}: {:?}", facts.refs.iter().map(|r| &r.target).collect::<Vec<_>>());
+            rows
+        };
+        for file_level in ["lib::util", "lib::dep", "load", "loadAll", "setup"] {
+            assert!(source_of(file_level).iter().all(|s| *s == module), "{ext}: {file_level} is the file's");
+        }
+        assert!(source_of("helper").iter().all(|s| *s == app), "{ext}: helper is the component's");
+    }
+}
+
+/// The value-binding rule is keyed on the TypeScript node kinds, so another
+/// grammar keeps its parents (S-532): a Rust item nested in a `const` block
+/// stays under the constant.
+#[test]
+fn a_rust_item_in_a_const_block_keeps_the_constant_as_its_container() {
+    let facts = extract_src("src/lib.rs", "pub const X: u32 = { fn helper() -> u32 { 1 } helper() };\n");
+    assert_eq!(container_of(&facts, "helper"), only_node(&facts, "X").symbol.as_str());
 }
 
 #[test]
@@ -5788,9 +6512,10 @@ function helper(int $x): int { return $x + 1; }\n";
 }
 
 /// A language declaring no body node kind treats every callable as bodied —
-/// a Python `@abstractmethod` stub included. Rust, which declares `block` since
-/// S-606, keeps every callable it had bodied; only its trait's required
-/// signature, a node since CR-202 F3, records none.
+/// a Python `@abstractmethod` stub included. Rust (`block` since S-606) and Go
+/// (`block` since S-525) keep every callable they had bodied; only Rust's trait
+/// required signature (a node since CR-202 F3) and Go's interface method spec
+/// (a node since S-525) record none.
 #[test]
 fn every_callable_is_bodied_in_a_language_declaring_no_body_kind() {
     for (ext, path, src) in NO_BODY_KIND_FIXTURES {
@@ -5996,8 +6721,10 @@ fn cpp_a_class_head_stranded_in_a_parse_error_is_a_class_on_its_own_line() {
     assert_eq!((class.start_line, class.end_line), (10, 10), "the head line only");
 
     // The class claims no body: the member recovery placed inside the ERROR is
-    // not nested under it, because where the class ends is unknown.
-    let what = node_of_kind(&facts, "what", NodeKind::Method);
+    // not nested under it, because where the class ends is unknown — and, in
+    // no class body, it is a function, never a Method of no class (S-582,
+    // FR-EX-31).
+    let what = node_of_kind(&facts, "what", NodeKind::Function);
     assert!(
         !what.symbol.as_str().starts_with(class.symbol.as_str()),
         "{} is not a member of {}",
@@ -6065,6 +6792,30 @@ fn parse_damage_is_counted_into_the_partial_extraction_warning() {
         1,
         "the count joins the one warning, never a second one"
     );
+}
+
+#[test]
+#[cfg(feature = "lang-cpp")]
+fn a_parse_error_records_the_files_parse_damage_and_a_clean_parse_none() {
+    // FR-IX-14 (S-571): `has_error` is the file's parse damage — ccache's
+    // `parse_umask` shape, and a Rust file one unclosed paren from clean.
+    let umask = extract_lang("cpp", "src/util/string.cpp", STRANDED_DECLARATOR_CPP);
+    assert!(umask.parse_damaged && umask.partial, "{:?}", umask.warnings);
+    let broken = extract_src("src/lib.rs", "fn ok() {}\nfn broken( {\n");
+    assert!(broken.parse_damaged);
+    let clean = extract_src("src/lib.rs", "fn ok() {}\nfn fine() {}\n");
+    assert!(!clean.parse_damaged && !clean.partial, "{:?}", clean.warnings);
+    // The configuration path records it alike.
+    let json = extract_lang("json", "config/app.json", "{ \"a\": [1, 2 }\n");
+    assert!(json.parse_damaged && json.partial, "{:?}", json.warnings);
+    let json = extract_lang("json", "config/app.json", "{ \"a\": [1, 2] }\n");
+    assert!(!json.parse_damaged, "{:?}", json.warnings);
+    // And the documentation path: tree-sitter-md reads a `||` inside a table
+    // cell's code span as damage (this repository's `docs/howto/metrics.md`).
+    let md = extract_lang("markdown", "docs/a.md", "| a | b |\n|---|---|\n| x | `t ||= 0` |\n");
+    assert!(md.parse_damaged && md.partial, "{:?}", md.warnings);
+    let md = extract_lang("markdown", "docs/a.md", "| a | b |\n|---|---|\n| x | y |\n");
+    assert!(!md.parse_damaged, "{:?}", md.warnings);
 }
 
 #[test]
@@ -6370,9 +7121,10 @@ fn a_scala_given_selector_imports_no_type() {
 
 /// Every Scala selector shape records its own rows (S-518): a rename imports
 /// the name it renames, aliased by the local name it binds (S-520), a selector
-/// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards, a
-/// Scala 3 `as` rename after the path imports its name under its local name,
-/// and comma-separated paths are separate imports.
+/// hidden with `=> _` imports nothing, `_` and Scala 3's `*` are wildcards —
+/// which bring every member into view, the static wildcard's alias `*` (S-573)
+/// — a Scala 3 `as` rename after the path imports its name under its local
+/// name, and comma-separated paths are separate imports.
 #[cfg(feature = "lang-scala")]
 #[test]
 fn every_scala_selector_shape_records_its_own_rows() {
@@ -6381,11 +7133,11 @@ fn every_scala_selector_shape_records_its_own_rows() {
         scala_imports("import a.b.{C => X, D => _, E}"),
         vec![row("a::b::C", Some("X"), RefForm::Path), row("a::b::E", Some("E"), RefForm::Path)]
     );
-    assert_eq!(scala_imports("import a.b._"), vec![row("a::b", None, RefForm::Glob)]);
-    assert_eq!(scala_imports("import a.b.*"), vec![row("a::b", None, RefForm::Glob)]);
+    assert_eq!(scala_imports("import a.b._"), vec![row("a::b", Some("*"), RefForm::Glob)]);
+    assert_eq!(scala_imports("import a.b.*"), vec![row("a::b", Some("*"), RefForm::Glob)]);
     assert_eq!(
         scala_imports("import a.b.{C, _}"),
-        vec![row("a::b", None, RefForm::Glob), row("a::b::C", Some("C"), RefForm::Path)]
+        vec![row("a::b", Some("*"), RefForm::Glob), row("a::b::C", Some("C"), RefForm::Path)]
     );
     assert_eq!(scala_imports("import a.b.C as K"), vec![row("a::b::C", Some("K"), RefForm::Path)]);
     assert_eq!(
@@ -6996,7 +7748,7 @@ impl A {
 /// S-606 / FR-EX-34: a fully qualified call `<T as Tr>::m(…)` records its type
 /// and trait — generics stripped, a turbofish or a path type alike, a
 /// qualified type kept as written — never the bare `m`; a bracketed type with
-/// no trait (`<Vec<u8>>::new()`) records what it did before.
+/// no trait (`<Vec<u8>>::new()`) records the path it writes, `Vec::new` (S-627).
 #[test]
 fn a_fully_qualified_rust_call_records_its_type_and_trait() {
     let src = "\
@@ -7023,7 +7775,582 @@ fn f(q: Q) {
             ("<<Q as Run>::Out as Run>::go".to_string(), Some(1)),
             ("<Q as Run>::go".to_string(), Some(1)),
             ("<a::Q as b::Run>::go".to_string(), Some(1)),
-            ("new".to_string(), Some(0)),
+            ("Vec::new".to_string(), Some(0)),
         ]
     );
+}
+
+/// The call rows a Scala file records, as `(source, target, form, receiver,
+/// arg count)`, sorted (S-573).
+#[cfg(feature = "lang-scala")]
+type ScalaCall = (String, String, RefForm, Option<crate::model::ReceiverShape>, Option<u32>);
+
+#[cfg(feature = "lang-scala")]
+fn scala_calls(body: &str) -> Vec<ScalaCall> {
+    let facts = extract_lang("scala", "src/App.scala", &format!("package app\n\n{body}"));
+    let mut rows: Vec<_> = facts
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .map(|r| {
+            let source = r.source.as_str().rsplit('/').next().unwrap_or_default().to_string();
+            (source, r.target, r.form, r.receiver, r.arg_count)
+        })
+        .collect();
+    rows.sort_by_key(|row| format!("{row:?}"));
+    rows
+}
+
+/// S-573 / FR-RS-36: a call on an object records `Obj::m` with its argument
+/// count, a generic one too, on an object or not; a parameterless selection
+/// records no count, on an object or on any other receiver, the value an
+/// assignment reads included; one an argument list applies or an assignment
+/// writes is no selection; `Outer.this` names no member; an infix
+/// call records its alphanumeric operator and no symbolic one. A call an
+/// argument list applies on the typed parameter `xs: List[Int]` is the typed
+/// `List::m` (S-576), keeping its `other` shape — a call on an instance, which
+/// the binder never reads as the written `List.m()` of a companion object; a
+/// selection on it is not typed.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn scala_records_object_calls_selections_and_infix_calls() {
+    use crate::model::ReceiverShape::Other;
+    let rows = scala_calls(
+        "class A {\n  def f(xs: List[Int]): Unit = {\n    Util.run(1, 2)\n    Util.gen[Int](3)\n    Util.size\n    xs.size\n    xs.head.name\n    xs.m(1)\n    xs.gen[Int](3)\n    xs.y = 4\n    xs.y = Util.limit\n    A.this.g()\n    xs max 1\n    xs + 1\n  }\n}\n",
+    );
+    let row = |target: &str, form, receiver, args| ("A#f().".to_string(), target.to_string(), form, receiver, args);
+    assert_eq!(
+        rows,
+        vec![
+            row("List::gen", RefForm::Path, Some(Other), Some(1)),
+            row("List::m", RefForm::Path, Some(Other), Some(1)),
+            row("Util::gen", RefForm::Path, None, Some(1)),
+            row("Util::limit", RefForm::Path, None, None),
+            row("Util::run", RefForm::Path, None, Some(2)),
+            row("Util::size", RefForm::Path, None, None),
+            row("g", RefForm::Method, Some(Other), Some(0)),
+            row("head", RefForm::Method, Some(Other), None),
+            row("max", RefForm::Method, Some(Other), None),
+            row("name", RefForm::Method, Some(Other), None),
+            row("size", RefForm::Method, Some(Other), None),
+        ]
+    );
+}
+
+/// S-573: `new T(…)` records `Instantiates` of its head type alone — never a
+/// type argument, which a Scala type parameter is not told apart from — and a
+/// qualified type keeps its path.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn scala_new_records_the_head_type_alone() {
+    let facts = extract_lang(
+        "scala",
+        "src/App.scala",
+        "package app\n\nclass A[T] {\n  def f(): Unit = {\n    new Box(1)\n    new a.b.Holder[T, Int](2)\n    new Runnable { def run(): Unit = () }\n  }\n}\n",
+    );
+    let mut rows: Vec<(String, EdgeKind)> = facts
+        .refs
+        .into_iter()
+        .filter(|r| matches!(r.kind, EdgeKind::Instantiates | EdgeKind::TypeUses))
+        .map(|r| (r.target, r.kind))
+        .collect();
+    rows.sort_by_key(|row| format!("{row:?}"));
+    assert_eq!(
+        rows,
+        vec![
+            ("Box".to_string(), EdgeKind::Instantiates),
+            ("Runnable".to_string(), EdgeKind::Instantiates),
+            ("a::b::Holder".to_string(), EdgeKind::Instantiates),
+        ]
+    );
+}
+
+/// S-573 review: the object test is one spelling on both sides — a receiver is
+/// an object exactly when it is one capitalised plain name — so `Foo$` is a
+/// receiver of another kind, recorded once, never both ways.
+#[cfg(feature = "lang-scala")]
+#[test]
+fn a_scala_receiver_is_an_object_or_not_never_both() {
+    use crate::model::ReceiverShape::Other;
+    let rows = scala_calls("class A {\n  def f(): Unit = {\n    Foo$.run(1)\n    Foo$.size\n  }\n}\n");
+    let row = |target: &str, args| ("A#f().".to_string(), target.to_string(), RefForm::Method, Some(Other), args);
+    assert_eq!(rows, vec![row("run", Some(1)), row("size", None)]);
+}
+
+// ── S-536 / FR-RS-20: a TypeScript call through an imported class ──────────────
+
+/// A member call whose receiver is a named, aliased or default import is
+/// recorded through that import as `<module>::<Class>::<method>` — nestjs's
+/// `UserMapper.toDomain(raw)`, the dominant shape — in both TypeScript
+/// grammars. A namespace import keeps its `<module>::<name>` qualification, a
+/// receiver a parameter shadows keeps its bare method form, and a receiver
+/// reached through a member (`a.UserMapper.f()`) is no import.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_ts_call_through_an_imported_class_is_recorded_through_its_import() {
+    let src = "import { UserMapper } from '../mappers/user.mapper';\n\
+import { FileMapper as Files } from './file.mapper';\n\
+import Session from './session.mapper';\n\
+import * as utils from '../utils';\n\
+export function find(raw: any, a: any) { UserMapper.toDomain(raw); UserMapper.toPersistence(raw); Files.toDomain(raw); Session.toDomain(raw); utils.format(raw); a.UserMapper.toDomain(raw); }\n\
+export function shadowed(UserMapper: any) { return UserMapper.toDomain(1); }\n";
+    for (ext, path) in [("ts", "src/users/user.repository.ts"), ("tsx", "src/users/user.repository.tsx")] {
+        let facts = extract_lang(ext, path, src);
+        assert_eq!(
+            call_targets(&facts),
+            [
+                ("..::mappers::user.mapper::UserMapper::toDomain".to_string(), RefForm::Path),
+                ("..::mappers::user.mapper::UserMapper::toPersistence".to_string(), RefForm::Path),
+                ("..::utils::format".to_string(), RefForm::Path),
+                (".::file.mapper::FileMapper::toDomain".to_string(), RefForm::Path),
+                (".::session.mapper::default::toDomain".to_string(), RefForm::Path),
+                ("toDomain".to_string(), RefForm::Method),
+                ("toDomain".to_string(), RefForm::Method),
+            ],
+            "{ext}"
+        );
+        // A member call on a named import names its receiver, which tells it
+        // from a bare call that spells the same target; a namespace's does not.
+        let mut aliases: Vec<(String, Option<String>)> = facts
+            .refs
+            .iter()
+            .filter(|r| r.kind == EdgeKind::Calls && r.form == RefForm::Path)
+            .map(|r| (r.target.clone(), r.alias.clone()))
+            .collect();
+        aliases.sort();
+        let row = |target: &str, alias: Option<&str>| (target.to_string(), alias.map(str::to_string));
+        assert_eq!(
+            aliases,
+            [
+                row("..::mappers::user.mapper::UserMapper::toDomain", Some("UserMapper")),
+                row("..::mappers::user.mapper::UserMapper::toPersistence", Some("UserMapper")),
+                row("..::utils::format", None),
+                row(".::file.mapper::FileMapper::toDomain", Some("Files")),
+                row(".::session.mapper::default::toDomain", Some("Session")),
+            ],
+            "{ext}"
+        );
+    }
+    // A local name both a namespace and a named import bind (invalid code)
+    // names neither module: the call keeps its bare method form.
+    let facts = extract_lang(
+        "ts",
+        "src/dup.ts",
+        "import * as Dup from './a';\nimport { Dup } from './b';\nexport function f() { return Dup.run(); }\n",
+    );
+    assert_eq!(call_targets(&facts), [("run".to_string(), RefForm::Method)]);
+}
+
+/// The S-543 fixture: a dataclass, a Django model with an inner `Meta`, and a
+/// werkzeug-shaped `Map` whose attributes are declared by `self.x = …` writes,
+/// one of them also annotated in the class body and one written twice — beside
+/// the `self` writes no class owns: one in a function nested in a method, one in
+/// a free function.
+#[cfg(feature = "lang-python")]
+const PYTHON_CLASS_MEMBERS: &str = "\
+import dataclasses
+from django.db import models
+
+
+@dataclasses.dataclass
+class Point:
+    x: int
+    y: int = 0
+    tags: list = dataclasses.field(default_factory=list)
+
+    def norm(self):
+        return self.x + self.y
+
+
+class Check(models.Model):
+    name = models.CharField(max_length=100)
+    project = models.ForeignKey(\"Project\", on_delete=models.CASCADE)
+
+    class Meta:
+        ordering = [\"name\"]
+
+    def url(self):
+        return self.project.url + self.name
+
+    @property
+    def label(self):
+        return self.name
+
+    @staticmethod
+    def make():
+        return Check()
+
+    @classmethod
+    def build(cls):
+        return cls()
+
+
+class Map:
+    rules: list
+
+    def __init__(self, rules=None):
+        self.rules = rules or []
+        self._rules_by_endpoint = {}
+        self.strict = False
+
+    def add(self, rule):
+        self.rules.append(rule)
+        self._rules_by_endpoint[rule] = rule
+        self.strict = True
+
+        def inner():
+            self.leaked = 1
+
+        return inner
+
+
+def helper(self):
+    self.free = 1
+
+    def nested():
+        pass
+
+    return nested
+";
+
+/// `(name, kind)` of every node of `kind`, sorted.
+#[cfg(feature = "lang-python")]
+fn names_of_kind(facts: &Facts, kind: NodeKind) -> Vec<String> {
+    let mut names: Vec<String> = facts.nodes.iter().filter(|n| n.kind == kind).map(|n| n.name.clone()).collect();
+    names.sort();
+    names
+}
+
+/// The `(container name, member name)` of every `Contains` edge whose target is
+/// a node of `kind`, sorted.
+#[cfg(feature = "lang-python")]
+fn members_of_kind(facts: &Facts, kind: NodeKind) -> Vec<(String, String)> {
+    let name = |s: &LogosSymbol| facts.nodes.iter().find(|n| &n.symbol == s).map(|n| n.name.clone());
+    let mut pairs: Vec<(String, String)> = facts
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .filter(|e| facts.nodes.iter().any(|n| n.symbol == e.target && n.kind == kind))
+        .map(|e| (name(&e.source).unwrap_or_default(), name(&e.target).unwrap_or_default()))
+        .collect();
+    pairs.sort();
+    pairs
+}
+
+/// A `def` in a class body — decorated, `@staticmethod`, `@classmethod` and
+/// `@property` ones included — is a Method; a def nested in a method and a
+/// free def stay Functions (S-543, FR-EX-20).
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_def_in_a_class_body_is_a_method() {
+    let facts = extract_lang("py", "app/models.py", PYTHON_CLASS_MEMBERS);
+    assert_eq!(
+        names_of_kind(&facts, NodeKind::Method),
+        ["__init__", "add", "build", "label", "make", "norm", "url"],
+        "every def of a class body is a Method"
+    );
+    assert_eq!(
+        names_of_kind(&facts, NodeKind::Function),
+        ["helper", "inner", "nested"],
+        "a def nested in a method or a function, and a free def, stay Functions"
+    );
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Method),
+        [
+            ("Check".to_string(), "build".to_string()),
+            ("Check".to_string(), "label".to_string()),
+            ("Check".to_string(), "make".to_string()),
+            ("Check".to_string(), "url".to_string()),
+            ("Map".to_string(), "__init__".to_string()),
+            ("Map".to_string(), "add".to_string()),
+            ("Point".to_string(), "norm".to_string()),
+        ],
+        "each Method is contained by its class"
+    );
+}
+
+/// A class's Fields come from its body's assignments and annotations (a
+/// dataclass's and a Django model's fields, an inner `Meta`'s option) and from
+/// the `self.x = …` writes of its methods, each name once per class; a `self`
+/// write no method of a class makes declares nothing (S-543, FR-EX-20).
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_class_declares_its_fields_once_each() {
+    let facts = extract_lang("py", "app/models.py", PYTHON_CLASS_MEMBERS);
+    let pair = |c: &str, f: &str| (c.to_string(), f.to_string());
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Field),
+        [
+            pair("Check", "name"),
+            pair("Check", "project"),
+            pair("Map", "_rules_by_endpoint"),
+            pair("Map", "rules"),
+            pair("Map", "strict"),
+            pair("Meta", "ordering"),
+            pair("Point", "tags"),
+            pair("Point", "x"),
+            pair("Point", "y"),
+        ],
+        "class-body, annotated and self-written attributes are Fields of their class, once each"
+    );
+    assert_eq!(
+        facts.nodes.iter().filter(|n| n.kind == NodeKind::Field).count(),
+        9,
+        "no Field is left outside a class: `self.leaked` and `self.free` declare none"
+    );
+    // The class-body annotation declares `rules`, ahead of the `__init__` write.
+    let rules = only_node(&facts, "rules");
+    assert_eq!((rules.start_line, rules.end_line), (39, 39), "{rules:?}");
+    assert!(rules.symbol.as_str().ends_with("`models.py`/Map#rules."), "{}", rules.symbol.as_str());
+    // A field first written in `__init__` is declared at that write.
+    let strict = only_node(&facts, "strict");
+    assert_eq!(strict.start_line, 44, "{strict:?}");
+}
+
+/// A Field is declared at its name, so what its assignment holds is still its
+/// scope's: the calls of a model field's initialiser stay the class's, and a
+/// method's `self.x` writes and reads stay that method's accesses (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_field_owns_no_reference() {
+    let facts = extract_lang("py", "app/models.py", PYTHON_CLASS_MEMBERS);
+    let source_of = |kind: EdgeKind, target: &str| -> Vec<String> {
+        let mut sources: Vec<String> = facts
+            .refs
+            .iter()
+            .filter(|r| r.kind == kind && r.target.rsplit("::").next() == Some(target))
+            .map(|r| {
+                let s = r.source.as_str();
+                s.rsplit('/').next().unwrap_or(s).to_string()
+            })
+            .collect();
+        sources.sort();
+        sources
+    };
+    assert_eq!(source_of(EdgeKind::Calls, "CharField"), ["Check#"], "a model field's call is its class's");
+    assert_eq!(source_of(EdgeKind::Calls, "field"), ["Point#"], "a dataclass field's call is its class's");
+    assert_eq!(
+        source_of(EdgeKind::Accesses, "strict"),
+        ["Map#__init__().", "Map#add()."],
+        "both `self.strict` writes stay their methods' accesses"
+    );
+    assert_eq!(
+        source_of(EdgeKind::Accesses, "rules"),
+        ["Map#__init__().", "Map#add()."],
+        "the write and the read of `self.rules` stay their methods' accesses"
+    );
+    assert!(
+        !facts.refs.iter().any(|r| facts.nodes.iter().any(|n| n.kind == NodeKind::Field && n.symbol == r.source)),
+        "no reference is sourced at a Field"
+    );
+}
+
+/// A def one level down an `if`/`elif`/`else` or a `try`/`except`/`else`/
+/// `finally` of a class body is still the class's Method, a decorated one
+/// too; one under a `with` of the body — no such marker — stays a Function the
+/// class contains. A `self` write under an `if` in a method still declares the
+/// class's Field, and a class nested in a method owns its own methods' writes
+/// (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_class_owns_what_its_compound_statements_and_nested_classes_hold() {
+    let src = "\
+class Proxy:
+    if TYPE_CHECKING:
+        def typed(self):
+            return self.target
+    elif LEGACY:
+        def legacy(self):
+            pass
+    else:
+        @property
+        def fallback(self):
+            pass
+
+    try:
+        def tried(self):
+            pass
+    except ImportError:
+        def excepted(self):
+            pass
+    else:
+        def elsed(self):
+            pass
+    finally:
+        def finished(self):
+            pass
+
+    with lock:
+        def guarded(self):
+            pass
+
+    def bind(self, target):
+        if target:
+            self.target = target
+
+        class Bound:
+            def __init__(self):
+                self.inner = 1
+
+        return Bound
+";
+    let facts = extract_lang("py", "app/proxy.py", src);
+    let pair = |c: &str, m: &str| (c.to_string(), m.to_string());
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Method),
+        [
+            pair("Bound", "__init__"),
+            pair("Proxy", "bind"),
+            pair("Proxy", "elsed"),
+            pair("Proxy", "excepted"),
+            pair("Proxy", "fallback"),
+            pair("Proxy", "finished"),
+            pair("Proxy", "legacy"),
+            pair("Proxy", "tried"),
+            pair("Proxy", "typed"),
+        ],
+        "a def one level down a body's if or try branch, and a nested class's def, are Methods of their class"
+    );
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Function),
+        [pair("Proxy", "guarded")],
+        "a def under a `with` of the body stays a Function"
+    );
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Field),
+        [pair("Bound", "inner"), pair("Proxy", "target")],
+        "a write under an `if` is the method's class's; a nested class's method writes its own class"
+    );
+}
+
+/// A class-body declaration of a name wins over a method's write of it even
+/// when the write comes first in the file: the Field sits at the class-body
+/// line (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_python_class_body_attribute_wins_over_an_earlier_self_write() {
+    let src = "\
+class Late:
+    def __init__(self):
+        self.limit = 5
+
+    limit = 10
+";
+    let facts = extract_lang("py", "app/late.py", src);
+    let fields: Vec<(&str, u32)> = facts
+        .nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Field)
+        .map(|n| (n.name.as_str(), n.start_line))
+        .collect();
+    assert_eq!(fields, [("limit", 5)], "one Field, declared at the class-body line");
+}
+
+/// Each name of a tuple target is a Field — in the class body and in a
+/// method's `self` write, parenthesised or not — and a tuple element that is
+/// no `self` attribute declares nothing (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn each_name_of_a_python_tuple_target_is_a_field() {
+    let src = "\
+class Pair:
+    left, right = None, None
+    (top, bottom) = 0, 1
+
+    def __init__(self, a, b):
+        self.a, self.b = a, b
+        (self.c, other.d) = b, a
+        e, self.f = a, b
+";
+    let facts = extract_lang("py", "app/pair.py", src);
+    let pair = |c: &str, f: &str| (c.to_string(), f.to_string());
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Field),
+        [
+            pair("Pair", "a"),
+            pair("Pair", "b"),
+            pair("Pair", "bottom"),
+            pair("Pair", "c"),
+            pair("Pair", "f"),
+            pair("Pair", "left"),
+            pair("Pair", "right"),
+            pair("Pair", "top"),
+        ],
+        "every name a tuple target declares in the body or as `self.x`, nothing else"
+    );
+}
+
+/// Two classes of one file each keep their own Field of a shared name, from a
+/// class-body assignment and from a `self` write alike: a field is declared
+/// once per class, never once per file (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn two_python_classes_each_keep_a_field_of_one_name() {
+    let src = "\
+class A:
+    name = 'a'
+
+    def __init__(self):
+        self.id = 1
+
+
+class B:
+    name = 'b'
+
+    def __init__(self):
+        self.id = 2
+";
+    let facts = extract_lang("py", "app/ab.py", src);
+    let pair = |c: &str, f: &str| (c.to_string(), f.to_string());
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Field),
+        [pair("A", "id"), pair("A", "name"), pair("B", "id"), pair("B", "name")],
+        "each class declares its own `name` and `id`"
+    );
+}
+
+/// An annotated `self` write declares its Field as a plain one does (S-543).
+#[cfg(feature = "lang-python")]
+#[test]
+fn an_annotated_python_self_write_is_a_field() {
+    let src = "\
+class Conn:
+    def __init__(self):
+        self.retries: int = 3
+        self.host = 'localhost'
+";
+    let facts = extract_lang("py", "app/conn.py", src);
+    let pair = |c: &str, f: &str| (c.to_string(), f.to_string());
+    assert_eq!(
+        members_of_kind(&facts, NodeKind::Field),
+        [pair("Conn", "host"), pair("Conn", "retries")],
+        "the annotated write and the plain one are both Fields"
+    );
+}
+
+/// S-563: a Kotlin class's and function's field-less `type_parameters` are in
+/// scope; a Scala `def`'s, which its grammar field-names `parameters`, is not
+/// read here, so its bound (`Foo` of `[T <: Foo]`) never joins the set.
+#[cfg(all(feature = "lang-kotlin", feature = "lang-scala"))]
+#[test]
+fn kotlin_type_parameters_are_read_and_a_scala_bound_never_is() {
+    fn innermost<'t>(root: tree_sitter::Node<'t>, src: &str, needle: &str) -> tree_sitter::Node<'t> {
+        let at = src.find(needle).expect("needle in source");
+        root.descendant_for_byte_range(at, at + needle.len()).expect("node at needle")
+    }
+    let parse = |language: tree_sitter::Language, src: &str| {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&language).expect("set language");
+        parser.parse(src, None).expect("parses")
+    };
+
+    let kotlin = "class Box<T>(val item: T) {\n    fun <E> get(e: E) = e.go()\n}\n";
+    let tree = parse(tree_sitter_kotlin_ng::LANGUAGE.into(), kotlin);
+    let names = type_parameters_in_scope(innermost(tree.root_node(), kotlin, "go"), kotlin.as_bytes());
+    assert_eq!(names, HashSet::from(["T".to_string(), "E".to_string()]));
+
+    let scala = "trait A {\n  def f[T <: Foo](x: T): Unit\n}\n";
+    let tree = parse(tree_sitter_scala::LANGUAGE.into(), scala);
+    let names = type_parameters_in_scope(innermost(tree.root_node(), scala, "Unit"), scala.as_bytes());
+    assert!(!names.contains("Foo"), "{names:?}");
 }

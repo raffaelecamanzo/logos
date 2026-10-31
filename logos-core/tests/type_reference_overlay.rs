@@ -332,7 +332,16 @@ fn a_workspace_with_no_java_kotlin_or_avro_member_carries_no_type_reference_sect
     keys.sort_unstable();
     assert_eq!(
         keys,
-        ["coverage", "degraded_rollup", "kind_candidates", "members", "topics", "warm_rollup", "workspace"],
+        [
+            "coverage",
+            "degraded_rollup",
+            "kind_candidates",
+            "members",
+            "reference_resolution",
+            "topics",
+            "warm_rollup",
+            "workspace"
+        ],
         "{status:#}"
     );
 }

@@ -105,7 +105,7 @@ fn a_kotlin_import_of_an_in_repository_type_binds_to_the_class_and_an_external_o
     // `self` shape, S-516): it binds the class's own `helper`.
     assert_eq!(
         edges_from(rt, "svc/src/main/kotlin/com/x/svc/Svc.kt", EdgeKind::Calls),
-        vec!["svc/src/main/kotlin/com/x/svc/Svc.kt:helper:function".to_string()]
+        vec!["svc/src/main/kotlin/com/x/svc/Svc.kt:helper:method".to_string()]
     );
 }
 

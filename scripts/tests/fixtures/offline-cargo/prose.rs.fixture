@@ -1,0 +1,7 @@
+// Text that mentions a command is not a command.
+#[doc = "cargo metadata --offline is what failed on CI"]
+fn messages() {
+    assert!(ok, "do not run cargo metadata --offline here");
+    run().expect("cargo tree --offline --target all is wrong");
+    panic!("cargo metadata --offline needs a platform");
+}

@@ -861,7 +861,8 @@ fn scan_and_quality_report_render_not_applicable_graph_dimensions() {
     }
 }
 
-/// On a project whose one language binds same-file only (C), `scan --json`,
+/// On a project whose one language binds same-file only — C, whose one
+/// cross-file callee is `static`, its own file's alone (S-584) — `scan --json`,
 /// `gate --json` and `session-start --json` each carry exactly one coverage
 /// warning, the same text on all three, naming `c` and its share ([FR-QM-18]) —
 /// and each exits as it did before the warning existed: 0 for the scan, the
@@ -872,7 +873,7 @@ fn scan_and_quality_report_render_not_applicable_graph_dimensions() {
 fn the_coverage_warning_rides_scan_gate_and_session_start_without_moving_an_exit_code() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/core/core.c", "int helper(int x) { return x + 1; }
-int step(int x) { return helper(x); }
+static int step(int x) { return helper(x); }
 ");
     write(tmp.path(), "src/net/net.c", "int step(int x);
 int send(int x) { return step(x); }

@@ -1,0 +1,4 @@
+// One passing site, so a fixture of non-calls reads its denominator too.
+fn control() {
+    let _ = cargo(&["tree", "--offline"]);
+}

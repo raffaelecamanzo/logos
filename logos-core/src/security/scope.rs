@@ -1,4 +1,4 @@
-//! A finding's code scope ([FR-SC-28], [ADR-79] §3a, S-795): `test` or
+//! A finding's code scope ([FR-SC-28], [ADR-79] §3a, S-795): `test`, `dev` or
 //! `production`, decided each time the finding is read, like its OWASP class,
 //! and never stored — so it follows the graph, and history.db gains nothing.
 //!
@@ -14,6 +14,12 @@
 //!   The fixture segments are test code for security only: the rule metrics,
 //!   hotspots and dead code read is unchanged.
 //!
+//! A finding that is not `test` is `dev` when it sits on a dependency its
+//! lockfile marks dev-only ([`DevDependency`](ScopeReason::DevDependency),
+//! [FR-SC-30], S-810): the dependency scope, read from the lockfile each time
+//! (`security/lockfile.rs`). Test code wins, so a dev package's finding
+//! in a fixtures lockfile reads `test`.
+//!
 //! Otherwise it is `production`, with no reason. A report path that is
 //! absolute and under the root is made project-relative first, as a path
 //! suppression reads it ([`project_location`]); a finding with no location, or
@@ -25,14 +31,20 @@
 //!
 //! Every list defaults to production behind a [`ScopeFilter`], and every count
 //! leaves test code out by [`counts`](crate::history::security::counts) and
-//! states how many it left out. The gate, the ratchet, the checked-in baseline
-//! and the branch delta never read the scope ([BR-98]).
+//! states how many it left out. The default scope also leaves out a finding its
+//! scanner marks low-confidence, "needs review" ([FR-SC-31]), and states how
+//! many; `--scope all` lists it, labelled. So does a `dev` finding ([FR-SC-30]):
+//! "N more in dev-only dependencies". The gate, the ratchet, the checked-in
+//! baseline and the branch delta never read the scope ([BR-98], [BR-100]).
 //!
 //! [FR-AN-05]: ../../../docs/specs/requirements/FR-AN-05.md
 //! [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
 //! [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+//! [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+//! [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
 //! [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
+//! [BR-100]: ../../../docs/specs/software-spec.md#328-security-findings
 
 use std::path::{Component, Path};
 
@@ -44,7 +56,9 @@ use crate::history::security::{project_location, CodeScope};
 use crate::history::SecurityFinding;
 use crate::navigate::is_test_path;
 
-/// Why a finding reads `test`.
+use super::lockfile::LockfileCache;
+
+/// Why a finding reads `test` or `dev`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeReason {
@@ -52,6 +66,10 @@ pub enum ScopeReason {
     TestSymbol,
     /// Its project-relative location matches the security path rule.
     TestPath,
+    /// Its lockfile marks the package it is on dev-only ([FR-SC-30]).
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+    DevDependency,
 }
 
 /// A finding's code scope and why: what every finding payload carries.
@@ -79,20 +97,24 @@ pub fn is_test_location(path: &str) -> bool {
 
 /// The scope of `finding` in the project at `root`, `in_test_symbol` being
 /// whether its enclosing graph node is test code ([module docs](self)).
+/// `lockfiles` holds the lockfiles already read, so one is parsed once however
+/// many findings sit on it.
 #[must_use]
-pub fn scope_of(root: &Path, finding: &SecurityFinding, in_test_symbol: bool) -> ScopeLabel {
-    let reason = if in_test_symbol {
+pub(crate) fn scope_of(root: &Path, finding: &SecurityFinding, in_test_symbol: bool, lockfiles: &mut LockfileCache) -> ScopeLabel {
+    let location = finding.location().and_then(|location| project_location(root, &location));
+    let test = if in_test_symbol {
         Some(ScopeReason::TestSymbol)
     } else {
-        finding
-            .location()
-            .and_then(|location| project_location(root, &location))
-            .filter(|path| is_test_location(path))
-            .map(|_| ScopeReason::TestPath)
+        location.as_deref().filter(|path| is_test_location(path)).map(|_| ScopeReason::TestPath)
     };
-    ScopeLabel {
-        code_scope: if reason.is_some() { CodeScope::Test } else { CodeScope::Production },
-        code_scope_reason: reason,
+    if let Some(reason) = test {
+        return ScopeLabel { code_scope: CodeScope::Test, code_scope_reason: Some(reason) };
+    }
+    match location {
+        Some(path) if lockfiles.is_dev(root, &path, finding) => {
+            ScopeLabel { code_scope: CodeScope::Dev, code_scope_reason: Some(ScopeReason::DevDependency) }
+        }
+        _ => ScopeLabel { code_scope: CodeScope::Production, code_scope_reason: None },
     }
 }
 
@@ -114,7 +136,8 @@ pub fn scopes(
         in_test.len(),
         findings.len()
     );
-    Ok(findings.iter().zip(in_test).map(|(f, in_test)| scope_of(root, f, in_test)).collect())
+    let mut lockfiles = LockfileCache::default();
+    Ok(findings.iter().zip(in_test).map(|(f, in_test)| scope_of(root, f, in_test, &mut lockfiles)).collect())
 }
 
 /// The answer of a read with no graph behind it: no finding sits in a test
@@ -139,7 +162,10 @@ pub fn no_test_symbols(findings: &[&SecurityFinding]) -> Result<Vec<bool>> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeFilter {
-    /// Production code only: what a surface lists when no scope is named.
+    /// Production code only: what a surface lists when no scope is named. It
+    /// leaves out a `dev` finding too ([FR-SC-30]), and states how many.
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
     Production,
     /// Test code only.
     Test,
@@ -166,7 +192,28 @@ impl ScopeFilter {
         }
     }
 
-    /// Whether a finding of `scope` passes.
+    /// Whether the listing leaves out a production finding its scanner marks
+    /// low-confidence ([FR-SC-31]): the default scope does, so a list and a
+    /// count read the same ("N more need review"); `test` and `all` do not.
+    ///
+    /// [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
+    #[must_use]
+    pub fn hides_needs_review(self) -> bool {
+        self == Self::Production
+    }
+
+    /// Whether the listing leaves out a finding on a dev-only dependency
+    /// ([FR-SC-30]) and states it ("N more in dev-only dependencies"): the
+    /// default scope does; `all` lists it; `test` lists test code alone, and
+    /// counts it among the findings the scope hid.
+    ///
+    /// [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
+    #[must_use]
+    pub fn hides_dev(self) -> bool {
+        self == Self::Production
+    }
+
+    /// Whether a finding of `scope` passes. A `dev` finding passes `all` alone.
     #[must_use]
     pub fn keeps(self, scope: CodeScope) -> bool {
         match self {
@@ -193,6 +240,7 @@ mod tests {
             fingerprint: "f".repeat(64),
             rule_id: "aws-access-key-id".into(),
             severity: crate::history::Severity::Critical,
+            confidence: crate::history::ScannerConfidence::Unstated,
             cwes: Vec::new(),
             message: "secret-class finding redacted".into(),
             redacted: true,
@@ -207,11 +255,12 @@ mod tests {
             legacy_fingerprints: Vec::new(),
             anchor: None,
             freshness: if path.is_some() { FRESHNESS_FRESH } else { crate::history::FRESHNESS_NA },
+            reporters: Vec::new(),
         }
     }
 
     fn read(f: &SecurityFinding, in_test_symbol: bool) -> (CodeScope, Option<ScopeReason>) {
-        let label = scope_of(Path::new(ROOT), f, in_test_symbol);
+        let label = scope_of(Path::new(ROOT), f, in_test_symbol, &mut LockfileCache::default());
         (label.code_scope, label.code_scope_reason)
     }
 
@@ -305,7 +354,42 @@ mod tests {
         assert_eq!(keeps(ScopeFilter::Production), [true, false]);
         assert_eq!(keeps(ScopeFilter::Test), [false, true]);
         assert_eq!(keeps(ScopeFilter::All), [true, true]);
+        let dev = |f: ScopeFilter| f.keeps(CodeScope::Dev);
+        assert_eq!([ScopeFilter::Production, ScopeFilter::Test, ScopeFilter::All].map(dev), [false, false, true]);
+        assert_eq!([ScopeFilter::Production, ScopeFilter::Test, ScopeFilter::All].map(ScopeFilter::hides_dev), [true, false, false]);
         assert_eq!(ScopeFilter::default(), ScopeFilter::All, "an unset filter keeps every scope");
+    }
+
+    /// S-810 (FR-SC-30): a finding on a package its lockfile marks dev-only reads
+    /// `dev` with its reason; the same advisory on a production package, or in a
+    /// lockfile that says nothing, reads `production`; a fixtures lockfile reads
+    /// `test` first. The lockfile is the project's own, read from the root.
+    #[test]
+    fn a_dev_only_dependency_reads_dev_unless_it_is_test_code_or_the_lockfile_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = r#"{"lockfileVersion":3,"packages":{"node_modules/vite":{"version":"5.0.0","dev":true},"node_modules/react":{"version":"18.2.0"}}}"#;
+        std::fs::create_dir_all(dir.path().join("web/tests/fixtures")).unwrap();
+        std::fs::write(dir.path().join("web/package-lock.json"), lock).unwrap();
+        std::fs::write(dir.path().join("web/tests/fixtures/package-lock.json"), lock).unwrap();
+        let on = |package: &str, report: &str| {
+            let mut f = finding(None, Some(report));
+            f.message = format!("Package '{package}' is vulnerable to 'GHSA-x' (also known as 'CVE-1').");
+            f
+        };
+        let read = |f: &SecurityFinding| {
+            let label = scope_of(dir.path(), f, false, &mut LockfileCache::default());
+            (label.code_scope, label.code_scope_reason)
+        };
+        let dev = (CodeScope::Dev, Some(ScopeReason::DevDependency));
+        assert_eq!(read(&on("vite@5.0.0", "web/package-lock.json")), dev);
+        assert_eq!(read(&on("react@18.2.0", "web/package-lock.json")), PRODUCTION);
+        let absolute = format!("{}/web/package-lock.json", dir.path().display());
+        assert_eq!(read(&on("vite@5.0.0", &absolute)), dev, "an absolute report path under the root");
+        assert_eq!(read(&on("vite@5.0.0", "web/Cargo.lock")), PRODUCTION, "another lockfile never guesses");
+        assert_eq!(read(&on("vite@5.0.0", "web/tests/fixtures/package-lock.json")), TEST_PATH, "test code wins");
+        assert_eq!(read(&finding(Some("web/src/app.ts"), None)), PRODUCTION, "a source finding has no dependency scope");
+        let in_test = scope_of(dir.path(), &on("vite@5.0.0", "web/package-lock.json"), true, &mut LockfileCache::default());
+        assert_eq!((in_test.code_scope, in_test.code_scope_reason), TEST_SYMBOL);
     }
 
     /// The graph is asked once, for every finding, and an answer of the wrong

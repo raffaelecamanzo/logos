@@ -42,7 +42,7 @@
 //! [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
 //! [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -1630,6 +1630,31 @@ pub fn cross_service_coverage<E>(answer: &AnswerScope<'_, E>) -> CrossServiceCov
 where
     E: MemberEngine + MemberContracts,
 {
+    coverage_and_bound_sites(answer).0
+}
+
+/// One invocation call site the coverage tier bound across members — the
+/// consumer's member, its declaration's symbol and its ledger target — a
+/// reference `workspace status` counts resolved in its workspace reference
+/// resolution (S-637, [FR-RS-49]).
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+pub(crate) type BoundSite = (String, String, String);
+
+/// [`cross_service_coverage`], and every invocation call site it filed
+/// **bound** ([`BoundSite`]) — read off the row the walk files for each
+/// consumer, so a site is bound here exactly when its row is, by the one
+/// classifier ([ADR-52]).
+///
+/// A site the walk folds into an earlier one of the same declaration and key
+/// files no row of its own and is not listed: it under-counts, the safe
+/// direction for the figure it feeds, a lower bound.
+///
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub(crate) fn coverage_and_bound_sites<E>(answer: &AnswerScope<'_, E>) -> (CrossServiceCoverage, BTreeSet<BoundSite>)
+where
+    E: MemberEngine + MemberContracts,
+{
     let mut providers: ProviderIndex = ProviderIndex::new();
     let mut consumer_refs: Vec<(String, String, crate::model::LogosSymbol)> = Vec::new();
     let surfaces = read_members(answer, "contract surface", |e| e.contract_surface());
@@ -1756,8 +1781,15 @@ where
     // one method share a `from` ([`JoinCall::target`] tells them apart).
     let mut join_population: Vec<(BridgeEndpoint, JoinCall)> = Vec::new();
     let mut awaiting: Option<(usize, JoinCall)> = None;
+    let mut bound_sites: BTreeSet<BoundSite> = BTreeSet::new();
+    let mut awaiting_site: Option<(usize, BoundSite)> = None;
     for (member, consumer, identity) in inv_consumers {
         settle_join(&tally, awaiting.take(), &mut join_population);
+        settle_site(&tally, awaiting_site.take(), &mut bound_sites);
+        awaiting_site = Some((
+            tally.references.len(),
+            (member.clone(), consumer.symbol.as_str().to_string(), consumer.target.clone()),
+        ));
         // Built once for all three branches below — the endpoint is the same
         // `(member, symbol)` pair whichever one the row takes.
         let from = BridgeEndpoint { member: member.clone(), symbol: consumer.symbol.clone() };
@@ -1841,6 +1873,7 @@ where
     }
 
     settle_join(&tally, awaiting.take(), &mut join_population);
+    settle_site(&tally, awaiting_site.take(), &mut bound_sites);
 
     // The recorded refusals on the provider side of an arm ([CR-107]). Reported
     // after the classified rows so the tally's own ordering is untouched;
@@ -1893,7 +1926,23 @@ where
         roots.get(member).map_or_else(BaseFacts::default, |root| BaseFacts::read(root))
     });
     coverage.declared_contracts = (!declared.is_empty()).then_some(declared);
-    coverage
+    (coverage, bound_sites)
+}
+
+/// Keep `site` in `into` if the row the invocation loop filed for it — at most
+/// one, at index `at`; none for an intra-repo resolution — is a bound
+/// invocation row: [`settle_join`]'s pairing, for the bound sites.
+fn settle_site(tally: &Tally, awaiting: Option<(usize, BoundSite)>, into: &mut BTreeSet<BoundSite>) {
+    let Some((at, site)) = awaiting else {
+        return;
+    };
+    let bound = tally
+        .references
+        .get(at)
+        .is_some_and(|row| row.intake == BridgeIntake::Invocation && row.state == CoverageState::Bound);
+    if bound {
+        into.insert(site);
+    }
 }
 
 /// What the external join judges one HTTP reference by: its stored target, and

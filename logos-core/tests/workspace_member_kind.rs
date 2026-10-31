@@ -310,6 +310,78 @@ fn a_workspace_without_declarations_or_candidates_renders_status_byte_for_byte_a
         }
     }
     assert!(rust_residues > 0, "the fixture has a Rust row, or this pins nothing");
+    // S-637's workspace reference resolution is a top-level section: taken out
+    // and checked the same way — the members' own populations summed, before
+    // S-635's block below takes those out, every member read.
+    let pooled = value
+        .as_object_mut()
+        .expect("a status object")
+        .shift_remove("reference_resolution")
+        .expect("the workspace states its reference resolution (S-637)");
+    let summed = |field: &str| -> u64 {
+        value["members"]
+            .as_array()
+            .expect("a member array")
+            .iter()
+            .map(|m| m["result"]["internal_resolution"][field].as_u64().expect("a count"))
+            .sum()
+    };
+    let (figure, cross) = (&pooled["internal_resolution"], &pooled["cross_member"]);
+    let reread = cross["named_by_another_member"].as_u64().unwrap() + cross["type_in_another_member"].as_u64().unwrap();
+    assert_eq!(figure["code_references"].as_u64(), Some(summed("code_references")), "{pooled}");
+    assert_eq!(
+        figure["resolved"].as_u64(),
+        Some(summed("resolved") + cross["bridge_bound"].as_u64().unwrap()),
+        "{pooled}"
+    );
+    assert_eq!(figure["provably_external"].as_u64(), Some(summed("provably_external") - reread), "{pooled}");
+    let roster = value["members"].as_array().expect("a member array").len() as u64;
+    assert_eq!(pooled["members"], serde_json::json!({ "members": roster, "read": roster }), "{pooled}");
+    // S-635's reference classes ride on each member's status: the two figures
+    // and each class's provably-external count, taken out and checked the same
+    // way — the figures partition the member's own deprecated population, and
+    // no class counts more external rows than it holds unbound.
+    for member in value["members"].as_array_mut().expect("a member array") {
+        let result = member["result"].as_object_mut().expect("a status object");
+        let internal = result
+            .shift_remove("internal_resolution")
+            .expect("a member states its internal-candidate headline (S-635)");
+        let doc = result
+            .shift_remove("doc_resolution")
+            .expect("a member states its doc figure (S-635)");
+        let count = |value: &serde_json::Value| value.as_u64().expect("a count");
+        assert_eq!(
+            count(&doc["references"]) + count(&internal["code_references"]),
+            count(&result["refs_total"]),
+            "{internal} {doc}"
+        );
+        assert_eq!(
+            count(&internal["internal_candidates"]) + count(&internal["provably_external"]),
+            count(&internal["code_references"]),
+            "{internal}"
+        );
+        let rows = result["resolution_by_language"].as_array_mut().expect("a row array");
+        for row in rows {
+            // S-571 adds `parse_damage` to every status row: taken out the same
+            // way — the fixture's files all parse clean.
+            let damage = row
+                .as_object_mut()
+                .expect("a row object")
+                .shift_remove("parse_damage")
+                .expect("a status row states its parse damage (S-571)");
+            assert_eq!(damage, serde_json::json!({ "files": 0, "unrecorded": 0, "share_percent": 0 }));
+            for class in ["calls", "imports"] {
+                let class = row[class].as_object_mut().expect("a class object");
+                let external = class
+                    .shift_remove("provably_external")
+                    .expect("a status row states its provably-external count (S-635)");
+                assert!(
+                    count(&external) <= count(&class["references"]) - count(&class["bound"]),
+                    "{external}"
+                );
+            }
+        }
+    }
     // S-702's `project_id` is recorded by each member's index: taken out and
     // checked the same way — each remote-less member names its own directory,
     // the coordinate its symbols carry in the golden below (S-703).

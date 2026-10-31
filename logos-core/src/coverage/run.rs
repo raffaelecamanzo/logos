@@ -52,7 +52,7 @@ use serde::Serialize;
 use super::consent::{self, CUSTOM_TOOL};
 use super::deps::{self, DependencyOutcome, DependencyRun, Need};
 use super::registry::{self, CoverageTool, DEFAULT_TIMEOUT, OUTPUT_DIR, REGISTRY};
-use super::{spawn_and_settle, CoverageRunner, Detection, Origin, Probes, RunOutcome};
+use super::{spawn_and_settle, CoverageRunner, Detection, Origin, Probes, RunOutcome, Timed};
 use crate::config::{load_coverage_consent, ConfigError, EffectiveCoverageIngest, COVERAGE_TOOLS};
 use crate::history::coverage::{artifact_candidates, CoverageFormat};
 use crate::history::security::mask;
@@ -145,6 +145,11 @@ pub struct ToolRun {
     pub version: Option<String>,
     #[serde(flatten)]
     pub outcome: ToolOutcome,
+    /// How long the tool's process ran, from its spawn to its end, in
+    /// milliseconds: what [`LAST_RUN_FILE`] records. Not in the run's
+    /// payload; `None` when no process ran.
+    #[serde(skip)]
+    duration_ms: Option<u64>,
 }
 
 /// How one tool's part in a run ended ([FR-CV-11]'s states).
@@ -156,8 +161,16 @@ pub enum ToolOutcome {
     /// It exited 0, and each report it wrote was ingested.
     Ran { reports: Vec<String>, ingests: Vec<IngestSummary> },
     /// *Ran — tests failed*: it exited non-zero but wrote reports, and each
-    /// was ingested (CR-234 CRA-01).
-    TestsFailed { exit_code: Option<i32>, reports: Vec<String>, ingests: Vec<IngestSummary> },
+    /// was ingested (CR-234 CRA-01). `cause` is the masked excerpt of the end
+    /// of its output, which names the failing tests; absent when it printed
+    /// nothing.
+    TestsFailed {
+        exit_code: Option<i32>,
+        reports: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<String>,
+        ingests: Vec<IngestSummary>,
+    },
     /// It wrote no report, could not start, or a report did not ingest.
     /// `stderr` is a masked excerpt of the end of the output; `log` holds the
     /// whole bounded output, each stream's head and tail.
@@ -194,6 +207,22 @@ impl ToolOutcome {
             ToolOutcome::Cancelled => "cancelled",
             ToolOutcome::NotApplicable | ToolOutcome::Disabled | ToolOutcome::NotInstalled { .. } => return None,
         })
+    }
+
+    /// Why a tool did not pass, for the record: the masked excerpt a
+    /// *failed* or *tests failed* run carries, or the limit a *timed out*
+    /// run hit; `None` for every other end, and for a run that printed
+    /// nothing. A failure's and a failing suite's excerpt is masked and
+    /// bounded where it is made ([`mask::excerpt`]), so the record holds no
+    /// more than the payload does.
+    fn cause(&self) -> Option<String> {
+        let cause = match self {
+            ToolOutcome::Failed { stderr, .. } => stderr.clone(),
+            ToolOutcome::TestsFailed { cause, .. } => cause.clone().unwrap_or_default(),
+            ToolOutcome::TimedOut { after_secs } => format!("timed out: still running when its {after_secs}s limit passed, and killed"),
+            _ => return None,
+        };
+        Some(cause).filter(|cause| !cause.is_empty())
     }
 
     fn exit_code(&self) -> Option<i32> {
@@ -510,11 +539,11 @@ impl CoverageRunner {
         ingest: &mut impl Ingest,
     ) -> ToolRun {
         let started = Instant::now();
-        let (version, ran, format) = match (entry, detection) {
+        let (version, (ran, took), format) = match (entry, detection) {
             (Entry::Tool(tool), Some(Detection::Installed { binary, version, .. })) => {
                 (version, self.run_installed(tool, &binary), Some(tool.format))
             }
-            (_, Some(detection)) => (None, RunOutcome::NotRun { detection }, None),
+            (_, Some(detection)) => (None, (RunOutcome::NotRun { detection }, None), None),
             (_, None) => {
                 let format = ingest_cfg.format_override().and_then(CoverageFormat::from_flag);
                 (None, self.run_custom(ingest_cfg), format)
@@ -522,13 +551,14 @@ impl CoverageRunner {
         };
         let outcome = settle(&self.root, entry.name(), ran, &mut |report: &Path| ingest(report, format, ingest_cfg));
         trace_run(entry.name(), version.as_deref(), started, &outcome);
-        ToolRun { tool: entry.name(), version, outcome }
+        let duration_ms = took.map(|took| u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
+        ToolRun { tool: entry.name(), version, outcome, duration_ms }
     }
 
     /// Run the configured `refresh_cmd` through `sh -c` in the project root,
     /// under the default timeout, and collect the artifact it wrote or
     /// rewrote. Reached only for a configured command.
-    fn run_custom(&self, ingest_cfg: &EffectiveCoverageIngest) -> RunOutcome {
+    fn run_custom(&self, ingest_cfg: &EffectiveCoverageIngest) -> Timed {
         let command = ingest_cfg.refresh_cmd.as_deref().unwrap_or_default();
         let before: BTreeSet<(PathBuf, SystemTime)> = artifact_candidates(&self.root, ingest_cfg).into_iter().collect();
         let argv = [OsString::from("-c"), OsString::from(command)];
@@ -559,8 +589,10 @@ fn settle(root: &Path, name: &str, ran: RunOutcome, ingest: &mut impl FnMut(&Pat
             (ingests, None) => ToolOutcome::Ran { reports: relative_all(root, &reports), ingests },
             (ingests, Some(e)) => failed(root, &log, Some(0), &format!("{e:#}"), None, ingests),
         },
-        RunOutcome::TestsFailed { exit_code, reports } => match ingest_all(&reports, ingest) {
-            (ingests, None) => ToolOutcome::TestsFailed { exit_code, reports: relative_all(root, &reports), ingests },
+        RunOutcome::TestsFailed { exit_code, reports, cause } => match ingest_all(&reports, ingest) {
+            (ingests, None) => {
+                ToolOutcome::TestsFailed { exit_code, reports: relative_all(root, &reports), cause, ingests }
+            }
             (ingests, Some(e)) => failed(root, &log, exit_code, &format!("{e:#}"), None, ingests),
         },
         RunOutcome::Failed { exit_code, stderr, cause } => {
@@ -694,6 +726,8 @@ fn record(root: &Path, head_sha: Option<&str>, tools: &[ToolRun]) {
                 head_sha: head_sha.map(str::to_string),
                 finished_at,
                 log: t.outcome.log().map(str::to_string),
+                duration_ms: t.duration_ms,
+                cause: t.outcome.cause(),
             },
         );
     }
@@ -796,5 +830,61 @@ fn origin_token(origin: Origin) -> &'static str {
         Origin::Project => "project",
         Origin::Path => "path",
         Origin::Managed => "managed",
+    }
+}
+
+#[cfg(all(test, unix))]
+mod record_tests {
+    use super::*;
+
+    /// A tool's end as `record` is handed it, with `duration_ms` set.
+    fn run(tool: &'static str, outcome: ToolOutcome) -> ToolRun {
+        ToolRun { tool, version: None, outcome, duration_ms: Some(12) }
+    }
+
+    /// S-802: a record holding the worst-case cause for every registry tool
+    /// and the custom entry — each excerpt at its bound, made of the
+    /// characters JSON writes longest — is still read back whole, within
+    /// [`RECORD_CAP`]; a record the cap cut would read as no run at all.
+    #[test]
+    fn a_cause_for_every_tool_stays_within_the_record_cap() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(OUTPUT_DIR)).unwrap();
+        let worst = mask::excerpt(&"\u{1}".repeat(8 * 1024));
+        assert!(worst.len() >= 1000, "the excerpt is at its bound: {} bytes", worst.len());
+        let tools: Vec<ToolRun> = REGISTRY
+            .iter()
+            .map(|t| t.name)
+            .chain([CUSTOM_TOOL])
+            .map(|tool| {
+                run(tool, ToolOutcome::Failed { exit_code: Some(1), stderr: worst.clone(), log: None, ingests: Vec::new() })
+            })
+            .collect();
+        record(root.path(), None, &tools);
+
+        let bytes = fs::metadata(root.path().join(OUTPUT_DIR).join(LAST_RUN_FILE)).unwrap().len();
+        assert!(bytes <= RECORD_CAP, "{bytes} bytes against a cap of {RECORD_CAP}");
+        let read = read_record(root.path());
+        assert_eq!(read.len(), tools.len(), "every tool's last run reads back");
+        assert!(read.values().all(|r| r.cause.as_deref() == Some(worst.as_str()) && r.duration_ms == Some(12)));
+    }
+
+    /// S-802: which ends carry a cause. A tool that printed nothing has none
+    /// to state, rather than empty text.
+    #[test]
+    fn only_a_failed_tests_failed_or_timed_out_end_has_a_cause() {
+        let quiet = ToolOutcome::TestsFailed { exit_code: Some(1), reports: Vec::new(), cause: None, ingests: Vec::new() };
+        let named = ToolOutcome::TestsFailed {
+            exit_code: Some(1),
+            reports: Vec::new(),
+            cause: Some("FAILED marker-test".to_string()),
+            ingests: Vec::new(),
+        };
+        let blank = ToolOutcome::Failed { exit_code: None, stderr: String::new(), log: None, ingests: Vec::new() };
+        let ran = ToolOutcome::Ran { reports: Vec::new(), ingests: Vec::new() };
+        assert_eq!(
+            [quiet, named, blank, ran, ToolOutcome::Cancelled, ToolOutcome::TimedOut { after_secs: 30 }].map(|o| o.cause()),
+            [None, Some("FAILED marker-test".to_string()), None, None, None, Some("timed out: still running when its 30s limit passed, and killed".to_string())],
+        );
     }
 }

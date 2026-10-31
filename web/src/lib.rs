@@ -26,8 +26,8 @@
 //!   a scan (S-673, ADR-80), or one of the enumerated
 //!   [`SECURITY_INSTALL_POST_ROUTES`] that start and cancel a scanner install
 //!   (S-747, FR-SC-24), or one of the enumerated
-//!   [`SECURITY_TRIAGE_POST_ROUTES`] that add and remove a suppression (S-672,
-//!   FR-SC-12), or one of the enumerated [`COVERAGE_RUN_POST_ROUTES`] that start
+//!   [`SECURITY_TRIAGE_POST_ROUTES`] that add, remove and re-confirm a suppression
+//!   (S-672, S-818, FR-SC-12, FR-SC-32), or one of the enumerated [`COVERAGE_RUN_POST_ROUTES`] that start
 //!   and cancel a coverage run (S-738, FR-CV-15), or one of the enumerated
 //!   [`COVERAGE_PREPARE_POST_ROUTES`] that install a missing coverage tool, or
 //!   add a missing coverage dev dependency, before one (S-750, FR-CV-17,
@@ -509,17 +509,21 @@ pub const SECURITY_SCAN_POST_ROUTES: &[&str] = &["/api/v1/security/scan", "/api/
 pub const SECURITY_INSTALL_POST_ROUTES: &[&str] = &["/api/v1/security/install", "/api/v1/security/install/cancel"];
 
 /// The enumerated security-triage `POST` routes (S-672, [FR-SC-12]): add a
-/// suppression (reason required, expiry optional) and remove one, each written
-/// to the committed `.logos/security-ignore.toml` through
-/// [`Engine::security_suppress`] and [`Engine::security_unsuppress`]. Like every
+/// suppression (reason required, expiry and evidence optional), remove one, and
+/// re-confirm the evidence of one (S-818, [FR-SC-32]), each written to the
+/// committed `.logos/security-ignore.toml` through
+/// [`Engine::security_suppress_with_evidence`], [`Engine::security_unsuppress`]
+/// and [`Engine::security_reconfirm`]. Like every
 /// admitted `POST`, each carries the same-origin + per-session intent-token
 /// proof [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page cannot
 /// hide a finding or bring one back. Kept in lock-step with [`method_guard`],
 /// which consults it.
 ///
 /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
+/// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
 /// [NFR-SE-06]: ../../../docs/specs/requirements/NFR-SE-06.md
-pub const SECURITY_TRIAGE_POST_ROUTES: &[&str] = &["/api/v1/security/suppress", "/api/v1/security/unsuppress"];
+pub const SECURITY_TRIAGE_POST_ROUTES: &[&str] =
+    &["/api/v1/security/suppress", "/api/v1/security/unsuppress", "/api/v1/security/reconfirm"];
 
 /// The enumerated coverage-run `POST` routes (S-738, [FR-CV-15], [ADR-87] §5):
 /// start (or join) the member's `coverage-run` job on the core's runner
@@ -927,11 +931,12 @@ fn build_router(state: WebState) -> Router {
         // `SECURITY_INSTALL_POST_ROUTES`, which `method_guard` consults.
         .route("/api/v1/security/install", get(api_v1::security_install_job).post(api_v1::security_install_start))
         .route("/api/v1/security/install/cancel", post(api_v1::security_install_cancel))
-        // Triage (S-672, FR-SC-12): add and remove one suppression in the
+        // Triage (S-672, S-818, FR-SC-12, FR-SC-32): add, remove and re-confirm one suppression in the
         // committed ignore file. Listed in `SECURITY_TRIAGE_POST_ROUTES`, which
         // `method_guard` consults.
         .route("/api/v1/security/suppress", post(api_v1::security_suppress))
         .route("/api/v1/security/unsuppress", post(api_v1::security_unsuppress))
+        .route("/api/v1/security/reconfirm", post(api_v1::security_reconfirm))
         .route("/api/v1/graph", get(api_v1::graph))
         .route("/api/v1/query", get(api_v1::search_query))
         // Read-only Decisions-panel impact read-model (FR-NV-10, FR-DG-02): the

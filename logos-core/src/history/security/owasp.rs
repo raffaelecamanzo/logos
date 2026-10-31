@@ -366,6 +366,24 @@ pub struct CategoryCoverage {
     /// the findings' code scopes ([`classify`] alone knows none).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub production_findings: Option<usize>,
+    /// The production-code part of [`findings`](CoverageState::Covered) whose
+    /// scanner marks it low-confidence, "needs review" ([FR-SC-31]), apart from
+    /// [`production_findings`](Self::production_findings): production, needs
+    /// review and test code partition `findings`' every code scope. `None` as
+    /// `production_findings` is.
+    ///
+    /// [FR-SC-31]: ../../../../docs/specs/requirements/FR-SC-31.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_review_findings: Option<usize>,
+    /// The part of [`findings`](CoverageState::Covered) on a dev-only
+    /// dependency ([FR-SC-30]), apart from
+    /// [`production_findings`](Self::production_findings): production, dev,
+    /// needs review and test code partition `findings`' every code scope. `None`
+    /// as `production_findings` is.
+    ///
+    /// [FR-SC-30]: ../../../../docs/specs/requirements/FR-SC-30.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dev_findings: Option<usize>,
 }
 
 /// The result of [`classify`].
@@ -456,6 +474,8 @@ pub fn classify<S: AsRef<str>>(
                 enabled_scanners,
                 state,
                 production_findings: None,
+                needs_review_findings: None,
+                dev_findings: None,
             }
         })
         .collect();
@@ -468,16 +488,23 @@ pub fn classify<S: AsRef<str>>(
     }
 }
 
-/// Set each covered category's [`production_findings`](CategoryCoverage::production_findings):
-/// the classified findings under it whose entry in `production` is `true`.
-/// `production` is one flag per entry of `classified`, in the same order; a
-/// not-covered category keeps `None`, never a count of zero.
+/// Set each covered category's [`production_findings`](CategoryCoverage::production_findings)
+/// [`needs_review_findings`](CategoryCoverage::needs_review_findings) and
+/// [`dev_findings`](CategoryCoverage::dev_findings): the classified findings
+/// under it whose entry in `production`, `needs_review` or `dev` is `true`. Each
+/// is one flag per entry of `classified`, in the same order, and no finding has
+/// two; a not-covered category keeps
+/// `None`, never a count of zero.
 pub fn count_production(
     categories: &mut [CategoryCoverage],
     classified: &[FindingClassification],
     production: &[bool],
+    needs_review: &[bool],
+    dev: &[bool],
 ) {
     debug_assert_eq!(classified.len(), production.len());
+    debug_assert_eq!(classified.len(), needs_review.len());
+    debug_assert_eq!(classified.len(), dev.len());
     for category in categories
         .iter_mut()
         .filter(|c| matches!(c.state, CoverageState::Covered { .. }))
@@ -489,13 +516,27 @@ pub fn count_production(
                 .filter(|(class, &production)| production && class.categories.contains(&category.id))
                 .count(),
         );
+        category.needs_review_findings = Some(
+            classified
+                .iter()
+                .zip(needs_review)
+                .filter(|(class, &review)| review && class.categories.contains(&category.id))
+                .count(),
+        );
+        category.dev_findings = Some(
+            classified
+                .iter()
+                .zip(dev)
+                .filter(|(class, &dev)| dev && class.categories.contains(&category.id))
+                .count(),
+        );
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::history::security::{FindingBinding, Severity};
+    use crate::history::security::{FindingBinding, ScannerConfidence, Severity};
 
     fn finding(scanner: &str, fingerprint: &str, cwes: &[&str]) -> SecurityFinding {
         SecurityFinding {
@@ -505,6 +546,7 @@ mod tests {
             fingerprint: fingerprint.into(),
             rule_id: "rule".into(),
             severity: Severity::High,
+            confidence: ScannerConfidence::Unstated,
             cwes: cwes.iter().map(|s| s.to_string()).collect(),
             message: "m".into(),
             redacted: false,
@@ -519,6 +561,7 @@ mod tests {
             legacy_fingerprints: Vec::new(),
             anchor: None,
             freshness: crate::history::FRESHNESS_NA,
+            reporters: Vec::new(),
         }
     }
 
@@ -672,7 +715,13 @@ mod tests {
         ];
         let mut with = classify(&f, OwaspEdition::V2025, &["semgrep"]);
         assert!(with.categories.iter().all(|c| c.production_findings.is_none()), "classify knows no scope");
-        count_production(&mut with.categories, &with.findings, &[true, false, true, true]);
+        count_production(
+            &mut with.categories,
+            &with.findings,
+            &[true, false, true, false],
+            &[false, false, false, true],
+            &[false, true, false, false],
+        );
         // `a` counts once under each of its two categories; `b` is not production.
         assert_eq!(coverage(&with, "A05:2025").production_findings, Some(1));
         assert_eq!(coverage(&with, "A05:2025").state, CoverageState::Covered { findings: 2 });
@@ -680,6 +729,13 @@ mod tests {
         assert_eq!(coverage(&with, "A07:2025").state, CoverageState::Covered { findings: 2 });
         // Covered with no production finding is a real zero; not covered states none.
         assert_eq!(coverage(&with, "A09:2025").production_findings, Some(0));
+        // The needs-review flag is `d`'s alone, which falls under no category.
+        assert_eq!(coverage(&with, "A05:2025").needs_review_findings, Some(0));
+        // The dev flag is `b`'s alone (under CWE-89 only): a fourth figure, apart from production.
+        assert_eq!(coverage(&with, "A05:2025").dev_findings, Some(1));
+        assert_eq!(coverage(&with, "A07:2025").dev_findings, Some(0));
+        assert_eq!(coverage(&with, "A03:2025").dev_findings, None);
+        assert_eq!(coverage(&with, "A03:2025").needs_review_findings, None);
         assert_eq!(coverage(&with, "A03:2025").state, CoverageState::NotCovered);
         assert_eq!(coverage(&with, "A03:2025").production_findings, None);
         let json = serde_json::to_value(coverage(&with, "A03:2025")).unwrap();

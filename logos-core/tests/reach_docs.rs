@@ -65,8 +65,9 @@ fn display_name(descriptor: &str) -> &'static str {
         "rust" => "Rust",
         "java" => "Java",
         "go" => "Go",
-        "typescript" => "TypeScript (incl. JavaScript)",
-        "tsx" => "TSX (incl. JSX)",
+        "typescript" => "TypeScript",
+        "tsx" => "TSX",
+        "javascript" => "JavaScript (incl. JSX)",
         "python" => "Python",
         "php" => "PHP",
         "c-sharp" => "C#",
@@ -217,19 +218,22 @@ fn the_readme_names_each_languages_level() {
     }
 }
 
-/// The check has teeth: a table whose Ruby row claims more, or that omits a
+/// The check has teeth: a table whose C row claims more, or that omits a
 /// language, is not the generated one.
 #[test]
 fn a_stale_table_is_detected() {
     let rows = declared();
     let generated = render_table(&rows);
 
-    let ruby_raised = generated.replace("| Ruby | `same-file` | none |", "| Ruby | `partial` | `calls` |");
+    let c_raised = generated.replace(
+        "| C | `partial` | `calls`, `imports` |",
+        "| C | `partial` | `calls`, `imports`, `type_relations` |",
+    );
     assert_ne!(
-        ruby_raised, generated,
+        c_raised, generated,
         "the fixture edit must change the table, or this test proves nothing"
     );
-    let doc = format!("{BEGIN}\n{ruby_raised}{END}\n");
+    let doc = format!("{BEGIN}\n{c_raised}{END}\n");
     assert_ne!(committed_block(&doc), generated.trim_matches('\n'));
 
     let dropped: String = generated

@@ -1,0 +1,8 @@
+// --offline may precede the subcommand, or arrive in a later .arg() of the chain.
+fn reordered() {
+    Command::new("cargo").args(["--offline", "metadata", "--format-version", "1"]).output();
+    Command::new("cargo").arg("--offline").arg("metadata").output();
+    Command::new("cargo").args(["metadata", "--format-version", "1"]).arg("--offline").output();
+    Command::new("cargo").args(["metadata"]).args(["--offline"]).output();
+    Command::new("cargo").args(["--offline", "metadata", "--filter-platform", "x"]).output();
+}

@@ -1,0 +1,16 @@
+// A bound split over several lines, behind a coverage exemption and a
+// parenthesised comparison: the shape a line-by-line grep cannot see.
+#[test]
+fn a_stalled_writer_never_blocks_the_caller() {
+    let start = Instant::now();
+    for _ in 0..10_000 {
+        record();
+    }
+    assert!(
+        cfg!(coverage)
+            || (start.elapsed()
+                <= Duration::from_secs(2)),
+        "10k records against a stalled writer must return ~instantly, took {:?}",
+        start.elapsed()
+    );
+}

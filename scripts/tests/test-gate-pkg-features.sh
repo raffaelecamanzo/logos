@@ -42,7 +42,7 @@ extract() { # function-name -> its definition, from `name() {` to the first `^}`
 }
 FUNCS="$(for f in flavor_features pkg_features pkg_field build_pkg_table; do extract "$f"; done)"
 LEGFUNCS="$FUNCS
-$(for f in reset_units add_unit write_evidence run_test_unit gate_tests; do extract "$f"; done)"
+$(for f in reset_units add_unit write_evidence parse_test_log run_test_unit gate_tests; do extract "$f"; done)"
 for f in flavor_features pkg_features pkg_field build_pkg_table; do
     if ! printf '%s' "$FUNCS" | grep -q "^$f()"; then
         echo "FAIL  could not extract $f from $GATE"

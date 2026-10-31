@@ -3940,7 +3940,9 @@ mod tests {
         assert_eq!(uncapped, 0, "no back-fill: old snapshots have no uncapped list");
 
         // Read back the way the store reads an old snapshot: "not recorded",
-        // never a zero.
+        // never a zero — through today's reader, so on the store an upgrade
+        // leaves (S-571's migration 44 adds a column it reads).
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let mut old = crate::models::quality::WorstOffenders {
             recorded: true,
             ..Default::default()
@@ -4237,7 +4239,10 @@ mod tests {
         }
 
         // Read back through the store's own read: the old rows say "not
-        // recorded", never a storage id reread as an identity.
+        // recorded", never a storage id reread as an identity — today's reader,
+        // so on the store an upgrade leaves (S-571's migration 44 adds a column
+        // it reads).
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
         let mut old = crate::models::quality::WhereToStart::recorded();
         super::super::read_snapshot_insight(&conn, 7, &mut old).unwrap();
         assert_eq!(old.units.len(), 2);
@@ -4282,6 +4287,255 @@ mod tests {
             .unwrap();
         assert_eq!(recorded, 1, "migration 40 is recorded once and never re-applied");
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 40");
+    }
+
+    /// S-593 / CR-191 / FR-EX-33: a populated v40 store upgrades to v41
+    /// forward only. The new, empty `local_bindings` table arrives with its
+    /// checks and its file cascade, every `files.content_hash` is cleared so the
+    /// next scan re-extracts, and every graph row — nodes, edges, shingles, the
+    /// ledger — is byte-for-byte unchanged.
+    #[test]
+    fn migration_41_adds_the_local_binding_table() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..40]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'svc/svc.go', 'go', 'h-go'), (2, 'app/run.py', 'python', 'h-py');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local n'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES (10, 1, 8, 'n', 1), (11, 2, 8, 'm', 2);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO shingles (node_id, hash) VALUES (10, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved)
+                 VALUES (1, 'local n', 'f', 1, 2, 3, 0);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..41]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 41, "40 → 41, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "every graph row is unchanged");
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let hashes: Vec<Option<String>> = conn
+            .prepare("SELECT content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(hashes, vec![None, None], "every hash is cleared so the next scan re-extracts");
+        let rows: i64 = conn.query_row("SELECT count(*) FROM local_bindings", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "no binding is back-filled");
+
+        // The checks: a name, a known kind, 1-based lines, 0-based columns, a
+        // scope that never ends before it starts, a boolean hoisting flag, a
+        // recorded file.
+        let binding = |file: i64, name: &str, kind: i64, line: i64, col: i64, span: [i64; 4], hoisted: i64| {
+            conn.execute(
+                "INSERT INTO local_bindings (file_id, name, kind, line, col, scope_start_line, scope_start_col, \
+                                             scope_end_line, scope_end_col, hoisted) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                rusqlite::params![file, name, kind, line, col, span[0], span[1], span[2], span[3], hoisted],
+            )
+        };
+        assert!(binding(1, "s", 2, 6, 8, [6, 1, 8, 2], 0).is_ok());
+        assert!(binding(2, "f", 3, 2, 18, [1, 0, 3, 8], 1).is_ok());
+        assert!(binding(1, "", 2, 6, 8, [6, 1, 8, 2], 0).is_err(), "a name is never empty");
+        assert!(binding(1, "s", 0, 6, 8, [6, 1, 8, 2], 0).is_err(), "an unknown kind");
+        assert!(binding(1, "s", 4, 6, 8, [6, 1, 8, 2], 0).is_err(), "an unknown kind");
+        assert!(binding(1, "s", 2, 0, 8, [6, 1, 8, 2], 0).is_err(), "lines are 1-based");
+        assert!(binding(1, "s", 2, 6, -1, [6, 1, 8, 2], 0).is_err(), "columns are 0-based");
+        assert!(binding(1, "s", 2, 6, 8, [0, 1, 8, 2], 0).is_err(), "a scope's lines are 1-based");
+        assert!(binding(1, "s", 2, 6, 8, [6, -1, 8, 2], 0).is_err(), "a scope's columns are 0-based");
+        assert!(binding(1, "s", 2, 6, 8, [6, 1, 5, 2], 0).is_err(), "a scope never ends before it starts");
+        assert!(binding(1, "s", 2, 6, 8, [6, 1, 8, -1], 0).is_err(), "a scope's columns are 0-based");
+        assert!(binding(1, "s", 2, 6, 8, [6, 1, 8, 2], 2).is_err(), "hoisted is 0 or 1");
+        assert!(binding(9, "s", 2, 6, 8, [6, 1, 8, 2], 0).is_err(), "a binding belongs to a recorded file");
+        conn.execute("DELETE FROM files WHERE id = 2", []).unwrap();
+        let left: Vec<String> = conn
+            .prepare("SELECT name FROM local_bindings ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(left, ["s"], "removing a file cascades its bindings away");
+
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 41", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 41 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 41");
+    }
+
+    /// S-602 / CR-199: a populated v41 store upgrades to v42 forward only.
+    /// `nodes` gains `type_arity` in place — `NULL` on every existing row until
+    /// re-extraction — while every pre-existing column, and all of `edges`,
+    /// `shingles` and the ledger, is byte-for-byte unchanged, and every
+    /// `files.content_hash` is cleared.
+    #[test]
+    fn migration_42_adds_the_type_arity_column() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..41]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/A/Result.cs', 'c-sharp', 'h-r');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local r'), (2, 'local m');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, has_body, param_min, param_max) VALUES
+                 (10, 1, 2, 'Result', 1, NULL, NULL, NULL), (11, 2, 8, 'm', 1, 1, 0, 0);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 1);
+             INSERT INTO shingles (node_id, hash) VALUES (11, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved, arg_count) VALUES
+                 (1, 'local r', 'Base', 2, 6, 3, 0, 1);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..42]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 42, "41 → 42, exactly one step");
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one nodes column added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v42 nodes column is byte-for-byte unchanged");
+            assert_eq!(&new[old.len()..], ["NULL"], "not recorded on any existing row");
+        }
+        let last: String = conn
+            .query_row("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, "type_arity", "the appended column is the S-602 add");
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let hash: Option<String> = conn.query_row("SELECT content_hash FROM files", [], |r| r.get(0)).unwrap();
+        assert_eq!(hash, None, "every hash is cleared so the next scan re-extracts");
+
+        // The CHECK: an arity is a count.
+        let set = |sql: &str| conn.execute(sql, []);
+        assert!(set("UPDATE nodes SET type_arity = 0 WHERE id = 10").is_ok());
+        assert!(set("UPDATE nodes SET type_arity = 2 WHERE id = 10").is_ok());
+        assert!(set("UPDATE nodes SET type_arity = -1 WHERE id = 10").is_err(), "never negative");
+
+        // Forward-only: re-running the full ledger never re-applies migration 42.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 42", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 42 is recorded once and never re-applied");
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 42");
+    }
+
+    /// Migration 43 (S-712, CR-226) changes no schema: it clears every
+    /// recorded hash, so the next scan re-extracts each file and re-binds every
+    /// trait fan-out with its dispatch marker. The graph, the ledger and every
+    /// other file column cross unchanged.
+    #[test]
+    fn migration_43_clears_every_hash_so_fan_outs_rebind_marked() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..42]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'a/src/lib.rs', 'rust', 'h-a'), (2, 'b/src/lib.rs', 'rust', 'h-b');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local caller'), (2, 'local imp');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES
+                 (10, 1, 7, 'caller', 1), (11, 2, 8, 'm', 2);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved) VALUES
+                 (1, 'local caller', 'Tr::m', 2, 2, 3, 1);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+        let files = |conn: &Connection| {
+            let mut stmt = conn.prepare("SELECT id, path, language, content_hash FROM files ORDER BY id").unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, Option<String>>(3)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(files(&conn).iter().all(|f| f.3.is_some()), "precondition: every hash recorded");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..43]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 43, "42 → 43, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "no graph row is touched");
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let after = files(&conn);
+        assert_eq!(
+            after.iter().map(|f| (f.0, f.1.as_str(), f.2.as_str())).collect::<Vec<_>>(),
+            [(1, "a/src/lib.rs", "rust"), (2, "b/src/lib.rs", "rust")],
+            "every file row is kept"
+        );
+        assert!(after.iter().all(|f| f.3.is_none()), "every hash is cleared so the next scan re-binds: {after:?}");
+
+        // Forward-only: re-running the full ledger never re-applies migration 43.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 43", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 43 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 43");
+    }
+
+    /// Migration 44 (S-571, FR-IX-14) adds `files.parse_damaged`: `NULL` ("not
+    /// recorded") on every existing row, `0`/`1` admitted and nothing else, every
+    /// hash cleared so the next scan records it, and no graph row touched. And
+    /// each snapshot entry table gains its `partial_parse` flag, `NULL` on the
+    /// rows already written (FR-QM-15: never back-filled), `0`/`1` admitted.
+    #[test]
+    fn migration_44_adds_the_parse_damage_columns() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..43]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/a.cpp', 'cpp', 'h-a'), (2, 'src/lib.rs', 'rust', 'h-b');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local f');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES (10, 1, 7, 'f', 1);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..44]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 44, "43 → 44, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "no graph row is touched");
+        let files = conn
+            .prepare("SELECT id, parse_damaged, content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<i64>>(1)?, r.get::<_, Option<String>>(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(files, [(1, None, None), (2, None, None)], "not recorded, and every hash cleared");
+        conn.execute("UPDATE files SET parse_damaged = 1 WHERE id = 1", []).unwrap();
+        conn.execute("UPDATE files SET parse_damaged = 0 WHERE id = 2", []).unwrap();
+        assert!(
+            conn.execute("UPDATE files SET parse_damaged = 2 WHERE id = 1", []).is_err(),
+            "the column admits 0 and 1 only"
+        );
+        for table in ["metric_snapshot_offenders", "metric_snapshot_offenders_uncapped", "metric_snapshot_fix_units"] {
+            let (column, not_null): (String, bool) = conn
+                .query_row(
+                    &format!("SELECT name, \"notnull\" FROM pragma_table_info('{table}') ORDER BY cid DESC LIMIT 1"),
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!((column.as_str(), not_null), ("partial_parse", false), "{table}");
+            let check: String = conn
+                .query_row("SELECT sql FROM sqlite_master WHERE name = ?1", [table], |r| r.get(0))
+                .unwrap();
+            assert!(check.contains("partial_parse INTEGER CHECK (partial_parse IN (0,1))"), "{table}: {check}");
+        }
+
+        // Forward-only: re-running the full ledger never re-applies migration 44.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 44", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 44 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 44");
     }
 
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —

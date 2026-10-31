@@ -3,7 +3,7 @@
 //!
 //! Runs **after** resolution on every index/sync and promotes matches of the
 //! ratified v1 framework set ([FR-FW-03], DL-02) — Rust Axum/Actix-web,
-//! Python FastAPI/Django, TypeScript/JS Express/Next.js, Go net/http + Gin,
+//! Python FastAPI/Django, TypeScript/JS Express/Next.js/NestJS, Go net/http + Gin,
 //! Java Spring (S-015) — to first-class graph nodes:
 //!
 //! - a route registration becomes a [`NodeKind::Route`] node named
@@ -33,6 +33,9 @@
 //! [`RouteRefusal::PathNotComposed`] rather than a partial path when the
 //! prefix is not a resolvable literal) is written once, so a second prefixing
 //! dialect inherits all of it by naming the same captures and adding no code.
+//! A framework that nests the other way — a functional router's `nest { }` and
+//! Ktor's `route { }` blocks, whose prefixes all apply — declares nesting scopes
+//! instead, and [`nest`] chains every one around a registration (S-561).
 //!
 //! # A promoted path has to be a path, once ([FR-FW-01], CR-110)
 //!
@@ -51,6 +54,21 @@
 //! so the surviving ledger doubles as a free framework fingerprint. A plain
 //! library has no such refs, so the pass parses **zero** files and can never
 //! emit a spurious route.
+//!
+//! The descriptor's `[framework_candidacy]` table refines the rule (S-541,
+//! [FR-FW-03]). A language whose detectors are also ordinary identifiers
+//! (`detectors_import_only`, JavaScript's `next`) matches them on `Imports`
+//! refs alone, so a `next()` callback names no framework. And a file binding a
+//! parameter the table names (`receiver_parameters`, JavaScript's `app` and
+//! `router`) is a candidate with no detector ref at all: an Express router
+//! module registers on the app it receives and imports nothing from `express`.
+//!
+//! A third route needs no ledger row of the file's own (S-554): a `global using`
+//! that names a detector admits every file of its language under the declaring
+//! file's directory — the reach the binder gives it — see `admission`. And a route
+//! whose prefix is a *value* rather than a declaration (a minimal API's
+//! `MapGroup` receiver) or carries a bracketed template token (`[controller]`) is
+//! composed by `group`, not by `compose_prefixes`.
 //!
 //! # Never fabricate ([NFR-RA-05])
 //!
@@ -100,7 +118,7 @@ use tree_sitter::{Node, Parser, QueryCursor, StreamingIterator};
 
 use crate::config::{BindingPolicy, Resolution};
 use crate::extract::symbol::{build_symbol, descriptor_for, path_segments, SymbolContext};
-use crate::graph_store::{NodeRow, UnresolvedRefRow};
+use crate::graph_store::{DetectorPrefix, NodeRow, ReceiverParameters, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId, NodeKind, RefForm};
 use crate::models::pipeline::FrameworkStats;
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
@@ -276,6 +294,12 @@ struct PrefixScope {
     /// Byte ranges of `@fw.route.prefix.opaque` captures — nodes sitting in the
     /// prefix position that are not themselves readable literals.
     opaque: Vec<(usize, usize)>,
+    /// `true` for a `@fw.route.prefix.nested` match: the prefix appends to the
+    /// one around it rather than replacing it ([`nest_scopes`], S-549).
+    nested: bool,
+    /// `true` for a `@fw.route.prefix.absorbs` match: a path of exactly `/`
+    /// (or none) under this prefix is the prefix itself ([`join_under`]).
+    absorbs: bool,
 }
 
 /// A declaration's prefix after every match describing it has been combined —
@@ -295,6 +319,18 @@ struct MergedScope {
     /// The constants each folded entry of `paths` was built from, keyed by the
     /// folded text. A written prefix has no entry.
     folded_from: HashMap<String, Vec<FoldedConstant>>,
+    /// `true` when any match over this range was `@fw.route.prefix.nested`.
+    nested: bool,
+    /// `true` when any match over this range was `@fw.route.prefix.absorbs`.
+    absorbs: bool,
+}
+
+impl MergedScope {
+    /// `path` joined onto `prefix`, one of this scope's paths, under the
+    /// scope's own trailing-slash rule ([`join_under`]).
+    fn join(&self, prefix: &str, path: &str) -> String {
+        join_under(prefix, path, self.absorbs)
+    }
 }
 
 /// One matched route registration in one file (pre-binding).
@@ -395,6 +431,24 @@ struct FileMatches {
     /// opt-in that makes [`fold_constants`] run at all (a Kotlin, Rust or
     /// TypeScript query names none, so their scans are untouched by S-469).
     folds: bool,
+    /// Each method's receiver binding and range (`@fw.receiver.*`, S-526): what
+    /// tells a handler written on the registering method's own receiver from
+    /// one written on a value.
+    receivers: Vec<handler::ReceiverScope>,
+    /// `true` once the dialect's query captured a handler written as a method
+    /// value (`@fw.route.handler.value`, S-526) — the opt-in that makes
+    /// [`HandlerBinder::link`](handler::HandlerBinder::link) count an unproven
+    /// receiver at all; a dialect that names none is untouched.
+    method_value_handlers: bool,
+    /// The route-group, receiver and absolute-path facts (`@fw.group.*`,
+    /// `@fw.group.route.receiver`, `@fw.route.absolute`; S-554) — see [`group`].
+    groups: group::Facts,
+    /// Nesting scopes, rooted paths and typed handler heads (S-561): see
+    /// [`nest`].
+    nest: nest::Facts,
+    /// `controller#action` handlers and the module blocks around them (S-567):
+    /// see [`action`].
+    actions: action::Facts,
 }
 
 /// Run the framework-promotion pass. See the module docs for the shape.
@@ -416,22 +470,25 @@ pub fn run(
     // Incremental gate (S-024-HF, mirroring the CR-015 resolve delta): on a
     // `sync`/`reconcile` (`delta` is `Some`), skip the whole-graph snapshot when
     // the post-resolve graph has **no framework footprint** — no promoted
-    // route/component node *and* no ledger ref naming a detector. This pass is a
-    // pure, idempotent function of the candidate files (those whose ledger names a
-    // detector) and the bound graph (see "Reconcile, don't accumulate" above); a
+    // route/component node, no ledger ref naming a detector, *and* no binding of
+    // a declared receiver parameter. This pass is a pure, idempotent function of
+    // the candidate files (those whose ledger names a detector, or that bind a
+    // receiver parameter their language declares, S-541) and the bound graph
+    // (see "Reconcile, don't accumulate" above); a
     // footprint-free graph has no candidate anywhere and nothing promoted, so a
     // from-scratch index would promote nothing either — the reconcile is provably
     // a no-op and is skipped, the framework-free fast path the [NFR-PE-03]
     // single-file-sync budget needs. A full `index` (`delta` is `None`) always
-    // runs the whole-graph pass below. The footprint probe is one cheap EXISTS
-    // read, not the ~O(graph) `all_nodes`/`all_edges`/`unresolved_refs`
+    // runs the whole-graph pass below. The footprint probe is at most three cheap
+    // EXISTS reads, not the ~O(graph) `all_nodes`/`all_edges`/`unresolved_refs`
     // materialisation the full pass pays.
     //
     // [NFR-PE-03]: ../../../docs/specs/requirements/NFR-PE-03.md
+    let (prefixes, receivers) = footprint_keys(registry);
     if delta.is_some() {
-        let prefixes = detector_prefixes(registry);
-        let has_footprint =
-            runtime.submit_read(move |store| store.has_framework_footprint(&prefixes))?;
+        let receivers = receivers.clone();
+        let has_footprint = runtime
+            .submit_read(move |store| store.has_framework_footprint(&prefixes, &receivers))?;
         if !has_footprint {
             return Ok((
                 FrameworkStats {
@@ -445,17 +502,22 @@ pub fn run(
 
     // Snapshot (one reader-pool read): the same consistent basis the
     // resolution pass binds against.
-    let (files, nodes, edges, refs, namespaces, associated, uninherited) = runtime.submit_read(|store| {
-        Ok((
-            store.indexed_files()?,
-            store.all_nodes()?,
-            store.all_edges()?,
-            store.unresolved_refs()?,
-            store.file_namespaces()?,
-            super::associated_items(store)?,
-            store.uninherited_members()?,
-        ))
-    })?;
+    let receiver_names = receivers.names;
+    let (files, nodes, edges, refs, namespaces, associated, uninherited, self_types, receiver_bindings, arities) =
+        runtime.submit_read(move |store| {
+            Ok((
+                store.indexed_files()?,
+                store.all_nodes()?,
+                store.all_edges()?,
+                store.unresolved_refs()?,
+                store.file_namespaces()?,
+                super::associated_items(store)?,
+                store.uninherited_members()?,
+                store.node_self_types()?,
+                store.files_binding_parameters(&receiver_names)?,
+                store.node_arities()?,
+            ))
+        })?;
     let (impl_blocks, item_facts) = associated;
     let signatures = super::signatures_of(&item_facts);
 
@@ -469,27 +531,35 @@ pub fn run(
     // own language's descriptor declares? Declarative since S-015 — each
     // plugin.toml lists its `framework_detectors` (canonical `::`-prefix form:
     // `axum`, `fastapi`, `org::springframework`, …) and the pass reads them
-    // here instead of a hardcoded crate list.
-    let detectors_by_file: HashMap<i64, &[String]> = files
+    // here instead of a hardcoded crate list. A file binding a receiver
+    // parameter its language names is a candidate too (S-541).
+    let semantics_by_file: HashMap<i64, &crate::plugin::Semantics> = files
         .iter()
         .filter_map(|f| {
             let ext = Path::new(&f.path).extension()?.to_str()?;
-            let plugin = registry.for_extension(ext)?;
-            let detectors = plugin.semantics().framework_detectors.as_slice();
-            (!detectors.is_empty()).then_some((f.id, detectors))
+            let semantics = registry.for_extension(ext)?.semantics();
+            (!semantics.framework_detectors.is_empty()
+                || !semantics.framework_receiver_parameters.is_empty())
+            .then_some((f.id, semantics))
         })
         .collect();
-    let candidate_ids: HashSet<i64> = refs
+    let mut candidate_ids: HashSet<i64> = refs
         .iter()
         .filter_map(|r| {
             let file_id = r.file_id?;
-            let detectors = detectors_by_file.get(&file_id)?;
-            detectors
-                .iter()
-                .any(|d| matches_detector(&r.target, d))
-                .then_some(file_id)
+            names_a_detector(semantics_by_file.get(&file_id)?, r).then_some(file_id)
         })
+        .chain(receiver_bindings.iter().filter_map(|(file_id, name)| {
+            semantics_by_file
+                .get(file_id)?
+                .framework_receiver_parameters
+                .contains(name)
+                .then_some(*file_id)
+        }))
         .collect();
+    // A file under a `global using` that names a detector relies on it with no
+    // reference of its own (S-554).
+    candidate_ids.extend(admission::governed_by_global_usings(&files, &semantics_by_file, &refs));
 
     // The fast path every plain library takes: nothing to promote, nothing
     // promoted before — the pass costs one in-memory scan and exits.
@@ -521,11 +591,17 @@ pub fn run(
         .with_import_root_overrides(&resolution.import_roots);
     // A required signature binds nothing (S-606), nor does an interface member
     // an implementing type does not inherit (S-609). A handler written `T::m`
-    // binds through the one associated-item lookup, as a call does (S-607).
+    // binds through the one associated-item lookup, as a call does (S-607). A
+    // handler written on the registering method's own receiver binds through
+    // the self type the method records, as its call does (Go, S-526). A
+    // `controller#action` handler is an instance method, which the arity facts
+    // tell from a class method (S-567).
     let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
     let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone())
         .with_associated_items(&bind_nodes, &impl_blocks, &item_facts)
-        .with_uninherited(uninherited);
+        .with_uninherited(uninherited)
+        .with_self_types(self_types)
+        .with_arities(&arities);
     let member = MemberConstants {
         root,
         registry,
@@ -554,7 +630,8 @@ pub fn run(
         .sum();
 
     // Its file-local fallback reads the same signature-free graph (S-606).
-    let desired = desired_set(ctx, &scanned, &bind_nodes, &bind_edges, &files, &index, policy);
+    let (desired, handlers_receiver_unproven) =
+        desired_set(ctx, &scanned, &bind_nodes, &bind_edges, &files, &refs, &index, policy);
 
     let routes = desired
         .values()
@@ -585,6 +662,7 @@ pub fn run(
             routes,
             components,
             routes_not_composed,
+            handlers_receiver_unproven,
             duration_ms: elapsed_ms(started),
         },
         newly_promoted,
@@ -595,19 +673,58 @@ fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-/// The deduplicated union of every loaded plugin's `framework_detectors` — the
-/// canonical `::`-joined detector prefixes the incremental gate
-/// ([`crate::graph_store::GraphStore::has_framework_footprint`]) tests the ledger
-/// against. Empty when no loaded grammar declares a framework (a plain repo), in
-/// which case the gate falls back to the promoted-node check alone.
-fn detector_prefixes(registry: &LanguageRegistry) -> Vec<String> {
-    let mut prefixes: Vec<String> = registry
-        .iter()
-        .flat_map(|plugin| plugin.semantics().framework_detectors.iter().cloned())
+/// What the incremental gate
+/// ([`crate::graph_store::GraphStore::has_framework_footprint`]) probes for,
+/// from every loaded plugin: the deduplicated union of their
+/// `framework_detectors` — the canonical `::`-joined prefixes it tests the
+/// ledger against — and of their receiver parameters, with the
+/// extensions of the languages declaring any. Both empty for a registry
+/// declaring no framework, in which case the gate falls back to the
+/// promoted-node check alone.
+///
+/// A prefix is import-only when every plugin declaring it says so (S-541): one
+/// language matching it on any ref kind keeps the probe's clause as wide as
+/// that language's candidacy, so the gate never skips a pass a candidate needs.
+fn footprint_keys(registry: &LanguageRegistry) -> (Vec<DetectorPrefix>, ReceiverParameters) {
+    let mut import_only: std::collections::BTreeMap<&str, bool> = std::collections::BTreeMap::new();
+    let mut receivers = ReceiverParameters::default();
+    for plugin in registry.iter() {
+        let semantics = plugin.semantics();
+        for prefix in &semantics.framework_detectors {
+            let only = import_only.entry(prefix).or_insert(true);
+            *only &= semantics.framework_detectors_import_only;
+        }
+        if !semantics.framework_receiver_parameters.is_empty() {
+            receivers.names.extend(semantics.framework_receiver_parameters.iter().cloned());
+            receivers.extensions.extend(plugin.extensions().iter().cloned());
+        }
+    }
+    for list in [&mut receivers.names, &mut receivers.extensions] {
+        list.sort();
+        list.dedup();
+    }
+    let detectors = import_only
+        .into_iter()
+        .map(|(prefix, import_only)| DetectorPrefix {
+            prefix: prefix.to_string(),
+            import_only,
+        })
         .collect();
-    prefixes.sort();
-    prefixes.dedup();
-    prefixes
+    (detectors, receivers)
+}
+
+/// `true` when a file's language makes it a framework candidate through one of
+/// its ledger rows ([FR-FW-04]): a row naming one of `semantics`'
+/// `framework_detectors`, and an `Imports` row where the language matches its
+/// detectors on imports alone (S-541).
+///
+/// [FR-FW-04]: ../../../docs/specs/requirements/FR-FW-04.md
+fn names_a_detector(semantics: &crate::plugin::Semantics, r: &UnresolvedRefRow) -> bool {
+    (!semantics.framework_detectors_import_only || r.kind == EdgeKind::Imports)
+        && semantics
+            .framework_detectors
+            .iter()
+            .any(|d| matches_detector(&r.target, d))
 }
 
 // ── Scanning (pure tree-sitter, per file) ────────────────────────────────────
@@ -862,11 +979,17 @@ fn scan_source(
     // alias semantics, FR-FW-05); the two are separate patterns, so the
     // ranking waits until every match for the file is in.
     drop_outranked_paths(&mut out.routes);
+    // A minimal API's prefix is its receiver's group, not a declaration the
+    // route sits in (S-554): resolved first, and those routes are then final.
+    group::compose(&mut out);
     // Join each surviving path onto its declaring type's prefix (FR-FW-05).
     // After precedence, so a suppressed positional path is never composed and
     // then dropped; before dedup, so two paths that only differ before
     // composition collapse correctly once they carry the same prefix.
     compose_prefixes(&mut out);
+    // `[action]` is the action's name, known only per route and only once the
+    // prefix is joined; a token left over is refused (S-554).
+    group::settle_tokens(&mut out);
     // A promoted route's path has to be a path (CR-110). After composition,
     // because composition is what turns a relative method path into a fuller one:
     // Spring's `@GetMapping("users")` under `@RequestMapping("/api")` is a route,
@@ -902,7 +1025,8 @@ fn collect_matches(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &st
     // overlapping query patterns capturing it twice.
     let mut seen: HashSet<usize> = HashSet::new();
     while let Some(m) = matches.next() {
-        if generic_match(m.captures, capture_names, src, methods, &mut out) {
+        let suffix = crate::plugin::queries::pattern_setting(query, m.pattern_index, action::SUFFIX_SETTING);
+        if generic_match(m.captures, capture_names, src, methods, suffix, &mut out) {
             continue; // consumed by the declarative contract
         }
         for cap in m.captures {
@@ -932,6 +1056,17 @@ fn collect_matches(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &st
                     .iter()
                     .any(|&(start, end)| start <= node.start_byte() && node.end_byte() <= end)
         });
+    // A handler written on a typed property reads the property's declared type
+    // (S-561), and one written `controller#action` the controller's (S-567).
+    let FileMatches { routes, pathless, opaque_paths, nest, actions, .. } = &mut out;
+    let handled = routes
+        .iter_mut()
+        .chain(pathless.iter_mut())
+        .chain(opaque_paths.iter_mut().map(|(route, _)| route));
+    handled.for_each(|route| {
+        nest.type_handler(route);
+        actions.name_handler(route);
+    });
     Some(out)
 }
 
@@ -950,10 +1085,12 @@ fn collect_matches(parser: &mut Parser, plugin: &dyn LanguagePlugin, source: &st
 ///   does not fold stays opaque and is refused by [`compose_prefixes`] exactly
 ///   as before.
 ///
-/// Runs only for a dialect that captured `@fw.const.*` facts. Without them the
-/// scan is exactly what it was before S-469: every opaque prefix stays opaque,
-/// and there are no opaque method paths to judge, because only a folding
-/// dialect's query captures them.
+/// Runs the folding only for a dialect that captured `@fw.const.*` facts.
+/// Without them every opaque prefix stays opaque and every opaque method path is
+/// refused, but one at exactly a captured literal's range is still that literal
+/// and is skipped (S-533: NestJS captures a method path through the
+/// `(expression)` supertype without folding, and the supertype matches the
+/// written strings as well).
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 /// [CR-151]: ../../../docs/requests/CR-151-provider-routes-composed-from-string-constants.md
@@ -963,12 +1100,36 @@ fn fold_constants(
     rel: &str,
     member: Option<&MemberConstants<'_>>,
 ) {
-    let opaque_paths = std::mem::take(&mut out.opaque_paths);
+    // A nested registration outside every nesting scope is no registration, so
+    // its unreadable path is not a refused one either (S-561).
+    let scopes = out.nest.has_nested().then(|| merge_scopes(&out.prefixes));
+    let in_a_router = |at: usize| match &scopes {
+        Some(scopes) => !out.nest.is_nested(at) || out.nest.chain(scopes, at) != nest::Chain::Outside,
+        None => true,
+    };
+    // One at exactly a written literal's range is that literal, folding dialect
+    // or not.
+    let opaque_paths: Vec<_> = std::mem::take(&mut out.opaque_paths)
+        .into_iter()
+        .filter(|(route, span)| !out.literal_path_spans.contains(span) && in_a_router(route.at))
+        .collect();
+    // Counted once per refused path *element*: a registration listing several
+    // verbs is one match per verb over the same path (Symfony's `methods:`,
+    // S-549), so a site's span is one element whichever verb carried it. A
+    // match with no anchor names no site and is counted on its own.
+    let mut refused: HashSet<(usize, (usize, usize))> = HashSet::new();
+    let mut first_refusal = |route: &RouteMatch, span: (usize, usize)| {
+        route.origin.site.is_none_or(|site| refused.insert((site, span)))
+    };
     if !out.folds {
-        // Refuse rather than drop, should a query ever capture an opaque path
-        // without the facts to fold it: absent facts are a fold that fails.
-        out.refusals
-            .extend(opaque_paths.iter().map(|_| RouteRefusal::PathNotFolded));
+        // Refuse rather than drop an opaque path captured without the facts to
+        // fold it (NestJS captures its method paths that way): absent facts are
+        // a fold that fails.
+        for (route, span) in &opaque_paths {
+            if first_refusal(route, *span) {
+                out.refusals.push(RouteRefusal::PathNotFolded);
+            }
+        }
         return;
     }
     let names = fold::Names::new(source, rel, &out.const_scopes, &out.const_fields);
@@ -989,17 +1150,18 @@ fn fold_constants(
     };
 
     for (route, (start, end)) in opaque_paths {
-        if out.literal_path_spans.contains(&(start, end)) {
-            continue;
-        }
         match names.fold(start, end) {
             Some((path, folded_from)) => out.routes.push(RouteMatch {
-                // Trimmed like a written path (see `generic_match`).
-                path: path.trim().to_string(),
+                // Trimmed, and rooted where the dialect roots, like a written
+                // path (see `generic_match`).
+                path: rooted_path(path.trim(), out.nest.is_rooted((start, end))),
                 folded_from,
                 ..route
             }),
-            None => out.refusals.push(RouteRefusal::PathNotFolded),
+            None if first_refusal(&route, (start, end)) => {
+                out.refusals.push(RouteRefusal::PathNotFolded)
+            }
+            None => {}
         }
     }
 
@@ -1017,7 +1179,7 @@ fn fold_constants(
             .flatten();
             match folded {
                 Some((text, folded_from)) => {
-                    let text = text.trim().to_string();
+                    let text = rooted_path(text.trim(), out.nest.is_rooted((start, end)));
                     scope.literals.push(PrefixLiteral {
                         resolvable: is_resolvable_prefix(&text),
                         text,
@@ -1058,6 +1220,11 @@ fn fold_constants(
 /// `opaque` rather than just an empty `paths`: "this type declares no prefix"
 /// and "this type declares a prefix I cannot read" are opposite answers.
 ///
+/// A registration declared **nested** (`@fw.route.nested`, S-561) takes none of
+/// these four: it is a route only inside the nesting scopes around it, whose
+/// prefixes all apply, outermost first ([`nest::Facts::compose`]) — and outside
+/// every one, or inside a handler body, it is dropped silently.
+///
 /// A pathless candidate with no prefix in scope establishes nothing either and
 /// is dropped **silently** — it is not a composition failure, so it earns no
 /// reason ([BR-46] again: absence of a prefix is never a defect).
@@ -1071,7 +1238,8 @@ fn compose_prefixes(out: &mut FileMatches) {
     // makes the scope count grow with the number of declarations, so resolving
     // opacity and sorting the fan-out per route made the pass quadratic in
     // (routes x declarations) on a large generated file.
-    let scopes = merge_scopes(&prefixes);
+    let mut scopes = merge_scopes(&prefixes);
+    nest_scopes(&mut scopes);
     let mut composed: Vec<RouteMatch> = Vec::with_capacity(out.routes.len());
     // One refusal per refused *registration*, not per refused path candidate: a
     // list-valued method path is several `RouteMatch`es for one annotation, and
@@ -1079,11 +1247,24 @@ fn compose_prefixes(out: &mut FileMatches) {
     let mut refused_sites: HashSet<usize> = HashSet::new();
 
     for route in out.routes.drain(..) {
+        // Already at its final path: composed through its group, or written
+        // absolute (S-554) — a class prefix is not joined onto it.
+        if out.groups.is_final(route.at) {
+            composed.push(route);
+            continue;
+        }
+        // A registration that is a route only inside a nesting scope chains
+        // every scope around it (S-561).
+        if out.nest.is_nested(route.at) {
+            out.nest
+                .compose(&scopes, route, &mut composed, &mut out.refusals, &mut refused_sites);
+            continue;
+        }
         match innermost_prefix(&scopes, route.at) {
             Some(scope) if !scope.paths.is_empty() => {
                 for prefix in &scope.paths {
                     composed.push(RouteMatch {
-                        path: join_route_path(prefix, &route.path),
+                        path: scope.join(prefix, &route.path),
                         folded_from: with_prefix_provenance(&route, scope, prefix),
                         ..route.clone()
                     });
@@ -1105,6 +1286,11 @@ fn compose_prefixes(out: &mut FileMatches) {
     // so it earns no reason (BR-46). An *empty* prefix supplies nothing
     // either, so it drops the same way rather than promoting a pathless route.
     for route in pathless {
+        if out.nest.is_nested(route.at) {
+            out.nest
+                .compose(&scopes, route, &mut composed, &mut out.refusals, &mut refused_sites);
+            continue;
+        }
         let usable: Vec<&String> = match innermost_prefix(&scopes, route.at) {
             Some(scope) => scope
                 .paths
@@ -1117,7 +1303,7 @@ fn compose_prefixes(out: &mut FileMatches) {
             let scope = innermost_prefix(&scopes, route.at);
             for prefix in usable {
                 composed.push(RouteMatch {
-                    path: join_route_path(prefix, &route.path),
+                    path: join_under(prefix, &route.path, scope.is_some_and(|s| s.absorbs)),
                     folded_from: scope
                         .map(|s| with_prefix_provenance(&route, s, prefix))
                         .unwrap_or_default(),
@@ -1137,12 +1323,18 @@ fn compose_prefixes(out: &mut FileMatches) {
 /// prefix it was joined onto.
 fn with_prefix_provenance(route: &RouteMatch, scope: &MergedScope, prefix: &str) -> Vec<FoldedConstant> {
     let mut folded = route.folded_from.clone();
-    for constant in scope.folded_from.get(prefix).into_iter().flatten() {
-        if !folded.contains(constant) {
-            folded.push(constant.clone());
+    extend_unique(&mut folded, scope.folded_from.get(prefix).into_iter().flatten().cloned());
+    folded
+}
+
+/// Append each of `more` to `into` that it does not already hold — the one
+/// provenance merge, shared by every composition path.
+fn extend_unique(into: &mut Vec<FoldedConstant>, more: impl IntoIterator<Item = FoldedConstant>) {
+    for constant in more {
+        if !into.contains(&constant) {
+            into.push(constant);
         }
     }
-    folded
 }
 
 /// Record one composition refusal, at most once per registration site.
@@ -1200,6 +1392,8 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
     struct Declared {
         literals: Vec<PrefixLiteral>,
         opaque: Vec<(usize, usize)>,
+        nested: bool,
+        absorbs: bool,
     }
 
     let mut by_range: HashMap<(usize, usize), Declared> = HashMap::new();
@@ -1207,11 +1401,13 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
         let entry = by_range.entry((scope.start, scope.end)).or_default();
         entry.literals.extend(scope.literals.iter().cloned());
         entry.opaque.extend(scope.opaque.iter().copied());
+        entry.nested |= scope.nested;
+        entry.absorbs |= scope.absorbs;
     }
 
     let mut merged: Vec<MergedScope> = by_range
         .into_iter()
-        .map(|((start, end), Declared { literals, opaque })| {
+        .map(|((start, end), Declared { literals, opaque, nested, absorbs })| {
             let disqualified = |lit: &PrefixLiteral| {
                 opaque.iter().any(|&(os, oe)| {
                     (os, oe) != (lit.start, lit.end) && os < lit.end && lit.start < oe
@@ -1243,6 +1439,8 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
                 paths,
                 opaque: unread,
                 folded_from,
+                nested,
+                absorbs,
             }
         })
         .collect();
@@ -1251,6 +1449,101 @@ fn merge_scopes(prefixes: &[PrefixScope]) -> Vec<MergedScope> {
     // containing a byte the innermost is the one with the greatest start.
     merged.sort_by_key(|s| (s.start, s.end));
     merged
+}
+
+/// Compose every `@fw.route.prefix.nested` scope onto the scope around it
+/// ([FR-FW-05], S-549), so [`innermost_prefix`] then answers with the whole
+/// accumulated prefix.
+///
+/// Spring's rule — a handler takes its declaring type's prefix and no enclosing
+/// type's — is the default, and a scope that does not opt in keeps it. Laravel's
+/// route groups are the other rule: `Route::prefix('api')->group(…)` around
+/// `Route::prefix('os/s3')->group(…)` serves `/api/os/s3/…`, so the inner prefix
+/// appends to the outer one. Written once here rather than in a query, because a
+/// query cannot see the declaration around its own match.
+///
+/// Outermost first, so the enclosing scope is already composed when its nested
+/// scope reads it and a chain of any depth accumulates. An enclosing scope that
+/// could not be read makes the nested one unreadable too: its routes' real
+/// address is `<unknown>/inner/…`, which is refused, never promoted at the
+/// partial path ([NFR-RA-05]). An enclosing scope that declared nothing leaves
+/// the nested one as written. Each nested scope searches every scope for its
+/// parent, which is linear per scope and cheap at a route file's group count;
+/// a dialect that never opts in pays nothing.
+///
+/// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn nest_scopes(scopes: &mut [MergedScope]) {
+    if !scopes.iter().any(|s| s.nested) {
+        return;
+    }
+    // Declarations nest rather than partially overlap, and distinct ranges are
+    // distinct scopes after `merge_scopes`, so a parent is strictly wider than
+    // every scope inside it.
+    let mut outermost_first: Vec<usize> = (0..scopes.len()).collect();
+    outermost_first.sort_by_key(|&i| std::cmp::Reverse(scopes[i].end - scopes[i].start));
+    for i in outermost_first {
+        if !scopes[i].nested {
+            continue;
+        }
+        let (start, end) = (scopes[i].start, scopes[i].end);
+        let Some(parent) = scopes
+            .iter()
+            .filter(|s| s.start <= start && end <= s.end && (s.start, s.end) != (start, end))
+            .min_by_key(|s| s.end - s.start)
+            .cloned()
+        else {
+            continue;
+        };
+        nest_into(&mut scopes[i], parent);
+    }
+}
+
+/// Compose one nested scope onto its already-composed enclosing `parent` — the
+/// step [`nest_scopes`] takes per scope, outermost first.
+fn nest_into(scope: &mut MergedScope, parent: MergedScope) {
+    if parent.paths.is_empty() {
+        if parent.opaque {
+            scope.paths.clear();
+            scope.folded_from.clear();
+            scope.opaque = true;
+        }
+        return;
+    }
+    if scope.paths.is_empty() {
+        // Declared nothing readable: an unreadable prefix still refuses, an
+        // empty declaration inherits the enclosing prefix unchanged — and its
+        // trailing-slash rule with it.
+        if !scope.opaque {
+            scope.paths = parent.paths;
+            scope.folded_from = parent.folded_from;
+            scope.absorbs |= parent.absorbs;
+        }
+        return;
+    }
+    let mut paths = Vec::with_capacity(parent.paths.len() * scope.paths.len());
+    let mut folded_from: HashMap<String, Vec<FoldedConstant>> = HashMap::new();
+    for outer in &parent.paths {
+        for inner in &scope.paths {
+            let joined = parent.join(outer, inner);
+            let constants: Vec<FoldedConstant> = parent
+                .folded_from
+                .get(outer)
+                .into_iter()
+                .chain(scope.folded_from.get(inner))
+                .flatten()
+                .cloned()
+                .collect();
+            if !constants.is_empty() {
+                folded_from.entry(joined.clone()).or_insert(constants);
+            }
+            paths.push(joined);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    scope.paths = paths;
+    scope.folded_from = folded_from;
 }
 
 /// The prefix governing byte `at`: the **innermost** containing [`MergedScope`],
@@ -1353,11 +1646,17 @@ fn introduces_reference(next: char) -> bool {
 /// a literal, but is handled for the same reason the other direction is.
 ///
 /// Composition **joins**; it does not absolutise. A prefix written without a
-/// leading slash (`@RequestMapping("v1")`) composes to `v1/users`, which the
-/// shared [`route_template`](super::route_template) normalizer then refuses as
-/// a non-template — deliberately, because inventing the leading slash Spring
-/// would supply is a guess about the servlet context, not something the source
-/// states.
+/// leading slash (a Django `include("v1/")`) composes to `v1/users`, which the
+/// shared [`route_template`](super::route_template) normalizer then refuses as a
+/// non-template — deliberately, because inventing the leading slash is a guess
+/// about the mount point, not something the source states. A dialect whose
+/// framework *does* serve every path from the root says so before the join
+/// (Spring's `@fw.route.slashed`, NestJS's `@fw.route.rooted`; see
+/// [`rooted_path`]), so a Spring `@RequestMapping("v1")` arrives here as `/v1`.
+///
+/// A path of exactly `/` keeps its trailing slash here (Spring serves `/v1/`); a
+/// dialect whose framework serves the prefix itself says so with
+/// `@fw.route.prefix.absorbs` and is joined by [`join_under`].
 ///
 /// [FR-FW-05]: ../../../docs/specs/requirements/FR-FW-05.md
 fn join_route_path(prefix: &str, path: &str) -> String {
@@ -1376,6 +1675,35 @@ fn join_route_path(prefix: &str, path: &str) -> String {
         prefix.trim_end_matches('/'),
         path.trim_start_matches('/')
     )
+}
+
+/// `path` joined onto `prefix` where the prefix may **absorb** a path of exactly
+/// `/`: under such a prefix that path — or an empty one, the registration that
+/// names none — is the prefix itself, without a trailing slash (and `/` where the
+/// prefix is empty or the root), and any other path is joined by
+/// [`join_route_path`]. Both halves matter: trimming only one would leave
+/// `@Controller('teams/')`'s `@Get()` and `@Get('/')` two keys again.
+///
+/// Whether a prefix absorbs is the framework's rule, so the dialect states it
+/// as data — `@fw.route.prefix.absorbs` on a prefix scope, `@fw.group.absorbs`
+/// on a route group ([`group`]) — and never a language check. Laravel trims both
+/// sides of the join (`Route::prefix('users')` + `Route::get('/')` serves
+/// `/users`), NestJS strips the end slash of every non-root path (`@Get('/')` in
+/// `@Controller('users')` is `@Get()`'s `/users`), Rails' `normalize_path` drops a
+/// trailing slash (`scope '/admin' do get '/' … end` serves `/admin`), and ASP.NET
+/// Core combines a group's pattern with its route's segment by segment, where the
+/// root has none. Spring does not absorb — `@RequestMapping("/v1")` +
+/// `@GetMapping("/")` serves `/v1/` — and neither does Symfony's class `#[Route]`,
+/// so `/users` and `/users/` stay the distinct shapes the route-template
+/// normaliser keeps them for every dialect that does not opt in.
+fn join_under(prefix: &str, path: &str, absorbs: bool) -> String {
+    if absorbs && matches!(path.trim(), "" | "/") {
+        return match prefix.trim().trim_end_matches('/') {
+            "" => "/".to_string(),
+            served => served.to_string(),
+        };
+    }
+    join_route_path(prefix, path)
 }
 
 /// Drop every route whose composed path is not a URL path at all ([FR-FW-01],
@@ -1399,7 +1727,8 @@ fn join_route_path(prefix: &str, path: &str) -> String {
 /// premise is false, and the repository's own fixtures disprove it: a Django
 /// URLconf registers `path("users/", index)` — relative by design, because the
 /// root URLconf's `include()` supplies the prefix — and ASP.NET Core's
-/// `[HttpGet("api/users")]` is relative for the same reason. Requiring a
+/// `[HttpGet("api/users")]` was relative for the same reason (S-554 roots it, as
+/// the framework serves it). Requiring a
 /// leading `/` would silently delete those frameworks' entire route surface,
 /// which is [FR-FW-01]'s *existing* acceptance criterion ("a route definition
 /// in each supported framework yields a `route` node") and a regression no
@@ -1464,6 +1793,7 @@ fn generic_match(
     capture_names: &[&str],
     src: &[u8],
     methods: &std::collections::BTreeMap<String, String>,
+    suffix: Option<&str>,
     out: &mut FileMatches,
 ) -> bool {
     // A path capture is collected as a list, not a single slot. A list-valued
@@ -1488,12 +1818,27 @@ fn generic_match(
     let mut const_import: Option<Node<'_>> = None;
     let mut const_import_static = false;
     let mut const_import_wildcard = false;
-    let mut prefix_nodes: Vec<Node<'_>> = Vec::new();
-    let mut prefix_scope: Option<Node<'_>> = None;
-    let mut prefix_opaque: Vec<(usize, usize)> = Vec::new();
-    // Predicate-only for the query; read here for its parent, the annotation,
-    // to tell whether the parser recovered an error inside it.
-    let mut prefix_name: Option<Node<'_>> = None;
+    // `@fw.receiver.*` (S-526): a method's receiver name and the declaration it
+    // governs, one pair per match.
+    let mut receiver_scope: Option<Node<'_>> = None;
+    let mut receiver_name: Option<Node<'_>> = None;
+    // `@fw.route.pattern` (S-526): the match's paths are `ServeMux` patterns.
+    let mut pattern_syntax = false;
+    // `@fw.route.rooted` (S-533): the framework serves every path from the root
+    // whether or not it was written with a leading slash (NestJS, ASP.NET Core).
+    let mut rooted = false;
+    // The match's prefix declaration, if it states one: see [`PrefixCaptures`].
+    // Typed, so the code graph binds its method calls (a `T::default()`
+    // initialiser alone does not type the receiver).
+    let mut prefix_caps: PrefixCaptures<'_> = PrefixCaptures::default();
+    // The match's group, receiver, absolute-path and token captures (S-554; see
+    // [`group`]).
+    let mut group_capture = group::Capture::default();
+    // `@fw.route.nested`, `@fw.route.prefix.nest`, `@fw.route.slashed` and
+    // `@fw.binding.*` (S-561): see [`nest`].
+    let mut nest_caps = nest::Captures::default();
+    // `@fw.route.handler.action` and `@fw.route.module.*` (S-567): see [`action`].
+    let mut action_caps = action::Captures::default();
     let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
     let mut handler_node: Option<Node<'_>> = None;
@@ -1540,6 +1885,28 @@ fn generic_match(
             slot.get_or_insert(cap.node);
             continue;
         }
+        // The receiver facts describe a declaration, like the constant facts:
+        // they mark the match as declarative and contribute no line or byte.
+        if let Some(role) = name.strip_prefix("fw.receiver.") {
+            generic = true;
+            match role {
+                "scope" => receiver_scope.get_or_insert(cap.node),
+                "name" => receiver_name.get_or_insert(cap.node),
+                _ => continue,
+            };
+            continue;
+        }
+        // Group facts describe a chain link or a binding, like the receiver
+        // facts: declarative, and no line or byte of a registration.
+        if let Some(role) = group::role_of(name) {
+            generic = true;
+            group_capture.take(role, cap.node);
+            continue;
+        }
+        if nest_caps.read(name, cap.node) || action_caps.read(name, cap.node) {
+            generic = true;
+            continue;
+        }
         if !name.starts_with("fw.route.") && !name.starts_with("fw.component.") {
             continue;
         }
@@ -1556,28 +1923,36 @@ fn generic_match(
             opaque_path_nodes.push((cap.node, name == "fw.route.path.named.opaque"));
             continue;
         }
-        // Prefixes are collected the same way, and for the same reason: a
-        // list-valued class prefix writes several.
-        if name == "fw.route.prefix" {
-            prefix_nodes.push(cap.node);
+        if prefix_caps.read(name, cap.node) {
             continue;
         }
-        // Recorded as a byte range, not a flag: which *literal* an opaque
-        // capture disqualifies is decided by overlap in `merge_scopes`.
-        if name == "fw.route.prefix.opaque" {
-            prefix_opaque.push((cap.node.start_byte(), cap.node.end_byte()));
-            continue;
+        // A handler written as a method value opts the file into counting an
+        // unproven receiver, and a path written as a pattern opts the match
+        // into carrying its verb as the method (S-526); neither names a route
+        // by itself.
+        match name {
+            "fw.route.handler.value" => {
+                out.method_value_handlers = true;
+                continue;
+            }
+            "fw.route.pattern" => {
+                pattern_syntax = true;
+                continue;
+            }
+            "fw.route.rooted" => {
+                rooted = true;
+                continue;
+            }
+            _ => {}
         }
         let slot = match name {
             "fw.route.anchor" => &mut anchor_node,
             "fw.route.method" => &mut method_node,
             "fw.route.handler" => &mut handler_node,
-            "fw.route.prefix.scope" => &mut prefix_scope,
-            "fw.route.prefix.name" => &mut prefix_name,
             "fw.component.name" => &mut component_node,
-            // Auxiliary captures (`fw.component.base`, `fw.route.key`,
-            // `fw.route.prefix.name`, …) exist only for the query's own
-            // `#match?`/`#any-of?`/`#eq?` predicates.
+            // Auxiliary captures (`fw.component.base`, `fw.route.key`, …)
+            // exist only for the query's own `#match?`/`#any-of?`/`#eq?`
+            // predicates.
             _ => continue,
         };
         slot.get_or_insert(cap.node);
@@ -1585,6 +1960,15 @@ fn generic_match(
     if !generic {
         return false;
     }
+
+    let (absolute, controller) = (group_capture.absolute(), group_capture.controller(src));
+    group_capture.finish(at, src, &mut out.groups);
+
+    out.receivers.extend(
+        receiver_scope
+            .zip(receiver_name)
+            .map(|(scope, name)| handler::ReceiverScope::capture(scope, name, src)),
+    );
 
     if let Some(scope) = const_scope {
         out.const_scopes.push(fold::ScopeCapture {
@@ -1619,36 +2003,12 @@ fn generic_match(
         });
     }
 
-    // A prefix declaration is its own match — it names no method and promotes
-    // nothing by itself; it only tells [`compose_prefixes`] which byte range
-    // its path governs.
-    if let Some(scope) = prefix_scope {
-        // The annotation holding the prefix is the name capture's parent.
-        if prefix_name
-            .and_then(|name| name.parent())
-            .is_some_and(|annotation| annotation.has_error())
-        {
-            out.unreadable_prefix_spans.extend(prefix_opaque.iter().copied());
-        }
-        out.prefixes.push(PrefixScope {
-            start: scope.start_byte(),
-            end: scope.end_byte(),
-            literals: prefix_nodes
-                .iter()
-                .map(|node| {
-                    let text = crate::extract::refs::unquote(text(*node, src)).trim().to_string();
-                    PrefixLiteral {
-                        resolvable: is_resolvable_prefix(&text),
-                        text,
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        folded_from: Vec::new(),
-                    }
-                })
-                .collect(),
-            opaque: prefix_opaque,
-        });
-    }
+    // A path or prefix written as an expression is judged by the fold, which
+    // has no match to read `rooted` or `slashed` from.
+    let opaque_spans = opaque_path_nodes.iter().map(|(n, _)| (n.start_byte(), n.end_byte()));
+    nest_caps.record(&mut out.nest, src, at, rooted, opaque_spans.chain(prefix_caps.opaque_spans()), methods);
+    action_caps.record(&mut out.actions, src, at, suffix);
+    prefix_caps.record(out, src, rooted, &nest_caps, controller, absolute);
 
     if let Some(name) = component_node {
         out.components.push(ComponentMatch {
@@ -1716,11 +2076,16 @@ fn generic_match(
             }
             for (path, named) in path_nodes {
                 out.literal_path_spans.insert((path.start_byte(), path.end_byte()));
+                // Trimmed here rather than inside `join_route_path`, so an
+                // uncomposed path and a composed one obey one rule. A pattern
+                // that opens with its verb (Go 1.22) carries it as the method.
+                let written = crate::extract::refs::unquote(text(path, src)).trim();
+                let written = out.groups.read_absolute(at, written, absolute);
+                let written = rooted_path(&written, rooted || nest_caps.slashed());
+                let (method, path_text) = handler::split_pattern_verb(mapped, &written, pattern_syntax);
                 out.routes.push(RouteMatch {
-                    // Trimmed here rather than inside `join_route_path`, so an
-                    // uncomposed path and a composed one obey one rule.
-                    path: crate::extract::refs::unquote(text(path, src)).trim().to_string(),
-                    method: mapped.clone(),
+                    path: path_text,
+                    method,
                     handler: handler.clone(),
                     start_line,
                     end_line,
@@ -1732,6 +2097,186 @@ fn generic_match(
         }
     }
     true
+}
+
+/// One match's prefix captures — `@fw.route.prefix`, `.opaque`, `.root`
+/// (S-533), `.nested` (S-549), `.absorbs`, `.scope` and `.name` — read by [`generic_match`]
+/// like the [`group`] and [`nest`] captures, and turned into the match's
+/// [`PrefixScope`] by [`PrefixCaptures::record`]. Each is a route capture, so it
+/// still counts towards the match's lines and first byte.
+#[derive(Default)]
+struct PrefixCaptures<'t> {
+    /// Collected, not slotted, like a match's paths: in every query shipped
+    /// today one node per match (a list-valued prefix is one match per element,
+    /// combined by range in [`merge_scopes`]); several only under an explicit
+    /// `+`/`*` quantifier.
+    nodes: Vec<Node<'t>>,
+    /// `@fw.route.prefix.symbol` (S-567): a prefix written as a symbol, whose
+    /// name is the literal (`namespace :mod` → `mod`).
+    symbols: Vec<Node<'t>>,
+    /// Byte ranges, not a flag: which *literal* an opaque capture disqualifies
+    /// is decided by overlap in [`merge_scopes`].
+    opaque: Vec<(usize, usize)>,
+    /// The declaration states no prefix and the framework roots its paths, so
+    /// the prefix is `/` itself.
+    root: Option<Node<'t>>,
+    /// The prefix appends to the enclosing one ([`nest_scopes`]).
+    nested: bool,
+    /// A path of exactly `/` (or none) under the prefix is the prefix
+    /// ([`join_under`]).
+    absorbs: bool,
+    scope: Option<Node<'t>>,
+    /// Predicate-only for the query; read for its parent, the annotation, to
+    /// tell whether the parser recovered an error inside it.
+    name: Option<Node<'t>>,
+}
+
+impl<'t> PrefixCaptures<'t> {
+    /// Read the capture `name` on `node` when it is a prefix capture: `true`
+    /// when it was (and nothing else is to be done with it).
+    fn read(&mut self, name: &str, node: Node<'t>) -> bool {
+        match name {
+            "fw.route.prefix" => self.nodes.push(node),
+            "fw.route.prefix.symbol" => self.symbols.push(node),
+            "fw.route.prefix.opaque" => self.opaque.push((node.start_byte(), node.end_byte())),
+            "fw.route.prefix.root" => drop(self.root.get_or_insert(node)),
+            "fw.route.prefix.nested" => self.nested = true,
+            "fw.route.prefix.absorbs" => self.absorbs = true,
+            "fw.route.prefix.scope" => drop(self.scope.get_or_insert(node)),
+            "fw.route.prefix.name" => drop(self.name.get_or_insert(node)),
+            _ => return false,
+        }
+        true
+    }
+
+    /// The `@fw.route.prefix.opaque` spans, which a fold roots like an opaque
+    /// path ([`nest::Captures::record`]).
+    fn opaque_spans(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.opaque.iter().copied()
+    }
+
+    /// Record the [`PrefixScope`] the match declares, if it declares one. A
+    /// prefix declaration is its own match — it names no method and promotes
+    /// nothing by itself; it only tells [`compose_prefixes`] which byte range
+    /// its path governs. Its literals are rooted where the match is `rooted` or
+    /// the dialect `slashed` (S-561), then have their `[controller]` token and
+    /// `~/` expanded (S-554). Two more writes go with it: the scope is marked
+    /// chained when the match declared a nesting scope
+    /// ([`nest::Captures::record_scope`]), and the opaque spans are recorded
+    /// unreadable when the annotation holding them was recovered from an error.
+    fn record(
+        self,
+        out: &mut FileMatches,
+        src: &[u8],
+        rooted: bool,
+        nest_caps: &nest::Captures<'_>,
+        controller: Option<&str>,
+        absolute: bool,
+    ) {
+        let Some(scope) = self.scope else {
+            return;
+        };
+        // The annotation holding the prefix is the name capture's parent.
+        if self.name.and_then(|name| name.parent()).is_some_and(|annotation| annotation.has_error()) {
+            out.unreadable_prefix_spans.extend(self.opaque_spans());
+        }
+        nest_caps.record_scope(&mut out.nest, scope.start_byte(), scope.end_byte());
+        out.prefixes.push(PrefixScope {
+            start: scope.start_byte(),
+            end: scope.end_byte(),
+            literals: expand_prefix_tokens(
+                prefix_literals(&self.nodes, &self.symbols, self.root, src, rooted, nest_caps.slashed()),
+                controller,
+                absolute,
+            ),
+            opaque: self.opaque,
+            nested: self.nested,
+            absorbs: self.absorbs,
+        });
+    }
+}
+
+/// The prefix literals one declaration wrote: each captured string, unquoted, and
+/// each captured symbol by its name (S-567), and (where `rooted` or `slashed`)
+/// given its leading slash, then the `/` a
+/// prefix-less rooted declaration states through `@fw.route.prefix.root`
+/// (S-533). A rooted empty string is the root too — NestJS serves
+/// `@Controller("")` from `/` — which a pathless route needs as a prefix to be
+/// an address at all; a `slashed` one stays empty (Spring's `@RequestMapping("")`
+/// supplies no prefix, S-329).
+fn prefix_literals(
+    nodes: &[Node<'_>],
+    symbols: &[Node<'_>],
+    root: Option<Node<'_>>,
+    src: &[u8],
+    rooted: bool,
+    slashed: bool,
+) -> Vec<PrefixLiteral> {
+    let literal = |text: String, node: Node<'_>| PrefixLiteral {
+        resolvable: is_resolvable_prefix(&text),
+        text,
+        start: node.start_byte(),
+        end: node.end_byte(),
+        folded_from: Vec::new(),
+    };
+    let written = nodes
+        .iter()
+        .map(|node| (node, crate::extract::refs::unquote(text(*node, src)).trim()))
+        .chain(symbols.iter().map(|node| (node, action::symbol_name(text(*node, src)))));
+    written
+        .map(|(node, written)| {
+            let text = match rooted_path(written, rooted || slashed) {
+                empty if rooted && empty.is_empty() => "/".to_string(),
+                rooted_text => rooted_text,
+            };
+            literal(text, *node)
+        })
+        .chain(root.map(|node| literal("/".to_string(), node)))
+        .collect()
+}
+
+/// Each prefix literal with its `[controller]` token expanded to the declaring
+/// type's name (`@fw.route.token.controller`, S-554), and judged again: the
+/// expansion is the only thing that can make a literal joinable or not.
+fn expand_prefix_tokens(literals: Vec<PrefixLiteral>, controller: Option<&str>, absolute: bool) -> Vec<PrefixLiteral> {
+    if controller.is_none() && !absolute {
+        return literals;
+    }
+    literals
+        .into_iter()
+        .map(|literal| {
+            let text = group::expand_tokens(&literal.text, controller, None);
+            // `~/` under `@fw.route.absolute` is the root, which rooting has
+            // already put a slash in front of.
+            let text = match text.strip_prefix("/~/").filter(|_| absolute) {
+                Some(rest) => format!("/{rest}"),
+                None => text,
+            };
+            PrefixLiteral {
+                resolvable: is_resolvable_prefix(&text),
+                text,
+                ..literal
+            }
+        })
+        .collect()
+}
+
+/// A written path as the pass records it: verbatim, or — where the framework
+/// serves every path from the root (`@fw.route.rooted`, NestJS;
+/// `@fw.route.slashed`, Spring) — with the leading slash it left out. An empty
+/// path stays empty (it is the pathless form: the prefix itself), a path
+/// already rooted is untouched, and so is one that opens with a template
+/// reference, whose property may supply the slash.
+fn rooted_path(written: &str, rooted: bool) -> String {
+    // A path opening with a template reference is not rooted either: the
+    // property it names may supply the slash (`${api.base}/x`), so a leading
+    // one would be a guess at what it resolves to.
+    if rooted && !written.is_empty() && !written.starts_with('/') && !opens_with_template_reference(written)
+    {
+        format!("/{written}")
+    } else {
+        written.to_string()
+    }
 }
 
 /// `true` when the parser recovered an error in a constant's initializer or in
@@ -2097,16 +2642,20 @@ enum DesiredEdge {
 /// Assemble the desired promoted set from the scanned matches: bind handler
 /// and state-type texts through the [`binder`] (exactly-one-or-nothing,
 /// [NFR-RA-05]) and build each promoted node's canonical symbol (ADR-07) under
-/// the run's `ctx` — the store's repository coordinate (ADR-85).
+/// the run's `ctx` — the store's repository coordinate (ADR-85). Returns the set
+/// and the number of method-value handlers left unlinked for want of a proven
+/// receiver ([`FrameworkStats::handlers_receiver_unproven`], S-526).
+#[allow(clippy::too_many_arguments)]
 fn desired_set(
     ctx: &SymbolContext,
     scanned: &[(i64, &str, FileMatches)],
     nodes: &[NodeRow],
     edges: &[crate::graph_store::EdgeRow],
     files: &[crate::graph_store::FileRecord],
+    refs: &[UnresolvedRefRow],
     index: &binder::Index,
     policy: BindingPolicy,
-) -> HashMap<String, DesiredNode> {
+) -> (HashMap<String, DesiredNode>, u64) {
     // Same-file declarations by name — the file-local binding fallback's
     // candidate index (see [`bind_text`]).
     let mut by_file_name: HashMap<(&str, &str), Vec<(NodeId, NodeKind)>> = HashMap::new();
@@ -2135,6 +2684,9 @@ fn desired_set(
         files.iter().map(|f| (f.path.as_str(), f.id)).collect();
 
     let mut desired: HashMap<String, DesiredNode> = HashMap::new();
+    let handlers = handler::HandlerBinder::new(index, policy, &by_file_name, nodes, refs);
+    // Method-value handlers left unlinked for want of a proven receiver.
+    let mut receiver_unproven = 0u64;
 
     for (file_id, rel, matches) in scanned {
         let Some(module) = module_by_path.get(rel) else {
@@ -2154,19 +2706,10 @@ fn desired_set(
                 continue;
             };
             let mut node_edges = vec![DesiredEdge::ContainedBy(module.id)];
-            if let Some(handler) = &route.handler {
-                if let Some(target) = bind_text(
-                    index,
-                    module,
-                    *file_id,
-                    handler,
-                    EdgeKind::Calls,
-                    policy,
-                    rel,
-                    &by_file_name,
-                ) {
-                    node_edges.push(DesiredEdge::RoutesTo(target));
-                }
+            match handlers.link(module, *file_id, rel, route, matches) {
+                handler::Link::Bound(target) => node_edges.push(DesiredEdge::RoutesTo(target)),
+                handler::Link::ReceiverUnproven => receiver_unproven += 1,
+                handler::Link::Unbound => {}
             }
             // One route node per (file, METHOD, path) symbol: a duplicate
             // registration deduplicates first-wins, deterministically (the
@@ -2243,7 +2786,7 @@ fn desired_set(
                 });
         }
     }
-    desired
+    (desired, receiver_unproven)
 }
 
 /// Node kinds a component promotion may target: the type-like kinds (a Rust
@@ -2410,7 +2953,12 @@ fn commit(
     )
 }
 
+mod action;
+mod admission;
 mod fold;
+mod group;
+mod handler;
+mod nest;
 
 #[cfg(test)]
 #[cfg(feature = "lang-rust")]

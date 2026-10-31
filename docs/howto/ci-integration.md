@@ -285,6 +285,11 @@ could not match to an indexed file — OSV-Scanner on a lockfile is the usual ca
 is keyed by its project-relative path, so it holds in a clone at any path; the
 same advisory in another lockfile is still new. An OSV-Scanner fingerprint also
 ignores the report's `partialFingerprints`, so an osv-scanner upgrade keeps it. A
+dependency finding (OSV-Scanner, Trivy, Dependency-Check) is keyed by its rule, its
+path (the lockfile, or the file Dependency-Check scanned) and its package's name and
+version in place of its position, so a result
+the scanner writes twice is one finding, and two packages sharing one advisory are
+two; a file blessed before history.db migration 13 still knows it by its old keys. A
 file blessed before history.db migration 10 recorded such a finding under a key
 that carried the blessing checkout's directory: the ratchet still matches it by
 the rule id and project-relative path the file records, for one release, so
@@ -423,8 +428,19 @@ mirrored story has a title that does not name an issue after a closing keyword
 `scripts/check-public-terms.sh` runs on the message and on the tree exactly as
 published (read from the commit, never from the working directory). A hit exits 1
 before any commit object exists. Last, once the commit id is known, a
-remote-tracking `origin/sprint/N`, if present, must be that commit; this one
-refusal (exit 2) follows the build and leaves the unreferenced commit object behind.
+remote-tracking `origin/sprint/N`, if present, must be that commit; this
+refusal (exit 2) follows the build and leaves the unreferenced commit object behind,
+as does the `--push` refusal for missing Linux-leg evidence below.
+
+**The Linux leg (`--push` only).** `--push` exits 2, naming `bash scripts/gate.sh ci`
+and writing no ref, unless passing tier `ci` evidence exists for local `main`'s tree
+(`bash scripts/verify-evidence.sh --strict --tier ci --tree <that tree>`; evidence for
+any other tree counts as absent, a different checkout or a dirty working directory
+included). It is decided after the build, so the ancestry and the term gates refuse
+first, as before. A dry run prints `gate evidence: present` or `gate evidence: absent`
+(with what is missing) and still builds and prints the commit.
+`scripts/publish-public.sh --tag-only` is not held to it. What the leg runs is in
+[contributing](contributing.md#the-linux-leg-before-a-publish).
 
 **Dry run by default.** Without `--push` the script writes one unreferenced commit
 object and nothing else: no branch, no pull request, no network call. It prints
@@ -445,8 +461,9 @@ is trivial, and it restores `origin/main` as an ancestor of local `main` for the
 next publish.
 
 Exit codes: `0` done, `1` the term gate found a listed term, `2` usage error or a
-failed precondition, `3` the term gate could not run or read the wrong number of
-files, `4` the push failed, `5` the branch is on `origin` but the pull request
+failed precondition (with `--push`: no passing tier `ci` evidence for `main`'s
+tree), `3` the term gate could not run or read the wrong number of files, `4` the
+push failed, `5` the branch is on `origin` but the pull request
 could not be created (re-run to retry it).
 
 The tests are `bash scripts/tests/test-publish-sprint.sh`: every case runs in a

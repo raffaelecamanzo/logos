@@ -1,0 +1,12 @@
+// A deadline built from an earlier instant, either way round, carries an unscaled
+// duration just as `Instant::now() + D` does.
+fn from_start() {
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(5);
+    assert!(Instant::now() < deadline);
+}
+
+fn reversed() {
+    let deadline = Duration::from_secs(5) + Instant::now();
+    assert!(Instant::now() < deadline);
+}

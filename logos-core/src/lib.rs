@@ -130,7 +130,9 @@ pub mod observability;
 /// The performance envelope (S-024): the ~100k-LOC target the latency budgets
 /// are tuned for ([NFR-PE-01](../../docs/specs/requirements/NFR-PE-01.md)..07)
 /// and the beyond-envelope advisory `index`/`status` emit when a repo exceeds it
-/// ([NFR-PE-09](../../docs/specs/requirements/NFR-PE-09.md)).
+/// ([NFR-PE-09](../../docs/specs/requirements/NFR-PE-09.md)). It also holds the
+/// one `LOGOS_PERF_TOLERANCE` reading every wall-clock test assertion scales
+/// through (`perf::scaled`); production code never calls it.
 pub mod perf;
 /// The discover → extract → persist pipeline (S-010): the orchestrator behind
 /// [`Engine::index`](engine::Engine::index) / [`Engine::sync`](engine::Engine::sync),

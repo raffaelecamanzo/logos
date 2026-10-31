@@ -13,6 +13,7 @@ import type {
   DeclaredContractRelation,
   MemberTopics,
   WorkspaceRoster,
+  WorkspaceReferenceResolution,
   WorkspaceStatus,
   XserviceBuildDeps,
 } from "../api/types.ts";
@@ -194,6 +195,28 @@ export const BOUND_EXTERNAL: BoundExternal = {
  *  that indexes no broker coupling reports (S-256). */
 export const NO_TOPICS: MemberTopics[] = [];
 
+/** A pooled workspace reference resolution (S-637) over `members` members,
+ *  every one read: 600 of 800 internal candidates resolved. */
+export function referenceResolution(
+  over: Partial<WorkspaceReferenceResolution> = {},
+  members = 2,
+): WorkspaceReferenceResolution {
+  return {
+    internal_resolution: {
+      resolved: 600,
+      internal_candidates: 800,
+      provably_external: 200,
+      code_references: 1_000,
+      lower_bound: 0.75,
+      absence: null,
+    },
+    cross_member: { named_by_another_member: 12, type_in_another_member: 3, bridge_bound: 4 },
+    members: { members, read: members },
+    summary: `lower bound 0.750 (600 of 800 internal candidates resolved; 1000 code references, 200 provably external), summed over ${members} of ${members} members; 15 counted internal as another member's, 4 bound across members`,
+    ...over,
+  };
+}
+
 /** A status fan-out over the two members. */
 export function status(
   coverage: CrossServiceCoverage = EMPTY_COVERAGE,
@@ -240,6 +263,7 @@ export function status(
     ...(buildDependency ? { build_dependency: buildDependency } : {}),
     // Likewise only when given: the server omits `links` without `[[links]]`.
     ...(links ? { links } : {}),
+    reference_resolution: referenceResolution(),
   };
 }
 

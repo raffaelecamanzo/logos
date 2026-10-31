@@ -104,11 +104,13 @@ pub const RECORDED_FINDING: &str = include_str!("ts_method_residue_finding.txt")
 /// [CR-154]: ../../../docs/requests/CR-154-typescript-own-field-accesses-bind.md
 pub const FILING_BASELINE: (usize, usize) = (58, 498);
 
-/// The plugins whose files are "TypeScript" here: one language split across two
-/// tree-sitter grammars ([ADR-09]).
+/// The plugins whose files are "TypeScript" here: one family split across two
+/// tree-sitter grammars ([ADR-09]). JavaScript is its own `javascript` plugin
+/// since S-538, and stays in the population this harness measured — its
+/// first-party `.js` files are [`Population::FirstPartyJs`].
 ///
 /// [ADR-09]: ../../../docs/specs/architecture/decisions/ADR-09.md
-pub const TS_PLUGINS: [&str; 2] = ["typescript", "tsx"];
+pub const TS_PLUGINS: [&str; 3] = ["typescript", "tsx", "javascript"];
 
 // ── The first-party split ──────────────────────────────────────────────────
 

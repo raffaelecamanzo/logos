@@ -141,6 +141,35 @@ fn is_test_path_recognises_per_language_test_conventions() {
     assert!(is_test_path("pkg/resolve_tests.rs"));
 }
 
+/// [S-574] Scala: `*Spec.scala` / `*Suite.scala` / `*Test.scala` files and the
+/// `src/it/scala` integration source set are test code; a production root wins.
+#[test]
+fn is_test_path_recognises_scala_suite_files_and_the_it_source_set() {
+    use super::is_test_path;
+    assert!(is_test_path("app/models/FooSpec.scala"));
+    assert!(is_test_path("app/models/FooSuite.scala"));
+    assert!(is_test_path("app/models/FooTest.scala"));
+    assert!(is_test_path("app/models/FooTests.scala"));
+    assert!(is_test_path("svc/src/it/scala/com/acme/FlowIT.scala"));
+    assert!(is_test_path("svc/src/it/scala/Helper.scala"));
+    // A production root silences the filename rule, as for every JVM file.
+    assert!(!is_test_path("svc/src/main/scala/FooSpec.scala"));
+    assert!(!is_test_path("svc/src/main/scala/FooSuite.scala"));
+    // Scala only: other languages keep their own filename rules.
+    assert!(!is_test_path("src/FooSuite.java"));
+    assert!(!is_test_path("src/FooSpec.kt"));
+    assert!(!is_test_path("src/FooSpec.ts"));
+    // Near misses: a real prefix and the exact suffix are both required.
+    assert!(!is_test_path("app/Spec.scala"));
+    assert!(!is_test_path("app/Suite.scala"));
+    assert!(!is_test_path("app/FooSpecs.scala"));
+    assert!(!is_test_path("app/Foospec.scala"));
+    assert!(!is_test_path("app/FooSuiteHelper.scala"));
+    assert!(!is_test_path("app/FooSpec.scala.txt"));
+    // `src/it` is a source set only as a direct child of `src/`.
+    assert!(!is_test_path("app/it/scala/Foo.scala"));
+}
+
 #[test]
 fn is_test_path_does_not_mark_production_files() {
     use super::is_test_path;
@@ -413,6 +442,7 @@ fn edge(graph: &mut DiGraph<Vertex, EdgeData>, from: NodeIndex, to: NodeIndex, k
         EdgeData {
             kind: Some(kind),
             weight: 1,
+            dispatch: false,
         },
     );
 }
@@ -637,6 +667,8 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         calls: RelationResolution::measured(20, 7, 7, cross_file),
         imports: RelationResolution::measured(0, 0, 0, 0),
         call_residue: None,
+        header_ownership: None,
+        parse_damage: None,
     };
     let over = |rows: Vec<LanguageResolution>| {
         let anchors: Vec<Option<String>> = rows.iter().map(|r| Some(r.language.clone())).collect();

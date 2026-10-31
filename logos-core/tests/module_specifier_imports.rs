@@ -180,7 +180,7 @@ fn a_relative_import_resolves_parent_hops_and_directory_index_files() {
 
 #[test]
 fn a_javascript_relative_require_binds_to_its_file() {
-    // `.js` rides the typescript grammar; neither CR-142 corpus holds a relative
+    // `.js` is the `javascript` plugin (S-538); neither CR-142 corpus holds a relative
     // JavaScript import, so this arm is evidenced here and nowhere else.
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "server/lib/util.js", "module.exports = { f() {} };\n");

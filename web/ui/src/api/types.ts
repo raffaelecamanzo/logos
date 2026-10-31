@@ -93,6 +93,12 @@ export interface SymbolRef {
   file: string | null;
   /** 1-based start line of the declaration, when recorded. */
   line: number | null;
+  /**
+   * The trait method a callers/callees/impact row was reached through,
+   * `"<Trait>::<method>"` — present only on a row reached by a trait fan-out's
+   * dispatch edge (S-712).
+   */
+  via?: string;
 }
 
 /** A documentation→node trace link in an {@link ImpactResult} (mirrors `TraceLink`). */
@@ -115,6 +121,8 @@ export interface ImpactEntry {
   kind: NodeKind;
   file: string | null;
   line: number | null;
+  /** The trait method the entry was reached through, as on {@link SymbolRef} (S-712). */
+  via?: string;
   /** BFS distance from the queried symbol (1 = direct). */
   distance: number;
 }
@@ -219,6 +227,8 @@ export interface QueryHit {
   line: number | null;
   /** 1-based rank within the ranked result set. */
   rank: number;
+  /** The trait method a relational hit was reached through (S-712); absent otherwise. */
+  via?: string;
 }
 
 /** The structured + relational whole-graph query result (mirrors `QueryResponse`). */
@@ -263,10 +273,24 @@ export interface StatusInfo {
   /** Unix-seconds string of the last incremental sync, or `null`. */
   last_sync_at: string | null;
   graph_revision: number;
+  /** The reference-resolution headline (S-635, FR-RS-49): bound code references
+   *  over the internal candidates — a lower bound — beside its population. The
+   *  server always sends it; optional here so a view that does not read it needs
+   *  no fixture for it. The Dashboard's Graph widget reads it (S-636) and states
+   *  its absence when a server sent none. */
+  internal_resolution?: InternalResolution;
+  /** The doc references' own resolution, stated apart from the code headline.
+   *  Always sent; optional as `internal_resolution` is. */
+  doc_resolution?: DocResolution;
+  /** Deprecated (FR-RS-49): every reported reference, doc and external code
+   *  included. Kept unchanged; read `internal_resolution`. */
   refs_total: number;
+  /** Deprecated, as `refs_total` is. */
   refs_resolved: number;
   refs_unresolved: number;
-  /** 0..1 fraction of references resolved. */
+  /** 0..1 fraction of references resolved. Deprecated (FR-RS-49) in favour of
+   *  `internal_resolution`: its denominator holds doc references and external
+   *  code no repository could resolve. */
   resolution_coverage: number;
   /** Total physical LOC from the last full index's roll-up (FR-IX-12, CR-085);
    *  `null` when no full index has computed it yet — render an honest empty
@@ -281,6 +305,37 @@ export interface StatusInfo {
   /** The ADR-11 freshness citation prose (internal — not user-facing here). */
   freshness: string;
   warnings: string[];
+}
+
+/** Why a reference-resolution figure states no ratio (mirrors
+ *  `ReferenceFigureAbsence`): its denominator is empty. Tagged by `cause`, per
+ *  the closed lexicon of `models::quality::absence`; the all-external arm also
+ *  carries `provably_external`. */
+export interface ReferenceFigureAbsence {
+  cause: string;
+  provably_external?: number;
+}
+
+/** Reference resolution over the internal candidates (mirrors
+ *  `InternalResolution`, S-635). `internal_candidates = code_references −
+ *  provably_external`; `lower_bound` is `resolved / internal_candidates`, `null`
+ *  exactly when `absence` names why. */
+export interface InternalResolution {
+  resolved: number;
+  internal_candidates: number;
+  provably_external: number;
+  code_references: number;
+  lower_bound: number | null;
+  absence: ReferenceFigureAbsence | null;
+}
+
+/** The doc references' resolution (mirrors `DocResolution`, S-635); `ratio` is
+ *  `null` exactly when `absence` names why. */
+export interface DocResolution {
+  references: number;
+  resolved: number;
+  ratio: number | null;
+  absence: ReferenceFigureAbsence | null;
 }
 
 /** One language's node/file presence in the indexed graph (mirrors `LanguageCount`). */
@@ -831,6 +886,12 @@ export interface PathFindings {
   stale: number;
   /** Fresh, unsuppressed findings in test code (FR-SC-28, S-795): "+N test", never part of `count`. */
   test: number;
+  /** Fresh, unsuppressed findings on a dev-only dependency (FR-SC-30, S-810):
+   *  "+N dev", never part of `count`. */
+  dev: number;
+  /** Fresh, unsuppressed production findings their scanner marks low-confidence
+   *  (FR-SC-31, S-817): "+N review", never part of `count`. */
+  needs_review: number;
 }
 
 /** The hotspot ranking read-model (mirrors `HotspotReport`, [FR-GH-06]). */
@@ -983,6 +1044,14 @@ export interface CoverageLastRun {
   finished_at: number;
   /** Root-relative log of a failed run's whole bounded output. */
   log: string | null;
+  /** How long the tool ran, in milliseconds: its spawn to its end, without a
+   *  readying step. Absent when not recorded (a record written before it was
+   *  kept, or a run that started no process) — never 0 (S-802). */
+  duration_ms?: number;
+  /** Why the run did not pass, for `failed`, `tests_failed` and `timed_out`
+   *  only: the masked excerpt of the end of the tool's output, or the limit a
+   *  timed out run hit. Absent otherwise — never empty text (S-802). */
+  cause?: string;
 }
 
 /** `GET /api/v1/files` bundle (mirrors `FilesModel`): the ranked hotspot board
@@ -1154,6 +1223,7 @@ export interface MetricThresholdDefaults {
   clone_similarity: number;
   clone_min_tokens: number;
   duplicate_min_tokens: number;
+  cohesion_min_classes: number;
 }
 
 /** `rules.toml`'s default / recommended-baseline projection (mirrors
@@ -2127,6 +2197,45 @@ export interface WorkspaceStatus {
    *  when the manifest declares no link — the service map then draws no asserted
    *  layer and renders exactly as before. */
   links?: WorkspaceLink[];
+  /** The workspace reference resolution (S-637, FR-RS-49): the members' code
+   *  references POOLED — summed, then divided, never a mean of their ratios
+   *  (BR-56) — where a reference into another member counts as internal. Each
+   *  member's own figure stays on its row's `internal_resolution`. */
+  reference_resolution: WorkspaceReferenceResolution;
+}
+
+/** `workspace status`'s `reference_resolution` (mirrors
+ *  `WorkspaceReferenceResolution`, S-637). */
+export interface WorkspaceReferenceResolution {
+  /** The pooled figure, its population and its absence — the shape of each
+   *  member's own figure. */
+  internal_resolution: InternalResolution;
+  /** The rows the workspace counted differently from their own member. */
+  cross_member: CrossMemberReferences;
+  /** The members summed over, and the ones that could not be read. */
+  members: ReferenceMembersRead;
+  /** The server's composed line for the figure. */
+  summary: string;
+}
+
+/** Rows the workspace re-read (mirrors `CrossMemberReferences`, S-637). */
+export interface CrossMemberReferences {
+  /** Provably external in their own member, named by another member: internal candidates here. */
+  named_by_another_member: number;
+  /** `external-type` in their own member, a type another member declares: internal candidates here. */
+  type_in_another_member: number;
+  /** Invocation call sites the bridge bound across members: resolved here. */
+  bridge_bound: number;
+}
+
+/** The members a pooled figure summed over (mirrors `ReferenceMembersRead`). */
+export interface ReferenceMembersRead {
+  members: number;
+  read: number;
+  /** Absent when every member was read. */
+  unread?: string[];
+  /** Why each unread member was not read; absent when none. */
+  unread_reasons?: Record<string, string>;
 }
 
 // ── The build-dependency relation (S-464, FR-WS-33, ADR-69) ──────────────────
@@ -2790,6 +2899,10 @@ interface StoredScan {
   /** Unsuppressed findings in it; `0` on a fresh row is a clean scan. */
   findings: number;
   suppressed: number;
+  /** Its findings merged into one advisory another scanner also reports on the
+   *  same lockfile, package and version, counted on that scanner's row
+   *  (FR-SC-29, S-809). */
+  merged?: number;
 }
 
 /** Why a stored report is stale (mirrors `StaleBecause`): HEAD moved since the
@@ -2913,20 +3026,50 @@ export interface SecurityFindingContext {
 }
 
 /** What an ignore entry suppresses (mirrors `Selector`): one finding by its
- *  fingerprint, or every finding at or under a path glob, optionally narrowed to
- *  one rule and one scanner (S-770). */
-export type SecuritySelector = { fingerprint: string } | { path: string; rule?: string; scanner?: string };
+ *  fingerprint, every finding at or under a path glob, optionally narrowed to
+ *  one rule and one scanner (S-770), or — with a rule and a scanner and no path
+ *  or fingerprint — that rule of that scanner in every file (S-814). */
+export type SecuritySelector =
+  | { fingerprint: string }
+  | { path: string; rule?: string; scanner?: string }
+  | { rule: string; scanner: string };
 
 /** A suppression entry's verdict on one finding (mirrors `Suppression`). `by` is
  *  the entry's selector: what Unsuppress removes. */
 export type SecuritySuppression =
-  | { state: "suppressed"; reason: string; expires: string | null; by: SecuritySelector }
+  | { state: "suppressed"; reason: string; expires: string | null; by: SecuritySelector; evidence?: SecurityEvidenceSymbol[] }
+  | { state: "out_of_date"; reason: string; expires: string | null; by: SecuritySelector; changed: SecurityEvidenceChange[] }
   | { state: "expired"; reason: string; expires: string | null; by: SecuritySelector };
+
+/** A symbol a suppression's reason rests on (mirrors `EvidenceSymbol`, FR-SC-32,
+ *  S-818): `symbol` is the identity the entry records, `name` what a person
+ *  calls it. A suppressed finding with an empty or absent list has "no evidence recorded". */
+export interface SecurityEvidenceSymbol {
+  symbol: string;
+  name: string;
+}
+
+/** One evidence symbol that no longer supports its verdict (mirrors
+ *  `EvidenceChange`): its span's bytes changed, it no longer exists, or it could
+ *  not be checked (`detail` says why). */
+export interface SecurityEvidenceChange extends SecurityEvidenceSymbol {
+  change: "changed" | "gone" | "unverifiable";
+  detail?: string;
+}
+
+/** One symbol an entry's reason rests on, with the hash of its exact source span
+ *  when the verdict was made (mirrors `Evidence`). */
+export interface SecurityIgnoreEvidence {
+  symbol: string;
+  hash: string;
+}
 
 /** One ignore entry (mirrors `IgnoreEntry`, its selector flattened). */
 export type SecurityIgnoreEntry = SecuritySelector & {
   reason: string;
   expires: string | null;
+  /** Absent when the entry records none: "no evidence recorded". */
+  evidence?: SecurityIgnoreEvidence[];
 };
 
 /** One ignore entry audited against the stored findings (mirrors `EntryStatus`). */
@@ -2940,6 +3083,10 @@ export interface SecurityEntryStatus {
   suppressed: number;
   /** For an entry written under a key a finding had before a re-key — it still applies — the fingerprint it should name. */
   should_name: string | null;
+  /** The evidence symbols that changed, are gone or could not be checked
+   *  (FR-SC-32, S-818); empty while the entry holds. The entry suppresses
+   *  nothing while this is non-empty. */
+  out_of_date: SecurityEvidenceChange[];
 }
 
 /** What a triage write left on disk (mirrors `IgnoreWrite`, S-672): the file
@@ -2958,7 +3105,13 @@ export interface SecurityFinding {
   fingerprint: string;
   rule_id: string;
   severity: SecuritySeverity;
+  /** What the scanner states of its own confidence (FR-SC-31, S-817); `low`
+   *  reads "needs review". `unstated` for a scanner that states none. */
+  confidence: SecurityScannerConfidence;
   cwes: string[];
+  /** The scanner marks it low-confidence: left out of the default scope's
+   *  list and counts, and still gated (FR-SC-31). */
+  needs_review: boolean;
   /** The rule message — or, when `redacted`, fixed text the page never shows. */
   message: string;
   /** A secret-class finding: the page explains the redaction in words and shows no message. */
@@ -2987,17 +3140,39 @@ export interface SecurityFinding {
   suppression: SecuritySuppression | null;
   /** The finding's code scope, computed when it is read (FR-SC-28, S-795). */
   code_scope: SecurityCodeScope;
-  /** Why it reads `test`; `null` exactly when it is `production`. */
+  /** Why it reads `test` or `dev`; `null` exactly when it is `production`. */
   code_scope_reason: SecurityScopeReason | null;
   context: SecurityFindingContext;
+  /** Every scanner finding one advisory on one lockfile, package and version
+   *  merges, this one's own first (FR-SC-29, S-809); absent when one scanner
+   *  alone reported it. */
+  reporters?: SecurityReporter[];
 }
 
-/** Whether a finding sits in shipped or in test code (mirrors `CodeScope`). */
-export type SecurityCodeScope = "production" | "test";
+/** One scanner's finding within a merged one (mirrors `Reporter`). */
+export interface SecurityReporter {
+  scanner_name: string;
+  scanner_version: string;
+  /** Its own key: suppressing by it suppresses the merged finding. */
+  fingerprint: string;
+  /** The advisory id that scanner reports it under. */
+  rule_id: string;
+  /** The severity that scanner gave it; the finding reads the highest rated one. */
+  severity: SecuritySeverity;
+}
 
-/** Why a finding reads `test` (mirrors `ScopeReason`): its enclosing symbol is
- *  test code, or its location matches the security path rule. */
-export type SecurityScopeReason = "test_symbol" | "test_path";
+/** How sure the scanner says it is of a finding (mirrors `ScannerConfidence`). */
+export type SecurityScannerConfidence = "low" | "medium" | "high" | "unstated";
+
+/** Whether a finding sits in shipped code, test code, or on a dev-only
+ *  dependency (mirrors `CodeScope`; `dev` is the dependency scope of FR-SC-30,
+ *  S-810, which only a lockfile finding can read). */
+export type SecurityCodeScope = "production" | "test" | "dev";
+
+/** Why a finding reads `test` or `dev` (mirrors `ScopeReason`): its enclosing
+ *  symbol is test code, its location matches the security path rule, or its
+ *  lockfile marks its package dev-only. */
+export type SecurityScopeReason = "test_symbol" | "test_path" | "dev_dependency";
 
 /** The commit a history-mode finding is anchored to (mirrors `CommitAnchor`). */
 export interface SecurityCommitAnchor {
@@ -3022,6 +3197,15 @@ export interface SecurityCategoryCoverage {
    *  ones included: what the page's OWASP list states under its default scope.
    *  Absent for a category not covered. */
   production_findings?: number;
+  /** The production part of `findings` whose scanner marks it low-confidence
+   *  (FR-SC-31): left out of `production_findings`, so production, dev-only,
+   *  needs review and test code partition `findings`. Absent for a category not
+   *  covered. */
+  needs_review_findings?: number;
+  /** The part of `findings` on a dev-only dependency (FR-SC-30): left out of
+   *  `production_findings` too, so production, dev-only, needs review and test
+   *  code partition `findings`. Absent for a category not covered. */
+  dev_findings?: number;
 }
 
 /** `security findings` (mirrors `SecurityFindings`). */
@@ -3198,6 +3382,12 @@ export interface SecurityExcluded {
   suppressed: number;
   /** Fresh, unsuppressed findings in test code (FR-SC-28, S-795): "N more in test code". */
   test: number;
+  /** Fresh, unsuppressed findings on a dev-only dependency (FR-SC-30, S-810):
+   *  "N more in dev-only dependencies". */
+  dev: number;
+  /** Fresh, unsuppressed production findings their scanner marks low-confidence
+   *  (FR-SC-31, S-817): "N more need review". */
+  needs_review: number;
 }
 
 /** Every stored finding, counted or left out (mirrors `FindingTally`). */
@@ -3484,7 +3674,14 @@ export interface CoverageIngestSummary {
 /** How one tool's part in a run ended (mirrors `ToolOutcome`, tag `outcome`). */
 export type CoverageToolOutcome =
   | { outcome: "ran"; reports: string[]; ingests: CoverageIngestSummary[] }
-  | { outcome: "tests_failed"; exit_code: number | null; reports: string[]; ingests: CoverageIngestSummary[] }
+  | {
+      outcome: "tests_failed";
+      exit_code: number | null;
+      reports: string[];
+      /** The masked excerpt of the end of the tool's output, which names the failing tests (S-802). */
+      cause?: string;
+      ingests: CoverageIngestSummary[];
+    }
   | { outcome: "failed"; exit_code: number | null; stderr: string; log: string | null; ingests?: CoverageIngestSummary[] }
   | { outcome: "timed_out"; after_secs: number }
   | { outcome: "cancelled" }

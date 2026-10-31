@@ -18,7 +18,7 @@ use std::process::Command;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
-use super::{ingest, read_latest, FindingBinding, SecurityIngestSummary, Severity};
+use super::{ingest, read_latest, FindingBinding, ScannerConfidence, SecurityIngestSummary, Severity};
 use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 
 /// The secret planted in the Gitleaks, Bandit and gosec fixtures (see the
@@ -57,7 +57,7 @@ const SCANNERS: &[(&str, &str, &str, usize)] = &[
     ("dependency-check.sarif", "dependency-check", "10.0.4", 2),
 ];
 
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/sarif")
         .join(name)
@@ -88,7 +88,7 @@ fn settings_py() -> String {
 }
 
 /// A git repository at `<tmp>/repo` holding the fixture project, committed.
-fn repo_with(extra: &[(&str, &str)]) -> (TempDir, PathBuf) {
+pub(super) fn repo_with(extra: &[(&str, &str)]) -> (TempDir, PathBuf) {
     let tmp = TempDir::new().expect("temp root");
     let r = tmp.path().join("repo");
     std::fs::create_dir_all(&r).unwrap();
@@ -188,11 +188,26 @@ fn every_registered_scanner_report_parses_and_ingests() {
     }
     let view = read_latest(&r).unwrap();
     assert_eq!(view.snapshots.len(), 9, "one snapshot per scanner at this HEAD");
+    let stored: usize = SCANNERS.iter().map(|s| s.3).sum();
     assert_eq!(
-        view.findings.len(),
-        SCANNERS.iter().map(|s| s.3).sum::<usize>(),
-        "every finding reads back"
+        view.findings.iter().map(|f| f.reporters.len().max(1)).sum::<usize>(),
+        stored,
+        "every finding reads back, alone or as one reporter of a merged one"
     );
+    // S-809 (FR-SC-29): each of OSV-Scanner's three `requirements.txt`
+    // advisories is one Trivy's captured report holds too, under the CVE
+    // OSV-Scanner lists as an alias: three findings read as one each.
+    let merged: Vec<Vec<(&str, &str)>> = view.findings.iter().filter(|f| !f.reporters.is_empty()).map(|f| f.reported_by()).collect();
+    assert_eq!(
+        merged,
+        [
+            [("Trivy", "CVE-2019-14234"), ("osv-scanner", "PYSEC-2019-13")],
+            [("Trivy", "CVE-2018-18074"), ("osv-scanner", "PYSEC-2018-28")],
+            [("Trivy", "CVE-2024-35195"), ("osv-scanner", "GHSA-9wx4-h78v-vm56")],
+        ],
+        "{merged:?}"
+    );
+    assert_eq!(view.findings.len(), stored - 3);
 }
 
 /// The parser on its own — no repository, no store — reads every registered
@@ -221,10 +236,12 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
         ingest_fixture(&r, file);
     }
     let view = read_latest(&r).unwrap();
+    // A finding merged with another scanner's (S-809) is found by any of its
+    // reporters.
     let find = |scanner: &str, rule: &str| {
         view.findings
             .iter()
-            .find(|f| f.scanner_name == scanner && f.rule_id == rule)
+            .find(|f| f.reported_by().contains(&(scanner, rule)))
             .unwrap_or_else(|| panic!("{scanner} {rule} is stored"))
     };
 
@@ -243,9 +260,14 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
     assert_eq!(f.path.as_deref(), Some("Dockerfile"));
     // Gitleaks: every finding is secret-class.
     assert!(view.findings.iter().filter(|f| f.scanner_name == "gitleaks").all(|f| f.redacted));
-    // OSV: an absolute `file://` URI binds by suffix; no level and no score → unrated.
+    // OSV: an absolute `file://` URI binds by suffix; no level and no score →
+    // unrated. Trivy reports the advisory too, under the CVE OSV-Scanner lists
+    // as its alias: one finding at Trivy's rating, which OSV-Scanner's unrated
+    // never lowers (S-809).
     let f = find("osv-scanner", "PYSEC-2018-28");
-    assert_eq!((f.binding, f.path.as_deref(), f.severity), (FindingBinding::Bound, Some("requirements.txt"), Severity::Unrated));
+    let osv = f.reporters.iter().find(|r| r.scanner_name == "osv-scanner").unwrap();
+    assert_eq!((f.binding, f.path.as_deref(), osv.severity), (FindingBinding::Bound, Some("requirements.txt"), Severity::Unrated));
+    assert_eq!((f.rule_id.as_str(), f.severity), ("CVE-2018-18074", Severity::High));
     // Bandit: `external/cwe/cwe-259` → CWE-259 → secret-class; B608 keeps its message.
     let f = find("Bandit", "B105");
     assert_eq!((f.cwes.as_slice(), f.redacted, f.severity), (&["CWE-259".to_string()][..], true, Severity::Low));
@@ -255,10 +277,11 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
     let f = find("gosec", "G304");
     assert_eq!((f.cwes.as_slice(), f.severity), (&["CWE-22".to_string()][..], Severity::Medium));
     assert!(find("gosec", "G101").redacted, "CWE-798 is a hard-coded credential");
-    // Checkov: the `CKV_SECRET_*` rule is redacted, the IaC rule is not.
+    // Checkov: the `CKV_SECRET_*` rule is redacted, the IaC rule is not; its
+    // constant `error` and no score is no rating (S-811).
     assert!(find("Checkov", "CKV_SECRET_2").redacted);
     let f = find("Checkov", "CKV_AWS_20");
-    assert_eq!((f.redacted, f.severity, f.path.as_deref()), (false, Severity::High, Some("infra/main.tf")));
+    assert_eq!((f.redacted, f.severity, f.path.as_deref()), (false, Severity::Unrated, Some("infra/main.tf")));
     // CodeQL: a rule found through `tool.extensions`, severity from its score.
     let f = find("CodeQL", "py/sql-injection");
     assert_eq!((f.severity, f.cwes.as_slice()), (Severity::High, &["CWE-89".to_string()][..]));
@@ -269,6 +292,9 @@ fn each_scanner_shape_reads_back_with_its_severity_cwes_and_binding() {
     let f = find("dependency-check", "CVE-2021-44228");
     assert_eq!((f.binding, f.path.as_deref(), f.freshness), (FindingBinding::Unmatched, None, FRESHNESS_NA));
     assert_eq!(f.report_path.as_deref(), Some("/home/ci/project/lib/log4j-core-2.14.1.jar"));
+    // Its template writes `warning` on every result and the rule carries no
+    // score here: no rating (S-811).
+    assert_eq!(f.severity, Severity::Unrated);
 }
 
 /// Severity bands at their edges: a CVSS score of exactly 9.0, 7.0 or 4.0
@@ -310,8 +336,8 @@ fn severity_bands_hold_at_their_edges() {
 /// advisories read `unrated` with their reason; at 2.7.0 the rule whose
 /// advisory has a CVSS score carries it as `security-severity` and reads its
 /// band, and the one without still reads `unrated`. No finding reads `medium`.
-/// Upstream's sample reports CVE-2022-24713 twice in each version, and both
-/// results are kept.
+/// Upstream's sample reports CVE-2022-24713 twice in each version, on one
+/// package: one finding (S-808).
 #[test]
 fn osv_scanner_reads_the_advisorys_rating_or_unrated_never_a_made_up_medium() {
     let read = |name: &str| {
@@ -332,7 +358,6 @@ fn osv_scanner_reads_the_advisorys_rating_or_unrated_never_a_made_up_medium() {
         [
             ("CVE-2021-3121".to_string(), Severity::Unrated, unrated),
             ("CVE-2022-24713".to_string(), Severity::Unrated, unrated),
-            ("CVE-2022-24713".to_string(), Severity::Unrated, unrated),
         ],
         "1.9.2 gives no rating: every result reads `warning`, no rule a score"
     );
@@ -340,7 +365,6 @@ fn osv_scanner_reads_the_advisorys_rating_or_unrated_never_a_made_up_medium() {
         read("osv-scanner-2.7.0.sarif"),
         [
             ("CVE-2021-3121".to_string(), Severity::Unrated, unrated),
-            ("CVE-2022-24713".to_string(), Severity::High, None),
             ("CVE-2022-24713".to_string(), Severity::High, None),
         ],
         "2.7.0's rule `security-severity` 7.5 is the advisory's rating"
@@ -449,6 +473,150 @@ fn migration_9_reads_a_stored_osv_scanner_1x_or_gitleaks_medium_as_unrated_and_n
         .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'index' AND name = 'security_findings_path'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(index, 1, "the path index is rebuilt with the table");
+}
+
+/// FR-SC-31: the confidence each scanner's report states is stored with the
+/// finding and read back as the table reads it — Semgrep's tag, CodeQL's and
+/// gosec's rule `precision`, Bandit's per-result `issue_confidence` — and a
+/// scanner that states none reads `unstated`.
+#[test]
+fn each_scanner_reads_back_the_confidence_its_report_states() {
+    let (_t, r) = repo();
+    for &(file, ..) in SCANNERS {
+        ingest_fixture(&r, file);
+    }
+    let view = read_latest(&r).unwrap();
+    let confidences = |scanner: &str| {
+        let mut read: Vec<(String, ScannerConfidence)> = view
+            .findings
+            .iter()
+            .filter(|f| f.reported_by_scanner(scanner))
+            .map(|f| (f.rule_id.clone(), f.confidence))
+            .collect();
+        read.sort_by(|a, b| a.0.cmp(&b.0));
+        read
+    };
+    assert_eq!(
+        confidences("Semgrep OSS").iter().map(|(_, c)| *c).collect::<Vec<_>>(),
+        [ScannerConfidence::Medium, ScannerConfidence::High],
+        "the fixture's rules read their tag, beside a `precision: very-high` that says nothing"
+    );
+    assert_eq!(
+        confidences("Bandit"),
+        [("B105".to_string(), ScannerConfidence::Medium), ("B608".to_string(), ScannerConfidence::Medium)],
+        "Bandit states it per result, `issue_confidence`"
+    );
+    assert_eq!(
+        confidences("gosec"),
+        [
+            ("G101".to_string(), ScannerConfidence::Low),
+            ("G201".to_string(), ScannerConfidence::High),
+            ("G304".to_string(), ScannerConfidence::High)
+        ]
+    );
+    assert!(confidences("CodeQL").iter().all(|(_, c)| *c == ScannerConfidence::High), "{:?}", confidences("CodeQL"));
+    for scanner in ["Trivy", "gitleaks", "osv-scanner", "Checkov", "dependency-check"] {
+        let read = confidences(scanner);
+        assert!(!read.is_empty(), "{scanner}");
+        assert!(read.iter().all(|(_, c)| *c == ScannerConfidence::Unstated), "{scanner} states none: {read:?}");
+    }
+}
+
+/// A scoped ingest carries the full scan's findings forward unchanged: their
+/// confidence is carried with them, not reset to `unstated`.
+#[test]
+fn a_scoped_ingest_carries_the_confidence_of_the_findings_it_keeps() {
+    let (_t, r) = repo();
+    ingest_fixture(&r, "semgrep-low-confidence.sarif");
+    let before: Vec<_> = read_latest(&r).unwrap().findings.iter().map(|f| (f.fingerprint.clone(), f.confidence)).collect();
+    assert!(before.iter().all(|(_, c)| *c == ScannerConfidence::Low), "{before:?}");
+    // A scoped run over a path that holds none of them: the report is empty.
+    let empty = write(&r, "scoped.sarif", r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0"}},"results":[]}]}"#);
+    super::ingest_scoped(&r, &empty, &indexed(), Some(super::IngestScope::replacing(&["cmd/server/main.go".to_string()]))).unwrap();
+    let after: Vec<_> = read_latest(&r).unwrap().findings.iter().map(|f| (f.fingerprint.clone(), f.confidence)).collect();
+    assert_eq!(after, before, "carried over with their confidence");
+}
+
+/// history.db 11 → 12: a finding stores the confidence its scanner states.
+/// Every stored row reads `unstated` — its report was not kept — with every
+/// other column as it was, every snapshot's report hash is marked so its own
+/// report re-ingests and decides it (one an earlier migration marked keeps that
+/// marker, which the pre-11 re-key looks for), and the CHECK refuses a word
+/// Logos never writes.
+#[test]
+fn migration_12_adds_confidence_to_a_stored_finding_as_unstated_and_marks_every_report() {
+    let tmp = TempDir::new().unwrap();
+    let path = tmp.path().join("history.db");
+    {
+        let conn = crate::history::db::open_at_version(&path, 11).unwrap();
+        // Three scanners: every snapshot is marked, whoever wrote it; snapshot 3
+        // is a Gitleaks one an earlier migration marked.
+        for (id, scanner) in [(1_i64, "Semgrep OSS"), (2, "Bandit"), (3, "gitleaks")] {
+            let hash = if id == 3 { "pre-11:hash3".to_string() } else { format!("hash{id}") };
+            conn.execute(
+                "INSERT INTO security_snapshots (id, head_sha, scanner_name, scanner_version, report_hash, format, created_at, full_head_sha)
+                 VALUES (?1, ?2, ?3, '1.85.0', ?4, 'sarif', 1, ?2)",
+                rusqlite::params![id, format!("head{id}"), scanner, hash],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding)
+                 VALUES (?1, 'f', 'r', 'high', 'CWE-89', 'm', 0, 'unbound')",
+                [id],
+            )
+            .unwrap();
+        }
+        assert!(conn.prepare("SELECT confidence FROM security_findings").is_err(), "no such column before migration 12");
+    }
+    let migrated = crate::history::db::open_at_version(&path, 12).unwrap();
+    assert_eq!(crate::history::db::current_version(&migrated).unwrap(), 12);
+    let read: Vec<(String, String, String)> = migrated
+        .prepare("SELECT rule_id, severity, confidence FROM security_findings ORDER BY snapshot_id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(read, vec![("r".to_string(), "high".to_string(), "unstated".to_string()); 3]);
+    let hashes: Vec<String> = migrated
+        .prepare("SELECT report_hash FROM security_snapshots ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    // An earlier migration's marker stays as it is, so the pre-11 re-key still finds it.
+    assert_eq!(hashes, ["pre-12:hash1", "pre-12:hash2", "pre-11:hash3"]);
+    for (word, accepted) in [("low", true), ("medium", true), ("high", true), ("unstated", true), ("very-high", false), ("LOW", false)] {
+        let inserted = migrated.execute(
+            "INSERT INTO security_findings (snapshot_id, fingerprint, rule_id, severity, cwes, message, redacted, binding, confidence)
+             VALUES (1, ?1, 'r', 'low', '', 'm', 0, 'unbound', ?1)",
+            [word],
+        );
+        assert_eq!(inserted.is_ok(), accepted, "{word}: {inserted:?}");
+    }
+}
+
+/// A store upgraded through migration 12 re-reads its own report: the very
+/// report that was stored is not a no-op, so the next ingest states each
+/// finding's confidence instead of leaving every row `unstated`.
+#[test]
+fn after_migration_12_re_ingesting_the_stored_report_states_its_confidence() {
+    let (_t, r) = repo();
+    ingest_fixture(&r, "semgrep-low-confidence.sarif");
+    {
+        // Rewind the store to what migration 12 leaves: `unstated`, hash marked.
+        let conn = Connection::open(crate::history::db_path(&r)).unwrap();
+        conn.execute_batch(
+            "UPDATE security_findings SET confidence = 'unstated';
+             UPDATE security_snapshots SET report_hash = 'pre-12:' || report_hash;",
+        )
+        .unwrap();
+    }
+    assert!(read_latest(&r).unwrap().findings.iter().all(|f| f.confidence == ScannerConfidence::Unstated));
+    let again = ingest_fixture(&r, "semgrep-low-confidence.sarif");
+    assert!(!again.already_ingested, "a marked report hash is not a no-op");
+    assert!(read_latest(&r).unwrap().findings.iter().all(|f| f.confidence == ScannerConfidence::Low));
 }
 
 // ── FR-SC-01: atomic rejection that names the defect ───────────────────────
@@ -1507,6 +1675,7 @@ fn secret_row(fingerprint: &str, line: i64, start: i64, end: i64) -> super::stor
         fingerprint: fingerprint.to_string(),
         rule_id: "generic-api-key".to_string(),
         severity: Severity::Medium,
+        confidence: ScannerConfidence::Unstated,
         cwes: Vec::new(),
         message: "redacted".to_string(),
         redacted: true,
@@ -1518,7 +1687,9 @@ fn secret_row(fingerprint: &str, line: i64, start: i64, end: i64) -> super::stor
         anchor_commit: None,
         commits: Vec::new(),
         legacy_fingerprints: Vec::new(),
+        pre13_legacy: Vec::new(),
         places: Vec::new(),
+        package: None,
     }
 }
 

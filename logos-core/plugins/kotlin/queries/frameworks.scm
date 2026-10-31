@@ -1,8 +1,13 @@
-; Kotlin framework-extraction query (S-055, S-330, capability = "frameworks") —
-; the ratified JVM set: Spring MVC/Boot (FR-FW-03, FR-FW-05),
+; Kotlin framework-extraction query (S-055, S-330, S-561, capability =
+; "frameworks") — the ratified JVM set: Spring MVC/Boot (FR-FW-03, FR-FW-05),
 ; annotation-compatible with the Java detector: the same `@GetMapping`
-; /stereotype idiom, the same `[framework_methods]` mapping and the same
-; `org::springframework` candidacy gate.
+; /stereotype idiom, the same annotation rows of `[framework_methods]` and the
+; `org::springframework` candidacy gate — plus the two call-shaped routing DSLs
+; Kotlin owns: Spring's functional `router`/`coRouter` and Ktor's `routing`
+; (see "Functional routing" below), the latter behind an `io::ktor` gate added
+; to Kotlin's. The annotation patterns read an annotation by its `…Mapping` name
+; as well as by the table, so the DSL's call names (`GET`, `get`) in the same
+; table never read as annotations (a Retrofit `@GET("users")`).
 ;
 ; Declarative capture contract (resolve::framework::generic_match): see the
 ; Python query's header for the capture vocabulary. Droppable on disk at
@@ -13,7 +18,9 @@
 ; fallback, the innermost-scope rule, the non-literal refusal — lives once in
 ; the shared interpreter (`resolve::framework::compose_prefixes`), so Kotlin
 ; contributes **no** composition code of its own: the whole per-language
-; surface is the capture names below, which is the claim S-330 verifies.
+; surface is the capture names below, which is the claim S-330 verifies. The
+; functional DSLs' nesting scopes chain instead of nesting innermost-first;
+; that rule is the interpreter's too (`resolve::framework::nest`).
 ;
 ; ── How Kotlin's annotation tree differs from Java's ─────────────────────────
 ;
@@ -59,8 +66,8 @@
 ; true in both spellings, and the two anchored node kinds stay disjoint, so a
 ; marker can still never share a site with an argument-bearing form.
 ;
-; Deliberately NOT captured: functional `RouterFunction` routing, whose builder
-; chain names no annotated handler method to link; a *method* path that is not
+; Deliberately NOT captured: the `RouterFunctions.route(…)` builder chain, which
+; names no router block to scope a registration to; a *method* path that is not
 ; a written literal — a constant reference, a concatenation or a string
 ; template leaves no literal, so nothing is promoted rather than a guessed
 ; path; and `@GetMapping()` with empty parentheses, a degenerate shape a
@@ -75,7 +82,8 @@
 ; C { … }` plus a DTO, a service interface or a second controller. The
 ; declaration is not recognised as a `class_declaration` at all: its modifiers
 ; are reparsed as a file-level expression, `has_error()` stays **false**, and
-; no pattern in this file (or any query) can see it. The same defect swallows
+; no pattern in this file can see it — `symbols.scm` counts the expression into
+; the file's partial-extraction warning (S-559). The same defect swallows
 ; an annotated `enum class` outright unless a second modifier precedes it
 ; (`internal enum class` parses and composes).
 ;
@@ -133,16 +141,17 @@
 ; `value = "/x"` (whose first named child is the key `identifier`). Without it
 ; this pattern also matches every string-valued named argument, `produces`
 ; included.
-(function_declaration
+((function_declaration
   (modifiers
     (annotation
       (constructor_invocation
-        (user_type (identifier) @fw.route.method)
+        (user_type (identifier) @fw.route.method @fw.route.slashed)
         (value_arguments
           (value_argument
             .
             (string_literal) @fw.route.path))) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
+  (#match? @fw.route.method "Mapping$"))
 
 ; The same annotation in its **named** form — what contract-first code and
 ; OpenAPI codegen actually emit: `@RequestMapping(method = RequestMethod.GET,
@@ -164,7 +173,7 @@
   (modifiers
     (annotation
       (constructor_invocation
-        (user_type (identifier) @fw.route.method)
+        (user_type (identifier) @fw.route.method @fw.route.slashed)
         (value_arguments
           (value_argument
             .
@@ -174,7 +183,8 @@
               (collection_literal (string_literal) @fw.route.path.named)
             ]))) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
-  (#any-of? @fw.route.key "value" "path" "`value`" "`path`"))
+  (#any-of? @fw.route.key "value" "path" "`value`" "`path`")
+  (#match? @fw.route.method "Mapping$"))
 
 ; A mapping annotation carrying NO path at all — `@GetMapping` on a handler
 ; whose full path is its declaring type's prefix (FR-FW-05, S-329). The
@@ -188,11 +198,12 @@
 ; clears the gate still establishes a route only where a literal prefix is in
 ; scope: the interpreter drops it otherwise rather than promoting an empty
 ; path.
-(function_declaration
+((function_declaration
   (modifiers
     (annotation
       (user_type (identifier) @fw.route.method) @fw.route.anchor))
   name: (identifier) @fw.route.handler)
+  (#match? @fw.route.method "Mapping$"))
 
 ; ── Class-/interface-level `@RequestMapping` prefix (S-329, S-330) ───────────
 ;
@@ -232,7 +243,7 @@
 ((_ (modifiers
       (annotation
         (constructor_invocation
-          (user_type (identifier) @fw.route.prefix.name)
+          (user_type (identifier) @fw.route.prefix.name @fw.route.slashed)
           (value_arguments
             (value_argument
               .
@@ -250,7 +261,7 @@
 ((_ (modifiers
       (annotation
         (constructor_invocation
-          (user_type (identifier) @fw.route.prefix.name)
+          (user_type (identifier) @fw.route.prefix.name @fw.route.slashed)
           (value_arguments
             (value_argument
               .
@@ -296,7 +307,7 @@
 ((_ (modifiers
       (annotation
         (constructor_invocation
-          (user_type (identifier) @fw.route.prefix.name)
+          (user_type (identifier) @fw.route.prefix.name @fw.route.slashed)
           (value_arguments
             (value_argument
               .
@@ -312,7 +323,7 @@
 ((_ (modifiers
       (annotation
         (constructor_invocation
-          (user_type (identifier) @fw.route.prefix.name)
+          (user_type (identifier) @fw.route.prefix.name @fw.route.slashed)
           (value_arguments
             (value_argument
               .
@@ -326,6 +337,210 @@
   (#any-of? @fw.route.prefix.key "value" "path" "`value`" "`path`")
   (#not-match? @fw.route.prefix.opaque "^\\[")
   (#not-eq? @fw.route.prefix.opaque ""))
+
+; ── Slash-less paths ─────────────────────────────────────────────────────────────
+;
+; Spring serves every mapping from the root, whether or not it was written with a
+; leading slash: `@GetMapping("vets.xml")` is `/vets.xml` (S-561). The
+; route-method and prefix-name captures of the annotation patterns above also
+; carry `@fw.route.slashed`, which makes the shared interpreter give a written
+; path or prefix the slash it left out. An empty path stays empty:
+; `@RequestMapping("")` supplies no prefix (S-329). The functional DSL and Ktor
+; patterns below carry no such capture: a router block states the root `/`
+; (`@fw.route.prefix.root`), which the join the interpreter makes gives every
+; slash-less `nest`, `route` or registration path (`"admin".nest { GET("users") }`
+; is `/admin/users`, as is Ktor's `route("admin") { get("users") }`).
+
+; ── Functional routing: Spring's `router` / `coRouter` DSL and Ktor's `routing` ─
+;
+; Both register routes by CALLING functions inside a lambda — `GET("/x", h::m)`,
+; `get("/x") { … }` — so a registration is a route only under a router block,
+; and a prefix is a `nest` or `route` call around it. Neither names an annotated
+; handler, so these patterns capture three things and leave every decision to
+; the shared interpreter (`resolve::framework::nest`):
+;
+;   `@fw.route.prefix.scope` + `@fw.route.prefix.nest` — a lambda that nests: the
+;       interpreter joins EVERY nesting scope around a registration, outermost
+;       first (a type's `@RequestMapping` is the innermost scope alone);
+;   `@fw.route.nested` — a registration that is a route only inside a nesting
+;       scope: outside every one it is not a route (`mockMvc.get("/x") { … }`,
+;       a cache lookup), and promotes nothing and counts nothing;
+;   `@fw.binding.*` — the typed property a handler reference is written on.
+;
+; A router block (`router`, `coRouter`, `routing`) is a nesting scope with the
+; root `/` as its prefix (`@fw.route.prefix.root`).
+((call_expression
+   (identifier) @fw.route.prefix.name @fw.route.prefix.root
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#any-of? @fw.route.prefix.name "router" "coRouter" "routing"))
+
+; Spring's `"/admin".nest { … }`: a written literal prefix.
+((call_expression
+   (navigation_expression
+     (string_literal) @fw.route.prefix
+     (identifier) @fw.route.prefix.name)
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "nest"))
+
+; Spring's `(accept(APPLICATION_JSON) and "/api").nest { … }`: the literal beside
+; a predicate that names no path. Only those four predicates are read as
+; path-free; any other operand is the opaque prefix below.
+((call_expression
+   (navigation_expression
+     (parenthesized_expression
+       (infix_expression
+         (call_expression (identifier) @fw.route.prefix.key)
+         (identifier) @fw.route.prefix.value
+         (string_literal) @fw.route.prefix))
+     (identifier) @fw.route.prefix.name)
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "nest")
+  (#eq? @fw.route.prefix.value "and")
+  (#any-of? @fw.route.prefix.key "accept" "contentType" "headers" "method"))
+
+((call_expression
+   (navigation_expression
+     (parenthesized_expression
+       (infix_expression
+         (string_literal) @fw.route.prefix
+         (identifier) @fw.route.prefix.value
+         (call_expression (identifier) @fw.route.prefix.key)))
+     (identifier) @fw.route.prefix.name)
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "nest")
+  (#eq? @fw.route.prefix.value "and")
+  (#any-of? @fw.route.prefix.key "accept" "contentType" "headers" "method"))
+
+; Any other receiver of `nest` is a prefix this file cannot read — the opaque
+; half, which makes a gap fail CLOSED: its registrations are refused and
+; counted, never promoted at the partial path the enclosing scopes give. The
+; receivers it excludes are the ones the patterns above read: a bare
+; path-free predicate (`accept(TEXT_HTML).nest { … }` adds no segment, so the
+; lambda is no scope at all), and the parenthesised `and` of one with a literal.
+; The text rule admits one level of parentheses in the predicate's arguments;
+; anything more reads as opaque, the safe side. A literal receiver also matches
+; here, at exactly the literal's range, and the interpreter ignores an opaque
+; capture that is just a captured literal restated.
+((call_expression
+   (navigation_expression
+     . (_) @fw.route.prefix.opaque
+     (identifier) @fw.route.prefix.name .)
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "nest")
+  (#not-match? @fw.route.prefix.opaque "^(?:(?:accept|contentType|headers|method)\\((?:[^()]|\\([^()]*\\))*\\)|\\(\\s*(?:accept|contentType|headers|method)\\((?:[^()]|\\([^()]*\\))*\\)\\s+and\\s+\"[^\"\\n]*\"\\s*\\)|\\(\\s*\"[^\"\\n]*\"\\s+and\\s+(?:accept|contentType|headers|method)\\((?:[^()]|\\([^()]*\\))*\\)\\s*\\))$"))
+
+; Ktor's `route("/p") { … }` (the optional second argument, an `HttpMethod`,
+; names no path), and the opaque form `route(PATH) { … }`.
+((call_expression
+   (call_expression
+     (identifier) @fw.route.prefix.name
+     (value_arguments
+       . (value_argument . (string_literal) @fw.route.prefix)))
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "route"))
+
+((call_expression
+   (call_expression
+     (identifier) @fw.route.prefix.name
+     (value_arguments
+       . (value_argument . (expression) @fw.route.prefix.opaque)))
+   (annotated_lambda) @fw.route.prefix.scope @fw.route.prefix.nest)
+  (#eq? @fw.route.prefix.name "route"))
+
+; A Ktor routing extension — `fun Route.users() { get("/u") { … } }` — is mounted
+; wherever another file calls it (`route("/api") { users() }`), which this file
+; does not show. Its registrations are refused and counted, never promoted at a
+; bare path that would claim a provider at the wrong address.
+((function_declaration
+   (user_type (identifier) @fw.route.prefix.name) @fw.route.prefix.opaque
+   .
+   name: (identifier)) @fw.route.prefix.scope @fw.route.prefix.nest
+  (#any-of? @fw.route.prefix.name "Route" "Routing"))
+
+; The registrations. The method text maps through `[framework_methods]`: Spring's
+; upper-case `GET` and Ktor's lower-case `get` are separate rows, so an unmapped
+; call promotes nothing.
+;
+; Positional path with a handler reference: `GET("/talk", talkHandler::find)`.
+; The reference is a `navigation_expression` whose separator is the `::` token
+; (a `navigation_expression` with `.` is a property read, never a handler) or a
+; bare `callable_reference` (`::find`).
+((call_expression
+   (identifier) @fw.route.method @fw.route.nested
+   (value_arguments
+     . (value_argument . (string_literal) @fw.route.path)
+     . (value_argument
+       [
+         (navigation_expression "::") @fw.route.handler
+         (callable_reference) @fw.route.handler
+       ]))) @fw.route.anchor
+  (#not-match? @fw.route.path "\\$[{A-Za-z_]"))
+
+; Positional path, handler written as a lambda or not at all: `GET("/x") { … }`,
+; `get("/x") { … }`, and the bare `GET("/x")` of a predicate combination
+; (`GET("/a") or GET("/b")`). A path with a string-template reference is not a
+; written path — it is the opaque form below — so one `GET("/$year/")` in a loop
+; is never promoted as a route whose name holds the template.
+((call_expression
+   (identifier) @fw.route.method @fw.route.nested
+   (value_arguments
+     . (value_argument . (string_literal) @fw.route.path))) @fw.route.anchor
+  (#not-match? @fw.route.path "\\$[{A-Za-z_]"))
+
+; A path that is not a written literal: counted in `routes_not_composed`, never
+; guessed.
+(call_expression
+  (identifier) @fw.route.method @fw.route.nested
+  (value_arguments
+    . (value_argument . (expression) @fw.route.path.opaque))) @fw.route.anchor
+
+; Ktor's pathless `get { … }`: the registration is the enclosing prefix itself.
+(call_expression
+  (identifier) @fw.route.method @fw.route.nested
+  (annotated_lambda)) @fw.route.anchor
+
+; A registration's handler body is no router block. The calls inside
+; `get("/h") { respond(buildJsonObject { put("status", "ok") }) }` are the
+; handler's own code, and kotlinx.html's `head { }` is no `HEAD` registration, so
+; the trailing lambda of a call the descriptor maps (`@fw.route.barrier.name` is
+; read through `[framework_methods]`) is a barrier: a registration inside one is
+; no route and is not counted. The third pattern is the lambda a parenthesised
+; predicate combination takes, `(GET("/a") or GET("/b")) { … }`.
+(call_expression
+  (call_expression (identifier) @fw.route.barrier.name (value_arguments))
+  (annotated_lambda) @fw.route.barrier)
+
+(call_expression
+  (identifier) @fw.route.barrier.name
+  (annotated_lambda) @fw.route.barrier)
+
+(call_expression
+  (parenthesized_expression)
+  (annotated_lambda) @fw.route.barrier)
+
+; The properties a handler reference can be written on, by their declared type:
+; a primary-constructor `val`/`var` and a member property that states its type,
+; each visible throughout its class. A type written as one bare name is read; a
+; generic, nullable or qualified one is not, so its handlers bind nothing.
+; Known gap: the match is the head's *text*, so a lambda parameter or local
+; that rebinds the property's name still reads as the property, and so does an
+; inner declaration of it whose type is not one bare name (it is not captured,
+; so it does not shadow the outer one). The binder
+; still has to prove the member (`resolve::framework::nest`).
+((class_declaration
+   (primary_constructor
+     (class_parameters
+       (class_parameter
+         ["val" "var"]
+         (identifier) @fw.binding.name
+         (user_type . (identifier) @fw.binding.type .))))) @fw.binding.scope)
+
+((class_declaration
+   (class_body
+     (property_declaration
+       (variable_declaration
+         (identifier) @fw.binding.name
+         (user_type . (identifier) @fw.binding.type .))))) @fw.binding.scope)
 
 ; ── Components ───────────────────────────────────────────────────────────────
 

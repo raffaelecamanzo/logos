@@ -54,7 +54,21 @@ macro_rules! query {
 /// the grammar is structural (documentation / artifact) and ships no `.scm`
 /// ([CR-211]).
 ///
+/// `entry!("javascript", shares tsx_entry())` is a language that is its own
+/// descriptor but not its own grammar (S-538, [FR-PL-08]): it takes the shared
+/// entry's `LanguageFn` **and** its very query slice, so its queries are never
+/// a copy that could drift, and always compile against the grammar they were
+/// written for.
+///
+/// `entry!("javascript", shares tsx_entry(), layers ["symbols"])` adds the
+/// sharing language's own patterns (S-539, [FR-EX-18]): each named
+/// `plugins/<lang>/queries/<name>.scm` is appended to the shared query of the
+/// same path ([`layered`]), so the patterns only that language reads sit
+/// beside the shared ones without changing what the shared language extracts.
+///
 /// [CR-211]: ../../../docs/requests/CR-211-grammar-entries-are-declared-once.md
+/// [FR-PL-08]: ../../../docs/specs/requirements/FR-PL-08.md
+/// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
 // Every use is behind a `lang-*` feature, and `query!` is used only by a grammar
 // that ships `.scm` queries: a build with no such grammar (`--no-default-features`,
 // or only structural ones like `lang-markdown`) has no call site. The macro is
@@ -72,6 +86,54 @@ macro_rules! entry {
             embedded_queries: &[$(query!($lang, $name)),*],
         }
     };
+    ($lang:literal, shares $shared:expr) => {{
+        let shared: GrammarEntry = $shared;
+        GrammarEntry {
+            manifest_label: concat!($lang, "/plugin.toml"),
+            manifest_toml: include_str!(concat!("../../plugins/", $lang, "/plugin.toml")),
+            language: shared.language,
+            embedded_queries: shared.embedded_queries,
+        }
+    }};
+    ($lang:literal, shares $shared:expr, layers [$($name:literal),* $(,)?]) => {{
+        // One layered slice per expansion site, built on first use: the
+        // shared entry an expansion names is fixed, so it never goes stale.
+        static LAYERED: std::sync::OnceLock<Vec<EmbeddedQuery>> = std::sync::OnceLock::new();
+        let shared: GrammarEntry = $shared;
+        GrammarEntry {
+            manifest_label: concat!($lang, "/plugin.toml"),
+            manifest_toml: include_str!(concat!("../../plugins/", $lang, "/plugin.toml")),
+            language: shared.language,
+            embedded_queries: LAYERED.get_or_init(|| layered(shared.embedded_queries, &[$(query!($lang, $name)),*])),
+        }
+    }};
+}
+
+/// The shared queries with each of `own` appended to the shared query of its
+/// path, or added when none has it (S-539): the layered source is the shared
+/// text, then the sharing language's, under a label naming both files, so a
+/// compile error points at the pair. A shared query `own` does not name is
+/// the shared asset itself.
+///
+/// Built once per `entry!(…, layers …)` site, so the leaked sources are
+/// bounded by the table, as `include_str!` text is.
+// Called only from `entry!(…, layers …)`, which only a `lang-*`-gated row uses.
+#[allow(dead_code)]
+fn layered(shared: &'static [EmbeddedQuery], own: &[EmbeddedQuery]) -> Vec<EmbeddedQuery> {
+    let leak = |text: String| -> &'static str { Box::leak(text.into_boxed_str()) };
+    let mut queries: Vec<EmbeddedQuery> = shared
+        .iter()
+        .map(|base| match own.iter().find(|q| q.relative_path == base.relative_path) {
+            Some(layer) => EmbeddedQuery {
+                relative_path: base.relative_path,
+                label: leak(format!("{} + {}", base.label, layer.label)),
+                source: leak(format!("{}\n{}", base.source, layer.source)),
+            },
+            None => *base,
+        })
+        .collect();
+    queries.extend(own.iter().filter(|q| shared.iter().all(|base| base.relative_path != q.relative_path)));
+    queries
 }
 
 /// One embedded `.scm` query asset shipped with a grammar.
@@ -132,14 +194,17 @@ pub fn compiled() -> Vec<GrammarEntry> {
     #[cfg(feature = "lang-python")]
     entries.push(python_entry());
 
-    // One crate, two grammars (ADR-09): `.ts`/`.js` parse with the TypeScript
-    // grammar, `.tsx`/`.jsx` with the TSX grammar (JSX changes the syntax, so
-    // tree-sitter ships it as a distinct `Language`). Both rows ride the single
-    // `lang-typescript` feature.
+    // One crate, two grammars (ADR-09): `.ts` parses with the TypeScript
+    // grammar, `.tsx` with the TSX grammar (JSX changes the syntax, so
+    // tree-sitter ships it as a distinct `Language`). JavaScript (`.js`, `.mjs`,
+    // `.cjs`, `.jsx`) is a third language over the TSX grammar and its queries
+    // (S-538). All three rows ride the single `lang-typescript` feature.
     #[cfg(feature = "lang-typescript")]
     entries.push(typescript_entry());
     #[cfg(feature = "lang-typescript")]
     entries.push(tsx_entry());
+    #[cfg(feature = "lang-typescript")]
+    entries.push(javascript_entry());
 
     #[cfg(feature = "lang-go")]
     entries.push(go_entry());
@@ -343,11 +408,13 @@ fn python_entry() -> GrammarEntry {
             // `requests`/`httpx` free functions and the session/client
             // receiver form.
             "invocations",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
 
-/// The TypeScript grammar entry (`.ts`/`.js`, [FR-PL-01], S-015).
+/// The TypeScript grammar entry (`.ts`, [FR-PL-01], S-015).
 #[cfg(feature = "lang-typescript")]
 fn typescript_entry() -> GrammarEntry {
     entry!(
@@ -360,13 +427,16 @@ fn typescript_entry() -> GrammarEntry {
             // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
             // consumer side that makes this language's routes bindable.
             "invocations",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
 
-/// The TSX grammar entry (`.tsx`/`.jsx`, [FR-PL-01], S-015). Shares the
+/// The TSX grammar entry (`.tsx`, [FR-PL-01], S-015). Shares the
 /// `lang-typescript` feature with [`typescript_entry`] but parses with the
-/// distinct TSX `Language` and ships its own queries (JSX node kinds).
+/// distinct TSX `Language` and ships its own queries (JSX node kinds), which
+/// [`javascript_entry`] shares.
 #[cfg(feature = "lang-typescript")]
 fn tsx_entry() -> GrammarEntry {
     entry!(
@@ -379,8 +449,27 @@ fn tsx_entry() -> GrammarEntry {
             // The outbound HTTP client-call arm (S-343, [FR-WS-08]): the
             // consumer side that makes this language's routes bindable.
             "invocations",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
+}
+
+/// The JavaScript entry (`.js`/`.mjs`/`.cjs`/`.jsx`, S-538, [FR-PL-08]): its
+/// own `javascript` descriptor over the TSX grammar and the `tsx` entry's very
+/// queries, so JSX parses in a `.js` file and a TypeScript-family query change
+/// reaches JavaScript with no second copy. Its own `symbols` patterns — the
+/// functions JavaScript defines by assignment, `exports` or prototype (S-539,
+/// [FR-EX-18]) — are layered over the shared `symbols` query, and its own
+/// Express template-literal paths (S-541, [FR-FW-03]) over the shared
+/// `frameworks` query.
+///
+/// [FR-PL-08]: ../../../docs/specs/requirements/FR-PL-08.md
+/// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
+/// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+#[cfg(feature = "lang-typescript")]
+fn javascript_entry() -> GrammarEntry {
+    entry!("javascript", shares tsx_entry(), layers ["symbols", "frameworks"])
 }
 
 /// The Go grammar entry ([FR-PL-01], S-015).
@@ -404,6 +493,8 @@ fn go_entry() -> GrammarEntry {
             // reference estate's 262 real `.go` files. The query header says why
             // the two halves must not be reported as one number.
             "brokers",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -429,6 +520,8 @@ fn java_entry() -> GrammarEntry {
             // `@ConfigurationProperties` class, its key prefix and the
             // properties it declares.
             "properties",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -445,7 +538,7 @@ fn java_entry() -> GrammarEntry {
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 #[cfg(feature = "lang-c")]
 fn c_entry() -> GrammarEntry {
-    entry!("c", tree_sitter_c::LANGUAGE, ["symbols", "references",])
+    entry!("c", tree_sitter_c::LANGUAGE, ["symbols", "references", "locals",])
 }
 
 /// The Kotlin grammar entry (S-055, [CR-009]).
@@ -481,6 +574,8 @@ fn kotlin_entry() -> GrammarEntry {
             // concedes a grammar-registry binding and never claimed zero-touch
             // for registering a query against an existing grammar entry.
             "properties",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -506,6 +601,8 @@ fn c_sharp_entry() -> GrammarEntry {
             // [CR-108]): the consumer side of the route key `frameworks`
             // promotes on the provider side.
             "invocations",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -525,7 +622,7 @@ fn c_sharp_entry() -> GrammarEntry {
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 #[cfg(feature = "lang-cpp")]
 fn cpp_entry() -> GrammarEntry {
-    entry!("cpp", tree_sitter_cpp::LANGUAGE, ["symbols", "references",])
+    entry!("cpp", tree_sitter_cpp::LANGUAGE, ["symbols", "references", "locals",])
 }
 
 /// The Ruby grammar entry (S-059, [CR-009], [FR-PL-07]).
@@ -542,6 +639,8 @@ fn ruby_entry() -> GrammarEntry {
             // [FR-WS-08], [CR-108]): the consumer side of the route key
             // `frameworks` promotes on the provider side.
             "invocations",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -562,7 +661,7 @@ fn php_entry() -> GrammarEntry {
     entry!(
         "php",
         tree_sitter_php::LANGUAGE_PHP,
-        ["symbols", "references", "frameworks", "invocations",]
+        ["symbols", "references", "frameworks", "invocations", "locals",]
     )
 }
 
@@ -581,7 +680,7 @@ fn scala_entry() -> GrammarEntry {
     entry!(
         "scala",
         tree_sitter_scala::LANGUAGE,
-        ["symbols", "references",]
+        ["symbols", "references", "locals",]
     )
 }
 
@@ -687,6 +786,8 @@ fn rust_entry() -> GrammarEntry {
             // Rust ships it alongside `reachability = true`, closing the
             // capability-matrix gap ([CR-081], [FR-WS-12] AC1).
             "brokers",
+            // The local-binding facts (S-593, [FR-EX-33]).
+            "locals",
         ]
     )
 }
@@ -710,6 +811,63 @@ mod tests {
         queries: &'static [(&'static str, &'static str, usize, u64)],
     }
 
+    /// The `tsx` entry's queries, pinned once: the `javascript` row runs the
+    /// very same assets (S-538), so both rows read this one table.
+    const TSX_QUERIES: &[(&str, &str, usize, u64)] = &[
+        (
+            "queries/symbols.scm",
+            "tsx/queries/symbols.scm",
+            8799,
+            0xfc5b284696884eae,
+        ),
+        (
+            "queries/references.scm",
+            "tsx/queries/references.scm",
+            16303,
+            0x49703e92de588b41,
+        ),
+        (
+            "queries/frameworks.scm",
+            "tsx/queries/frameworks.scm",
+            12665,
+            0x5d319b971eeb949a,
+        ),
+        (
+            "queries/invocations.scm",
+            "tsx/queries/invocations.scm",
+            7399,
+            0x0b82a0e876891fea,
+        ),
+        (
+            "queries/locals.scm",
+            "tsx/queries/locals.scm",
+            3735,
+            0xb54de5df2f23165b,
+        ),
+    ];
+
+    /// The `javascript` entry's queries (S-539): the `tsx` entry's, with its own
+    /// `symbols` layer appended to the shared `symbols` query and its own
+    /// `frameworks` layer to the shared `frameworks` query (S-541); every other
+    /// query is the `tsx` asset itself.
+    const JAVASCRIPT_QUERIES: &[(&str, &str, usize, u64)] = &[
+        (
+            "queries/symbols.scm",
+            "tsx/queries/symbols.scm + javascript/queries/symbols.scm",
+            13184,
+            0x3141d7063fbd6df8,
+        ),
+        TSX_QUERIES[1],
+        (
+            "queries/frameworks.scm",
+            "tsx/queries/frameworks.scm + javascript/queries/frameworks.scm",
+            15005,
+            0x2acd65db562df3d6,
+        ),
+        TSX_QUERIES[3],
+        TSX_QUERIES[4],
+    ];
+
     fn fnv1a(text: &str) -> u64 {
         text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
             (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
@@ -725,7 +883,7 @@ mod tests {
         vec![
             Row {
                 feature: cfg!(feature = "lang-rust"),
-                manifest: ("rust/plugin.toml", 10743, 0x75c6271b31b59fa9),
+                manifest: ("rust/plugin.toml", 10923, 0x228bcc338ce0dfef),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -736,8 +894,8 @@ mod tests {
                     (
                         "queries/references.scm",
                         "rust/queries/references.scm",
-                        11761,
-                        0x004f860f6b1f54c6,
+                        12765,
+                        0xd5c87d5cf4015a31,
                     ),
                     (
                         "queries/frameworks.scm",
@@ -757,23 +915,29 @@ mod tests {
                         12999,
                         0x591536b77328dd73,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "rust/queries/locals.scm",
+                        3351,
+                        0x3f08d9b4840320c2,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-python"),
-                manifest: ("python/plugin.toml", 6154, 0xf8811a0062e2a0bf),
+                manifest: ("python/plugin.toml", 6892, 0x96d0a27a72364c4f),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "python/queries/symbols.scm",
-                        5781,
-                        0x43bbfe75770584d0,
+                        9857,
+                        0x7b25cb779975a34b,
                     ),
                     (
                         "queries/references.scm",
                         "python/queries/references.scm",
-                        6514,
-                        0x88711c3203ae5098,
+                        22289,
+                        0xcdc5d69deb119253,
                     ),
                     (
                         "queries/frameworks.scm",
@@ -787,29 +951,35 @@ mod tests {
                         8235,
                         0x520b44ad31174e4a,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "python/queries/locals.scm",
+                        4746,
+                        0x2d31f23668e33992,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-typescript"),
-                manifest: ("typescript/plugin.toml", 6736, 0xba51af954b3e8ce7),
+                manifest: ("typescript/plugin.toml", 8055, 0x9dd43e33ec070f0e),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "typescript/queries/symbols.scm",
-                        4334,
-                        0xe0100e6b86947a44,
+                        8820,
+                        0x856d6d3f21ad78c4,
                     ),
                     (
                         "queries/references.scm",
                         "typescript/queries/references.scm",
-                        5135,
-                        0x2dfd30409cdb5eec,
+                        16159,
+                        0xc083e18107d6a0f8,
                     ),
                     (
                         "queries/frameworks.scm",
                         "typescript/queries/frameworks.scm",
-                        3419,
-                        0xd3840e469f367696,
+                        12679,
+                        0xb0b0a0f064321e92,
                     ),
                     (
                         "queries/invocations.scm",
@@ -817,59 +987,48 @@ mod tests {
                         7405,
                         0x089e8311da95e6b0,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "typescript/queries/locals.scm",
+                        3728,
+                        0xaffe9ea1e7a6fa25,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-typescript"),
-                manifest: ("tsx/plugin.toml", 5653, 0xf09a93022ea5fac0),
-                queries: &[
-                    (
-                        "queries/symbols.scm",
-                        "tsx/queries/symbols.scm",
-                        4313,
-                        0x59c4a5774eb77072,
-                    ),
-                    (
-                        "queries/references.scm",
-                        "tsx/queries/references.scm",
-                        5385,
-                        0xd84a3a8a6bfc5a2b,
-                    ),
-                    (
-                        "queries/frameworks.scm",
-                        "tsx/queries/frameworks.scm",
-                        3405,
-                        0xd136b44c359a0530,
-                    ),
-                    (
-                        "queries/invocations.scm",
-                        "tsx/queries/invocations.scm",
-                        7399,
-                        0x0b82a0e876891fea,
-                    ),
-                ],
+                manifest: ("tsx/plugin.toml", 6924, 0x1057c0cb65109baa),
+                queries: TSX_QUERIES,
+            },
+            // JavaScript runs the `tsx` entry's very queries (S-538), never a
+            // copy of its own, with its own `symbols` (S-539) and `frameworks`
+            // (S-541) layers.
+            Row {
+                feature: cfg!(feature = "lang-typescript"),
+                manifest: ("javascript/plugin.toml", 8108, 0x27b19b132aba44e2),
+                queries: JAVASCRIPT_QUERIES,
             },
             Row {
                 feature: cfg!(feature = "lang-go"),
-                manifest: ("go/plugin.toml", 5634, 0x897e062307e504df),
+                manifest: ("go/plugin.toml", 8453, 0x2a7356aef73b47ba),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "go/queries/symbols.scm",
-                        4012,
-                        0x8959f36cfa3f5540,
+                        9016,
+                        0xeb26e96af4ba6805,
                     ),
                     (
                         "queries/references.scm",
                         "go/queries/references.scm",
-                        3906,
-                        0xb0603177705c1d2c,
+                        6203,
+                        0x6f24c842449e7ee1,
                     ),
                     (
                         "queries/frameworks.scm",
                         "go/queries/frameworks.scm",
-                        1644,
-                        0xd070e52fb3c6a054,
+                        4181,
+                        0x0db1f4ebbe9d2b36,
                     ),
                     (
                         "queries/invocations.scm",
@@ -883,11 +1042,17 @@ mod tests {
                         8256,
                         0x9e2060e44083c47d,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "go/queries/locals.scm",
+                        3650,
+                        0xfbcc7767f8462b4d,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-java"),
-                manifest: ("java/plugin.toml", 10730, 0x7240f6ffa0bb7c5d),
+                manifest: ("java/plugin.toml", 11139, 0x0e7035fc0e92b17a),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -904,8 +1069,8 @@ mod tests {
                     (
                         "queries/frameworks.scm",
                         "java/queries/frameworks.scm",
-                        21430,
-                        0x3a9ed21dfa313290,
+                        22135,
+                        0x2e7eb5f8c7e748ce,
                     ),
                     (
                         "queries/invocations.scm",
@@ -925,6 +1090,12 @@ mod tests {
                         9419,
                         0x211576acec806b2b,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "java/queries/locals.scm",
+                        2524,
+                        0x727009aed218109c,
+                    ),
                 ],
             },
         ]
@@ -936,43 +1107,49 @@ mod tests {
         vec![
             Row {
                 feature: cfg!(feature = "lang-c"),
-                manifest: ("c/plugin.toml", 3486, 0xe08a7b0e8cf9b3ae),
+                manifest: ("c/plugin.toml", 5540, 0xb79b2b615fa49907),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "c/queries/symbols.scm",
-                        4322,
-                        0xf2b7e98cb849a9d6,
+                        10216,
+                        0x78b88b78fb69884e,
                     ),
                     (
                         "queries/references.scm",
                         "c/queries/references.scm",
-                        1147,
-                        0x759a30fe84202ef7,
+                        1909,
+                        0xdea07c8019db7fa4,
+                    ),
+                    (
+                        "queries/locals.scm",
+                        "c/queries/locals.scm",
+                        1747,
+                        0x9ce914ef3e4aab80,
                     ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-kotlin"),
-                manifest: ("kotlin/plugin.toml", 11780, 0x2344974eda8b1145),
+                manifest: ("kotlin/plugin.toml", 16504, 0x767e96e5cacf9609),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "kotlin/queries/symbols.scm",
-                        5445,
-                        0x3f656076b5781204,
+                        10530,
+                        0xfd89cbaf137bdcec,
                     ),
                     (
                         "queries/references.scm",
                         "kotlin/queries/references.scm",
-                        8082,
-                        0xa68ef19461008f1c,
+                        28484,
+                        0x7c01b75bfccb14b7,
                     ),
                     (
                         "queries/frameworks.scm",
                         "kotlin/queries/frameworks.scm",
-                        18666,
-                        0x186405a809ad43cc,
+                        29783,
+                        0xf85bd4ec5c2dd500,
                     ),
                     (
                         "queries/invocations.scm",
@@ -986,29 +1163,35 @@ mod tests {
                         6183,
                         0x6efef4607b409eca,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "kotlin/queries/locals.scm",
+                        2280,
+                        0x7125243d879b9f5c,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-c-sharp"),
-                manifest: ("c-sharp/plugin.toml", 9500, 0x045c0a95b989be36),
+                manifest: ("c-sharp/plugin.toml", 12682, 0x3d9ce2c9cc53fee4),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "c-sharp/queries/symbols.scm",
-                        3269,
-                        0x60af034d61675963,
+                        4098,
+                        0xb1356cb6efbfb3c4,
                     ),
                     (
                         "queries/references.scm",
                         "c-sharp/queries/references.scm",
-                        7569,
-                        0x316d9e9cb22e1c3a,
+                        28328,
+                        0x5b872d5c84a41bd3,
                     ),
                     (
                         "queries/frameworks.scm",
                         "c-sharp/queries/frameworks.scm",
-                        1378,
-                        0x8f43797db8e09a4b,
+                        15391,
+                        0x32f35e14cc1ddc92,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1016,47 +1199,59 @@ mod tests {
                         10265,
                         0xb463d6744cac16ec,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "c-sharp/queries/locals.scm",
+                        3935,
+                        0x6a38ccbf417d3d69,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-cpp"),
-                manifest: ("cpp/plugin.toml", 4274, 0xb979cfc3e48b2c87),
+                manifest: ("cpp/plugin.toml", 6445, 0xc3508a40dac8afb5),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "cpp/queries/symbols.scm",
-                        7136,
-                        0x4307e3e695c06048,
+                        16358,
+                        0xe060e744299d2494,
                     ),
                     (
                         "queries/references.scm",
                         "cpp/queries/references.scm",
-                        4566,
-                        0xc16992938c69add3,
+                        21792,
+                        0x373d4dbc013eb9ff,
+                    ),
+                    (
+                        "queries/locals.scm",
+                        "cpp/queries/locals.scm",
+                        3659,
+                        0x7cef7ea71261a64c,
                     ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-ruby"),
-                manifest: ("ruby/plugin.toml", 5404, 0x0e2423b98884f23b),
+                manifest: ("ruby/plugin.toml", 8327, 0x02b590adf59f0ae1),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "ruby/queries/symbols.scm",
-                        2885,
-                        0x2adb5e37cd35671b,
+                        8080,
+                        0x9f73715c8dfb9022,
                     ),
                     (
                         "queries/references.scm",
                         "ruby/queries/references.scm",
-                        7465,
-                        0x661ea66aedb840cf,
+                        19132,
+                        0xc50022b1d02e20da,
                     ),
                     (
                         "queries/frameworks.scm",
                         "ruby/queries/frameworks.scm",
-                        1865,
-                        0x714c857c769f6c11,
+                        11986,
+                        0x22717c694e8a068c,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1064,29 +1259,35 @@ mod tests {
                         9149,
                         0x82f0520da4ac95a7,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "ruby/queries/locals.scm",
+                        2534,
+                        0x375f4fd15c5058ae,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-php"),
-                manifest: ("php/plugin.toml", 6868, 0x674501fd424182b5),
+                manifest: ("php/plugin.toml", 8945, 0x33e913387f0fce21),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "php/queries/symbols.scm",
-                        3417,
-                        0x42d85e53eae99587,
+                        5768,
+                        0x990b6cbc2e2764a0,
                     ),
                     (
                         "queries/references.scm",
                         "php/queries/references.scm",
-                        7103,
-                        0x6a6b43107a598435,
+                        21027,
+                        0x15daf455fad1e482,
                     ),
                     (
                         "queries/frameworks.scm",
                         "php/queries/frameworks.scm",
-                        1790,
-                        0xaaa6fec47a6f5a1b,
+                        16715,
+                        0x7c45801e3fcc3dfd,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1094,23 +1295,35 @@ mod tests {
                         9935,
                         0x4f4c4c87873fe722,
                     ),
+                    (
+                        "queries/locals.scm",
+                        "php/queries/locals.scm",
+                        2512,
+                        0x297d177b3fe082a3,
+                    ),
                 ],
             },
             Row {
                 feature: cfg!(feature = "lang-scala"),
-                manifest: ("scala/plugin.toml", 5658, 0xf443858e00b869e4),
+                manifest: ("scala/plugin.toml", 9324, 0xd0e445568ba11005),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "scala/queries/symbols.scm",
-                        4437,
-                        0x61b8318965c105dd,
+                        5478,
+                        0xcccce7338dc799ef,
                     ),
                     (
                         "queries/references.scm",
                         "scala/queries/references.scm",
-                        5441,
-                        0x464eaf86327ec71b,
+                        32646,
+                        0x27d3bf8d80b32dcd,
+                    ),
+                    (
+                        "queries/locals.scm",
+                        "scala/queries/locals.scm",
+                        3189,
+                        0x4ad219a271bc555f,
                     ),
                 ],
             },
@@ -1215,5 +1428,116 @@ mod tests {
                 assert_eq!(fnv1a(query.source), qhash, "{qlabel}: source bytes");
             }
         }
+    }
+
+    /// The `javascript` entry shares the `tsx` entry rather than copying it
+    /// (S-538, [FR-PL-08]): the same `LanguageFn`, and every query the `tsx`
+    /// asset itself — the very static source, so a TypeScript-family query
+    /// change made in `tsx/queries/` is the change JavaScript runs, with no
+    /// second copy to keep in step — except `symbols` and `frameworks`, each
+    /// that asset with JavaScript's own layer appended (S-539, [FR-EX-18];
+    /// S-541, [FR-FW-03]).
+    ///
+    /// [FR-PL-08]: ../../../docs/specs/requirements/FR-PL-08.md
+    /// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
+    /// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn javascript_runs_the_tsx_grammar_and_the_tsx_queries_themselves() {
+        let (javascript, tsx) = (javascript_entry(), tsx_entry());
+        assert_eq!(javascript.manifest_label, "javascript/plugin.toml");
+        assert_eq!(javascript.embedded_queries.len(), tsx.embedded_queries.len());
+        for (js, shared) in javascript.embedded_queries.iter().zip(tsx.embedded_queries) {
+            assert_eq!(js.relative_path, shared.relative_path);
+            let layer = match js.relative_path {
+                "queries/symbols.scm" => Some(include_str!("../../plugins/javascript/queries/symbols.scm")),
+                "queries/frameworks.scm" => Some(include_str!("../../plugins/javascript/queries/frameworks.scm")),
+                _ => None,
+            };
+            if let Some(layer) = layer {
+                assert_eq!(js.source, format!("{}\n{layer}", shared.source), "the shared query, then JavaScript's");
+            } else {
+                assert!(
+                    std::ptr::eq(js.source, shared.source),
+                    "{}: javascript runs tsx's own asset, not a copy",
+                    js.label
+                );
+            }
+        }
+        assert!(
+            std::ptr::eq(javascript.embedded_queries, javascript_entry().embedded_queries),
+            "the layered table is built once"
+        );
+        assert_eq!(
+            javascript.language.into_raw() as usize,
+            tsx.language.into_raw() as usize,
+            "javascript parses with the grammar its shared queries were written for"
+        );
+    }
+
+    /// A layer is appended to whatever its shared entry holds, as it stands,
+    /// and a layer the shared entry has no query for is a query of its own.
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn a_layer_is_appended_to_the_shared_query_of_its_path() {
+        const SHARED: &[EmbeddedQuery] = &[
+            EmbeddedQuery {
+                relative_path: "queries/symbols.scm",
+                label: "tsx/queries/symbols.scm",
+                source: "(function_declaration name: (identifier) @symbol.function)",
+            },
+            EmbeddedQuery {
+                relative_path: "queries/references.scm",
+                label: "tsx/queries/references.scm",
+                source: "(call_expression) @ref.call",
+            },
+        ];
+        const OWN: &[EmbeddedQuery] = &[
+            EmbeddedQuery {
+                relative_path: "queries/symbols.scm",
+                label: "javascript/queries/symbols.scm",
+                source: "(pair key: (property_identifier) @symbol.method)",
+            },
+            EmbeddedQuery {
+                relative_path: "queries/extra.scm",
+                label: "javascript/queries/extra.scm",
+                source: "(identifier) @x",
+            },
+        ];
+        let queries = layered(SHARED, OWN);
+        let shape: Vec<(&str, &str, &str)> = queries.iter().map(|q| (q.relative_path, q.label, q.source)).collect();
+        assert_eq!(
+            shape,
+            [
+                (
+                    "queries/symbols.scm",
+                    "tsx/queries/symbols.scm + javascript/queries/symbols.scm",
+                    "(function_declaration name: (identifier) @symbol.function)\n(pair key: (property_identifier) @symbol.method)",
+                ),
+                ("queries/references.scm", "tsx/queries/references.scm", "(call_expression) @ref.call"),
+                ("queries/extra.scm", "javascript/queries/extra.scm", "(identifier) @x"),
+            ]
+        );
+        assert!(std::ptr::eq(queries[1].source, SHARED[1].source), "an unlayered query is the shared asset");
+    }
+
+    /// The `shares` form carries whatever its shared entry holds — a changed
+    /// query reaches the sharing language as it stands, never a snapshot.
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn a_changed_shared_query_reaches_the_sharing_language() {
+        const CHANGED: &[EmbeddedQuery] = &[EmbeddedQuery {
+            relative_path: "queries/symbols.scm",
+            label: "tsx/queries/symbols.scm",
+            source: "(function_declaration name: (identifier) @symbol.function)",
+        }];
+        let changed_tsx = GrammarEntry {
+            embedded_queries: CHANGED,
+            ..tsx_entry()
+        };
+        let sharing = entry!("javascript", shares changed_tsx);
+        assert!(std::ptr::eq(sharing.embedded_queries, CHANGED));
+        assert_eq!(sharing.embedded_queries[0].source, CHANGED[0].source);
+        assert_eq!(sharing.manifest_toml, javascript_entry().manifest_toml, "its own descriptor");
     }
 }

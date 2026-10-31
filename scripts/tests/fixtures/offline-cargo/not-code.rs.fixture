@@ -1,0 +1,11 @@
+//! `cargo metadata --offline` unfiltered failed on CI: only a comment.
+/* ["metadata", "--offline"] in a block comment */
+fn not_a_call() {
+    let quote = '"';
+    let v = m.get("metadata")?.get("minBinaryVersion");
+    let t = root.join("tree");
+    // cargo(&["metadata", "--offline"]) in a line comment
+    let online = cargo(&["metadata", "--format-version", "1"]);
+    let tree = cargo(&["tree", "--target", "all"]);
+    println!("{:<6}", "tree");
+}

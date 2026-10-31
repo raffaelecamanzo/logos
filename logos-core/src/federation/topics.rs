@@ -221,6 +221,7 @@ mod tests {
             source: NodeId(source),
             target: NodeId(target),
             kind,
+            dispatch: false,
         }
     }
 

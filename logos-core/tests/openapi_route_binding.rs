@@ -172,3 +172,67 @@ fn the_binding_surfaces_through_node_and_context() {
         "context at the handler pulls in the spec section (ApiPath): {kinds:?}"
     );
 }
+
+/// S-549: a Laravel route binds its OpenAPI operation once it is rooted and
+/// carries its groups' prefixes — `Route::get('me')` inside `prefix('api')` is
+/// `/api/me`, which the spec writes — and an operation only an `apiResource`
+/// would serve stays unresolved, because resource routes are not expanded
+/// (CR-176 §3.3).
+#[cfg(feature = "lang-php")]
+#[test]
+fn a_laravel_route_in_a_prefix_group_binds_its_operation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "api-docs/api.yaml",
+        "\
+openapi: 3.0.3
+info:
+  title: Music API
+  version: 1.0.0
+paths:
+  /api/me:
+    get:
+      summary: Current user
+  /api/os/s3/song:
+    post:
+      summary: Put a song
+  /api/albums:
+    get:
+      summary: List albums
+",
+    );
+    write(
+        root,
+        "routes/api.php",
+        "<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::prefix('api')->middleware('api')->group(static function (): void {
+    Route::middleware('auth')->group(static function (): void {
+        Route::get('me', [ProfileController::class, 'show']);
+        Route::apiResource('albums', AlbumController::class);
+    });
+    Route::middleware('os.auth')->prefix('os/s3')->group(static function (): void {
+        Route::post('song', [S3SongController::class, 'put']);
+    });
+});
+",
+    );
+
+    let engine = index_then_rebind(root);
+    let rt = engine.runtime().expect("runtime present");
+    let coverage = rt
+        .submit_read(|store| logos_core::resolve::coverage(store))
+        .expect("coverage read");
+    let route_cov = coverage
+        .by_relation
+        .get("route")
+        .expect("the route relation appears in coverage");
+    assert_eq!(
+        (route_cov.bound, route_cov.unresolved),
+        (2, 1),
+        "/api/me and /api/os/s3/song bind; the apiResource operation stays unresolved"
+    );
+}

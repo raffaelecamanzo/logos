@@ -194,7 +194,11 @@ jobs:
       - name: test (--workspace)
         env:
           LOGOS_PERF_TOLERANCE: "3"
-        run: cargo test --workspace
+        # --no-fail-fast (S-805, NFR-MA-11): cargo stops at the first failing test
+        # binary otherwise, so a run that fails two binaries reports one and the
+        # second surfaces only after the first is fixed and pushed. Every failing
+        # binary is reported in one run, as scripts/gate.sh's tiers run it.
+        run: cargo test --workspace --no-fail-fast
 
       # The `agents` marker (logos-core/Cargo.toml) declares `Surface::Chat`, and
       # no crate of this workspace turns it on, so the step above compiles that

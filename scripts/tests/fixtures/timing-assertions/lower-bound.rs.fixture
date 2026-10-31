@@ -1,0 +1,11 @@
+// A minimum is never flaky under load: load only lengthens an elapsed time, and
+// scaling the minimum would assert a wait the code never made.
+#[test]
+fn shutdown_waits_the_grace() {
+    let began = Instant::now();
+    assert!(!jobs.shutdown(Duration::from_millis(200)), "the job is still running");
+    let waited = began.elapsed();
+    assert!(waited >= Duration::from_millis(200), "it waited the grace: {waited:?}");
+    assert!(Duration::from_millis(200) <= waited, "and so reads the other way round");
+    assert!(waited < crate::perf::scaled(Duration::from_secs(5)), "and no longer: {waited:?}");
+}

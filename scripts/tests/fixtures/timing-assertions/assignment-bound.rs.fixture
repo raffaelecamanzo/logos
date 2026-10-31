@@ -1,0 +1,9 @@
+// A name assigned (not bound by `let`) from an elapsed time, and a name a later
+// binding takes from it.
+fn assigned() {
+    let start = Instant::now();
+    let mut t = Duration::ZERO;
+    t = start.elapsed();
+    let u = t;
+    assert!(u < Duration::from_secs(2));
+}

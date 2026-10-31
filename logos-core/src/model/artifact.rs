@@ -648,6 +648,16 @@ impl ArtifactRelation {
     pub const fn is_invocation_arm(self) -> bool {
         self.bridge_namespace().is_some()
     }
+
+    /// `true` for the **consumer** side of an invocation arm — a client call, a
+    /// stub call, a publish: the reference a bridge edge starts from. The one
+    /// test the bridge's consumer index and the workspace reference resolution
+    /// (S-637) both apply to a ledger row's relation ([ADR-52]).
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub fn is_invocation_consumer(self) -> bool {
+        self.bridge_role() == Some(BridgeRole::Consumer)
+    }
 }
 
 /// Invocation arms with a **real production capture path** today — the
@@ -1176,6 +1186,19 @@ mod tests {
     /// relation declares **both** `bridge_namespace` and `bridge_role`, or
     /// **neither**. A half-declared arm is a contract bug the bridge relies on
     /// never seeing. Iterating `ALL` means a future arm variant is auto-checked.
+    /// The consumer side of the invocation arms is exactly the client call, the
+    /// stub call and the publish (S-637): the rows a workspace counts resolved
+    /// when the bridge binds them.
+    #[test]
+    fn the_invocation_consumers_are_the_client_call_the_stub_call_and_the_publish() {
+        let consumers: Vec<ArtifactRelation> =
+            ArtifactRelation::ALL.into_iter().filter(|r| r.is_invocation_consumer()).collect();
+        assert_eq!(
+            consumers,
+            [ArtifactRelation::HttpClientCall, ArtifactRelation::GrpcCall, ArtifactRelation::BrokerPublish]
+        );
+    }
+
     #[test]
     fn bridge_namespace_and_role_are_declared_together_or_not_at_all() {
         for rel in ArtifactRelation::ALL {

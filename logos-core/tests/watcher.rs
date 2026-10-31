@@ -342,7 +342,7 @@ fn single_file_sync_meets_the_pe03_budget() {
 
     assert_eq!(sync.files_modified, 1, "{sync:?}");
     assert!(
-        elapsed <= Duration::from_millis(250),
+        elapsed <= logos_core::perf::scaled(Duration::from_millis(250)),
         "single-file sync took {elapsed:?}, over the NFR-PE-03 ≤250ms budget"
     );
 }
@@ -389,7 +389,7 @@ fn navigation_reads_survive_a_continuous_edit_stream() {
     );
     // Reads stayed live (NFR-PE-01 posture; the rigorous p95 lands in S-024).
     assert!(
-        cfg!(coverage) || slowest_read < Duration::from_secs(2),
+        cfg!(coverage) || slowest_read < logos_core::perf::scaled(Duration::from_secs(2)),
         "a navigation read stalled for {slowest_read:?} during the stream"
     );
 }

@@ -13,6 +13,1124 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.22.1] — 2026-10-30
+
+### Changed
+
+- **The web UI's Health page is named Quality in the sidebar.** Both the project and the
+  workspace entries read **Quality**; their routes (`/health`, `/workspace-health`), the
+  `GET /api/v1/health` endpoint, `logos health` and the MCP `health` tool keep their names,
+  so bookmarks and scripts are unaffected.
+
+## [1.22.0] — 2026-10-30
+
+### Added
+
+- **Rails routes are read inside `routes.draw` and link to their controller actions.**
+  `get "/x" => "c#a"` (the form most Rails applications use), `get "/x", to: "c#a"`,
+  `root` and `namespace`/`scope` prefixes become `route` nodes, and the handler
+  `"c#a"` links `RoutesTo` the action `a` of `CController`, inside the `namespace`
+  modules around it. A verb call outside a `draw` block — a test client's
+  `get("/cgi/test")` — is no longer a route, and a registration inside a
+  `resources` block is counted in `routes_not_composed` instead of promoted at a
+  guessed path ([commands](docs/howto/commands.md)).
+- **The workspace states its own reference resolution.** `logos workspace status`
+  (human and `--json`), MCP `workspace_status` and `GET /api/v1/workspace/status` carry
+  `reference_resolution`: resolved code references over internal candidates, a lower
+  bound, from every member's population summed — never a mean of member ratios. A
+  reference whose target another member declares counts as an internal candidate there,
+  though its own member counts it provably external, and an outbound call the
+  cross-service coverage bound to another member counts as resolved. It states the
+  members it summed over and names each one it could not read. The Workspace Dashboard
+  shows it with its population line, and its Members column now shows each member's own
+  figure over its internal candidates
+  ([commands](docs/howto/commands.md#reference_resolution--the-workspaces-own-reference-resolution)).
+
+- **Spring functional routes and Ktor routes are extracted, and a Spring mapping written
+  without a leading slash is rooted.** Kotlin's `router { }` / `coRouter { GET("/x",
+  handler::m) }` registrations become `route` nodes with their `nest` prefixes joined
+  (`(accept(JSON) and "/api").nest { "/admin".nest { … } }` is `/api/admin/…`), linked to the
+  handler their `property::member` reference names through the type the class declares for
+  the property. Ktor's `routing { route("/p") { get("/x") { } } }` is read the same way, with
+  `io::ktor` a Kotlin framework detector. A registration outside a router block is not a
+  route, and a prefix, path or `Route.` extension whose address the file does not state is
+  counted in `routes_not_composed` instead of promoted. A Java or Kotlin Spring mapping
+  written without a leading `/` — petclinic's `@GetMapping("vets.xml")` — is now `/vets.xml`;
+  a placeholder path and every other framework's path are left as written
+  ([commands](docs/howto/commands.md)).
+- **Scala test conventions: suites by base class, and `*Spec`/`*Suite` files.** A `def`
+  of a class, trait or object that extends a ScalaTest, MUnit or Specs2 base
+  (`AnyFunSuite`, `AnyFlatSpec`, `AnyWordSpec`, `FunSuite`, `Specification`, … with their
+  `Async`/`Fixture` variants and `…Like` traits) now carries test evidence wherever the
+  file sits, and a `*Spec.scala` or `*Suite.scala` file is test code beside the
+  `*Test.scala` and `src/it/` rules that already marked one (beneath a production root
+  the file names do not mark, as for any JVM file; `src/it/` still does). Only the framework's own base names match, so a
+  production class and a class extending a base of its own are unchanged. On gitbucket
+  and ox every test callable was already `is_test` by its `src/test` path (96 of 96 and
+  200 of 200); the evidence now reads 57 of 96 (was 17) and 181 of 200 (was 0), with
+  0 of 1,218 and 0 of 821 callables outside the test tree marked, and the scan signal is
+  unchanged (7801 and 7983). No schema change; a Scala file's evidence changes when it is
+  next extracted ([metrics](docs/howto/metrics.md#production-scope--test-code-is-excluded)).
+- **A JavaScript class's constructor-assigned fields are declared, and a callee is never an
+  access.** A `this.x = …` in the constructor or a method of a JavaScript `class` now
+  declares a Field `x` of that class, once per class (a class field written `x = 0;` is
+  the declaration already), so a later `this.x` read binds to it as an `Accesses` edge.
+  `this.setState()` and every other call through `this` is a call, not an access of a
+  field of that name, in JavaScript, TypeScript and TSX alike. JavaScript declares
+  `member_access`, so Cohesion is scored over its classes. TypeScript's Field set is
+  unchanged. Part of metric semantics v9 — the baseline resets once, and a JavaScript
+  file's fields and links count once it is next extracted
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+- **One tolerance for every timing assertion, and a gate leg that fails one that
+  bypasses it.** `logos_core::perf::scaled` widens a duration by `LOGOS_PERF_TOLERANCE`
+  (a finite number of 1.0 or more, default 1.15), and every test that bounds an elapsed
+  time above now goes through it, the 5-60 s liveness timeouts included; the three
+  hand-written copies of the variable's reading are gone. The `Runtime::open`
+  regression band is 230 ms at the default. `gate.sh fast` and `full` run
+  `scripts/check-timing-assertions.py` over every `.rs` file and fail on an elapsed-time
+  upper bound that does not scale ([installation](docs/howto/installation.md)).
+- **Focus counts Rust and Go methods toward their struct.** A Rust `impl` method
+  (inherent or trait, associated functions included) now counts toward the struct of
+  that name in its crate, and a Go receiver method (pointer or value) toward the struct
+  of that name in its package, so a Rust or Go struct with 20 or more methods is god by
+  method count and no longer by span alone. A method naming no struct of its
+  crate/package, or two, counts toward none; `scan --json` reports how many as
+  `metrics.focus_attribution` (`unattributed` of `denominator`). Node ids, symbols and
+  edges, and Cohesion, are unchanged. Part of metric semantics v9 — the baseline resets
+  once ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+- **TypeScript path aliases and workspace packages resolve.** A bare specifier now binds
+  through the importing file's nearest `tsconfig.json` or `jsconfig.json`, its `extends`
+  chain followed inside the repository: `paths` and `baseUrl` rewrite it into a file the
+  way a relative specifier resolves. Each app of a monorepo uses its own config. A
+  specifier naming a workspace package's `package.json` `name` resolves to that package's
+  entry (`exports`, then `types`, `module`, `main`). Calls through such imports bind as
+  calls through relative imports do. A call through an external package such as `react`
+  is now recorded qualified (`react::useState`) and stays unbound, where its bare name
+  could previously bind to a workspace function of the same name. Editing a config or
+  `package.json` re-binds on the next sync. The plugin key is `bare_specifiers`
+  ([configuration](docs/howto/configuration.md)).
+- **TypeScript re-exports, default imports and dynamic imports resolve.** A call through
+  an import is followed through barrels (`export * from`, `export { a as b } from`),
+  transitively and up to 8 re-exports deep, and binds when exactly one definition is
+  reached; a re-export cycle, or a name two modules provide, stays unbound. A default
+  import (`import App from`, `{ default as App }`) binds through the module's
+  `export default App` / `export default function App` / `export { App as default }`, or
+  to the `default` symbol of `export default <expression>`. A call through an import may
+  now bind to a top-level value binding as well as a function. A re-export records an
+  import edge from the barrel to the module it names, and `export default App` an import
+  edge from the module to `App`. A literal `import('./x')` records an import edge from the
+  function that makes it. A call through a default import is now recorded as
+  `<module>::default` rather than by its local name
+  ([configuration](docs/howto/configuration.md)).
+- **TypeScript and TSX declare abstract classes, interface and abstract member signatures,
+  wrapped components, top-level bindings and default exports.** An `abstract class` is a
+  Class; its `abstract` methods and an interface's method members are bodyless Methods
+  under their type, recorded as required signatures, so no call binds to one. A PascalCase
+  `const X = forwardRef(…)` / `memo(…)` / `React.forwardRef(…)` / `React.memo(…)`, or a
+  `styled.<tag>` / `styled(X)` tagged template, is a Function (a component); any other
+  top-level `const` is a Constant (`const Dialog = DialogPrimitive.Root`) and a top-level
+  `let` / `var` a Variable; and
+  `export default <expression>` is an exported symbol named `default`. No symbol the graph
+  already held changes, with one correction: the methods of an abstract class, captured
+  before with no class to own them, now sit under it. An `interface X` and an `abstract
+  class X` both persist. A call or import inside a wrapped component is now the component's;
+  one inside a constant or variable binding stays the file's. The change takes effect on the
+  next index.
+- **C# calls keep their type, generic and conditional calls are captured, and `new T()`
+  records `Instantiates`.** `Helpers.Run()` — a call on a PascalCase type name — is recorded
+  as the path `Helpers::Run` and binds among the members of the one type `Helpers` names in
+  scope (through the file's namespace, enclosing namespaces and `using`s); a name that no
+  repository type carries, or that two do, stays unbound. A lowercase receiver
+  (`helpers.Run()`) is a call on another object, never a type name. Generic calls
+  (`Pick<T>()`, `x.Pick<T>()`, `Helpers.Make<T>()`) and conditional calls (`x?.Go()`) are
+  captured like their plain forms. `new T(…)` records an `Instantiates` row bound to the
+  class; a type parameter, an array and a target-typed `new()` record none, and a struct,
+  delegate or enum has no class to bind. A name the file declares as a property, field,
+  parameter, local or type parameter is never read as a type name, so `Logger.Log()` on
+  an `IAuditSink Logger` property binds nothing. C#'s declared reach now lists `calls`
+  beside imports and type relations (its level stays `partial`). No schema change.
+- **Ruby constants resolve, and calls on a constant bind across files.** Every Ruby
+  `class` and `module` is the constant its nesting spells (`A::B::C`, a compact
+  `class A::B` included), and a constant is read as Ruby reads it: through the lexical
+  nesting outward, then the top level. `Foo.bar` and `A::B.bar` are recorded as
+  `Foo::bar` and bind to the one `def self.bar`, `class << self` method or
+  `module_function` of that constant — never to its instance method of the same name —
+  and `Foo.new` records `Instantiates` to the class. A class reopened in several files
+  is one constant; a name declared as a class in one file and a module in another binds
+  nothing. Ruby's declared reach is now `partial` (`calls`, `type_relations`).
+- **A finding its scanner marks low-confidence reads "needs review", and is still gated.**
+  Each finding carries `confidence` — `low`, `medium`, `high` or `unstated` — read from
+  its report by one rule per scanner: Semgrep's `LOW`/`MEDIUM`/`HIGH CONFIDENCE` rule
+  tag, CodeQL's and gosec's rule `precision`, Bandit's `issue_confidence`; every other
+  scanner reads `unstated`. A value a scanner writes on every result is never read
+  (Semgrep's `precision` is `very-high` on every rule), so a `MEDIUM CONFIDENCE` rule
+  beside `precision: very-high` reads `medium` and stays. A `low` finding is left out of
+  `security findings` and the MCP `security_findings` by default, which state
+  `hidden_needs_review`; `--scope all` lists it with `needs_review: true`. `security
+  status`, the Security page, the Dashboard widget, the workspace roll-up and the
+  Files & Risk cell state the rest as "N more need review" (`needs_review`), after
+  suppressed, not fresh and test code. The `[security]` caps and ratchet, `gate --save`,
+  `security bless` and the branch delta count it as any other finding. A new history.db
+  migration (12) adds the column; findings stored before it read `unstated` until their
+  scanner's next ingest, which re-reads a stored report.
+- **A Python call through an imported module or class binds.** After `from hc.lib import
+  curl`, `curl.post()` is recorded as `hc::lib::curl::post` and binds the module's one
+  `post`, or constructs its class. `Check.for_project()` through a named-imported class
+  binds among that class's own methods. `import a.b` binds `a`, `import a.b as x` binds
+  `x`. A call through an import that binds nothing (`os.getcwd()`) stays unbound and never
+  reaches a workspace module of the same name. A parameter, local or module-level
+  assignment of the name shadows the import. Before, every such call was a bare method
+  name that never bound.
+- **A PHP static call keeps its class, and `new Foo()` records `Instantiates`.** `Foo::bar()`
+  — a static call on a class name, `\App\Foo::bar()` and a `use … as` alias included — is
+  recorded as the path `Foo::bar` and binds among the methods of the one class `Foo` names
+  (through the file's `use` imports, then its own namespace, then the name written fully
+  qualified); a class that no repository file declares, or that two do, stays unbound.
+  `self::` and `static::` still bind within the enclosing class, and `parent::` through the
+  proven base. A class held in a variable (`$cls::m()`), a call result, a
+  `namespace\Foo::` scope and a qualified name written without a leading `\`
+  (`Sub\Foo::m()`, which PHP reads under the file's own namespace) are still calls on
+  another object and bind nothing — never to a global class of that name. `new Foo(…)`
+  records an `Instantiates` row bound to the class (a qualified name only when written
+  `\A\Foo`); `new self`, `new static`, `new $cls` and `new class { … }` record none. PHP's declared reach now lists `calls` beside imports and
+  type relations (its level stays `partial`). No schema change.
+- **A bare C# field or property read is an access.** `_count`, `Name` and the receiver of
+  `_log.Add(x)` now record an `Accesses` edge from the method to the field or property its own
+  class declares, when no local, parameter, pattern or loop variable of that method has the
+  name. A name in a type or declaration position, a `nameof(Name)`, the member side of an
+  object initializer, and `Status.Open` beside a `Status Status` property record nothing. A
+  member a class inherits or declares in another part of a `partial` type, and a constructor's
+  or accessor's body, are not seen. C# declares `member_access`, so its Cohesion is computed.
+  On eShop the `.cs` access edges go from 7 to 728 and the fields with an access from 4 to
+  348 of 1,206; on Newtonsoft.Json the edges go from 114 to 1,775 and the fields from 68 to
+  785 of 3,914. C# Cohesion, not applicable before, reads 0.81 (322 of eShop's 522 classes and
+  structs hold a method) and 0.62 (813 of 1,674); from the `this.x` accesses alone it read
+  0.74 and 0.54.
+- **The parts of a C# partial type form one type.** The `partial` declarations of one
+  fully-qualified name and arity (a `partial` class, struct, interface or record, nested
+  ones included; `Box` and `Box<T>` are two types) in one directory tree — every part in
+  or below the directory of one of them, the directory standing in for the project,
+  whose `.csproj` is not read — are one type; two projects' `partial class Program` stay
+  two types. A call from one part to a member another part declares binds, bare or
+  through `this`, and so does an own-field access through `this` (a bare read of a field
+  only another part declares is not seen, so it links no method in Cohesion); a base list
+  one part writes is the whole type's; and the type's name (`Foo.Run()`, `new Foo()`, `: Foo`) binds to the
+  first-declared part, by file path order, where two parts made it ambiguous. Each part
+  keeps its node, and every later part records an `Extends` to the first; the first
+  part, and a `partial` declaration with no other part, records one `Extends` row that
+  stays unbound, so a C# project's unresolved count grows by one per partial type.
+  Focus counts the parts as one container, with every part's methods and the sum of
+  their spans, and Cohesion reads the same union (metric semantics 9). A `partial`
+  declaration beside a plain one of the same name, or a partial class beside a partial
+  struct, is still two types and binds neither. No schema change; a C# file's parts
+  are recorded when it is next extracted.
+- **Ruby requires bind to their files.** `require_relative 'abstract/handler'` binds the
+  file beside the requiring one, and `'../lib/rack/lint'` keeps its `..`. A bare
+  `require 'rack/lint'` binds against the load roots: the repository root and each gem's
+  `require_paths`, read from its `*.gemspec` (`lib/` when it assigns none), to the one
+  file across them. A require that no root holds a file for, such as `require 'json'`,
+  stays unbound, as does one two roots answer. Editing a gemspec re-binds the requires on
+  the next sync. The plugin key is `bare_specifiers = "load-path"`
+  ([configuration](docs/howto/configuration.md)). Ruby's declared reach gains `imports`
+  (`calls`, `imports`, `type_relations`).
+- **The `.h` rule is stated where it decided something.** `logos languages` carries a
+  `note` on the `c` and `cpp` rows stating which of the two reads a `.h` header in a
+  repository, and in a repository holding both C and C++ sources `status --json`'s row
+  of the language that reads the headers carries `headers` (the `.h` count) and the
+  same `note`. A repository of one language or neither — this repository — prints
+  exactly what it did. A plugin descriptor may declare a `note` key for such a
+  disclosure.
+- **A dev-only dependency's finding is labelled apart and still gated.** A lockfile
+  finding carries a dependency scope, read each time it is read and never stored: `dev`
+  when its `package-lock.json`, `npm-shrinkwrap.json` or pnpm lockfile marks its package
+  `dev: true`, `production` for every other lockfile and ecosystem (the scope never
+  guesses; Go, Cargo, Maven and Python are a later change). It reads
+  `code_scope: "dev"` with reason `dev_dependency`. `security findings` and the MCP
+  `security_findings` leave it out by default and state `hidden_dev`, "N more in
+  dev-only dependencies"; `--scope all` lists it, labelled. `security status`, the
+  Security page, the Dashboard widget, the workspace roll-up and the Files & Risk cell
+  state the rest as `dev`, after test code. The `[security]` caps and ratchet,
+  `gate --save`, `security bless` and the branch delta count it as any other finding.
+  No migration: the scope is computed from the lockfile each time.
+- **TypeScript type relations are captured and bound.** `class A extends B` and
+  `interface I extends J` record `Extends`, `implements` records `Implements`, `new T(…)`
+  records `Instantiates`, and the declared type of a field, parameter, return value,
+  variable or property signature records `TypeUses` — type arguments included, and the
+  members of a union, intersection or indexed access (`Dto | null`, `User['id']`). A type
+  named through an import is recorded qualified by that import's module and binds only
+  within what the import binds to (through a barrel, a default import, a `tsconfig` alias
+  or a workspace package, as a call does); a type the file declares binds in the file.
+  `implements` binds an abstract class or a type alias as readily as an interface, and an
+  interface may extend a class. A type parameter, a primitive and a call (`extends
+  Mixin(Base)`) record nothing; a library type (`BaseEntity`, `CanActivate`) and a type
+  named through a namespace import (`ns.Dto`) stay unbound. With its base proven, a
+  `super.m()` or `this.m()` reaches the `m` a class inherits. TypeScript and TSX now declare
+  `type_relations` in their reach. The new plugin key is `structural_types`
+  ([configuration](docs/howto/configuration.md)). The edges are structural facts, so no
+  quality metric moves.
+- **A C# call on a receiver of declared type binds among that type's members.**
+  `_orderService.AddOrderItem()` on an `IOrderService _orderService` field is recorded as
+  the path `IOrderService::AddOrderItem` and binds among that type's members, or a base
+  type's, as a Java typed call does. The type is read from a field, a parameter or local,
+  `out T x`, `var x = new T()`, a typed `foreach` variable, a property read through
+  `this.` or named in lowercase, or a primary-constructor parameter of a type with no base
+  list (an inherited member of the name would hide it); `T?` reads as `T`. A receiver the
+  file proves no type for keeps its `other` row and stays `no-receiver-evidence`: `var x =
+  Make()`, an untyped lambda parameter, a `var` loop variable, a deconstructed or pattern
+  name, a query range variable, a tuple element's name, an accessor's `value`, a name
+  declared with a qualified type (`A.B.Order o`) or `dynamic`, and a conditional call
+  `x?.Go()`. A call on a PascalCase property (`Logger.Log()`) still records no row at
+  all. On eShop bound C# calls go from 282 to 427 of 3,687 (cross-file 60 to 202), and
+  `no-receiver-evidence` from 2,388 to 1,768; on Newtonsoft.Json from 4,058 to 5,285 of
+  21,332 (cross-file 1,893 to 3,039), and from 7,995 to 4,674. The row count rises (3,666
+  to 3,687; 21,083 to 21,332) because two calls of one name in one method on differently
+  typed receivers are now two rows. Java's graph is unchanged. No schema change; a C#
+  file's calls are retyped when it is next extracted.
+- **Scala calls resolve through imports, the package and the objects they name.**
+  `StringUtil.decode(t)` — a call on a capitalised name — is recorded as the path
+  `StringUtil::decode` and binds among that object's methods through the file's imports,
+  wildcards and package, and a parameterless `StringUtil.size` binds only a method, never a
+  `val`. A class and its companion `object` are one name: a call on it binds among the
+  object's methods, and `import Chain._` no longer makes every other import of the file
+  ambiguous. A Scala 3 top-level `def` is a member of its package: `import ox.discard`
+  binds it, `import ox.*` brings it into view, and a call from the same package reaches it.
+  A bare call inside an object or class that neither inherits nor declares the name — not
+  a case class, an enum or an anonymous `new T { … }` — where the file binds no value of
+  it, is now that free call (`forever { … }` inside `object
+  Actor`) rather than a call on the instance. `new T(…)` records `Instantiates`, generic
+  calls `m[T](x)` are captured, and an alphanumeric infix call `a max b` records a call to
+  `max` on `a`. Scala's declared reach adds `calls`. A Scala wildcard import now records
+  the alias `*`: it brings every member into view, and it outranks the package's other
+  files, as Scala ranks them. The plugin keys are `companion_objects`,
+  `top_level_callables` and `wildcards_outrank_package`
+  ([configuration](docs/howto/configuration.md)).
+- **C++ includes resolve, and free and qualified calls and base classes bind across
+  files.** `#include "x.h"` binds the header beside the including file, else the one
+  under the include roots — every `include/` and `src/` directory, and every directory
+  holding an `include/` one; `#include <a/b.h>` binds under the roots alone. The header
+  is named whole, so `hash.hpp` beside `hash.cpp` is no ambiguity. A header no root holds
+  (`<vector>`), or one two roots hold, stays unbound. A qualified call (`ns::f()`,
+  `Cls::sf()`, `ns::f<T>()`) is now recorded as its path rather than its last name. It,
+  a free call and a base class (`class A : public B`, which now records `Extends`) bind
+  through the caller's namespaces and class, its file's `using` declarations and
+  directives, and the declarations its includes make visible, transitively — the file's
+  own declarations first, then its includes', exactly one or nothing. A `this->` call
+  reaches a member of a base declared in another file. Any change re-binds every C++
+  reference on the next sync. The plugin key is `bare_specifiers = "include-roots"`
+  ([configuration](docs/howto/configuration.md)).
+  C++'s declared reach moves from `same-file` to `partial` (`calls`, `imports`,
+  `type_relations`). No schema change; a C++ file's rows change when it is next
+  extracted.
+- **The plugin guardrail asks for a brace expansion, an expanded logos subcommand and a
+  loop variable.** An unquoted brace expansion (`{a,b}`, `{a..b}`) in a guarded position
+  asks: `logos gate --sa{ve,}`, `logos check --{bless,x}` and `logos security {bless,status}`,
+  and a writer's path that can spell a file under `.logos/`
+  (`rm .logos/rules{.toml,-baseline.json}`, `rm .lo{gos,}/rules.toml`). With `logos` as the
+  command word, an expansion before any subcommand of logos's is read asks, naming it
+  (`S="gate --save"; logos $S`, `logos ${CMD}`, `` logos `echo gate` --save ``,
+  `logos check$(…)`, `logos$X`); `logos scan $DIR` and `logos security status $X` pass.
+  `for NAME in WORDS` counts as assigning NAME, so `for F in .logos/rules.toml; do rm $F; done`
+  asks, while `for F in src/*.rs; do rm $F; done` and a reader given `$F` pass. A `for`
+  header that names a guarded file no longer asks by itself. Braces are read by shape and
+  never expanded, so `logos gate --label {x}` passes (S-801).
+- **A coverage tool's last run records how long it ran and why it did not pass.**
+  `.logos/coverage/last-run.json` gains `duration_ms` (the tool's spawn to its end, a
+  readying step not counted) and `cause` (for `failed`, `tests_failed` and `timed_out`: the
+  masked excerpt of the end of the tool's output, which names the failing test, or the limit
+  a timed out run hit). `coverage status` carries both on the CLI, MCP and the web
+  mirror. A field not recorded is absent, never `0` or empty text, so a record written by
+  1.21.2 reads unchanged. A `tests_failed` tool's run payload carries its `cause` too.
+  ([coverage](docs/howto/coverage.md))
+- **A rule can be suppressed project-wide, with a reason.** An entry of
+  `.logos/security-ignore.toml` with a `rule` and its `scanner` and no `path` and no
+  `fingerprint` suppresses that rule's findings for that scanner in every file,
+  including a finding that names no file. Each finding is listed as suppressed with the
+  entry's reason, and `by` reads `{rule, scanner}`; the Security page labels it
+  "suppressed by a rule-wide entry". `expires` works as for any entry, and the
+  `[security]` gate leaves the findings out as it does any suppression. A `rule` without
+  its `scanner`, or the reverse, exits 2 naming the missing key; a whole-project `path`
+  glob is still refused. The web API's `suppress` and `unsuppress` take the same selector
+  ([security](docs/howto/security.md#one-entry-for-a-rule-in-every-file)). No migration.
+- **Go route handlers link to their routes, and Go 1.22 patterns carry their method.**
+  A handler written as a method of the registering method's own receiver
+  (`r.GET("/api/pull", s.PullHandler)` inside `func (s *Server) …`) now links
+  `RoutesTo` the method of the receiver's type, bound through the type recorded for the
+  method, never to a same-named method of another type. A handler written on a value the
+  file does not prove (a parameter, `s.deps.Pull`) keeps its route and gets no edge; the
+  run counts those as `handlers_receiver_unproven`. A `Handle` / `HandleFunc` pattern
+  that opens with a standard verb, upper-case and followed by whitespace
+  (`"GET /api/status"`), names its method and path apart — the route is `GET /api/status`,
+  not `ANY GET /api/status`. On ollama at 42e911bc, 20 of the 37 Gin routes in
+  `server/routes.go` link (none did before); 32 routes named `ANY <VERB> …` are named by
+  their verb. A route that is now one of two providers of the same method and path no
+  longer binds an OpenAPI operation, which is refused as ambiguous. A sync that deletes
+  a handler a route linked to no longer leaves a ledger row a fresh index would not have.
+  No migration.
+- **A Go call binds within its own package across files.** Every file of one directory
+  that declares the same `package` clause shares one scope, so a bare `F()` that its own
+  file, imports and dot-imports do not supply now binds to the one top-level `F` among
+  the package's other files. `callers`, `impact` and `context` see these calls. A name two
+  files of the package declare, such as build-tag variants, stays unbound. A
+  `package foo_test` file is a package of its own, so it never reaches `foo`'s unexported
+  names. Each Go file's clause is recorded on re-extraction, which this release's
+  migrations already trigger. The plugin key is `directory_packages`. No new migration.
+- **Go types implement interfaces by method set, and methods access their receiver's
+  fields.** A Go type now records `Implements` to each interface of the repository whose
+  methods its method set covers: its own methods, by pointer or value receiver, and those
+  an embedded field promotes, matched by name and parameter count against the interface's
+  methods with its embedded interfaces expanded. An unexported method matches only within
+  its package. A generic interface is not computed, and an interface declaring no method
+  (`any`, a constraint) is implemented by nothing. So `logos node Core` lists zap's
+  `ioCore` among its incoming `Implements`. An interface's embedded interface is an
+  `Extends` row of the interface, and its method specs record their parameter range.
+  Inside a method, `c.enc` on the method's own receiver `c` records `Accesses` to that
+  field of the receiver's type, whichever file of the package declares it; a call on the
+  receiver, another value's field and a free function's same-named parameter record
+  none. Go only; no other language's graph changes. No migration.
+- **A TypeScript call through an imported class binds among its methods.**
+  `UserMapper.toDomain(raw)`, after a named, default or aliased import of the class, is
+  recorded as `<module>::UserMapper::toDomain` (through `<module>::default` for a default
+  import) and binds to that class's one method of that name, static or not. A class from an external package, an imported function or
+  value, a class declaring the name twice, and a name that reaches two classes stay
+  unbound; a namespace import's call is unchanged. A member call on any named or default
+  import is now recorded through the import rather than as a bare method name; one that
+  reaches no class stays unbound, as it was. No migration
+  ([configuration](docs/howto/configuration.md#re-exports-default-exports-and-dynamic-imports-typescript-tsx)).
+- **Kotlin calls resolve through imports, the package, extensions and companions.** A
+  top-level `fun` is a member of its package: an import names it, `import a.b.*` brings
+  it into view, and a call from the same package reaches it — the overload the call's
+  arguments admit. A bare call inside a class that declares none of its name and
+  inherits nothing — not a `data` or `enum class`, nor one whose companion has a
+  supertype — where the file binds no value of it, is now that free call
+  (`enumMatcher(s)` in a handler) rather than a call on the instance. A call on a
+  capitalised name (`Ticket.empty()`, `YearSelector.create(…)`) is recorded as the path
+  `Ticket::empty` and binds among that object's members, or, for a class with a
+  companion, among the companion's alone (`Ticket#Companion#empty`), never an instance
+  member. A bare call inside a class reaches its companion's members once the class and
+  its supertypes hold none the call can take, then its superclasses' companions. A
+  companion with a name of its own (`companion object Factory`) is reached only as
+  `Ticket.Factory`, and a member a companion inherits is not reached. An extension `fun String.toSlug()` records its receiver type, and a call
+  `title.toSlug()` binds the one extension of the name the file imports, its package
+  declares or a wildcard brings into view; two bind neither, and so does any extension
+  named like a member of some class, since the receiver is not typed. A bare call
+  reaches an extension only from inside an extension's body, and there a member of the
+  receiver's type comes first. Java reaches a Kotlin file's top-level functions through
+  its facade class: `import mixit.util.UtilsKt;` binds `Utils.kt` and `UtilsKt.f()` its
+  `f` (`@file:JvmName` is not read). A Kotlin file never binds a Scala top-level `def`,
+  nor Scala a Kotlin one. Kotlin's declared reach adds `calls`. On mixit, cross-file
+  Kotlin `Calls` edges go from 48 to 311, and bound call rows from 304 of 3,864 to 709
+  of 3,883; on koin, cross-file edges go from 14 to 1,033 and bound rows from 863 to
+  1,949 of about 9,750, and Java→Kotlin call edges from 5 to 9, the four new ones
+  through a file facade. The plugin keys are `top_level_callables`,
+  `extension_functions`, `file_facade` and `companion_name`
+  ([configuration](docs/howto/configuration.md)).
+  No schema change; a Kotlin file's rows change when it is next extracted.
+- **A suppression records the code its reason rests on, and re-opens when it changes.** An
+  entry of `.logos/security-ignore.toml` can carry `evidence`: symbols the reason rests on
+  (say `DefaultCookieConfig`), each with a hash of its exact source lines, literals
+  included. The entry suppresses only while every hash matches. A changed literal or a
+  deleted symbol makes the finding read "verdict out of date: re-review", naming the
+  symbol; it counts again in `security status`, `hotspots` and the Security page, and for
+  the `[security]` gate, its ratchet and every cap. Evidence Logos cannot check (the index
+  is behind the file) never holds. `logos security reconfirm <fingerprint>` (MCP
+  `security_reconfirm`, and a Re-confirm button on the Security page) re-records the hashes
+  and keeps the reason; `--evidence <symbol>` records the symbols the verdict now rests
+  on. An entry without evidence suppresses exactly as before and reads "no evidence
+  recorded". The graph's own node `fingerprint` is a normalised shape that ignores
+  literals, so it is not the hash. The plugin guard asks before an agent runs the command
+  or the tool. No migration
+  ([security](docs/howto/security.md#recording-what-a-verdict-rests-on-evidence-and-reconfirm)).
+- **NestJS controller routes are extracted and linked to their handlers.** In a
+  TypeScript or TSX file that imports `@nestjs/common`, each `@Get`/`@Post`/`@Put`/
+  `@Delete`/`@Patch`/`@Head`/`@Options`/`@All` method decorator is a route, named with
+  its controller's `@Controller(...)` prefix joined on (`"users"`, `["a", "b"]` and
+  `{ path: "auth" }` all read; a decorator with no path, `@Get()`, is the prefix
+  itself) and rooted at `/` as NestJS serves it. Each route links to the method it
+  decorates, also when further decorators sit between them. A prefix or path that is
+  not a written literal (`@Controller(PREFIX)`, `@Get(ROUTES.one)`) promotes no route
+  and is counted in `routes_not_composed`. Not applied: a global prefix set in
+  `main.ts` and URI versioning. Express and Next.js extraction is unchanged; a file
+  admitted by `@nestjs/common` is also read by the Next.js component pattern, so an
+  exported PascalCase function there (a decorator factory such as `Roles`) is
+  promoted as a component, 2 of 190 files on nestjs-boilerplate. A route decorator
+  outside a `@Controller` class (an abstract base) is promoted at its written path,
+  and two controllers of one file sharing a handler name get routes without a
+  handler link. No migration.
+- **A TypeScript call on a receiver of proven type binds among that type's members.**
+  `this.usersService.findByEmail()` on a constructor parameter property `private readonly
+  usersService: UsersService` is recorded as `<module>::UsersService::findByEmail`
+  through the type's named import. It binds that class's one `findByEmail`, else the
+  nearest supertype's. On an abstract class or an interface it binds the declared,
+  bodyless method, never an implementation. `this.x` reads an annotated field of the
+  enclosing class itself; a plain `x` reads the one binding of `x` in scope at the call
+  — an annotated parameter or variable, or `const x = new T()` (also in `.js` files).
+  A type the file declares needs no import. A type outside the repository
+  (`ConfigService`, typeorm's `Repository`) binds nothing. A receiver with no proof
+  keeps its `other` row and stays `no-receiver-evidence`: an untyped or inferred one, a
+  qualified (`ns.T`), union or array annotation, a name two bindings in scope spell (a
+  shadowing local, an inner function's parameter, a module-level variable beside a
+  parameter), an inherited or unannotated field, and a call on a class name. On
+  nestjs-boilerplate, bound TypeScript calls go from 121 to 204 of 1,313 call rows
+  (1,316 after: two calls of one name on differently typed receivers become two rows),
+  cross-file from 93 to 176, and no edge is lost; of the 197 retyped rows, 114 name a
+  library type and stay unbound. On bulletproof-react 13 of 1,140 rows are retyped and
+  none binds. This repository's `web/ui` retypes 185 of 8,023 rows and gains 3 calls,
+  test helpers calling the `CanvasRecording` interface's methods; no metric moves.
+  Java and C# are unchanged. No migration
+  ([configuration](docs/howto/configuration.md)).
+- **PHP promoted properties, class constants and enum cases are symbols.** A constructor
+  parameter that declares a visibility (`public function __construct(private Logger $log)`,
+  by reference too) in a named class or trait is now a Field of that type, so `$this->log`
+  binds to it. A class, interface, trait or enum constant (each name of
+  `const A = 1, B = 2;`) and an enum case are Constants under their type. A global `const`,
+  an anonymous class's constant and a promotion in an anonymous class's constructor are not
+  captured. A constant that shares a name with a property is numbered after it, so no
+  existing symbol moves. PHP Cohesion can move for a class that reads its promoted
+  properties, since those reads now count as shared state. At monolog `d7059e4c`, Fields go
+  from 285 to 310 and Constants from 0 to 79 over 125 PHP files, `LogRecord`'s 9 `$this->`
+  accesses go from 0 to 9 bound, and all 1,423 earlier nodes keep their symbols; at koel
+  `9f9ca6bf`, Fields go from 373 to 1,238, Constants from 0 to 213, and bound accesses from
+  1,163 to 2,110 of 2,457. Document mentions of the new names bind too (monolog's
+  `CHANGELOG.md` reference edges go from 25 to 32). No schema change; a PHP file's nodes
+  change when it is next extracted.
+- **PHP global functions bind across files, and includes are imports.** A bare call
+  in a PHP file that declares no namespace binds the one function another such file
+  declares, under every binding policy; before, only `aggressive` reached it. A
+  namespaced file's bare call binds its own namespace's function first, then the
+  global one, as PHP reads it; a class name never falls back. A name two files
+  declare binds neither, and a method that only shares the name is never one. A
+  `use function` import binds its function. `require`, `require_once`, `include` and
+  `include_once` of a string literal, or of `__DIR__ . '/…'`, record an `Imports`
+  edge to the file they name beside the includer; any other argument records
+  nothing. On mantisbt, `gpc_get_int` binds at 143 of 143 call rows (2 before), bare
+  call rows bound go from 1,545 to 11,840 of 15,631, cross-file PHP `Calls` edges from
+  974 to 11,058, and 268 of 276 includes bind; the other 8 name a file the
+  repository does not hold (under `vendor/`, or an optional offline page) or one PHP
+  finds on its include path. The plugin keys are
+  `top_level_callables` and a new `global_function_fallback`
+  ([configuration](docs/howto/configuration.md)). No schema change; a PHP file's
+  rows change when it is next extracted.
+- **Scala records its supertypes, class parameters and field reads, and scores Cohesion.**
+  Every entry of `extends A with B with C` is recorded and binds the one in-repository
+  class or trait it names: `Extends` to a class, `Implements` to a trait, so the cake
+  pattern's `with AccountService` mixins implement their traits — a trait beside its
+  companion `object` included, since an object is never a supertype. A class and its
+  companion `object` stay unbound, as does a library supertype; a self-type records
+  nothing. A proven base is what `super.m()` and an inherited bare call now climb. A
+  class's, case class's and trait's constructor parameters are fields, and a bare read of
+  a field inside a method (`semaphore.acquire(n)`, `rate - n`, `s"$label"`) records an
+  access, unless a local of the name hides it. Scala now declares `member_access`, so its
+  classes are scored for Cohesion, and a trait with a bodied method is a Focus and
+  Cohesion container. On gitbucket, 493 of 671 supertype rows bind and Cohesion reads
+  0.7587 where it was n/a; on ox, `FixedWindow`'s LCOM4 is 2 where its five methods were
+  five components. The plugin key is `bodied_traits_are_containers`. Part of metric
+  semantics v9 ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes),
+  [configuration](docs/howto/configuration.md#trait-containers-bodied_traits_are_containers)).
+- **A bare Kotlin property read is an access.** `count + x`, `repo.find(id)`, `return rate`
+  and `"${name}"` now record an `Accesses` edge from the method to the property its own
+  class declares — a primary-constructor `val`/`var` included — when no parameter, local,
+  lambda, `for`, `catch` or destructured name of that method has the name. A name in a type
+  or declaration position, the member side of a selection (`o.count`), a call's callee, a
+  named argument's label and a callable reference record nothing. A property a class
+  inherits or an outer class declares, the body of an `object : T { … }`, of an extension
+  function and of an `apply`, `run` or `with` lambda, a property initialiser, `init` block or accessor, and a short `"$name"`
+  interpolation are not seen. Kotlin declares `member_access`, so its Cohesion is computed.
+  On mixit the Kotlin `Accesses` edges go from 14 to 901 (of 1,003 `Field` nodes; 441 of
+  them accessed), on koin from 11 to 486 (of 2,968; 246) and on spring-petclinic-kotlin
+  from 28 to 93 (of 53; 37). Kotlin Cohesion, not applicable before, reads 0.87, 0.83 and
+  0.76 (119, 135 and 13 classes hold a bodied method); from the `this.x` accesses alone it
+  read 0.57, 0.69 and 0.54. Part of metric semantics v9
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+- **Ruby superclasses and mixins are relations, and calls on the instance resolve along
+  the ancestor chain.** `class A < B` records `Extends` to the class `B` names, read from
+  the scope enclosing `A`; `include M`, `prepend M` and `extend M` in a class or module
+  body record `Implements` to the module `M` names. Both bind through the constant index,
+  and an external base or mixin (`ActiveRecord::Base`, `Comparable`) stays unbound. A
+  call on the instance — `foo()`, `self.foo()`, and now a bare `foo` that no parameter or
+  local of its method binds, such as `to_app` in `to_app.call(env)` — and a `super` bind
+  along Ruby's ancestors: the prepended modules, the class (every reopening of it), the
+  included modules, then the superclass. Exactly one method at the first level holding the
+  name binds; two mixins that both define it bind nothing, a mixin the graph cannot see
+  stops the walk, and a module the superclass already includes stays after the superclass,
+  as Ruby leaves it. A `def self.x`, and a method defined in a block of the body (a
+  concern's `class_methods do … end`), answers no instance call; a block's implicit `it`
+  or `_1` is a local, never a call. A namespace no file
+  declares, such as Zeitwerk's implicit `Mod` of `app/controllers/mod/`, still names no
+  constant. No schema change; a Ruby file's rows change when it is next extracted.
+- **C++ tests are named, and a bare member read is an access.** A GoogleTest `TEST(Suite,
+  Name)` (and `TEST_F`, `TEST_P`, `TYPED_TEST`) is now the test node `Suite.Name`, not
+  `TEST`, and a Catch2 or doctest `TEST_CASE("…")` or `SCENARIO("…")` — decorated forms
+  such as `TEST_CASE("x" * doctest::skip())` included — is a test node named by its string,
+  spanning its block, which owns the calls in it. A bare `m_x` in a method now records an
+  `Accesses` edge to the field its own class declares, in the value positions code spells it
+  in, unless a parameter or local of the method hides it; `this->f()` is a call and records
+  no access. C++ declares `member_access`, so its classes are scored for Cohesion. A
+  field a base class declares, or one read in a source file that does not declare the class (a class written in
+  a header), is not seen. A test named like a function it calls (`TEST_CASE("parse")` calling
+  `parse`) can bind that call to itself. On ccache 290 of 292 `TEST_CASE` sites are test
+  nodes where none were, 284 of them named by their string; `Accesses` edges go from 21 to
+  383 over 7 to 162 fields; on nlohmann/json 278 of 282 sites are test nodes, and the edges
+  go from 91 to 883 over 43 to 264 fields. Cohesion, n/a before, reads 0.572 and 0.532
+  (0.485 and 0.436 had only `this->x` been read).
+  Part of metric semantics v9
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+- **C macro-defined tests are test nodes.** A function a known test macro defines is now
+  a node named by the macro's argument, marked as a test, and the calls in its body belong
+  to it rather than to the file: libuv's `TEST_IMPL(name) { … }`, a one-argument
+  `TEST(name)` or `TEST_CASE(name)`, and greatest's `TEST name(void)`. A Unity or cmocka
+  case is marked too: a `test_*` function of a file that includes `unity.h`,
+  `unity_fixture.h` or `cmocka.h`, and any function a `cmocka_unit_test*(f, …)`
+  registration names. A `test_*` name with no framework header, a macro off the list and a
+  header that merely ends in a framework's (`myunity.h`) mark nothing. C declares
+  `test_convention = "c-test-macros"`. On libuv, 488 of the 489 `TEST_IMPL` sites are test
+  nodes (the sites hold 479 distinct names, ten of them defined twice for different
+  platforms, and each definition is its own node) and Calls edges go
+  from 1570 to 1884, 427 of them from a test node; the remaining site sits in a
+  `#define` whose `/* … */` comment tree-sitter-c cannot parse, which tears the
+  function into an ERROR region. A two-argument `TEST(group, name) { … }` parses as a
+  statement and a bare block, so it has no function to mark. redis is unchanged (30387
+  nodes, 51 test-evidence rows, before and after). No schema change; a C file's rows
+  change when it is next extracted.
+- **A callable's local bindings are recorded.** Every name a function, method, closure
+  or lambda body binds — its parameters, local variables, loop, `catch`, `with` and
+  pattern variables, a nested function, and a local `import`, `use` or `using` — is now
+  stored with its kind (parameter, variable or import), its position, the span of the
+  scope it binds in, and whether it is in force throughout that scope (a JavaScript
+  `var` or function declaration, any Python local, a C# or Scala block local). Every code
+  language records them through a new `locals` query; a Go method's own receiver, a
+  Rust `self` and a pattern's upper-case variant or constant names are never bindings.
+  The facts change no node, symbol or edge yet. Migration 41 adds their table, and the
+  store re-extracts every file on its next scan
+  ([configuration](docs/howto/configuration.md#advanced-overriding-language-queries)).
+- **JavaScript functions defined by assignment, `exports` or prototype are symbols.** In
+  a `javascript` file, `X.y = function …` and `X.y = (…) => …` declare a Function `y`
+  under the function or class named `X`, or the top-level `const`/`let`/`var`, that the
+  assignment sees from where it is written, or at file level when it sees none (a mixin's
+  parameter, a nested local, `window`). `exports.y = …`
+  and `module.exports.y = …` declare an exported Function `y` at file level.
+  `Foo.prototype.y = …` declares a Method of `Foo`, and `{ y: function … }` or
+  `{ y: () => … }` in an object literal declares a Method of the object's declaration or
+  of the enclosing function. Only a function or arrow value declares one, and
+  `module.exports = …` and `this.y = …` declare none. Calls in their bodies are now
+  theirs rather than the enclosing function's or the file's. Every symbol a JavaScript
+  file held before is unchanged, and TypeScript and TSX files extract exactly as before:
+  JavaScript's own `symbols.scm` is layered over the shared TypeScript-family query
+  ([configuration](docs/howto/configuration.md#advanced-overriding-language-queries)).
+  No migration of its own: a file gains its functions when it is next extracted, and
+  `logos index` re-extracts every file.
+- **JavaScript `require` bindings qualify calls, and `module.exports` records exports.**
+  In a `javascript` file, a top-level `const m = require('./x')` makes `m.f()` bind
+  what `x` provides under `f`, and `const { f, g: h } = require('./x')` binds `f()` and
+  `h()` as named imports. `module.exports = X` and `const X = module.exports` name the
+  module's export object, whose members are its names (`user.exists()` reaches
+  `User.exists` of `const User = module.exports`) and which is its default export;
+  `module.exports = { a: b }` exports `b` as `a`. A `require` of an external package,
+  and every call through it, stays unbound. The new plugin key `commonjs` turns this on;
+  only the JavaScript plugin declares it, so TypeScript and TSX files bind exactly as
+  before ([configuration](docs/howto/configuration.md#commonjs-modules-commonjs)). No
+  migration of its own.
+- **Ruby instance-variable reads and writes are accesses.** A method's `@x` — read, assigned
+  (`@x = …`, `@x ||= …`, `@a, @b = …`) or both — is an `Accesses` edge to the Field its class
+  declares for `@x`, bound only when the class declares that name once; an `@x` no class
+  declares stays unresolved, and a `@@x` class variable or `$global` is not read. Ruby now
+  declares `member_access`, so Ruby Cohesion is scored from those edges where it had been n/a
+  (metric semantics 9, no further bump,
+  [metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  The edges are read when a Ruby file is next extracted; no migration.
+- **Reference resolution is stated over the references that could be internal.**
+  `status` (human and `--json`), MCP `status` and `GET /api/v1/status` now lead with
+  `internal_resolution`: bound code references over the **internal candidates**, as a
+  lower bound, beside its population — how many code references there are and how many
+  are **provably external** (unbound, and naming nothing the graph declares, or an
+  `external-type` the binder proved). Doc references get their own `doc_resolution`.
+  Each `resolution_by_language` class gains `provably_external`. A zero denominator
+  reads absent, never `1.0`. `refs_total`, `refs_resolved` and `resolution_coverage`
+  are unchanged and deprecated. No reference's bound state, the quality signal or the
+  gate changes ([commands](docs/howto/commands.md#internal_resolution-and-doc_resolution)).
+- **Express router modules and template-literal paths yield routes.** A JavaScript
+  file that receives an `app` or `router` parameter is now scanned for routes even when
+  it imports nothing from `express`, so a router module (`module.exports = function
+  (app) { app.get('/x', …) }`) yields its routes. A path written as a template literal
+  is read verbatim: `` app.get(`${base}/ping`, h) `` yields `GET ${base}/ping`, the
+  leading interpolation kept as a prefix that is not resolved and never binds to an
+  API operation. JavaScript's framework detectors now match import references only,
+  so a middleware calling its `next()` callback no longer marks a JavaScript file as
+  Next.js. Takes effect on the next `index` or `sync`; no migration.
+- **A call through a trait is marked as dispatch on each implementation it reaches.**
+  A trait-typed Rust call (`&dyn Tr`, `&impl Tr`, a bounded generic, `self.m()` in a
+  default body, `Tr::m(x)`) still binds every implementation plus the default; each edge
+  to an implementation now records the trait method it went through, and the edge to the
+  trait's own method does not. A direct call from the same caller to that implementation
+  keeps its edge unmarked. `callers`, `callees` and `impact` (CLI, MCP and
+  `/api/v1`) label such a row `via: "<Trait>::<method>"`, and the web query results show
+  it; every other row is unchanged. No edge is added or lost and no function turns dead.
+  Opening an existing store applies logos.db migration 43, which re-extracts every file
+  on the next scan so its fan-outs re-bind marked
+  ([commands](docs/howto/commands.md#callers--callees)).
+- **A Python call on an annotated or constructed receiver binds among its type's
+  methods.** `svc.run()` after `def f(svc: Service)` is recorded as `Service::run` and
+  binds `Service`'s one `run`, else the nearest proven base's. The type is also read from
+  an annotated local, `x = Service(…)`, and, for `self.x.run()`, from the attribute the
+  class itself declares: a class-level `x: T`, `self.x: T = …` or `self.x = T(…)`.
+  `Optional[T]`, `T | None` and a string `"T"` read as `T`. A receiver its function binds
+  twice, a `global` name, a dotted or other-union annotation, a lowercase callee
+  (`x = make()`), an untyped or inherited attribute, an attribute that shadows the method
+  (`run = other`), a type the file both imports and redeclares, and a type outside the
+  repository bind nothing, and an unproven receiver stays `no-receiver-evidence`. On werkzeug, bound Python calls go from
+  1505 to 1590 of 6460 (6478 after: two receivers of one name typed apart are two rows)
+  and cross-file edges from 413 to 489; on healthchecks, from 1914 to 2411 of 13012
+  (13136 after) and cross-file from 651 to 1134. No edge is lost on either. Of 20 new
+  edges re-judged per repository, none is wrong. healthchecks' `self.transport.notify()`
+  stays unbound: `transport` is a property, not an attribute. Java, C# and TypeScript are
+  unchanged. No migration ([configuration](docs/howto/configuration.md)).
+- **Laravel routes carry their group prefixes and match their OpenAPI paths, and
+  Symfony `#[Route]` attributes are routes.** A Laravel route is rooted at `/` as
+  Laravel serves it, so `Route::get('me', …)` is `GET /me` and a single-segment path
+  is no longer dropped. A route inside `Route::prefix('api')->group(…)` (with other
+  registrar calls before or after `prefix()`) or `Route::group(['prefix' => …], …)`
+  takes the prefix, and nested groups accumulate theirs: `/api/os/s3/song`.
+  `prefix()` is read up to three calls before `group()`. A prefix that is not a
+  literal (single- or double-quoted, without interpolation) refuses the routes
+  under it and counts them in `routes_not_composed`. `apiResource`/`resource` are still not expanded. In a file
+  that imports `Symfony`, `#[Route('/x', methods: [...])]` on a method is a route per
+  listed verb (`ANY` when none is listed), composed with the class's `#[Route]`
+  prefix and linked to that method. On koel, 18 of its 40 OpenAPI operations bind to a
+  route, up from 0; the other 22 name a path its routes do not register or only an
+  `apiResource` serves. Takes effect on the next `index` or `sync`; no migration.
+- **A PHP call on a natively typed receiver binds among its type's methods.**
+  `function f(Mailer $m) { $m->send(); }` records `$m->send()` as the path
+  `Mailer::send`, the row a static call `Mailer::send()` records, and binds among
+  `Mailer`'s methods (or a base class's) through the file's `use` imports and namespace.
+  The type is read from the one binding of the variable in scope at the call — a
+  parameter typed `T` or `?T`, or `$x = new T()` — or from a typed or
+  constructor-promoted property read through `$this->`. A receiver the file proves no
+  type for keeps its `other` row and stays `no-receiver-evidence`: an untyped parameter
+  or property, a union, intersection, primitive, qualified or `self` type, and a variable
+  that any other assignment, `foreach`, `catch`, `global` or `static` also binds in the
+  same function — or, inside a closure, that the closure's own parameter of that name
+  binds. Nullsafe calls (`$m?->send()`) are still not recorded. Each clause of a grouped
+  `use App\Mail\{Mailer, Pager as P};` is now an import, so a static or typed call through
+  it binds the imported class rather than a same-named class of the caller's namespace.
+  On monolog bound PHP calls go from 1,141 of 5,240 to 1,834 of 5,255 (cross-file 603 to
+  1,286), on mantisbt from 13,429 of 19,833 to 13,825 of 19,835, and on koel from 3,274
+  of 20,824 to 4,604 of 20,877; `no-receiver-evidence` falls from 2,883 to 1,975, 5,740 to
+  5,165 and 11,402 to 9,265. No edge is lost. The row counts rise because two calls of
+  one name in one method on differently typed receivers are now two rows. No schema
+  change; a PHP file's calls are retyped when it is next extracted.
+- **ASP.NET Core minimal APIs and class route prefixes yield routes.** An
+  `app.MapGet/MapPost/MapPut/MapDelete/MapPatch("/p", Handler)` registration is a route,
+  joined onto the `MapGroup` its receiver is — through a local (`var api =
+  app.MapGroup("api/orders").HasApiVersion(1.0)`), a chain of builder calls and nested
+  groups. A controller action takes its class `[Route("api/[controller]")]` prefix, with
+  `[controller]` (the class name without `Controller`) and `[action]` expanded; an action
+  path written `"/x"` or `"~/x"` ignores the prefix, and a path written without its
+  leading slash is rooted, as ASP.NET Core serves it. A group handed in as a
+  `RouteGroupBuilder` parameter, built by a helper or bound to a lambda parameter, and a
+  prefix that is not a written string, promote nothing and are counted in
+  `routes_not_composed`. A file under a `global using Microsoft.AspNetCore…` (the
+  declaring file's directory, as the binder reads a global `using`), or one naming
+  `IEndpointRouteBuilder` / `WebApplication`, is a framework candidate with no `using` of
+  its own. On eShop the routes go from 0 to 30 and 14 of 25 OpenAPI operations bind a
+  route; a typed constraint (`{id:int}`) is still not normalised, so the other 11 stay
+  unresolved. Extraction-only: no migration.
+- **A route written `/` under a Laravel, NestJS or Rails prefix is the prefix itself.**
+  `Route::get('/')` in a `Route::prefix('users')` group, `@Get('/')` in
+  `@Controller('users')` and `get '/'` in `scope '/users'` or `namespace :users` are
+  `GET /users`, as each framework serves them, where they were `GET /users/` and so
+  joined no OpenAPI operation or HTTP-client call on `/users` (NestJS's `@Get()` was
+  already `GET /users`: the two are now one key). ASP.NET Core's `MapGroup` follows
+  the same rule. Spring's `@GetMapping("/")` under `@RequestMapping("/v1")` and
+  Symfony's `#[Route('/')]` under a class `#[Route('/blog')]` keep `/v1/` and
+  `/blog/`, which those frameworks serve. Takes effect on the next `index`; no
+  migration.
+- **A C# `#if` region is read as its first branch.** Before a `.cs` file is parsed, each
+  `#if … #elif … #else … #endif` region keeps its first branch; the other branches and
+  the directive lines are blanked to spaces, so every node keeps the file's lines and
+  columns. A class written two ways under `#if` is one class with its members under it,
+  and no class is named after a preprocessor symbol. On Newtonsoft.Json the two
+  `HAVE_ASYNC_DISPOSABLE` classes are gone, and the 140 members that sat under a file and
+  the 93 under those classes sit under their own; 9 members declared only in a later
+  branch are no longer read. A file whose regions do not balance is parsed as written.
+  Declared by the new `preprocessor` descriptor key
+  ([configuration](docs/howto/configuration.md#preprocessor-regions-preprocessor)). Takes
+  effect when a C# file is next extracted; no migration.
+- **Parse damage is reported per language, and the insight entries it touches are
+  flagged.** Each file now records whether its parse held a syntax error, and every
+  `status` row (CLI `--json` and MCP) carries `parse_damage`: that language's damaged
+  files and their share, floored. `scan` warns, naming the language and its share, when
+  at least 10% of a language's files are damaged and the language holds at least 10% of
+  the production callables; the warning never changes an exit code. A worst-offender
+  entry or a "where to start" unit whose file is damaged carries `partial_parse: true`
+  in `scan`, `offenders`, `improvements` and the Health API (`GET /api/v1/health`); the
+  flag is recorded with the snapshot, and every other entry is unchanged. Opening an
+  existing store applies logos.db migration 44, which adds the per-file flag and the
+  snapshot entries' flag and re-extracts every file on the next scan; until then
+  `status` counts a language's not-yet-recorded files as `unrecorded`, never as clean
+  ([commands](docs/howto/commands.md#resolution_by_language)).
+- **A Kotlin call on a typed receiver binds among that type's members.** `repo.find()` on
+  a constructor property `private val repo: Repo` is recorded as the path `Repo::find`
+  and binds among `Repo`'s own members, or a supertype's — never its companion's, which
+  only `Repo.find()` reaches. The type is read from the one binding of the receiver's
+  name in scope at the call: a parameter, a typed local, `val x = T()`, a typed lambda,
+  `for`, `catch` or `when` variable, or a property or constructor `val`/`var` of the
+  caller's own class, object or companion; `T?` reads as `T`, and `Box<T>` as `Box`. A
+  call no member of the type answers still reaches the one extension of its name in
+  scope, as an untyped call does. A receiver the file proves no type for keeps its
+  `other` row and stays `no-receiver-evidence`: an untyped local or lambda parameter,
+  `it`, a destructured name, a `vararg`, a type parameter, a qualified or function type,
+  `x!!`, a plain constructor parameter, a name a nearer parameter or local also binds,
+  and a top-level property, which an inherited, companion, outer-class or extension
+  receiver's member of its name outranks. A class property is not typed inside a lambda
+  that may have a receiver of its own (`x.apply { }`, `with(x) { }`, a builder, a lambda
+  passed in parentheses or stored) — only inside the trailing lambda of a standard
+  function that takes none (`let`, `forEach`, `map`, …) — nor inside an `object : T { }`,
+  a nested class or a companion. A type whose name a top-level function in scope also
+  spells (`fun Repo(): Other`, which `Repo()` calls) proves nothing. On mixit bound Kotlin
+  calls go from 709 to 1,101 of 3,941 (call edges 555 to 932, cross-file 311 to 686); on
+  koin from 1,949 to 2,034 of 9,772 (edges 1,307 to 1,391); on spring-petclinic-kotlin
+  from 31 to 54 of 449 (edges 5 to 28, cross-file 0 to 23). No edge is lost, and 60
+  sampled typed edges were all judged correct. The row count rises (3,883 to 3,941;
+  9,751 to 9,772; 448 to 449) because two calls of one name in one method on differently
+  typed receivers are now two rows. Java's graph is unchanged. No schema change; a
+  Kotlin file's calls are retyped when it is next extracted.
+- **A Scala call on a receiver of declared type binds among that type's members.**
+  `orderService.addOrderItem(1)` on a class parameter `orderService: OrderService` is
+  recorded as the path `OrderService::addOrderItem` and binds among that type's members, or
+  a base type's, as a Java typed call does. The type is read from a class parameter or
+  member `val`/`var` (bare or through `this.`), a parameter, a typed local `val`, a typed
+  lambda parameter, or `val x = new T(…)`. A type parameter (`class Box[T](t: T)`, `def
+  f[A](a: A)`) is no type. A receiver the file proves no type for keeps its `other` row
+  and stays `no-receiver-evidence`: `val x = make()`, an untyped lambda parameter, a
+  generator, pattern, `given` or `val (a, b)` name, a `new T { … }` value, and a name
+  declared with a qualified or compound type (`a.b.Order`, `A with B`). Only a call with an
+  argument list is typed: a parameterless `config.schedule` may read a case-class field
+  beside a same-named `def`, and stays as it was. On ox bound Scala calls go from 575 of 5,838
+  to 622 of 5,850 (cross-file edges 261 to 307), and `other`-shaped rows from 3,180 to 2,929;
+  on gitbucket from 1,050 of 12,823 to 1,057 of 12,870 (cross-file 437 to 444). Most of the
+  newly typed rows name a library type (`String`, `HttpServletRequest`), now
+  `external-type`; others name a class with a companion `object`. Such a call is read as a
+  written `T.m()` is, among the object's methods, so it misses the class's own: 33 rows on
+  gitbucket (`registry.addController(…)` on a `PluginRegistry`) and 25 on ox stay unbound
+  (`supertype-unreached`), and one ox call binds the object's method of its name, the one
+  wrong edge in the 20 re-judged. No edge is lost. The row count rises because two calls of
+  one name on differently typed receivers are now two rows. Scala's reach stays `partial`
+  ([usage](docs/howto/usage.md)). No schema change; a Scala file's calls are retyped when it
+  is next extracted.
+- **A C call binds across translation units, and C's declared reach is `partial`
+  (`calls`, `imports`).** A C `#include` now binds the header it names, read as C++'s
+  are: a quoted one beside the including file first, then under the include roots; a
+  system header stays external. A bare call binds the caller's own definition, else a
+  definition a file its includes reach supplies (a header's `static inline` function or
+  macro), else the one non-`static` definition of the name among the repository's C
+  files. A `static` function is its own file's alone, and two non-`static` definitions
+  (platform variants such as libuv's `uv_loop_init` in `src/unix/` and `src/win/`) bind
+  neither; a definition an earlier `static` declaration names is file-local too. A call
+  through a function pointer (a parameter, a local or a file-scope variable of the name)
+  binds nothing. No build file is read. On redis the C cross-file calls go from 0 to 24,571
+  (of 50,892 call references) and 1,658 of 3,153 includes bind; on libuv from 0 to
+  6,654 (of 15,854) and 725 of 1,910, while 3,164 libuv calls to a platform-duplicated
+  function stay unbound. With a module graph to measure, redis's scan signal moves from
+  8411 to 7641 and libuv's from 8552 to 8056: acyclicity, depth and modularity are measured
+  instead of not applicable. Declared by the new `[module_model] link_unit` descriptor key
+  ([configuration](docs/howto/configuration.md)). Takes effect when a C file is next
+  extracted; no migration.
+- **A `gen`, `union` or `default` call inside a Rust macro is recorded as it is outside
+  one (CR-205, S-628).** `default(..)`, `T::default()`, `Default::default()`,
+  `x.union()` and `self.gen()` inside `assert_eq!`, `vec!` or `format!` were never
+  recorded, because the grammar tokenizes the three names as keywords in a macro's token
+  tree; a callee reached only that way read as dead. They now record the rows, argument
+  counts and receiver proofs the same call records outside a macro, and bind as it does.
+  `auto`, `raw` and `safe` already recorded; `gen { … }`, `default fn`, `union U { … }` and
+  a declaration such as `fn default()` record no call named `gen`, `union` or `default`. No migration: run `logos scan` (or `logos index`) to re-bind an
+  existing graph.
+- **A C++ call on a receiver of declared type binds among that type's members (S-581).**
+  `hash.hash_delimiter("x")` on a parameter `Hash& hash` is recorded as the path
+  `Hash::hash_delimiter` and binds as a written `Hash::hash_delimiter()` does, through the
+  file's namespaces, `using`s and includes. The type is read from the one parameter,
+  local, lambda, `catch`, `for` or condition variable in scope at the call, or a data
+  member of the caller's own class read by an inline method: `T`, `T&`, `const T&` or
+  `T&&` types a call through `.`, and `T*`, `std::unique_ptr<T>` or `std::shared_ptr<T>`
+  one through `->`. `p.reset()` on a smart pointer and `x->m()` on a value are not typed.
+  Nothing else proves a type: `auto`, a template parameter, a structured binding, an
+  array, a chain (`ctx.config.m()`), `this->x.m()`, and a data member read by an
+  out-of-line `T::f` definition stay `no-receiver-evidence`, and a name bound twice in
+  scope (a parameter beside a data member, a local in an `#ifdef` branch) proves nothing;
+  a declaration of the name the reading does not scope (a `case` local, a labelled one)
+  hides it across its function. A qualified call `T::m` is now decided in the nearest
+  class `T` names, as C++ reads a qualified name: its own `m`, else its nearest proven
+  base's, never a same-named class's in an outer namespace. On ccache bound C++ calls go
+  from 1,568 of 8,714 to 2,284 of 8,849 (call edges 1,553 to 2,262, cross-file 694 to
+  1,343), and `other`-shaped rows from 3,199 to 1,742; on nlohmann/json from 2,094 of
+  14,961 to 2,153 of 15,276 (edges 2,042 to 2,101), where most newly typed rows name a type alias (`json`,
+  `string_t`) or a library type (`std::vector`, `std::string`) and stay unbound. No edge is
+  lost, and 40 sampled new edges (20 per repository) were all judged correct. One written
+  call newly binds through a base: json's `StringMaker<T>::convert` reaches the primary
+  template's `convert`, where a specialization of that base may declare its own. The row
+  count rises because two calls of one name on differently typed receivers are now two
+  rows. C++'s reach stays `partial` ([usage](docs/howto/usage.md)). No migration; a C++
+  file's calls are retyped when it is next extracted.
+- **The gate fails an unfiltered offline cargo call, and CI reports every failing
+  binary.** `gate.sh fast` and `full` run `scripts/check-offline-cargo.py` over every
+  `.rs` file and fail on a `cargo metadata --offline` that names no platform
+  (`--filter-platform` or `--target`; `--no-deps` is exempt) and on a
+  `cargo tree --offline --target all`: either resolves every target's crates, which an
+  offline cache built on one host does not hold (HF-12)
+  ([installation](docs/howto/installation.md)). `ci.yml`'s workspace test step runs
+  `cargo test --workspace --no-fail-fast`.
+- **`/logos:sec-review --backlog` triages the findings no one has judged, and its
+  false-positive drafts carry their evidence (CR-253, S-819).** `--backlog` selects, by
+  a script in the skill (`sec-backlog.sh`), every active, unsuppressed, production-code
+  finding that is neither a secret nor a dependency finding — needs-review ones,
+  infrastructure findings and findings of no file included — bounded by `--limit`
+  (highest severity first), `--rule` (an exact id) and `--path` (a file or directory).
+  `sec-context.sh` hands each one its enclosing symbol and source, its callers and the
+  source of the symbols it calls or reads. Verdicts are `fix` (proven by the targeted
+  re-scan, which still knows the findings the bounds left out), `false-positive` or
+  `untrusted`. A `false-positive` draft (`suppress-draft.sh --evidence`) names at least one
+  symbol beyond the enclosing one, checked against the graph, and prints the held
+  `logos security reconfirm` command that records its hash; the report states how many
+  findings the run did not reach, and `sec-check-report.sh` holds that figure and the
+  evidence ([plugin](docs/howto/plugin.md#triaging-the-backlog---backlog)).
+
+### Changed
+
+- **Go declares every type, top-level variable, interface method and struct field.**
+  A type alias (`type Level = int8`) is a TypeAlias node flagged as an alias, a
+  top-level `var` or `const`, grouped or single, is a node (a function-local one is
+  not), an interface's method specs are bodyless Methods of the interface, a struct's
+  fields are Fields, and an embedded field records `Extends` to the type it embeds.
+  Every existing Go symbol is unchanged.
+- **A bare Python decorator is a reference.** `@authorize` and `@mod.authorize` are
+  calls qualified like any other name, so a decorator the repository defines binds
+  to its definition; `@property`, `@staticmethod` and other builtins stay unbound.
+- **Checkov and dependency-check findings with no score read `unrated`.** Both write
+  a constant SARIF level (Checkov `error` or `warning`, dependency-check `warning`),
+  so a result of either with no `security-severity` reads `unrated` with the reason
+  `the scanner gave none`, where it read `high` or `medium`; one carrying a score
+  keeps that rating. A rated `--severity` compares an unrated finding as `medium`.
+  Stored findings keep their old severity until a report with new content is
+  ingested ([security](docs/howto/security.md#severities-and-unrated)).
+- **C repositories own their headers, and C declarations are faithful.** A `.h` header
+  was always read as C++, so a C repository's headers lost their macros, every
+  `struct X *p` made a phantom struct (redis had 60 `redisCommand` structs), pointer and
+  array members were dropped, and a macro-prefixed prototype became a method of no
+  class (277 in libuv's `uv.h`). Now C reads `.h` in a repository whose `.c` files
+  outnumber its C++ sources (redis, libuv), C++ otherwise; the decision is recorded with
+  the graph, and a sync that moves it re-reads every header. In C and C++ alike a
+  `struct`, `union` or `enum` is a node only with its body, pointer, array and
+  function-pointer members are fields, and no function outside a class body is a method
+  (a C++ member function is one in a class body at any `#if`/`#elif`/`#else` depth). In
+  C a header's `#define`s are macros, a member outside every body is none, and a struct
+  whose header recovery tore from its body (libuv's `struct uv_loop_s`) keeps its
+  members. A C `struct` is now a `Struct`, which Focus counts by its span, and a C++
+  method reading a pointer member now links through it in Cohesion
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  A plugin descriptor may declare `shared_extensions`
+  ([configuration](docs/howto/configuration.md#shared-extensions-shared_extensions)). No
+  migration: the sprint's re-extraction on upgrade applies it.
+
+- **C++ out-of-line members merge into their declaration, prototypes pair with their
+  definition, and constructors are methods.** `void Widget::set() {…}` was not extracted,
+  so a method defined below its class had no body and its calls belonged to the file. A
+  definition in its class's own file now merges into the in-class declaration: one node,
+  the same symbol, now bodied. A definition whose class another file declares is a method
+  of its own, named for that class (`widget.cpp/Widget#set().`). A prototype and a
+  definition of one scope, name and parameters in one file both stay, but calls bind the
+  definition, `node` and `callees` land on it, and the prototype links to it; a prototype
+  in a header whose definition is in another file is bound as before. Constructors and
+  template members are methods. No existing symbol changes.
+- **Cohesion links inherited members and needs enough classes to score (metric
+  semantics 9).** Two methods that access one name through `this` that their class does
+  not declare, such as React's inherited `this.state`, are now one LCOM4 component, as if
+  they shared a field; declared-field links are unchanged. The new
+  `[metric_thresholds] cohesion_min_classes` (default 5) is the fewest scoreable classes
+  Cohesion needs: below it Cohesion reads n/a ("too few classes"), leaves the aggregate
+  and "where to start", and its worst-offender list still lists classes at LCOM4 ≥ 2.
+  `scan --json` names the reason as `metrics.cohesion_not_applicable`. The metric
+  semantics move to version 9 and the effective-thresholds hash now includes the new key,
+  so a baseline taken before resets once: the first `gate` after upgrading re-baselines
+  informationally.
+- **Kotlin declarations are kinded and complete, and a misparse is never silent.** A member
+  `fun` of a class, object, interface or companion is a Method (a top-level or local one stays
+  a Function), an `enum class` is an Enum, a `typealias` is a TypeAlias, and a primary-constructor
+  `val`/`var` parameter is a Field of its class. A `companion object`, named or not (the
+  default name is `Companion`), is a node of its own that holds its members:
+  `Svc#Companion#create().`, where it had been `Svc#create().`. A re-kinded `fun` and
+  `enum class` keep the symbol they had, and a `typealias` is new. A call to a member of a
+  class's anonymous companion — `Svc.create()`, or a bare `create()` inside `Svc` or a
+  subclass — still binds, now to the member under the companion; a named companion's
+  member is reached only through its name (`Svc.Factory.create()`). A Kotlin class's member `fun`s now count toward Focus (metric semantics 9,
+  [metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  A file whose parse loses declarations carries a partial-extraction warning: the one-line
+  class body `class A { fun f() = 1 }` already did, and so now does an annotated declaration the
+  grammar reads as an expression without reporting an error — a type with two annotations, or an
+  annotation with arguments, ahead of another declaration. This change adds no migration.
+- **Ruby declarations are complete, and Ruby build files are indexed.** A compact
+  `class A::B` or `module A::B` is the `class` itself rather than its scope `A::B`, so it keeps its
+  body: its methods are `A::B`'s, where they had been the file's. A setter or operator `def`
+  (`def x=`, `def []`, `def <=>`, `def -@`) and a `def` named by a constant are Methods, so every `def`
+  is a node. `attr_reader`, `attr_writer` and `attr_accessor` symbols (and plain strings), and the first
+  assignment of each `@ivar` in a class or module, are Fields named `@x`: `Account#@balance`, one
+  Field where an `attr_accessor :balance` and an `@balance = …` both name it; an `@x` outside a class or
+  module is none. `.rake`, `.ru` and `.gemspec` files, `Gemfile` and `Rakefile` are indexed as Ruby
+  (`Gemfile.lock` is not: a code plugin's basename claim is exact). `Gemfile` and `Rakefile`
+  are declared but not resolved: the lookups that bind constants, bare `require`s and
+  reachability key on the file extension, which they have none of, while `.rake`, `.ru` and
+  `.gemspec` files bind as any Ruby file. A constant a compact class holds
+  now binds from inside its body, and a call to a method defined after its `end` binds to the scope
+  that holds it. A Ruby class's methods count toward its Focus (metric semantics 9,
+  [metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  Ruby Cohesion stays n/a until `@ivar` access is captured. Symbols of a compact class's
+  methods change (`B#m()`, where they had been `m()`); no migration.
+- **A package name is never masked as a token.** The masker's long-token rule (20 or more
+  letters and digits) read a Go module path or a scoped npm name in a scanner message as a
+  generated key: `Package 'github.com/xuri/excelize/v2@2.10.1'` was stored as
+  `Package 'github.[masked]@2.10.1'`. A package coordinate (`name@version`, a version of two
+  or more numeric parts, or a module path of a dot-qualified host and `/` segments) now
+  reads whole. A word in a coordinate's name reads whole only if none of its `/` segments
+  is itself a token, and a coordinate after `://` is a URL's path: so a coordinate's URL
+  user-info (`https://user:token@registry/…`), a bare 40-character token and a secret in
+  a URL's or a host's path (a webhook, an API key) are still masked. No migration.
+- **Python classes have methods, fields and `self` accesses.** A `def` in a class body —
+  a decorated one, `@staticmethod`, `@classmethod` and `@property` included — is a Method
+  of its class, where every Python class had 0 methods; a def nested in a method, and a
+  free def, stay Functions. A class's Fields are its body's assignments and annotations (a
+  dataclass's or a Django model's fields, `x: int`) and its methods' `self.x = …` writes,
+  each name of a tuple target included, once per class, the class-body one first. `self.x` reads and writes bind
+  `Accesses` to them, and Python now declares member access, so Python classes are scored
+  for Cohesion (`.pyi` stubs are not) and count their methods toward Focus (metric
+  semantics 9,
+  [metrics](docs/howto/metrics.md#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  A method keeps the symbol it had as a function, and a field's initialiser calls stay
+  its class's. The names after the first of a chained assignment (`a = b = 0`), an
+  augmented assignment, `cls.x = …`, an assignment under an `if` or other compound
+  statement of the class body, and a `self.x = …` outside a method of the class declare
+  no field. This change adds no migration.
+- **Checkov leaves secrets to Gitleaks when Gitleaks runs.** With Gitleaks enabled and
+  installed, Checkov is run with `--skip-framework secrets` (a scoped scan included), so a
+  hardcoded secret that both report is no longer listed twice. With Gitleaks disabled or
+  not installed, Checkov's argv is unchanged and its `secrets` framework still runs. The
+  skip does not depend on which scanners a scan selects: `security scan checkov` alone
+  skips them too, and Gitleaks' earlier findings stand. A full Gitleaks run reads the
+  committed history, so a secret only in an uncommitted file is no longer reported by
+  Checkov either; a scoped run reads the files as they are. No migration.
+- **JavaScript is its own language, parsed with the JSX-capable grammar.** `.js`, `.mjs`,
+  `.cjs` and `.jsx` files are now labelled `javascript`, where `.js`, `.mjs` and `.cjs`
+  were `typescript` and `.jsx` was `tsx`. They parse with the TSX grammar, so JSX inside a
+  `.js` file is no longer a syntax error and a component it renders binds as a call. The
+  `javascript` plugin runs the TSX plugin's queries themselves rather than a copy, so a
+  TypeScript-family query change reaches it. `status --json` reports a `javascript` row in
+  `resolution_by_language`, and the `typescript` and `tsx` rows no longer count JavaScript
+  files. A `.logos/config.toml` `languages` allowlist naming `typescript` or `tsx` no
+  longer admits JavaScript files: add `javascript` to keep them. Likewise a query override
+  under `.logos/plugins/typescript/` or `.logos/plugins/tsx/` no longer applies to
+  JavaScript files, which read `.logos/plugins/javascript/queries/`: copy it there to keep
+  it. JavaScript still declares no `member_access`, and its calls are still never
+  filtered by arity ([configuration](docs/howto/configuration.md)). No migration of its own: a file takes
+  its new label when it is next extracted, and `logos index` re-extracts every file.
+- **A C# type name binds only a type of its own arity.** `Result` and `Result<T>` are two
+  types, as C# reads them: a base type or `new` binds, in its own file, the file's own
+  namespace, an enclosing namespace or a `using` namespace, only a type with as many type
+  parameters as it writes type arguments. `Result` written in `A.Sub` now passes over a generic
+  `A.Result<T>` to the `X.Result` that `using X;` supplies, and two types of one name are
+  ambiguous only when both have the written count, so a plain type and its generic twin
+  in one namespace both bind where neither did. On Newtonsoft.Json at `52fa3aef`
+  (`JsonConverter` and `JsonConverter<T>` in one file) bound C# `Extends` rows go from
+  326 to 399 of 938 (941 after: a type written plain and generic by one declaration is
+  now two rows), with 73 `Extends` edges, 2 `Instantiates` and 2 `Calls` added and none
+  removed. A call through a type name (`Result.Make()`), a `using` alias and a name
+  written qualified (`X.Result<int>`) are still matched by name only. Other
+  languages are unchanged. The plugin key is `[module_model] type_arity`
+  ([configuration](docs/howto/configuration.md)). Upgrade note: migration 42 adds
+  `nodes.type_arity` and clears every file's content hash, so the next scan or index
+  re-extracts every file.
+- **A C# `using` inside a namespace block is read before the enclosing namespaces.** In
+  `namespace Acme.Sub { using X; class Impl : Foo }`, with both `Acme.Foo` and `X.Foo`
+  declared, `Foo` now binds `X.Foo`, as C# reads it; it bound `Acme.Foo` before. Each
+  level of the walk reads that namespace's types, then the `using`s written inside its
+  block, then moves one level out (`A.B`, then `A`), and the `using`s written outside
+  every block are read last, as before. Two types the `using`s of one block supply bind
+  nothing (`type-ambiguous`), and the walk does not go past them. A file whose `using`s
+  are all at file level binds exactly as before, and other languages are unchanged. A
+  block's `using`s are read early only when that block encloses every type of the file;
+  in a block holding only some of the file's types they are read last, as before, and in
+  a block holding none of them they are not read at all. A `using static` inside a block is still read as a file-level
+  one, and a `using` alias is still read first wherever it is written. On Newtonsoft.Json at `52fa3aef`, 9 `using`s in one file are
+  block-scoped, all of `System` namespaces. Edges (74,266) and every bound/total count
+  are unchanged ([configuration](docs/howto/configuration.md)). No migration of its own:
+  a C# file records its `using`s' blocks when it is next extracted, and the upgrade's
+  migration re-extracts every file.
+- **A Rust `<T>::m()` call binds through the one lookup, never a free function.** A
+  qualified self that names no trait is the path the call writes, inside a macro and
+  outside one: `<W>::new()` is `W::new`, `<Vec<u8>>::new()` is `Vec::new`, and the
+  associated-item lookup binds it as it binds the written path, so it no longer binds a
+  free `fn new` in scope. `<Vec<u8>>::new()` reads `external-type`; `<[u8]>::len(x)`,
+  `<&str>::len(s)` and `<dyn Tr>::m(x)`, whose bracket is no path, bind nothing; a
+  `self`-taking `m` called as `<T>::m(x)` counts its receiver. `<T as Tr>::m()` is
+  unchanged. On a `git archive` export of this repository no `Calls` edge changes (37,477
+  before and after: it holds no such call); on serde at `0db9b3b5` none changes
+  (1,809 before and after) and 7 unresolved rows read their written path (`default`,
+  `deserialize`). Upgrade note: run `logos scan` (or `logos index`) to re-extract the
+  Rust files. This change adds no migration.
+- **A dependency finding is keyed by its package, and a repeated result is one
+  finding.** An OSV-Scanner, Trivy or Dependency-Check result is keyed by its rule, its
+  path (the lockfile, or the file Dependency-Check scanned) and the package name and
+  version it names, no longer by its position. A
+  result a scanner writes twice in one report is one finding, and two packages sharing
+  one advisory in one lockfile stay two. osv-scanner writes a package once per advisory
+  record that matched it, so a Go module with a `GO-` and a `GHSA-` record was counted
+  twice: on one Go and npm project, 29 OSV-Scanner results read 23 findings. Other
+  findings keep their keys ([security](docs/howto/security.md)). Upgrade note: history.db
+  migration 13 marks those scanners' snapshots; each one's next scan or ingest re-keys its
+  stored findings and the ratchet's baseline, and every finding keeps its old keys, so a
+  checked-in baseline and the ignore file written before it still match.
+- **One advisory on one package is one finding, whichever scanners reported it.**
+  OSV-Scanner, Trivy and Dependency-Check findings on one lockfile, package and
+  version that share an advisory id (the rule id, or an id OSV-Scanner lists as an
+  alias) read as one finding naming every reporter in `reporters`, at the highest
+  rating any of them gave; an `unrated` one never lowers a rated one. Every list and
+  count, the `[security]` caps and ratchet, `security bless`, the branch delta, the
+  Security page and the Dashboard widget count it once; `security status` counts it on
+  its first reporter's row and states it as `merged` on the others'. An ignore entry
+  naming any reporter's fingerprint suppresses it; it reads suppressed only when every
+  reporter is. Reports stay stored per scanner
+  ([security](docs/howto/security.md#one-advisory-several-scanners)). Upgrade note:
+  history.db migration 14 stores a dependency finding's package; a Dependency-Check
+  report stored before it joins the merge at its next scan or ingest.
+- **A call through a trait is no longer a dependency on its implementations.** The edges
+  a trait call fans out to its implementations (marked dispatch, under Added)
+  are skipped by every architecture view: the metric graph behind Modularity, Acyclicity
+  and Depth, the DSM and the module and file tiers of the graph view, the layer and
+  boundary rules, and the `max_fan_in` / `max_fan_out` budgets. A crate that calls its own trait no longer depends on the crates implementing
+  it, so a dependency-inversion seam is neither a layer violation nor a module cycle.
+  Runtime answers keep the edges — `callers`, `callees`, `impact`, `affected`,
+  reachability and dead code — so no implementation reached only through its trait turns
+  dead, and a direct call to an implementation is still a dependency. Part of the metric
+  semantics v9 re-baseline; on this repository Modularity moved 0.6905 → 0.6948, Depth and
+  Acyclicity were unchanged, and the signal moved 8276 → 8279
+  ([metrics](docs/howto/metrics.md#dispatch-through-a-trait-is-excluded-too)).
+- **A local binding shadows the receiver and the callee.** A name a function's body binds
+  where a call is — declared before the call's statement, or hoisted (a JavaScript `var`,
+  any Python local) — now decides a bare call of that name before any other scope. A local
+  import (`from m import f` inside a function, a block-scope `using ns::f;`, a block `use`)
+  is the call's target through that import alone, never the caller itself or a
+  same-named function it hides; two imports of the name in one file that disagree bind
+  neither. A local parameter or variable (`var f = pick(); f()`, a
+  parameter `f` called as `f()`, a Rust closure) binds nothing, and `status` counts it under
+  the new `call_residue` reason `local-binding` — on the row of any language holding one. A
+  Go receiver name that a `range`, `:=`, closure parameter or type switch rebinds is `other`,
+  so `s.Close()` on a rebound `s` no longer binds the receiver type's `Close`. A nested
+  function the graph records is still the call's target; Java and Ruby, whose calls never
+  name a value, declare the new plugin key `separate_call_namespace`
+  ([commands](docs/howto/commands.md), [configuration](docs/howto/configuration.md)).
+- **Equality's functions are no longer listed as offenders.** Equality's list holds the
+  functions with above-average complexity, judged against no threshold, and they had
+  been read as defects. `logos offenders` and the MCP `offenders` tool now leave them
+  out, with or without `--path`, unless `--dimension equality` asks for them, which
+  lists every one. The Health page keeps its top 10 under copy that says what they
+  are. The Equality score, the signal and the thresholds hash are unchanged
+  ([commands](docs/howto/commands.md#offenders---path-glob---dimension-d)).
+
 ## [1.21.2] — 2026-10-24
 
 ### Fixed

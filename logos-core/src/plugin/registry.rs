@@ -31,8 +31,9 @@
 //! [FR-PL-04]: ../../../docs/specs/requirements/FR-PL-04.md
 //! [NFR-PC-03]: ../../../docs/specs/requirements/NFR-PC-03.md
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tree_sitter::Language;
@@ -42,7 +43,7 @@ use super::error::{PluginError, SkippedGrammar};
 use super::grammars::{self, GrammarEntry};
 use super::manifest::{CallTargets, PluginManifest};
 use super::plugin::{CompiledPlugin, LanguagePlugin, Semantics};
-use super::queries::{self, LanguageQueries};
+use super::queries::{self, CaptureChecks, LanguageQueries};
 
 /// One language's path-model declaration (S-519, [FR-RS-14]), as
 /// [`LanguageRegistry::path_models`] hands it to the module key: the package-file
@@ -97,9 +98,67 @@ pub struct LanguageRegistry {
     /// [CR-010]: ../../../docs/requests/CR-010-config-artifact-graph-layer.md
     /// [FR-CG-01]: ../../../docs/specs/requirements/FR-CG-01.md
     filename_claims: Vec<(String, usize)>,
+    /// The extensions two plugins claim, one declaring it shared (S-582,
+    /// [FR-PL-07]): C's `.h`. `by_extension` maps each to its default reader,
+    /// the other plugin; which one reads it in this repository is decided by
+    /// its sources ([`shared_owners_for`](Self::shared_owners_for)).
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    shared: Vec<SharedExtension>,
     /// Grammars skipped at load (ABI mismatch), recorded for `languages` and
     /// diagnostics ([FR-PL-03]).
     skipped: Vec<SkippedGrammar>,
+}
+
+/// One extension two plugins claim (S-582): `sharer` declares it in
+/// `shared_extensions`, `owner` claims it outright and reads it unless the
+/// repository's decision gives it to the sharer.
+#[derive(Debug)]
+struct SharedExtension {
+    /// The normalised extension.
+    ext: String,
+    /// Index of the plugin that declares the extension shared.
+    sharer: usize,
+    /// Index of the plugin that claims it outright — its default reader.
+    owner: usize,
+    /// Whether this repository gives the extension to `sharer`. Set by the
+    /// pipeline from the files it indexes, and at engine start from the
+    /// decision the store records, so every reader of the registry routes a
+    /// file as the graph was built.
+    sharer_reads: AtomicBool,
+}
+
+/// The shared extensions a repository gives to the plugin that shares them
+/// (S-582, [FR-PL-07]) — `{"h"}` in a C repository, empty otherwise. The
+/// decision [`LanguageRegistry::shared_owners_for`] makes, and the value the
+/// store records so a later process routes `.h` as the graph was built.
+///
+/// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SharedOwners(BTreeSet<String>);
+
+impl SharedOwners {
+    /// The decision as the store records it: the extensions, sorted and
+    /// comma-joined (`"h"`); empty when no extension goes to its sharer.
+    pub fn record(&self) -> String {
+        self.0.iter().map(String::as_str).collect::<Vec<_>>().join(",")
+    }
+
+    /// The decision a [`record`](Self::record) holds; an empty record is the
+    /// default, every shared extension with its outright claimant.
+    pub fn from_record(record: &str) -> Self {
+        Self(record.split(',').map(str::trim).filter(|e| !e.is_empty()).map(normalize_ext).collect())
+    }
+
+    /// Whether the decision gives no extension to its sharer — the default.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Whether the decision gives `ext` (normalised) to its sharer.
+    pub fn contains(&self, ext: &str) -> bool {
+        self.0.contains(&normalize_ext(ext))
+    }
 }
 
 impl LanguageRegistry {
@@ -144,6 +203,7 @@ impl LanguageRegistry {
         let mut plugins: Vec<CompiledPlugin> = Vec::new();
         let mut by_extension: HashMap<String, usize> = HashMap::new();
         let mut filename_claims: Vec<(String, usize)> = Vec::new();
+        let mut shared: Vec<SharedExtension> = Vec::new();
         let mut skipped: Vec<SkippedGrammar> = Vec::new();
 
         for entry in entries {
@@ -170,16 +230,8 @@ impl LanguageRegistry {
             let plugin = CompiledPlugin::new(manifest, language, queries, overridden);
 
             let idx = plugins.len();
-            for ext in plugin.extensions() {
-                // Last declaration wins on an extension collision; warn so the
-                // shadowing is visible rather than silent.
-                if let Some(prev) = by_extension.insert(normalize_ext(ext), idx) {
-                    warn(&format!(
-                        "extension '{ext}' claimed by '{}' shadows '{}'",
-                        plugin.name(),
-                        plugins[prev].name()
-                    ));
-                }
+            for shadowing in claim_extensions(&plugins, &plugin, idx, &mut by_extension, &mut shared) {
+                warn(&shadowing);
             }
             // Basename claims (S-062, CR-010, FR-CG-01): recorded in declaration
             // order so `for_path`'s exact + `Name.*` prefix lookup is deterministic
@@ -202,15 +254,112 @@ impl LanguageRegistry {
             plugins,
             by_extension,
             filename_claims,
+            shared,
             skipped,
         })
     }
 
     /// The plugin that claims `ext` (with or without a leading dot, any case).
+    /// A shared extension (S-582: `.h`) is read by the plugin this
+    /// repository's decision gives it to ([`set_shared_owners`](Self::set_shared_owners)).
     pub fn for_extension(&self, ext: &str) -> Option<&dyn LanguagePlugin> {
-        self.by_extension
-            .get(&normalize_ext(ext))
-            .map(|&i| &self.plugins[i] as &dyn LanguagePlugin)
+        self.reader_of(&normalize_ext(ext))
+            .map(|i| &self.plugins[i] as &dyn LanguagePlugin)
+    }
+
+    /// The index of the plugin that reads files of the normalised `ext`: a
+    /// shared extension's sharer when this repository gives it the extension,
+    /// else the extension's outright claimant.
+    fn reader_of(&self, ext: &str) -> Option<usize> {
+        match self.shared.iter().find(|s| s.ext == ext) {
+            Some(s) if s.sharer_reads.load(Ordering::Relaxed) => Some(s.sharer),
+            _ => self.by_extension.get(ext).copied(),
+        }
+    }
+
+    /// The normalised extensions of `plugin` that it reads in this repository
+    /// (S-582): every one it claims, less a shared one the other claimant
+    /// reads. The per-key extension sets and maps below are built from these,
+    /// so a `.h` carries the semantics of the language that parses it.
+    fn read_extensions<'a>(&'a self, plugin: &'a CompiledPlugin) -> impl Iterator<Item = String> + 'a {
+        plugin
+            .extensions()
+            .iter()
+            .map(|e| normalize_ext(e))
+            .filter(move |e| self.reader_of(e).is_some_and(|i| std::ptr::eq(&self.plugins[i], plugin)))
+    }
+
+    /// Which shared extensions the repository whose admitted files are
+    /// `paths` gives to the plugin that shares them (S-582, [FR-PL-07]): a
+    /// shared extension goes to its sharer when the repository holds more
+    /// files of the sharer's other extensions than of its outright
+    /// claimant's. C reads `.h` in a repository whose `.c` files outnumber its
+    /// `.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx` ones — redis's 475 C files beside
+    /// 8 vendored C++ ones — and C++ reads it otherwise, a repository of
+    /// headers alone included. The rule `status` disclosed C repositories by
+    /// before C owned their headers (S-572). Shared files themselves are not
+    /// counted, so the decision never depends on the one it makes.
+    ///
+    /// A pure reading of `paths`; [`set_shared_owners`](Self::set_shared_owners)
+    /// applies it.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    pub fn shared_owners_for<'p>(&self, paths: impl IntoIterator<Item = &'p str>) -> SharedOwners {
+        if self.shared.is_empty() {
+            return SharedOwners::default();
+        }
+        let mut sources = vec![0_usize; self.plugins.len()];
+        for path in paths {
+            let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()).map(normalize_ext) else {
+                continue;
+            };
+            if self.shared.iter().any(|s| s.ext == ext) {
+                continue;
+            }
+            if let Some(&i) = self.by_extension.get(&ext) {
+                sources[i] += 1;
+            }
+        }
+        SharedOwners(
+            self.shared
+                .iter()
+                .filter(|s| sources[s.sharer] > sources[s.owner])
+                .map(|s| s.ext.clone())
+                .collect(),
+        )
+    }
+
+    /// The decision this registry routes shared extensions by now.
+    pub fn shared_owners(&self) -> SharedOwners {
+        SharedOwners(
+            self.shared
+                .iter()
+                .filter(|s| s.sharer_reads.load(Ordering::Relaxed))
+                .map(|s| s.ext.clone())
+                .collect(),
+        )
+    }
+
+    /// Route shared extensions by `owners` from now on (S-582): each one it
+    /// names to its sharer, every other to its outright claimant. Returns
+    /// whether the routing changed.
+    pub fn set_shared_owners(&self, owners: &SharedOwners) -> bool {
+        let mut changed = false;
+        for s in &self.shared {
+            let reads = owners.0.contains(&s.ext);
+            changed |= s.sharer_reads.swap(reads, Ordering::Relaxed) != reads;
+        }
+        changed
+    }
+
+    /// Whether `rel` has an extension two plugins share (S-582) — a file the
+    /// repository's decision routes, so one a change of decision re-reads.
+    pub fn is_shared_path(&self, rel: &str) -> bool {
+        Path::new(rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(normalize_ext)
+            .is_some_and(|ext| self.shared.iter().any(|s| s.ext == ext))
     }
 
     /// The plugin that claims `rel` by its **extension or basename** (S-062,
@@ -221,7 +370,9 @@ impl LanguageRegistry {
     /// 2. else the **exact** basename among the `filenames` claims (so
     ///    `Dockerfile` binds the Dockerfile plugin);
     /// 3. else the documented **`Name.*` prefix** rule — a basename `Name.<rest>`
-    ///    matches a claim `Name` (so `Dockerfile.dev` binds the same plugin).
+    ///    matches a claim `Name` of an **artifact** plugin (so `Dockerfile.dev`
+    ///    binds the same plugin). A code plugin's claim is exact only: Ruby's
+    ///    `Gemfile` does not take `Gemfile.lock` (S-564).
     ///
     /// Returns the first match in declaration order, so the lookup is
     /// deterministic ([NFR-RA-06]).
@@ -239,14 +390,17 @@ impl LanguageRegistry {
             return Some(plugin);
         }
         let base = path.file_name().and_then(|b| b.to_str())?;
-        // Exact basename claim first, then the `Name.*` prefix rule.
+        // Exact basename claim first, then the `Name.*` prefix rule — which only
+        // an artifact plugin's claim takes (`Dockerfile.dev`): a code plugin's
+        // claim is its exact name, so `Gemfile.lock` is not Ruby (S-564).
         let idx = self
             .filename_claims
             .iter()
             .find(|(claim, _)| claim == base)
             .or_else(|| {
-                self.filename_claims.iter().find(|(claim, _)| {
-                    base.len() > claim.len()
+                self.filename_claims.iter().find(|(claim, i)| {
+                    self.plugins[*i].is_artifact()
+                        && base.len() > claim.len()
                         && base.starts_with(claim.as_str())
                         && base.as_bytes()[claim.len()] == b'.'
                 })
@@ -275,8 +429,19 @@ impl LanguageRegistry {
         self.plugins
             .iter()
             .filter(|p| p.supports_reachability())
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .flat_map(|p| self.read_extensions(p))
             .collect()
+    }
+
+    /// Each normalised extension whose code plugin declares `entry_points`
+    /// (S-530, [FR-AN-01]), mapped to those names: the functions the language's
+    /// runtime calls itself (Go's `main` and `init`). The [annotation-engine]
+    /// roots a top-level function of one of these names in a file of that
+    /// extension; an extension absent from the map adds no root.
+    ///
+    /// [FR-AN-01]: ../../../docs/specs/requirements/FR-AN-01.md
+    pub fn entry_point_names(&self) -> HashMap<String, Vec<String>> {
+        self.code_extension_map(|s| (!s.entry_points.is_empty()).then(|| s.entry_points.clone()))
     }
 
     /// The file extensions (normalised: lower-case, no leading dot) whose loaded
@@ -309,10 +474,51 @@ impl LanguageRegistry {
                     .iter()
                     .map(|e| normalize_ext(e))
                     .collect();
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), targets.clone()))
+                self.read_extensions(p).map(move |e| (e, targets.clone()))
             })
+            .collect()
+    }
+
+    /// The file extensions (normalised: lower-case, no leading dot) whose loaded
+    /// plugin declares `bare_specifiers = "tsconfig"`
+    /// ([`BareSpecifiers::Tsconfig`](super::BareSpecifiers::Tsconfig); S-531):
+    /// the files whose bare specifiers bind through their nearest
+    /// `tsconfig.json`/`jsconfig.json` and the workspace packages
+    /// ([`crate::resolve`]'s `ts_config`). Every other extension's bare
+    /// specifier names an external package.
+    pub fn tsconfig_extensions(&self) -> std::collections::HashSet<String> {
+        self.extensions_declaring(|s| s.bare_specifiers == super::BareSpecifiers::Tsconfig)
+    }
+
+    /// The file extensions (normalised) whose loaded plugin declares
+    /// `bare_specifiers = "load-path"`
+    /// ([`BareSpecifiers::LoadPath`](super::BareSpecifiers::LoadPath); S-566):
+    /// the files whose bare specifiers bind against the repository's load
+    /// roots — each gem's `require_paths` and the repository root
+    /// ([`crate::resolve`]'s `load_path`).
+    pub fn load_path_extensions(&self) -> std::collections::HashSet<String> {
+        self.extensions_declaring(|s| s.bare_specifiers == super::BareSpecifiers::LoadPath)
+    }
+
+    /// The file extensions (normalised) whose loaded plugin declares
+    /// `bare_specifiers = "include-roots"`
+    /// ([`BareSpecifiers::IncludeRoots`](super::BareSpecifiers::IncludeRoots);
+    /// S-579): the files whose `#include` binds against the including file's
+    /// directory and the repository's include roots, and whose calls and type
+    /// relations bind through what they include. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`].
+    pub fn include_root_extensions(&self) -> std::collections::HashSet<String> {
+        self.extensions_declaring(|s| s.bare_specifiers == super::BareSpecifiers::IncludeRoots)
+    }
+
+    /// The normalised extensions of every loaded plugin whose semantics
+    /// `declares` holds for — the one walk the semantics-keyed extension sets
+    /// share.
+    fn extensions_declaring(&self, declares: impl Fn(&Semantics) -> bool) -> HashSet<String> {
+        self.plugins
+            .iter()
+            .filter(|p| declares(p.semantics()))
+            .flat_map(|p| self.read_extensions(p))
             .collect()
     }
 
@@ -328,15 +534,7 @@ impl LanguageRegistry {
     ///
     /// [CR-149]: ../../../docs/requests/CR-149-java-imports-and-type-relations-never-bind.md
     pub fn package_source_roots(&self) -> std::collections::HashMap<String, Vec<String>> {
-        self.plugins
-            .iter()
-            .filter_map(|p| Some((p, p.semantics().package_modules.as_ref()?)))
-            .flat_map(|(p, pm)| {
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), pm.source_roots.clone()))
-            })
-            .collect()
+        self.read_extension_map(|p| p.semantics().package_modules.as_ref().map(|pm| pm.source_roots.clone()))
     }
 
     /// The file extensions (normalised as in
@@ -348,11 +546,7 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     pub fn namespace_extensions(&self) -> std::collections::HashSet<String> {
-        self.plugins
-            .iter()
-            .filter(|p| p.semantics().module_model == super::ModuleModelKind::Namespace)
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
-            .collect()
+        self.extensions_declaring(|s| s.module_model == super::ModuleModelKind::Namespace)
     }
 
     /// The file extensions (normalised as in
@@ -364,14 +558,17 @@ impl LanguageRegistry {
     ///
     /// [FR-RS-14]: ../../../docs/specs/requirements/FR-RS-14.md
     pub fn path_models(&self) -> HashMap<String, PathModelDecl> {
+        self.read_extension_map(|p| PathModelDecl::of(p))
+    }
+
+    /// Each extension a loaded plugin reads, mapped to what `value` gives that
+    /// plugin — every plugin, documentation and artifact ones included; the
+    /// code-only twin is [`code_extension_map`](Self::code_extension_map).
+    fn read_extension_map<V: Clone>(&self, value: impl Fn(&CompiledPlugin) -> Option<V>) -> HashMap<String, V> {
         self.plugins
             .iter()
-            .filter_map(|p| Some((p, PathModelDecl::of(p)?)))
-            .flat_map(|(p, decl)| {
-                p.extensions()
-                    .iter()
-                    .map(move |e| (normalize_ext(e), decl.clone()))
-            })
+            .filter_map(|p| Some((p, value(p)?)))
+            .flat_map(|(p, v)| self.read_extensions(p).map(move |e| (e, v.clone())))
             .collect()
     }
 
@@ -384,7 +581,7 @@ impl LanguageRegistry {
             .iter()
             .filter(|p| !p.is_documentation() && !p.is_artifact())
             .filter(|p| declares(p.semantics()))
-            .flat_map(|p| p.extensions().iter().map(|e| normalize_ext(e)))
+            .flat_map(|p| self.read_extensions(p))
             .collect()
     }
 
@@ -396,7 +593,7 @@ impl LanguageRegistry {
             .iter()
             .filter(|p| !p.is_documentation() && !p.is_artifact())
             .filter_map(|p| Some((p, value(p.semantics())?)))
-            .flat_map(|(p, v)| p.extensions().iter().map(move |e| (normalize_ext(e), v.clone())))
+            .flat_map(|(p, v)| self.read_extensions(p).map(move |e| (e, v.clone())))
             .collect()
     }
 
@@ -450,6 +647,18 @@ impl LanguageRegistry {
 
     /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares structural types (S-535, [FR-EX-17]): every type relation such
+    /// a file records relates its declaration. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds type relations as before.
+    ///
+    /// [FR-EX-17]: ../../../docs/specs/requirements/FR-EX-17.md
+    pub fn structural_type_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.structural_types)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
     /// declares that a namespace sees the types of its enclosing namespaces
     /// (S-595, [FR-RS-45]). Consumed through
     /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
@@ -458,6 +667,152 @@ impl LanguageRegistry {
     /// [FR-RS-45]: ../../../docs/specs/requirements/FR-RS-45.md
     pub fn enclosing_namespace_extensions(&self) -> HashSet<String> {
         self.code_extensions_where(|s| s.enclosing_namespaces)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// tells a type apart from a same-named one by its generic arity (S-602,
+    /// [CR-199]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
+    pub fn type_arity_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.type_arity)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// names its classes and modules by lexical constants (S-565,
+    /// [FR-RS-33]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-33]: ../../../docs/specs/requirements/FR-RS-33.md
+    pub fn lexical_constant_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.lexical_constants)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that the files of one directory declaring one `package` clause
+    /// share one package scope (S-528, [FR-RS-17]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
+    pub fn directory_package_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.directory_packages)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a bare call no included declaration supplies binds the
+    /// one non-`static` definition of its name among the language's files
+    /// (S-584, [FR-RS-40]). A shared extension is one only where its sharer
+    /// reads it: C's `.h` in a repository whose headers C reads. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
+    pub fn link_unit_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.link_unit)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a type and the same-named singleton beside it are one
+    /// name (S-573, [FR-RS-36]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn companion_object_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.companion_objects)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a file's top-level functions are members of its declared
+    /// namespace (S-573, [FR-RS-36]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn top_level_callable_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.top_level_callables)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a wildcard import outranks the namespace's other files
+    /// (S-573, [FR-RS-36]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
+    pub fn wildcard_first_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.wildcards_outrank_package)
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that a top-level function with a receiver type is callable on
+    /// a value (S-560, [FR-RS-31]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn extension_function_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.extension_functions)
+    }
+
+    /// Extension → the file-facade suffix its code plugin declares (S-560,
+    /// [FR-RS-31]), normalised as in
+    /// [`package_source_roots`](Self::package_source_roots). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the map has no facade.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn file_facades(&self) -> HashMap<String, String> {
+        self.code_extension_map(|s| s.file_facade.clone())
+    }
+
+    /// Extension → the name its code plugin gives a type's anonymous companion
+    /// object (I4-INT, [FR-RS-31]), normalised as in
+    /// [`package_source_roots`](Self::package_source_roots). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the map has no companions.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub fn companion_names(&self) -> HashMap<String, String> {
+        self.code_extension_map(|s| s.companion_name.clone())
+    }
+
+    /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares that an unqualified call its namespace does not supply falls
+    /// back to the global function (S-551, [FR-RS-26]). Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`]; an extension absent from
+    /// the set binds exactly as before.
+    ///
+    /// [FR-RS-26]: ../../../docs/specs/requirements/FR-RS-26.md
+    pub fn global_function_fallback_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.global_function_fallback)
+    }
+
+    /// Every code plugin's file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)), each mapped to its
+    /// plugin's name (S-560) — what tells two languages of one interop family
+    /// apart where they do not name each other's declarations: a Kotlin file
+    /// never calls a Scala top-level `def` by its package. Consumed through
+    /// [`crate::resolve::package_key::PackageLayout`].
+    pub fn languages(&self) -> HashMap<String, String> {
+        self.plugins
+            .iter()
+            .filter(|p| !p.is_documentation() && !p.is_artifact())
+            .flat_map(|p| self.read_extensions(p).map(move |e| (e, p.name().to_string())))
+            .collect()
     }
 
     /// The file extensions (normalised as in
@@ -515,7 +870,7 @@ impl LanguageRegistry {
     /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
     /// declares the **member-access capability** (S-523, [CR-171], [ADR-39]),
     /// less the ones it carves out in `member_access_excluded_extensions`
-    /// (JavaScript under the TypeScript grammars): the metrics engine scores
+    /// (Python's `.pyi` stubs): the metrics engine scores
     /// Cohesion only for a class defined in one of them ([FR-QM-11]), and a
     /// class of any other language is not applicable rather than scored from
     /// calls alone. The Cohesion twin of
@@ -532,10 +887,7 @@ impl LanguageRegistry {
             .flat_map(|p| {
                 let excluded: HashSet<String> =
                     p.semantics().member_access_excluded_extensions.iter().map(|e| normalize_ext(e)).collect();
-                p.extensions()
-                    .iter()
-                    .map(|e| normalize_ext(e))
-                    .filter(move |ext| !excluded.contains(ext))
+                self.read_extensions(p).filter(move |ext| !excluded.contains(ext))
             })
             .collect()
     }
@@ -554,10 +906,22 @@ impl LanguageRegistry {
     }
 
     /// The file extensions (normalised as in
+    /// [`package_source_roots`](Self::package_source_roots)) whose code plugin
+    /// declares `method_set_implements = true` (S-529, [FR-RS-18]): a type
+    /// declared there implements an interface declared there by its method set.
+    /// Consumed by the resolution pass ([`crate::resolve`]); an extension absent
+    /// from the set records no such relation.
+    ///
+    /// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+    pub fn method_set_extensions(&self) -> HashSet<String> {
+        self.code_extensions_where(|s| s.method_set_implements)
+    }
+
+    /// The file extensions (normalised as in
     /// [`package_source_roots`](Self::package_source_roots)) a code plugin
     /// declares in `arity_unchecked_extensions` (S-592, [FR-RS-43]): files of a
-    /// language that enforces no arity — JavaScript, parsed by the TypeScript
-    /// grammars — whose calls are never filtered by a parameter range.
+    /// language that enforces no arity — JavaScript — whose calls are never
+    /// filtered by a parameter range.
     ///
     /// [FR-RS-43]: ../../../docs/specs/requirements/FR-RS-43.md
     pub fn arity_unchecked_extensions(&self) -> HashSet<String> {
@@ -640,6 +1004,7 @@ impl LanguageRegistry {
         let mut plugins: Vec<CompiledPlugin> = Vec::new();
         let mut by_extension: HashMap<String, usize> = HashMap::new();
         let mut filename_claims: Vec<(String, usize)> = Vec::new();
+        let mut shared: Vec<SharedExtension> = Vec::new();
         let mut skipped: Vec<SkippedGrammar> = Vec::new();
         let mut timings = RegistryLoadTimings::default();
 
@@ -673,14 +1038,8 @@ impl LanguageRegistry {
             let plugin = CompiledPlugin::new(manifest, language, queries, overridden);
 
             let idx = plugins.len();
-            for ext in plugin.extensions() {
-                if let Some(prev) = by_extension.insert(normalize_ext(ext), idx) {
-                    tracing::warn!(
-                        "extension '{ext}' claimed by '{}' shadows '{}'",
-                        plugin.name(),
-                        plugins[prev].name()
-                    );
-                }
+            for shadowing in claim_extensions(&plugins, &plugin, idx, &mut by_extension, &mut shared) {
+                tracing::warn!("{shadowing}");
             }
             for fname in plugin.filenames() {
                 if let Some((_, prev)) = filename_claims.iter().find(|(c, _)| c == fname) {
@@ -701,6 +1060,7 @@ impl LanguageRegistry {
                 plugins,
                 by_extension,
                 filename_claims,
+                shared,
                 skipped,
             },
             timings,
@@ -811,9 +1171,12 @@ fn compile_capabilities(
     let queries = LanguageQueries::new(
         &manifest.name,
         entry.manifest_label,
-        manifest.module_model_kind() == super::ModuleModelKind::Namespace,
-        manifest.implicit_call_falls_through,
-        manifest.inherits_interface_bodies,
+        CaptureChecks {
+            namespace_model: manifest.module_model_kind() == super::ModuleModelKind::Namespace,
+            falls_through: manifest.implicit_call_falls_through,
+            interface_bodies: manifest.inherits_interface_bodies,
+            type_arity: manifest.type_arity(),
+        },
         resolved_queries,
         language,
     )?;
@@ -829,6 +1192,52 @@ fn override_dir_for(root: &Path, name: &str) -> std::path::PathBuf {
 /// Normalise an extension for indexing: lower-cased, leading dot stripped.
 fn normalize_ext(ext: &str) -> String {
     ext.trim_start_matches('.').to_ascii_lowercase()
+}
+
+/// Record `plugin`'s claim (it will sit at `idx`) on each of its extensions,
+/// the step both loaders share; returns a warning per extension it shadows.
+///
+/// An extension already claimed goes to the later plugin, and the shadowing
+/// is warned rather than silent — unless exactly one of the two declares it
+/// shared (S-582, C's `.h`): then the other keeps it as its default reader,
+/// the pair is recorded in `shared`, and nothing is shadowed.
+fn claim_extensions(
+    plugins: &[CompiledPlugin],
+    plugin: &CompiledPlugin,
+    idx: usize,
+    by_extension: &mut HashMap<String, usize>,
+    shared: &mut Vec<SharedExtension>,
+) -> Vec<String> {
+    let shares = |p: &CompiledPlugin, ext: &str| p.shared_extensions().iter().any(|e| normalize_ext(e) == ext);
+    let mut shadowed = Vec::new();
+    for ext in plugin.extensions() {
+        let key = normalize_ext(ext);
+        let Some(&prev) = by_extension.get(&key) else {
+            by_extension.insert(key, idx);
+            continue;
+        };
+        let (sharer, owner) = match (shares(plugin, &key), shares(&plugins[prev], &key)) {
+            (true, false) => (idx, prev),
+            (false, true) => (prev, idx),
+            _ => {
+                by_extension.insert(key, idx);
+                shadowed.push(format!(
+                    "extension '{ext}' claimed by '{}' shadows '{}'",
+                    plugin.name(),
+                    plugins[prev].name()
+                ));
+                continue;
+            }
+        };
+        by_extension.insert(key.clone(), owner);
+        shared.push(SharedExtension {
+            ext: key,
+            sharer,
+            owner,
+            sharer_reads: AtomicBool::new(false),
+        });
+    }
+    shadowed
 }
 
 /// Whether the file at `file_path` is in a language whose normalised extension
@@ -847,6 +1256,29 @@ pub(crate) fn declares_by_extension(file_path: Option<&str>, exts: &HashSet<Stri
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
         .is_some_and(|ext| exts.contains(&ext))
+}
+
+/// The file extensions (normalised as in [`declares_by_extension`]) whose code
+/// plugin declares `bodied_traits_are_containers` (S-575, [FR-QM-11]): a trait
+/// defined in one of them, with a bodied method, is a container for Focus and
+/// Cohesion. Read off the compiled-in descriptors once per process, as
+/// [`code_language_names`](super::grammars::code_language_names) is — a
+/// descriptor is never overridden on disk, so every registry of the process
+/// declares the same set, and the metrics engine needs no registry to read it.
+/// A descriptor that fails to parse contributes nothing here; it already fails
+/// [`LanguageRegistry::load`] loudly.
+///
+/// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
+pub(crate) fn bodied_trait_container_extensions() -> &'static HashSet<String> {
+    static EXTENSIONS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    EXTENSIONS.get_or_init(|| {
+        grammars::compiled()
+            .iter()
+            .filter_map(|entry| PluginManifest::parse(entry.manifest_label, entry.manifest_toml).ok())
+            .filter(|m| !m.documentation && !m.artifact && m.bodied_traits_are_containers)
+            .flat_map(|m| m.extensions.into_iter().map(|e| normalize_ext(&e)).collect::<Vec<_>>())
+            .collect()
+    })
 }
 
 #[cfg(all(test, feature = "lang-rust"))]
@@ -1059,6 +1491,35 @@ mod tests {
             .expect("the capture satisfies the check");
     }
 
+    /// S-602: a language declaring `type_arity` must record its type
+    /// declarations' type-parameter lists — its `symbols` query captures
+    /// `@item.type_parameters` — or its compile is refused naming the
+    /// descriptor: every generic type would otherwise read as a plain one.
+    #[test]
+    fn a_type_arity_language_without_the_type_parameters_capture_fails_its_compile() {
+        fn entry(source: &'static str) -> GrammarEntry {
+            let model = "[module_model]\nkind = \"namespace\"\ntype_arity = true\n";
+            toy_grammar("toyta", "", model, "symbols", source)
+        }
+        let load = |source: &'static str| {
+            let mut entries = grammars::compiled();
+            entries.push(entry(source));
+            LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
+                .expect("an embedded query compiles on first use")
+        };
+        let err = load("(mod_item name: (identifier) @module.namespace)\n(struct_item name: (type_identifier) @symbol.struct)")
+            .compile_all_queries()
+            .expect_err("no type-parameters capture fails the compile")
+            .to_string();
+        assert!(err.contains("toyta/plugin.toml") && err.contains("@item.type_parameters"), "{err}");
+        load(
+            "(mod_item name: (identifier) @module.namespace)\n(struct_item name: (type_identifier) @symbol.struct)\n\
+             (struct_item type_parameters: (type_parameters) @item.type_parameters)",
+        )
+        .compile_all_queries()
+        .expect("the capture satisfies the check");
+    }
+
     /// S-500 / FR-EX-11 / FR-PL-02: a `body_node_kinds` entry must name a node
     /// kind of the descriptor's own grammar. A misspelt one would match nothing
     /// and silently record every callable bodyless, so the load fails naming
@@ -1114,6 +1575,91 @@ mod tests {
             .expect("a real body kind loads");
         let toy = reg.for_extension("toyb").expect("toybody claims .toyb");
         assert_eq!(toy.semantics().body_node_kinds, ["block"]);
+    }
+
+    /// `.h` is shared, not shadowed (S-582): C declares it in
+    /// `shared_extensions`, so loading C and C++ warns of nothing and C++ reads
+    /// it until a repository's decision gives it to C — and then every
+    /// per-key extension set reads `.h` with C's semantics.
+    #[cfg(all(feature = "lang-c", feature = "lang-cpp"))]
+    #[test]
+    fn a_shared_extension_is_routed_by_the_repository_decision() {
+        let mut warnings = Vec::new();
+        let reg = LanguageRegistry::load_from(&grammars::compiled(), AbiRange::runtime(), None, &mut |w| {
+            warnings.push(w.to_string())
+        })
+        .expect("embedded grammars load");
+        assert!(warnings.iter().all(|w| !w.contains("'h'")), "{warnings:?}");
+        assert_eq!(reg.for_path("src/a.h").map(|p| p.name()), Some("cpp"));
+        assert!(reg.include_root_extensions().contains("h"), "C++ semantics while C++ reads it");
+
+        let c_repo = reg.shared_owners_for(["src/a.c", "src/b.c", "src/a.h", "x.cpp", "README.md"]);
+        assert_eq!(c_repo.record(), "h");
+        assert!(reg.set_shared_owners(&c_repo), "the routing moved");
+        assert!(!reg.set_shared_owners(&c_repo), "and moves once");
+        assert_eq!(reg.for_path("src/a.h").map(|p| p.name()), Some("c"));
+        assert_eq!(reg.for_path("src/A.H").map(|p| p.name()), Some("c"));
+        assert_eq!(reg.for_path("src/a.hpp").map(|p| p.name()), Some("cpp"), "only the shared extension moves");
+        assert_eq!(reg.languages().get("h").map(String::as_str), Some("c"));
+        assert!(reg.include_root_extensions().contains("h"), "C reads its includes against the roots too (S-584)");
+        // Every per-key set and map reads `.h` as C's, not C++'s.
+        assert_eq!(reg.families().get("h"), reg.families().get("c"));
+        assert_eq!(reg.call_targets().get("h"), reg.call_targets().get("c"));
+        assert!(!reg.member_access_extensions().contains("h"), "C declares no member access");
+        assert!(reg.specifier_target_extensions().contains_key("h"), "C's includes are paths, as C++'s are (S-584)");
+        assert!(!reg.overloaded_call_extensions().contains("h"), "C does not overload");
+        assert_eq!(reg.shared_owners(), c_repo);
+
+        // A tie, a `.hh` source (the near miss: a header extension that is C++'s
+        // own), and headers alone all leave `.h` with C++.
+        for paths in [vec!["a.c", "b.cpp"], vec!["a.c", "s.hh"], vec!["a.h", "b.h"]] {
+            let owners = reg.shared_owners_for(paths.iter().copied());
+            assert!(owners.is_empty(), "{paths:?}: {owners:?}");
+        }
+        reg.set_shared_owners(&SharedOwners::default());
+        assert_eq!(reg.for_path("src/a.h").map(|p| p.name()), Some("cpp"));
+    }
+
+    /// A sharer that loads after the plugin it shares with (S-582): the other
+    /// arm of `claim_extensions` — the compiled grammars load C before C++, so
+    /// only the shipped order exercises the first. No shadowing is warned, the
+    /// earlier outright claimant reads by default, and the sharer once a
+    /// decision gives it the extension.
+    #[test]
+    fn a_sharer_loaded_after_its_owner_shares_rather_than_shadows() {
+        const SHARER: &str = r#"
+            name = "rustshare"
+            extensions = ["rs"]
+            shared_extensions = ["rs"]
+            module_separator = "::"
+            abi_version = 15
+            capabilities = ["symbols"]
+            [queries]
+            symbols = "queries/symbols.scm"
+        "#;
+        let mut entries = grammars::compiled();
+        entries.push(GrammarEntry {
+            manifest_label: "rustshare/plugin.toml",
+            manifest_toml: SHARER,
+            ..collide_entry()
+        });
+        let mut warnings = Vec::new();
+        let reg = LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |w| warnings.push(w.to_string()))
+            .expect("a sharing grammar loads");
+        assert!(warnings.iter().all(|w| !w.contains("shadow")), "{warnings:?}");
+        assert_eq!(reg.for_extension("rs").map(|p| p.name()), Some("rust"));
+        reg.set_shared_owners(&SharedOwners::from_record("rs"));
+        assert_eq!(reg.for_extension("rs").map(|p| p.name()), Some("rustshare"));
+    }
+
+    /// The recorded decision reads back as the decision (S-582).
+    #[test]
+    fn shared_owners_round_trip_their_record() {
+        let owners = SharedOwners::from_record("h");
+        assert!(owners.contains(".H") && !owners.is_empty());
+        assert_eq!(SharedOwners::from_record(&owners.record()), owners);
+        assert!(SharedOwners::from_record("").is_empty());
+        assert_eq!(SharedOwners::from_record(" h ,, hh").record(), "h,hh");
     }
 
     #[test]
@@ -1182,27 +1728,73 @@ mod tests {
         );
     }
 
+    /// S-530: Go — and no other shipped grammar — names the functions its
+    /// runtime calls itself, and Go still does not declare the reachability
+    /// capability: its measured sample of dead verdicts held 30 live of 30.
+    #[cfg(feature = "lang-go")]
+    #[test]
+    fn go_names_its_runtime_entry_points_and_declares_no_reachability() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let names = reg.entry_point_names();
+        assert_eq!(names.keys().collect::<Vec<_>>(), ["go"], "{names:?}");
+        assert_eq!(names["go"], ["main", "init"]);
+        assert!(!reg.reachability_extensions().contains("go"), "Go's dead verdicts stay NULL");
+    }
+
     /// S-523 / CR-171: exactly the declaring plugins' extensions carry the
-    /// member-access capability Cohesion is gated on — Java, TypeScript, TSX
-    /// and PHP — less the JavaScript the TypeScript grammars carve out
-    /// (`js`, `mjs`, `cjs`, `jsx`); no other code language, Rust, C++ and Ruby
-    /// included.
-    #[cfg(all(feature = "lang-java", feature = "lang-typescript", feature = "lang-php"))]
+    /// member-access capability Cohesion is gated on — Java, TypeScript, TSX,
+    /// PHP, (S-556, FR-EX-22) C#, (S-543, FR-EX-20) Python and (S-575, FR-EX-28)
+    /// Scala, (S-562, FR-EX-25) Kotlin, (S-580, FR-EX-22) C++ and (S-569,
+    /// FR-EX-27) Ruby and (S-542, FR-EX-19) JavaScript (`js`, `mjs`, `cjs`,
+    /// `jsx`) — less the `.pyi` stubs Python carves out; no other code
+    /// language, Rust included.
+    #[cfg(all(
+        feature = "lang-java",
+        feature = "lang-typescript",
+        feature = "lang-php",
+        feature = "lang-c-sharp",
+        feature = "lang-python"
+    ))]
     #[test]
     fn member_access_extensions_are_exactly_the_declaring_languages() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
         let mut exts: Vec<String> = reg.member_access_extensions().into_iter().collect();
         exts.sort();
-        assert_eq!(exts, ["java", "php", "ts", "tsx"]);
+        let scala = cfg!(feature = "lang-scala");
+        let kotlin = cfg!(feature = "lang-kotlin");
+        let mut want = vec!["cjs", "cs", "java", "js", "jsx", "mjs", "php", "py", "ts", "tsx"];
+        if scala {
+            want.extend(["sc", "scala"]);
+        }
+        if kotlin {
+            want.extend(["kt", "kts"]);
+        }
+        let cpp = cfg!(feature = "lang-cpp");
+        if cpp {
+            want.extend(["cc", "cpp", "cxx", "h", "hh", "hpp", "hxx"]);
+        }
+        let ruby = cfg!(feature = "lang-ruby");
+        if ruby {
+            want.extend(["gemspec", "rake", "rb", "ru"]);
+        }
+        want.sort_unstable();
+        assert_eq!(exts, want);
         for (path, declared) in [
             (Some("src/Account.java"), true),
+            (Some("src/Account.cs"), true),
+            (Some("src/Account.scala"), scala),
+            (Some("src/Account.kt"), kotlin),
             (Some("web/App.TSX"), true),
-            (Some("app/javascript/user.js"), false),
-            (Some("web/Widget.jsx"), false),
-            (Some("lib/index.mjs"), false),
-            (Some("lib/model.rb"), false),
-            (Some("src/widget.cpp"), false),
+            (Some("app/javascript/user.js"), true),
+            (Some("web/Widget.jsx"), true),
+            (Some("lib/index.mjs"), true),
+            (Some("hc/api/models.py"), true),
+            (Some("src/werkzeug/datastructures/structures.pyi"), false),
+            (Some("lib/model.rb"), ruby),
+            (Some("src/widget.cpp"), cpp),
+            (Some("include/widget.hpp"), cpp),
             (Some("src/lib.rs"), false),
             (Some("Makefile"), false),
             (None, false),
@@ -1215,8 +1807,23 @@ mod tests {
         }
     }
 
+    /// S-575: exactly Scala's extensions make a bodied trait a container — not
+    /// Rust's, whose trait default methods are no state-bearing container, nor
+    /// PHP's.
+    #[cfg(all(feature = "lang-scala", feature = "lang-php"))]
+    #[test]
+    fn bodied_trait_container_extensions_are_exactly_scalas() {
+        let mut exts: Vec<&str> = bodied_trait_container_extensions().iter().map(String::as_str).collect();
+        exts.sort_unstable();
+        assert_eq!(exts, ["sc", "scala"]);
+        assert!(declares_by_extension(Some("src/Svc.SCALA"), bodied_trait_container_extensions()));
+        assert!(!declares_by_extension(Some("src/lib.rs"), bodied_trait_container_extensions()));
+        assert!(!declares_by_extension(Some("src/Svc.php"), bodied_trait_container_extensions()));
+    }
+
     /// The path-grammar extension map covers exactly the grammars that declare
-    /// `import_specifier = "path"` (S-439): both TypeScript grammars and Go, and
+    /// `import_specifier = "path"` (S-439): both TypeScript grammars and
+    /// JavaScript (S-538), Go and Ruby (S-566), and
     /// no name-grammar language — Rust above all, whose imports must stay on the
     /// scope hierarchy byte for byte — and each maps to its own family only.
     #[test]
@@ -1229,7 +1836,8 @@ mod tests {
             let targets = exts
                 .get(ext)
                 .unwrap_or_else(|| panic!("`{ext}` specifiers are paths"));
-            // A TS/JS relative specifier resolves within the TS family only.
+            // A TS/JS relative specifier resolves within the TS family only —
+            // JavaScript's own plugin (S-538) declares the family's list.
             assert!(targets.contains("ts") && targets.contains("tsx"), "{ext}: {targets:?}");
             assert!(!targets.contains("py") && !targets.contains("go"), "{ext}: {targets:?}");
         }
@@ -1239,8 +1847,66 @@ mod tests {
             Some(0),
             "Go import paths are paths, and name no file extension"
         );
-        for ext in ["rs", "py", "java", "kt", "cs", "php", "rb", "scala"] {
+        // A Ruby `require` string is a path (S-566), resolving to `.rb` files only.
+        #[cfg(feature = "lang-ruby")]
+        assert_eq!(
+            exts.get("rb").map(|t| t.iter().cloned().collect::<Vec<_>>()),
+            Some(vec!["rb".to_string()])
+        );
+        for ext in ["rs", "py", "java", "kt", "cs", "php", "scala"] {
             assert!(!exts.contains_key(ext), "`{ext}` specifiers are names");
+        }
+    }
+
+    /// Both TypeScript grammars and JavaScript (S-538), and only they, bind
+    /// bare specifiers through `tsconfig` (S-531): Go's bare import paths take
+    /// its `go.mod`.
+    #[test]
+    fn tsconfig_extensions_collect_only_the_typescript_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let exts = reg.tsconfig_extensions();
+        #[cfg(feature = "lang-typescript")]
+        for ext in ["ts", "js", "mjs", "cjs", "tsx", "jsx"] {
+            assert!(exts.contains(ext), "`{ext}` binds bare specifiers through tsconfig");
+        }
+        for ext in ["go", "rs", "py", "java", "kt", "cs", "php", "rb", "scala"] {
+            assert!(!exts.contains(ext), "`{ext}` does not");
+        }
+    }
+
+    /// Ruby, and only Ruby, binds bare specifiers against its load roots
+    /// (S-566): a `require 'a/b'` is a path under a gem's `require_paths` —
+    /// from a `.rb` file, and from the `.rake`, `.ru` and `.gemspec` files the
+    /// plugin also claims (S-564).
+    #[test]
+    fn load_path_extensions_collect_only_ruby() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let exts = reg.load_path_extensions();
+        #[cfg(feature = "lang-ruby")]
+        assert_eq!(exts, ["rb", "rake", "ru", "gemspec"].map(String::from).into_iter().collect::<HashSet<_>>());
+        for ext in ["go", "rs", "py", "java", "kt", "cs", "php", "scala", "ts", "js"] {
+            assert!(!exts.contains(ext), "`{ext}` does not");
+        }
+    }
+
+    /// C++ (S-579) and C (S-584), and only they, bind their includes against
+    /// include roots: an `#include <a/b.h>` is a path under an `include/` or
+    /// `src/` directory.
+    #[test]
+    fn include_root_extensions_collect_only_cpp_and_c() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let exts = reg.include_root_extensions();
+        #[cfg(feature = "lang-cpp")]
+        for ext in ["cpp", "cc", "cxx", "hpp", "hh", "hxx", "h"] {
+            assert!(exts.contains(ext), "`{ext}` binds its includes");
+        }
+        #[cfg(feature = "lang-c")]
+        assert!(exts.contains("c"), "`c` binds its includes");
+        for ext in ["go", "rs", "py", "java", "kt", "cs", "php", "rb", "scala", "ts", "js"] {
+            assert!(!exts.contains(ext), "`{ext}` does not");
         }
     }
 
@@ -1315,9 +1981,10 @@ mod tests {
     }
 
     /// The supertype key (S-522, FR-RS-15): C# and Kotlin write a base class
-    /// and an interface in one list, so their every extension declares it.
-    /// Every other grammar — Java, PHP and Python above all, whose clauses say
-    /// which is which — is absent.
+    /// and an interface in one list, and Scala's `extends A with B` may head
+    /// with a trait (S-575), so their every extension declares it. Every other
+    /// grammar — Java, PHP and Python above all, whose clauses say which is
+    /// which — is absent.
     #[test]
     fn supertype_kind_follows_target_collects_only_the_declaring_grammars() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1327,8 +1994,30 @@ mod tests {
         for ext in ["cs", "kt", "kts"] {
             assert!(declaring.contains(ext), "`{ext}` follows the bound supertype's kind");
         }
-        for ext in ["rs", "java", "php", "py", "scala", "ts", "go", "rb", "c", "cpp", "md"] {
+        #[cfg(feature = "lang-scala")]
+        for ext in ["scala", "sc"] {
+            assert!(declaring.contains(ext), "`{ext}` follows the bound supertype's kind");
+        }
+        for ext in ["rs", "java", "php", "py", "ts", "go", "rb", "c", "cpp", "md"] {
             assert!(!declaring.contains(ext), "`{ext}` spells each supertype's kind");
+        }
+    }
+
+    /// The structural-types key (S-535, FR-EX-17): TypeScript's two grammars
+    /// and JavaScript (S-538) declare it, for every extension each parses;
+    /// every other grammar —
+    /// Java and C# above all, whose types are nominal — is absent.
+    #[test]
+    fn structural_type_extensions_collect_only_the_typescript_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.structural_type_extensions();
+        #[cfg(feature = "lang-typescript")]
+        for ext in ["ts", "js", "mjs", "cjs", "tsx", "jsx"] {
+            assert!(declaring.contains(ext), "`{ext}` declares structural types");
+        }
+        for ext in ["rs", "java", "php", "py", "scala", "cs", "kt", "go", "rb", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds type relations as before");
         }
     }
 
@@ -1366,8 +2055,48 @@ mod tests {
         }
     }
 
+    /// The lexical-constants key (S-565, FR-RS-33): Ruby alone declares it.
+    #[test]
+    fn lexical_constant_extensions_collect_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.lexical_constant_extensions();
+        #[cfg(feature = "lang-ruby")]
+        assert!(declaring.contains("rb"), "`rb` names its classes by lexical constants");
+        for ext in ["rs", "java", "kt", "kts", "php", "py", "scala", "ts", "go", "cs", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
+        }
+    }
+
+    /// The directory-packages key (S-528, FR-RS-17): Go alone declares it.
+    #[test]
+    fn directory_package_extensions_collect_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.directory_package_extensions();
+        #[cfg(feature = "lang-go")]
+        assert!(declaring.contains("go"), "`go` scopes a package by directory and clause");
+        for ext in ["rs", "java", "kt", "kts", "php", "py", "scala", "ts", "rb", "cs", "c", "cpp", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
+        }
+    }
+
+    /// The link-unit key (S-584, FR-RS-40): C alone declares it, and its
+    /// shared `.h`, which C++ reads by default, is not one by default.
+    #[test]
+    fn link_unit_extensions_collect_only_the_declaring_grammars() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let declaring = reg.link_unit_extensions();
+        #[cfg(feature = "lang-c")]
+        assert!(declaring.contains("c"), "`c` binds a bare call across its link unit");
+        for ext in ["h", "cpp", "hpp", "rs", "java", "kt", "php", "py", "scala", "ts", "rb", "go", "cs", "md"] {
+            assert!(!declaring.contains(ext), "`{ext}` binds exactly as before");
+        }
+    }
+
     /// The free-only bare-call key (S-590, FR-RS-07): Go, Rust, Python, PHP,
-    /// TypeScript (with JavaScript) and TSX declare `implicit_receiver = "none"`
+    /// TypeScript, TSX and JavaScript (S-538) declare `implicit_receiver = "none"`
     /// explicitly. Java declares nothing, and the `"self"` languages — C#,
     /// Kotlin, Scala, C++, Ruby — reach the instance, so all are absent.
     #[test]
@@ -1387,7 +2116,7 @@ mod tests {
     /// Kotlin, Scala, C# and C++; an implicit-instance call falls through to a
     /// free function in Kotlin alone — in C#, Scala, C++ and Ruby a member of
     /// that name hides every outer one; and only JavaScript's extensions —
-    /// claimed by the two TypeScript grammars — are never filtered, while
+    /// claimed by its own plugin since S-538 — are never filtered, while
     /// `.ts`/`.tsx` are.
     #[test]
     fn the_arity_extension_sets_name_the_declaring_grammars_only() {
@@ -1402,6 +2131,8 @@ mod tests {
         }
         let lookup = reg.impl_block_lookup_extensions();
         assert_eq!(lookup, HashSet::from(["rs".to_string()]), "Rust alone records impl blocks");
+        let method_set = reg.method_set_extensions();
+        assert_eq!(method_set, HashSet::from(["go".to_string()]), "Go alone implements by method set");
         let fallthrough = reg.free_call_fallthrough_extensions();
         for ext in ["kt", "kts"] {
             assert!(fallthrough.contains(ext), "`{ext}`'s instance call falls through");
@@ -1502,6 +2233,23 @@ mod tests {
         assert!(reg.for_path("LICENSE").is_none());
     }
 
+    /// A code plugin's basename claim is exact (S-564): Ruby's `Gemfile` and
+    /// `Rakefile` bind, and the `Name.*` variants an artifact's claim takes
+    /// (`Dockerfile.dev`) do not extend to them — `Gemfile.lock` is not Ruby.
+    #[cfg(all(feature = "lang-ruby", feature = "lang-dockerfile"))]
+    #[test]
+    fn a_code_plugins_basename_claim_is_exact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        for path in ["Gemfile", "sub/Rakefile", "tasks/x.rake", "config.ru"] {
+            assert_eq!(reg.for_path(path).map(|p| p.name()), Some("ruby"), "{path}");
+        }
+        for path in ["Gemfile.lock", "Gemfile.dev", "gemfile", "Rakefileish"] {
+            assert!(reg.for_path(path).is_none_or(|p| p.name() != "ruby"), "{path}");
+        }
+        assert_eq!(reg.for_path("Dockerfile.dev").map(|p| p.name()), Some("dockerfile"));
+    }
+
     #[test]
     fn loads_the_real_rust_grammar() {
         let reg = LanguageRegistry::load_from(
@@ -1537,6 +2285,29 @@ mod tests {
             cfg!(feature = "lang-python")
         );
         assert!(reg.for_extension("zig").is_none());
+    }
+
+    /// JavaScript is its own plugin (S-538, FR-PL-08): it claims `.js`, `.mjs`,
+    /// `.cjs` and `.jsx`, and the TypeScript grammars gave them up rather than
+    /// being shadowed — a collision would let the later row win with only a
+    /// warning, so the shipped table must raise none.
+    #[cfg(feature = "lang-typescript")]
+    #[test]
+    fn javascript_claims_its_extensions_and_no_shipped_claim_is_shadowed() {
+        let mut warnings = Vec::new();
+        let reg = LanguageRegistry::load_from(&grammars::compiled(), AbiRange::runtime(), None, &mut |w| {
+            warnings.push(w.to_string())
+        })
+        .unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.contains("shadows")),
+            "no shipped extension claim is shadowed: {warnings:?}"
+        );
+        for ext in ["js", "mjs", "cjs", "jsx", "JS"] {
+            assert_eq!(reg.for_extension(ext).map(|p| p.name()), Some("javascript"), "{ext}");
+        }
+        assert_eq!(reg.for_extension("ts").map(|p| p.name()), Some("typescript"));
+        assert_eq!(reg.for_extension("tsx").map(|p| p.name()), Some("tsx"));
     }
 
     #[test]

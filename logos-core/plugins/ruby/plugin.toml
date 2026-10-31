@@ -4,18 +4,37 @@
 # overrides resolve under `.logos/plugins/ruby/queries/` (FR-PL-04, UAT-PL-03).
 
 name = "ruby"
-extensions = ["rb"]
+extensions = ["rb", "rake", "ru", "gemspec"]
+
+# Ruby's build files (S-564, CR-179, FR-EX-26): `*.rake` tasks, a rackup
+# `config.ru` and a `*.gemspec` are claimed by extension, and the two files that
+# carry no extension by basename. The exact name only: a code plugin's claim
+# never takes the `Name.*` variants an artifact's does, so `Gemfile.lock` (a
+# lockfile, not Ruby) stays unclaimed.
+filenames = ["Gemfile", "Rakefile"]
 
 # Ruby joins namespace segments with `::` (`ActiveRecord::Base`). Surfaced by
 # `logos languages` (FR-PL-06); reference extraction canonicalises paths into
 # the `::`-joined ledger form.
 module_separator = "::"
 
+# A `require`/`require_relative` string is a path, not a constant (S-566,
+# CR-179, FR-RS-34): only `/` separates, and `..` is kept. `references.scm`
+# marks a `require_relative` relative to the requiring file's directory, so
+# `require_relative 'abstract/handler'` and `'../lib/rack/lint'` name the file
+# they load; a trailing `.rb` names the file itself. A bare `require 'a/b'`
+# binds against the load roots — each gem's `require_paths` (`lib/` unless its
+# `*.gemspec` says otherwise) and the repository root — to exactly one file, and
+# one no root holds (`require 'json'`, an external gem) stays unbound.
+import_specifier = "path"
+specifier_extensions = ["rb"]
+bare_specifiers = "load-path"
+
 # tree-sitter-ruby 0.23 is generated against ABI 14; asserted at load against
 # the compiled grammar (FR-PL-03, NFR-PC-03).
 abi_version = 14
 
-capabilities = ["symbols", "references", "frameworks", "invocations"]
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
 
 # Decision-point tokens for the cyclomatic-complexity keyword walk (FR-EX-03).
 # Anonymous-token kinds in the Ruby grammar: branching keywords, loop keywords,
@@ -34,6 +53,20 @@ nesting_block_kinds = ["if", "unless", "while", "until", "for", "case", "case_ma
 # every receiver-less call `@ref.receiver.implicit`; inside a named class it
 # records the `self` shape, anywhere else the free call it always was.
 implicit_receiver = "self"
+
+# A bare call never names a local value (S-594, FR-RS-44): `f()` with
+# parentheses calls the method even where a local `f` is assigned — the parser
+# reads the bare `f` as that local. A local binding shadows no call here.
+separate_call_namespace = true
+
+# The optional member-access capability (S-569, CR-179, FR-EX-27, ADR-39):
+# Cohesion scores a class only in a language that declares it. Ruby's queries
+# capture `@x` instance-variable reads and writes as Accesses edges
+# (`queries/references.scm`, `@ref.access`), bound to the Fields its classes
+# declare from `attr_*` and `@x = …` (`queries/symbols.scm`, S-564), so its
+# classes' LCOM4 has its shared-field links. A bare `x` that calls an `attr_*`
+# reader is a call, not an access, and links nothing.
+member_access = true
 
 # Ruby methods are public by default; `private`/`protected` are dynamic
 # visibility calls whose effect on subsequent definitions a structural pass
@@ -59,9 +92,9 @@ framework_detectors = ["Rails", "ActionController", "ActiveRecord", "Application
 # consumer-side twin of `framework_detectors`. FR-WS-08's normative Ruby row is
 # Net::HTTP and Faraday, and both rows are the ledger form of a `require`
 # import, not the constant's own spelling: `require "net/http"` and
-# `require "faraday"` canonicalise through the same generic `import_segments`/
-# `split_path_text` path every other language's imports do (S-345's `net/http`
-# → `net::http` verbatim), giving `net::http` and `faraday` — lowercase,
+# `require "faraday"` canonicalise as path specifiers (S-566; every `/` a
+# segment boundary, S-345's `net/http` → `net::http` verbatim), giving
+# `net::http` and `faraday` — lowercase,
 # because the require STRING is lowercase even though the constant used at the
 # call site (`Net::HTTP`, `Faraday`) is not. Matched at a segment boundary
 # (`resolve::matches_detector`), so `net::http` also admits a
@@ -69,13 +102,27 @@ framework_detectors = ["Rails", "ActionController", "ActiveRecord", "Application
 # `net::ftp` / `net::smtp` stdlib siblings.
 http_client_detectors = ["net::http", "faraday"]
 
-# Declared cross-file reach (S-570, CR-180, FR-PL-09): references bind only
-# inside the file that wrote them.
+# Ruby names a class or module by its constant (S-565, CR-179, FR-RS-33): every
+# `class`/`module` declaration is the constant its nesting spells (`A::B::C`,
+# the compact `class A::B` included), reopenings of one name are one constant,
+# and a constant reference is read the way Ruby reads it — the lexical nesting
+# outward, then the top level. A call on a constant (`Foo.bar`, `A::B.bar`)
+# binds among that constant's singleton methods and module functions, and
+# `Foo.new` instantiates it. Files keep their path-derived module keys.
+[module_model]
+kind = "path"
+lexical_constants = true
+
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): a call on a constant
+# binds across files, and so does the class a `Foo.new` instantiates (S-565),
+# and the file a `require`/`require_relative` loads (S-566); every other
+# reference binds only inside the file that wrote it.
 # Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
 # declared relation binds nothing across files or an undeclared one does — a
 # change that alters this language's reach updates this table in the same change.
 [reach]
-level = "same-file"
+level = "partial"
+cross_file = ["calls", "imports", "type_relations"]
 
 [queries]
 symbols = "queries/symbols.scm"
@@ -86,12 +133,17 @@ frameworks = "queries/frameworks.scm"
 # `Net::HTTP.get(URI(...))` constructor-wrapped path, and a symbol-keyed hash
 # call. See the query header for the registration-vs-client discriminator.
 invocations = "queries/invocations.scm"
+# The names a callable body binds locally, each with its kind, scope and
+# position (S-593, CR-191, FR-EX-33): facts only, read by no edge.
+locals = "queries/locals.scm"
 # Captured `@fw.route.method` text → HTTP method (the declarative framework
-# contract, S-015). Rails routing-DSL verbs map to their HTTP verb; the RESTful
-# macros (`resources`/`resource`) and `root` carry no single path and are
-# deliberately unmapped — an unmapped method drops the match (FR-FW-04), so the
-# pass never fabricates the seven routes a `resources` macro expands to.
+# contract, S-015). Rails routing-DSL verbs map to their HTTP verb, and `root`
+# is a `GET` of the path the blocks around it give (S-567); the RESTful macros
+# (`resources`/`resource`) carry no single path and are deliberately unmapped —
+# an unmapped method drops the match (FR-FW-04), so the pass never fabricates
+# the seven routes a `resources` macro expands to.
 [framework_methods]
+root = "GET"
 get = "GET"
 post = "POST"
 put = "PUT"

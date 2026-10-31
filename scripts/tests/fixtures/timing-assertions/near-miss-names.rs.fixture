@@ -1,0 +1,9 @@
+// Names one step from the helper are not the helper.
+#[test]
+fn near_misses_are_caught() {
+    let start = Instant::now();
+    assert!(start.elapsed() < rescaled(Duration::from_secs(1)));
+    assert!(start.elapsed() < unscaled(Duration::from_secs(2)));
+    assert!(start.elapsed() < tolerance_ms(3));
+    assert!(start.elapsed() < perf_scaled_budget);
+}

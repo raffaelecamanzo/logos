@@ -498,9 +498,11 @@ no extension shows none of these fields, and no *Workspace settings* group.
 ```toml
 # Optional code-language admission allowlist (grammar names from `logos languages`).
 # Omit it (or use []) to index every compiled-in code language out of the box —
-# the twelve below are the default set. List a subset to restrict indexing; dropping
+# the fourteen below are the default set. List a subset to restrict indexing; dropping
 # a grammar from a broader list purges its now-unadmitted nodes on the next reconcile.
-languages = ["rust", "python", "typescript", "go", "java", "c", "cpp", "c-sharp", "kotlin", "scala", "ruby", "php"]
+# JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`) is its own grammar, `javascript`: a list
+# naming `typescript` or `tsx` admits no JavaScript file unless it names `javascript` too.
+languages = ["rust", "python", "typescript", "tsx", "javascript", "go", "java", "c", "cpp", "c-sharp", "kotlin", "scala", "ruby", "php"]
 
 # Discovery: a file is indexed only if it matches an include glob (default:
 # everything) and no exclude glob. Excludes are unioned with .gitignore.
@@ -616,7 +618,7 @@ configuration reference.
 
 `**/*.min.js` is in the default code `exclude`, at the root and at every nested
 depth: a minified file is never meaningfully navigable, and on a workspace with
-vendored front-end libraries it can carry a large share of the TypeScript-language
+vendored front-end libraries it can carry a large share of the JavaScript-language
 access and method-call rows the resolver then cannot bind. `logos index` says
 how many files the glob kept out, so the exclusion is never silent. The line is an
 advisory **note**: it appears under `notes` in `index --json` (and in the human
@@ -682,8 +684,8 @@ Admission is the set of files any of the above tables let in. When you **narrow*
 it — add a code/doc/config `exclude`, set `[documentation] enabled = false`, or
 drop a language from `languages` — the previously-admitted nodes and edges are
 no longer derivable, so a stale graph would otherwise keep serving them. Logos
-**reconciles on config change**: the next `logos index` (or `logos reconcile`,
-or the first navigation call after the change) detects the narrowed admission
+**reconciles on config change**: the next `logos index` (or the first navigation
+call after the change) detects the narrowed admission
 via a config fingerprint and **purges** the now-unadmitted nodes/edges through
 the same capture-before-delete path used for deleted files — the reconciled
 graph is byte-identical to a fresh index under the new config. The purge runs on
@@ -710,7 +712,9 @@ No policy changes how a receiver-method call (`x.f()`) binds: it binds by its
 receiver's shape — `this.f()` / `self.f()` to the caller's own class, `super.f()`
 through a proven base class, a call on any other receiver nowhere
 ([FR-RS-12](../specs/requirements/FR-RS-12.md)) unless its file proves the
-receiver's type (Java, [FR-RS-10](../specs/requirements/FR-RS-10.md); Rust,
+receiver's type (Java, [FR-RS-10](../specs/requirements/FR-RS-10.md); TypeScript,
+[FR-RS-21](../specs/requirements/FR-RS-21.md); Python,
+[FR-RS-24](../specs/requirements/FR-RS-24.md); Rust,
 [FR-RS-42](../specs/requirements/FR-RS-42.md)), which no policy widens either.
 
 Changing the policy needs no migration — resolution re-evaluates the whole
@@ -848,7 +852,8 @@ instead.
 ### `.logos/security-ignore.toml` — suppressions
 
 Accepted security risk is recorded in a committed file. Each entry names one
-finding, or every finding under a path, with a reason and an optional expiry:
+finding, every finding under a path, or one rule of one scanner in every file,
+with a reason and an optional expiry:
 
 ```toml
 [[ignore]]
@@ -877,6 +882,13 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   entries name a finding, the first unexpired one labels it, fingerprint
   entries first. See
   [security.md](security.md#one-entry-for-a-whole-path).
+- **A rule in every file.** `rule = "<rule id>"` and `scanner = "<scanner>"` with
+  no `path` and no `fingerprint` suppress that rule's findings for that scanner
+  wherever they are, listed as suppressed by a rule-wide entry with the reason.
+  `expires` works as for any entry, and the gate leaves the findings out as it
+  does any suppression. A `rule` without a `scanner`, or a `scanner` without a
+  `rule`, exits 2 naming the missing key. See
+  [security.md](security.md#one-entry-for-a-rule-in-every-file).
 - **Expiry.** From the day after `expires` the entry no longer suppresses: the
   finding comes back, and the entry is listed as `expired`.
 - **Counts.** `security status` and `security findings` list every entry under
@@ -885,8 +897,9 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   (the finding was fixed, its scanner has not run here, or its glob matches
   nothing). An entry
   naming a fingerprint a finding had before it was re-keyed (a Gitleaks finding's
-  earlier, per-commit one, or an OSV-Scanner one from before history.db
-  migration 10) still suppresses it and carries `should_name`: the fingerprint
+  earlier, per-commit one, an OSV-Scanner one from before history.db
+  migration 10, or a dependency finding's from before migration 13) still
+  suppresses it and carries `should_name`: the fingerprint
   that finding has now. The file is never rewritten.
 - **Visible, never silent.** A suppressed finding is still returned by
   `security findings`, with its reason, under its code scope (one in test code
@@ -894,8 +907,9 @@ expires = 2026-12-31          # optional; suppresses through this day inclusive
   `--suppression active` hides it.
 - **Written from the Security page.** Its Suppress… and Unsuppress write the
   file in one canonical spelling: one `[[ignore]]` table per entry, the
-  fingerprint entries sorted by fingerprint and then the path entries sorted by
-  path, rule and scanner, a path without a leading `./` or a trailing `/`, and
+  fingerprint entries sorted by fingerprint, then the path entries sorted by
+  path, rule and scanner, then the rule-wide entries sorted by rule and scanner,
+  a path without a leading `./` or a trailing `/`, and
   no comments. A file spelled any other way (the comment in the
   example above is enough) is refused with an error that says so, rather than
   rewritten without your comments. Edit such a file by hand.
@@ -987,7 +1001,7 @@ command line is fixed in Logos:
 | OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output-file OUT` *extra* `--recursive` *unignored* |
 | Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos`(`,`*ignored*) *extra* `.` |
 | gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *ignored* *extra* `./...` (with `GOTOOLCHAIN=local`) |
-| Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet --skip-path .logos` *ignored* *extra* `--directory .` |
+| Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet` [`--skip-framework secrets`, with Gitleaks enabled and installed] `--skip-path .logos` *ignored* *extra* `--directory .` |
 | CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
 | Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` [`--propertyfile .logos/security/nvd-api-key.properties`, with `NVD_API_KEY` set and no key in *extra*] *extra* |
 
@@ -1364,7 +1378,10 @@ against them). The **structural
 > NULL callables are excluded from the `max_dead` count. Today only Rust
 > declares the capability; other languages report NULL until their binder
 > coverage is proven, so `max_dead` never penalises a language Logos cannot yet
-> resolve precisely.
+> resolve precisely. Go was measured and stays NULL: re-checked against the
+> source, a sample of 30 of its "dead" functions held 30 live — reached through a
+> call on a typed receiver, a function value or a build-tag variant the graph
+> does not yet bind.
 
 
 budgets** (`max_nesting_depth`, `max_brain_methods`, `max_clone_ratio`,
@@ -1501,6 +1518,7 @@ god_span         = 500   # Focus: line-span above which a container is "god"
 clone_similarity = 0.85  # Uniqueness: Jaccard similarity above which two functions near-clone (0–1]
 clone_min_tokens = 50    # Uniqueness: minimum function token-length to be near-clone-eligible
 duplicate_min_tokens = 50  # Redundancy: minimum body token-length to be an exact duplicate
+cohesion_min_classes = 5   # Cohesion: fewest scoreable classes before Cohesion enters the signal
 ```
 
 A brain method (Conciseness) must trip **all three** of `brain_complexity`,
@@ -1554,6 +1572,19 @@ triggers the announced one-time re-baseline. It is independent of
 are unchanged by it. A store indexed before the body facts were recorded keeps
 its previous duplicate verdicts until its files are re-extracted (the next
 `logos scan` or `logos index`), rather than reading every function as bodyless.
+
+`cohesion_min_classes` is the fewest **scoreable classes** the Cohesion
+dimension needs before it enters the signal (default `5`). Below it Cohesion
+reads `n/a` ("too few classes"), leaves the aggregate and "where to start",
+and the Cohesion worst-offender list still lists every class at LCOM4 ≥ 2 — a
+mean over one or two classes would let one class move the whole signal (see
+[metrics.md](metrics.md#8-cohesion-lcom4--do-classes-hang-together)). `1`
+scores any number of classes, as before metric-semantics version 9. It must be
+a positive integer (non-positive fails at load with exit 2). Unlike the clone
+and duplicate keys it is always in the hashed effective set, its default
+included, so the hash changed with it once — on the same upgrade that moved
+the metric semantics to version 9 — and editing it re-baselines as any other
+key does.
 
 ### `[history]` / `[coverage]` — the evidence tiers
 
@@ -1731,7 +1762,7 @@ not apply on, an empty graph, or a change of metric semantics or thresholds,
 since values across those do not measure the same thing.
 
 `gate --json` and `session-end` also carry the warning as a structured `trend`
-list (`dimension`, `values` oldest first, `window`). The Health page shows the
+list (`dimension`, `values` oldest first, `window`). The Quality page shows the
 same warning beside the Gate verdict, read from the snapshots up to the one it
 displays, and records nothing. Without the table, or with a `rules.toml` that does not load, the
 page shows no warning and its verdict is unchanged.
@@ -1766,7 +1797,7 @@ nothing; a later `session-start` keeps the baseline it finds. A
 `--reason "<why>"`, and exits 2 without it. The reason is stored with the
 baseline, together with the attribution of the change being blessed (see
 [`gate`](commands.md#gate---save---threshold-n---label-l)). Under the table,
-`gate`, `session-end` and the Health page show that attribution. Without the
+`gate`, `session-end` and the Quality page show that attribution. Without the
 table, `gate`, `session-end`, `check` and the Stop hook print exactly what
 they printed before; `review` prints the same plus its `attribution`. A `gate_dimensions` entry
 that names a distributional dimension or an unknown one, a negative
@@ -1815,6 +1846,7 @@ extraction, framework detection) are embedded in the binary but can be
 .logos/plugins/<language>/queries/invocations.scm
 .logos/plugins/<language>/queries/brokers.scm
 .logos/plugins/<language>/queries/properties.scm
+.logos/plugins/<language>/queries/locals.scm
 ```
 
 A file present at one of these paths replaces the embedded query for that
@@ -1823,6 +1855,27 @@ This is the escape hatch for teaching Logos project-specific conventions
 without rebuilding. The embedded queries under `logos-core/plugins/` serve as
 reference starting points — each header documents the captures and the known
 v1 limitations.
+
+`<language>` is the plugin's name, so each language reads its own directory.
+JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`) reads `.logos/plugins/javascript/queries/`:
+an override under `typescript/` or `tsx/` does not reach JavaScript files — copy it
+there to keep it. JavaScript runs the TSX plugin's queries, so
+`logos-core/plugins/tsx/queries/` is its starting point, except `symbols.scm`:
+JavaScript appends its own `logos-core/plugins/javascript/queries/symbols.scm` —
+the functions it defines by assignment, `exports` or prototype — to the TSX one,
+and a `symbols.scm` override replaces the pair, so start from both files.
+
+`locals.scm` records the names each callable body binds locally — parameters,
+local variables, loop, `catch` and pattern variables, local imports — with
+their kind, position and scope. Its captures (`@local.parameter`,
+`@local.variable`, `@local.import`, the `@local.name` each binds, and the
+companions naming its scope) are documented in
+`logos-core/src/extract/locals.rs`; an empty file records none. A binding in
+force at a call shadows it: a bare call to a local import resolves through that
+import, a bare call to a local parameter or variable binds nothing (counted
+`local-binding` in `status`), and a rebound Go receiver name is `other`
+([Commands](commands.md)). An empty `locals.scm` therefore also turns those
+rules off for the language.
 
 ### Module models (`[module_model]`)
 
@@ -1876,6 +1929,48 @@ as b`) binds the import but gives the file no name `a`, and a name imported twic
 `as` names of one target (`from m import X as A` and `from m import X as B` in one
 scope) both bind, and so do `import numpy` beside `import numpy as np` and the
 Kotlin and Scala `import … as …` twins.
+
+A call through an imported module or class follows its import. After `from
+hc.lib import curl`, `curl.post()` is recorded as `hc::lib::curl::post`. It binds
+the one `post` that the module the import names declares: a function, or a class
+the call constructs (`Instantiates`). After `from .models import Check`,
+`Check.for_project()` binds among `Check`'s own methods, and never reaches a module
+function of the same name beside the class. `import a.b` binds the name `a`, as
+Python does, and `import a.b as x` binds `x`. A call through an import that binds
+nothing stays unbound and never falls back to a workspace module of the same name.
+`os.getcwd()` is an example, and so is `os.path.join()`, whose receiver is no
+imported name at all. A name that a parameter, a local assignment, a loop or `with`
+target, or a module-level assignment rebinds is not the import, so a call through
+it keeps its bare form — or the typed form below, where an annotation or a
+construction proves the name's type.
+
+A call on a receiver whose type the file proves binds among that type's methods.
+`svc.run()` reads the one binding of `svc` in its function: a parameter annotated
+`svc: Service`, an annotated local, or `svc = Service(…)`. `self.transport.notify()`
+reads the attribute `transport` that the enclosing class declares itself: a
+class-level `transport: Transport`, an annotated `self.transport: Transport = …`,
+or `self.transport = Transport(…)`. `Optional[T]`, `typing.Optional[T]`,
+`T | None` and a string annotation `"T"` read as `T`, and a generic `Repo[User]`
+as `Repo`. The call is recorded as `Service::run`, keeping its `other` shape. The
+type is read through the file's imports, as a written qualifier is, else in the
+file. The call binds the one `run` of that class, else of the nearest level of
+its proven `Extends` chain. A type the repository does not declare (`str`, a
+`Session` imported from `requests`) binds nothing. So does `x = Factory()` where `Factory` is a
+function: a construction is read only from a capitalised name, and a lowercase
+`x = make()` proves nothing. A receiver with no proof stays
+`no-receiver-evidence`: an untyped one, a name its function binds a second time
+(a reassignment, a loop, `with`, `except` or `case` target, a walrus, a nested
+`def` or `class`, an import, a comprehension or lambda variable, an inner
+function's parameter), a `global` or `nonlocal` name, a module-level name read in
+a function, a sibling function's local or a class-body name read in a method,
+and a dotted (`models.T`), `Union[…]` or other union, `Annotated`, `ClassVar` or
+`Final` annotation. So does an attribute the class inherits or never declares,
+one it writes untyped (`self.x = make()`) or with two types, one a `def` or
+`@property` of the class body also names, and `cls.x`. A call whose class holds an
+attribute of the method's name (`run = other`, `self.run = callback`) binds
+nothing: the attribute is what it calls. A type the file both imports and
+declares (`class Service(Service)`) binds nothing either: which one an
+annotation names is the statements' order.
 
 **`family`.** Languages that can name each other's types declare one **interop
 family** (any kind), and the type and namespace lookups never cross it:
@@ -1955,16 +2050,243 @@ enclosing_namespaces = true   # refused under any other kind
 
 A simple type name, or the head of a qualified one, that the file's own namespace
 does not supply is then looked up in each enclosing namespace, nearest first
-(`A.B`, then `A`, for code in `A.B.C`), before any `using` namespace. One type
+(`A.B`, then `A`, for code in `A.B.C`), before any file-level `using` namespace. One type
 decides a level; two at one level bind nothing (`type-ambiguous`) and the walk
 never falls through to an outer level. Only the file's own interop family is
-read, and the global namespace is never a level. Two known limits, shared with
-the same-namespace lookup:
+read, and the global namespace is never a level. A `using` written inside a
+namespace block is read at that block's level, after the namespace's own types
+and before the next level out: in `namespace A { using X; namespace B { using
+Y; … } }`, code in `A.B` reads `A.B`, then `Y`, then `A`, then `X`. A `using`
+written outside every block is read after every level, as are global ones. Two
+types the `using`s of one block supply bind nothing, as two of one level do. A
+block's `using`s are read at its level only when the block encloses every type
+of the file. A block holding only some of the file's types has its `using`s read
+after every level, as before; a block holding none of them, such as
+`namespace A { using X; }` beside a separate `namespace A.B { … }`, has its
+`using`s read nowhere.
 
-- types are matched by name only, so a generic `Result<T>` in an enclosing
-  namespace is taken for a non-generic `Result` a `using` supplies;
-- a `using` written inside a namespace block is read after the enclosing
-  namespaces, where C# reads it before them.
+**`type_arity` (`namespace` model only).** C# tells `Result` and `Result<T>`
+apart by their number of type parameters. A plugin opts in, and the C# plugin
+does:
+
+```toml
+[module_model]
+kind = "namespace"
+type_arity = true   # refused under any other kind
+```
+
+Each type declaration then records its type-parameter count, and each base type
+or `new` the number of type arguments it writes (`Result` 0, `Result<int>` 1).
+Types declared in the same file, in the file's own namespace, in each enclosing
+namespace and in each `using` namespace are admitted only at the written count, so `Result` written in `A.Sub` passes
+over a generic `A.Result<T>` to the `X.Result` that `using X;` supplies, and
+`Result<int>` binds `A.Result<T>`. Two types of one name are ambiguous only when
+both have the written count. The plugin's `symbols` query must capture each
+type's type-parameter list as `@item.type_parameters`, or the plugin fails to
+load; a type with no list counts 0. A call through a type name
+(`Result.Make()`) records no count and binds as before, and a `using` alias and
+a name written qualified (`X.Result<int>`) are still matched by name only.
+
+**`companion_objects`, `top_level_callables` and `wildcards_outrank_package`
+(`namespace` model only).** Scala declares a class and its companion `object`
+under one name, a Scala 3 file declares `def`s at its top level, and a Scala
+wildcard import outranks the package's other files. A plugin opts in to each,
+and the Scala plugin opts in to all three:
+
+```toml
+[module_model]
+kind = "namespace"
+companion_objects = true          # refused under any other kind
+top_level_callables = true        # refused under any other kind
+wildcards_outrank_package = true  # refused under any other kind
+```
+
+- With `companion_objects`, a class and the same-named singleton declared beside
+  it in one file are one name. A call on the name (`Chain.empty()`) binds among
+  the singleton's callables only — the ones the `symbols` query marks
+  `@item.receiver.none` — never an instance method of the class; a call on an
+  instance the file types `Chain` (`chain.size()`) binds among the class's
+  methods alone, never the singleton's. A path or a wildcard through the name
+  (`import cats.data.Chain._`) reads both declarations' members. The name itself still names two declarations, so an
+  import of it, or a `new Chain()`, binds nothing.
+- With `top_level_callables`, a function a file declares at its top level is a
+  member of the namespace the file declares, as its types are: `import
+  ox.discard` binds it, `import ox.*` brings it into view, and a free call from
+  the same namespace reaches it. Only a file of a language that declares the
+  key reaches one, and only one its own language declares: Kotlin declares the
+  key too, yet a Kotlin file never binds a Scala top-level `def`. A class of
+  the same name keeps its import.
+- With `wildcards_outrank_package`, a name a wildcard import brings into view
+  outranks one the file's namespace declares in another file, as Scala ranks
+  them. Java and Kotlin read the namespace first. The file's own declarations
+  and its explicit imports come before both either way.
+
+All three default to `false`, so a plugin that declares none binds as before.
+
+**`directory_packages` (`path` model only).** In Go every file of one directory
+that declares the same `package` clause shares one scope. A plugin opts in, and
+the Go plugin does:
+
+```toml
+[module_model]
+kind = "path"
+directory_packages = true   # refused under any other kind
+```
+
+The plugin's `symbols` query captures the clause's name with `@package.name`, and
+it is recorded beside the file; the file's module key stays its path's. A bare name
+that the file itself, its imports and its dot-imports do not supply then binds to the
+one top-level declaration of that name among the package's other files. A method
+that only shares the name is never one. A name declared twice in the package, such
+as build-tag variants (`term_unix.go`, `term_windows.go`), binds nothing. A file of
+the same directory that declares another clause, such as `package foo_test` or a
+`//go:build ignore` generator's `package main`, is a package of its own. A file
+whose clause is not recorded (a store not re-extracted since the key was declared,
+or a damaged parse) is in no package, and no name binds through its directory's
+package until it is, since it may declare the name too. The key defaults to `false`,
+so a plugin that does not declare it binds as before.
+
+**`link_unit` (`path` model only).** A C program is linked from its translation
+units, and a function defined in one is called from another through a prototype in
+a header. A plugin opts in, and the C plugin does:
+
+```toml
+[module_model]
+kind = "path"
+link_unit = true   # refused under any other kind
+```
+
+The key reads the include scope, so it requires `bare_specifiers =
+"include-roots"` (and with it `import_specifier = "path"`); a descriptor that
+declares it without them is refused.
+
+A bare call is read through its includes first: the file's own definition, then a
+definition a file its `#include`s reach supplies (a `static inline` function or a
+macro of a header). A prototype found there only names the function. Failing a
+definition, the call binds to the one non-`static` definition of the name among
+the language's files (`.c`, and `.h` where the repository's headers are read as
+C). A `static` function is its own file's alone. Two non-`static` definitions,
+such as platform variants (`src/unix/loop.c` and `src/win/core.c` each defining
+`uv_loop_init`), bind nothing. A call through a function pointer — a
+parameter, a local or a file-scope variable of the name — binds nothing. No
+build file (`Makefile`, CMake,
+`compile_commands.json`) is read, so a definition no binary links with the
+caller is still a candidate; the exactly-one rule keeps the guess out. The key
+defaults to `false`, so a plugin that does not declare it binds as before.
+
+**`extension_functions` and `file_facade` (`namespace` model only).** Kotlin
+declares functions that extend a type (`fun String.toSlug()`), and Java reaches
+a Kotlin file's top-level functions through a class named after the file. The
+Kotlin plugin opts in to both, beside `top_level_callables`:
+
+```toml
+[module_model]
+kind = "namespace"
+top_level_callables = true
+extension_functions = true   # refused under any other kind
+file_facade = "Kt"           # a bare identifier; refused under any other kind
+```
+
+- With `extension_functions`, a top-level function whose `symbols` query
+  captures a receiver type (`@symbol.self_type`) is callable on a value. A call
+  `title.toSlug()` whose receiver's type is not known binds the one such
+  function of its name that the file imports, its namespace declares, or a
+  wildcard brings into view, in that order; an import is final. Two such
+  functions of one name in one of those scopes bind neither
+  (`overload-ambiguous`). A member wins over an extension, and the receiver's
+  type is not known, so a callable member of that name on any class of the
+  language's family keeps the call unbound (`no-receiver-evidence`). Only the
+  call's written arguments decide among overloads: an extension's receiver is
+  not one of its parameters. A bare call `f()` reaches an extension only from
+  inside an extension's own body, never past a member of the name, and there a
+  member of the receiver's own type, when the repository declares it, comes
+  before any top-level function.
+- With `file_facade`, another language of the family reaches a file's
+  top-level functions through a class named after the file: its stem, with
+  every character a class name cannot hold replaced by `_` and the first
+  letter upper-cased, then the suffix. `mixit/util/Utils.kt` declaring
+  `package mixit.util` gives `mixit.util.UtilsKt`, so Java's `import
+  mixit.util.UtilsKt;` binds that file and `UtilsKt.enumMatcher(s)` binds its
+  `enumMatcher`. An extension takes its receiver as the first argument there.
+  The declaring language never names the facade itself. A name set with
+  `@file:JvmName` is not read.
+
+Both default to off, so a plugin that declares neither binds as before.
+
+**`companion_name` (`namespace` model only).** A Kotlin `companion object` is a
+node of its own, nested in its class (`Svc#Companion#create().`), and its members
+are reached through the class. The key names the companion a class has when it is
+written without a name of its own:
+
+```toml
+[module_model]
+kind = "namespace"
+companion_name = "Companion"   # a bare identifier; refused under any other kind
+```
+
+- A call on a class that has a companion, `Svc.create()`, binds among the
+  companion's own callables alone: an instance member of `Svc` is never what it
+  calls. Two the call's arguments admit bind neither (`overload-ambiguous`), and
+  one holding the name with none it admits is `no-applicable-overload`.
+- A bare `create()` inside the class reaches the companion's members after the
+  class's own and its supertypes', then the companions of its superclasses,
+  nearest first, and only then any top-level function or import. A member of
+  the class that the call's arguments admit still wins, and one they do not is
+  passed over. A class nested in `Svc` reaches `Svc`'s companion too. A class
+  whose base the repository does not hold reaches no companion: that base may
+  declare the name.
+
+What the key does not see:
+
+- A companion declared with a name of its own (`companion object Factory`) is an
+  ordinary nested object here: `Svc.Factory.create()` binds, `Svc.create()` does
+  not. A plain nested `object Companion`, which is no companion, is read as one.
+- A companion's own supertypes (`companion object : Factory()`) are not
+  recorded, so a member it inherits is not reached, and `Svc.create()` on one
+  stays unbound.
+- A lambda's receiver is not known. Inside `Builder().apply { create() }` the
+  call may be `Builder`'s, yet it binds the companion's `create` as it would a
+  member of the class itself.
+
+The key defaults to none, so a plugin that does not declare it binds as before.
+
+**`global_function_fallback` (`namespace` model only).** PHP reads an unqualified
+function name in the file's own namespace first, then in the global namespace. The
+PHP plugin opts in, beside `top_level_callables`:
+
+```toml
+[module_model]
+kind = "namespace"
+top_level_callables = true
+global_function_fallback = true   # needs top_level_callables; refused under any other kind
+```
+
+- A file that declares no namespace is in the global one. A bare call it does not
+  declare itself binds the one function another such file declares at its top
+  level — mantisbt's `gpc_get_int()` from its pages to `core/gpc_api.php` — under
+  every binding policy, not only `aggressive`. A function declared inside an `if`
+  (a `function_exists` guard) counts as declared.
+- A namespaced file's bare call binds its own namespace's function first, then the
+  global one. Under `strict` and `balanced` a namespaced function is never reached
+  from another namespace, nor from the global one; `aggressive` still tries its
+  workspace-unique name after these rules, as for every language. A class name
+  never falls back.
+- A name two files declare binds neither, whatever their parameters. A method
+  that only shares the name is never a candidate.
+- A file whose namespace is not known (its top-level declarations sit in two
+  namespaces, such as `namespace { … }` beside `namespace Foo { … }`) may
+  declare a global function, so a global function of a name it declares too
+  binds nothing. Its own bare calls take none of these rules.
+
+The key defaults to `false`, so a plugin that does not declare it binds as before.
+
+A PHP `require`, `require_once`, `include` or `include_once` of a string literal,
+or of `__DIR__ . '/…'`, records an `Imports` edge to the file it names, read
+against the including file's directory. Any other argument records nothing: a
+variable, `dirname(__FILE__) . '/…'`, a string with a variable in it, and a
+helper such as mantisbt's `require_api('…')`. PHP itself tries the include path
+before the file's own directory, so a literal that a file beside the includer does
+not hold stays unbound.
 
 ### Call targets (`class_call_instantiates`, `macros_callable`)
 
@@ -1983,14 +2305,15 @@ macros_callable = true
   `Check(project=p)` after `from hc.api.models import Check` instantiates
   `hc/api/models.py`'s `Check`.
 - With `macros_callable`, a call whose one candidate is a macro records `Calls` to
-  that macro node. C headers belong to the C++ plugin, so a macro defined in a
-  `.h` file is no candidate.
+  that macro node. A `.h` header C reads — in a repository whose C sources outnumber
+  its C++ ones — declares its `#define`s as macros too.
 
 The rule that binds every call still holds: exactly one candidate, or nothing. Two
 classes of one name stay unbound. So do a function and a class (or macro) of one
 name in one scope, and a name that matches no declaration. Kotlin and Scala read
 a bare `Foo()` inside a class as a call on the current instance, so it binds among
-that type's own members and never reaches the class. Both keys default to
+that type's own members and never reaches the class — unless, in Scala, the file
+shows that no member answers it: then it is the free call it is outside a class. Both keys default to
 `false`, and a plugin that declares neither binds its calls as before.
 
 ### Supertypes (`@ref.extends`, `@ref.implements`, `supertype_kind_follows_target`)
@@ -2005,7 +2328,8 @@ namespace, or the path modules:
   PHP class's `use`d traits.
 
 Python (`class A(B)`), PHP (`extends`, `implements`, trait `use`), C#
-(`base_list`), Kotlin (the supertype list) and Java capture them. A supertype
+(`base_list`), Kotlin (the supertype list), Scala (`extends A with B`),
+TypeScript (`extends`, `implements`) and Java capture them. A supertype
 binds only to the one in-repository type its file's scope names — its own
 module, its imports, its namespace or package, its wildcards — and never by a
 workspace-wide name guess, under any binding policy. A library base (`TestCase`,
@@ -2015,23 +2339,73 @@ extends \Exception` never names itself. An `Extends` binds a class (an interface
 from an interface); an `Implements` binds an interface or a trait.
 
 C# and Kotlin write the base class and the interfaces in one list (`class A : B,
-IC`, `class A : Base(), Iface`), so their descriptors declare:
+IC`, `class A : Base(), Iface`), and Scala's `extends A with B with C` may name a
+trait first and a class without `with`, so their descriptors declare:
 
 ```toml
-# C#, Kotlin: the supertype list does not say which entry is the class.
+# C#, Kotlin, Scala: the supertype list does not say which entry is the class.
 supertype_kind_follows_target = true
 ```
 
 Each entry is then captured as `@ref.extends`, and a class's entry binds the one
 class, interface or trait it names. Its edge kind follows the target:
-**`Extends`** to a class, **`Implements`** to an interface. The key defaults to
+**`Extends`** to a class, **`Implements`** to an interface or a Scala trait (the
+cake pattern's `with AccountService` mixins). A Scala self-type (`self: A with B
+=>`) is no supertype and records nothing. An `object` is never a supertype, so a
+mixin named by a trait and its companion `object` (`trait AccountService` beside
+`object AccountService`) binds the trait; a name a class shares with its companion
+`object` names two classes the graph cannot tell apart, so it stays unbound. The key defaults to
 `false`, where each clause binds the kind it spells.
 
+TypeScript's types are structural, so its descriptors (both grammars, and
+JavaScript's) declare:
+
+```toml
+# TypeScript, TSX, JavaScript: every type relation relates its declaration.
+structural_types = true
+```
+
+With it, a TypeScript file records every type relation, not only a type's
+supertypes: `@ref.instantiates` records the class `new T(…)` constructs
+(**`Instantiates`**), and `@ref.type_use` the declared type of a field,
+parameter, return value, variable or property signature (**`TypeUses`**) — its
+type arguments, and the members of a union, intersection or indexed access
+(`Dto | null`, `User['id']`), included. Each binds from whatever declaration it
+sits in. An `implements` binds an abstract class or a type alias as readily as an
+interface, and an interface's `extends` any type; a class's `extends` and a `new`
+still bind a class. A type named through a named or default import is recorded as
+`<module>::<Name>` and binds only within what that import binds to — through a
+barrel, a `tsconfig` alias or a workspace package, as a call through it does. One
+the file declares binds in the file, and one it neither declares nor imports
+binds nothing. A type parameter, a primitive, a call (`extends Mixin(Base)`) and
+a type named through a namespace import (`ns.Dto`) record nothing that binds. A
+type use written in an abstract or interface member signature stays unbound. The
+key defaults to `false`.
+
+With `structural_types` on, a call on a receiver whose type the file proves
+binds among that type's members. `this.users.findByEmail()` reads the field
+`users` of the enclosing class itself: a constructor parameter property
+(`constructor(private readonly users: UsersService)`) or an annotated field.
+`users.findByEmail()` reads the one binding of `users` in scope at the call: an
+annotated parameter or variable, or `const users = new UsersService()`. The call
+is recorded as `<module>::UsersService::findByEmail` through the type's named
+import, keeping its `other` shape. It binds the one `findByEmail` of
+`UsersService`, else of the nearest level of its proven `Extends` chain. On an
+abstract class or an interface it binds the declared, bodyless method, never an
+implementation; this is the only call that reaches one. A type the repository
+does not declare binds nothing. A receiver with no proof stays
+`no-receiver-evidence`: an untyped or inferred one, a qualified (`ns.T`), union
+or array annotation, and a name two bindings in scope spell — a shadowing local,
+an inner function's parameter, a module-level variable beside a parameter. So
+does a field the class inherits or does not annotate, and a call on a class name
+(`Mapper.from()` without an import). The JavaScript plugin runs the same queries
+over `.js` files, where `const x = new T()` is the one proof that can be written.
+
 A proven `Extends` is also what a call on the current instance climbs: a Python
-`self.m()`, PHP `$this->m()`, C# `this.M()` or unqualified Kotlin/C# `m()` reaches
-an inherited `m`, and Python's `super().m()`, PHP's `parent::m()`, C#'s `base.M()`
-and Kotlin's `super.m()` bind the nearest supertype that declares exactly one
-`m`. An `Implements` is not part of that chain, so `base.M()` in a class whose only
+`self.m()`, PHP `$this->m()`, C# or TypeScript `this.M()` or unqualified Kotlin/C# `m()` reaches
+an inherited `m`, and Python's `super().m()`, PHP's `parent::m()`, C#'s `base.M()`,
+Kotlin's and TypeScript's `super.m()` bind the nearest supertype that declares
+exactly one `m`. An `Implements` is not part of that chain, so `base.M()` in a class whose only
 supertype is an interface binds nothing (a language declaring
 `inherits_interface_bodies`, below, visits interfaces after the chain). The walk reads one base class per level,
 so it never climbs through a Python class with several bases (its MRO decides) or
@@ -2072,7 +2446,7 @@ extraction, but only an explicit `"none"` also tells the binder that a bare
 call never reaches an instance member:
 
 ```toml
-# Go, Rust, Python, PHP, TypeScript (and its .js files), TSX: a method is reached only through a
+# Go, Rust, Python, PHP, TypeScript, TSX, JavaScript: a method is reached only through a
 # receiver, so a bare `f()` binds a free or imported `f`, never a method `f`.
 implicit_receiver = "none"
 ```
@@ -2111,9 +2485,9 @@ candidate whose parameter count admits the call ([Usage](usage.md)). Four
 # admits one argument, and a scope whose `f`s admit none is passed over.
 overloaded_calls = true
 
-# TypeScript (`js`, `mjs`, `cjs`) and TSX (`jsx`): JavaScript enforces no
-# arity, so a call in these files is never filtered. The range is still recorded.
-arity_unchecked_extensions = ["js", "mjs", "cjs"]
+# JavaScript (`js`, `mjs`, `cjs`, `jsx`): the language enforces no arity, so a
+# call in these files is never filtered. The range is still recorded.
+arity_unchecked_extensions = ["js", "mjs", "cjs", "jsx"]
 
 # Kotlin only: an unqualified in-class call that no member admits goes on to
 # the top-level functions and imports in scope ...
@@ -2162,14 +2536,29 @@ language's symbols query must record its impl blocks (the `@item.impl`
 captures, `@item.impl.target` for a `Deref` target). It defaults to `false`: a written `T::m()`
 binds among the functions of `T`'s module, as before. Only Rust declares it.
 
+### Calls never name a value (`separate_call_namespace`)
+
+```toml
+# Java: `String name = …; name()` calls the method `name`, never the local.
+separate_call_namespace = true
+```
+
+A language whose calls and values are separate namespaces declares it: a local
+parameter or variable never shadows a bare call there, so the call binds as it
+would without the local. Java and Ruby declare it (Ruby's `f()` with
+parentheses calls the method even where a local `f` is assigned). A local
+import still shadows. It defaults to `false`: a local value in force at a bare
+call of its name makes it a call through that value, which binds nothing.
+
 ### Member access (`member_access`, `member_access_excluded_extensions`)
 
 ```toml
-# Java, TypeScript, TSX, PHP: the references query captures own-field access
-# (`this.x`, `$this->x`) as Accesses edges, so a class's methods can share fields.
+# Java, TypeScript, TSX, JavaScript, PHP, C#, Python, Scala, Kotlin, C++, Ruby: the references query captures
+# own-field access (`this.x`, `$this->x`, `self.x`, Ruby's `@x`, and C#'s, Scala's, Kotlin's and C++'s bare `x`) as Accesses
+# edges, so a class's methods can share fields.
 member_access = true
-# TypeScript / TSX: JavaScript files are carved out of the declaration.
-member_access_excluded_extensions = ["js", "mjs", "cjs"]   # TSX: ["jsx"]
+# Python: its `.pyi` stubs are carved out of the declaration.
+member_access_excluded_extensions = ["pyi"]
 ```
 
 The Cohesion dimension ([metrics.md](metrics.md#8-cohesion-lcom4--do-classes-hang-together))
@@ -2179,6 +2568,235 @@ from its intra-class calls alone. It defaults to `false`. Each
 `member_access_excluded_extensions` entry must be one of the plugin's
 `extensions`, and the key is accepted only beside `member_access = true`. The
 capability is not listed by `logos languages`.
+
+### Trait containers (`bodied_traits_are_containers`)
+
+```toml
+# Scala: a trait with a bodied method is a container, as a class is.
+bodied_traits_are_containers = true
+```
+
+Focus and Cohesion ([metrics.md](metrics.md#9-focus--are-containers-god-objects))
+read classes and structs as containers. A language whose traits carry state and
+behaviour declares this key, and a trait of it with at least one method with a
+body then counts as a container too: Focus counts it, and Cohesion scores it when
+the language also declares `member_access`. A trait of abstract declarations only
+stays no container. It defaults to `false`, so a Rust trait's default methods or a
+PHP trait never make a container. Only Scala declares it.
+
+### Shared extensions (`shared_extensions`)
+
+```toml
+# C: `.h` is claimed by C++ too; C reads it only in a C repository.
+extensions = ["c", "h"]
+shared_extensions = ["h"]
+```
+
+An extension two plugins claim is read by one of them per repository. The plugin
+that declares it shared reads it when the repository's files of its own other
+extensions outnumber the other plugin's; the other plugin reads it otherwise, a
+tie and a repository of shared files alone included. So C reads `.h` in redis
+(475 `.c` files beside 8 C++ ones) and C++ in a C++ project. Only the files the
+`languages` list admits are counted. The decision is recorded with the graph: a
+`sync` whose files move it re-reads every header, and `status` states it on the
+reading row when the repository holds both languages ([Commands](commands.md)).
+Each entry must be one of the plugin's `extensions`; it defaults to empty. Only C
+declares it.
+
+### Preprocessor regions (`preprocessor`)
+
+```toml
+# C#: each `#if` region is read as its first branch.
+preprocessor = "c-sharp"
+```
+
+Before a file is parsed, each `#if … #elif … #else … #endif` region is reduced to
+its first branch: the other branches and the region's `#if`, `#elif`, `#else` and
+`#endif` lines are blanked to spaces, so every node keeps the line and column it
+has in the file. Other directives (`#region`, `#pragma`, `#nullable`) are left to
+the parser. No symbol is
+evaluated, since the build's defines are unknown. A type written two ways under
+`#if` (Newtonsoft's `class JsonWriter` takes `: IAsyncDisposable` only
+`#if HAVE_ASYNC_DISPOSABLE`) is then one class, with its members under it, rather
+than a class named after the symbol. A file whose regions do not balance is
+parsed as written. A directive is recognised by the first non-blank character
+of its line, and strings and comments are not read, so a directive line inside a
+multi-line string or comment counts too: a lone `#else` or `#endif` there pairs
+with the region around it and can blank the code after it. The
+default, `"none"`, parses every file as written. Only C# declares it.
+
+### Bare specifiers (`bare_specifiers`)
+
+```toml
+# TypeScript, TSX, JavaScript: a bare specifier (`@/lib/api`, `@acme/ui`) binds through the
+# importing file's tsconfig/jsconfig and the workspace packages.
+bare_specifiers = "tsconfig"
+```
+
+A **bare** specifier is a path specifier that is not relative. With the default,
+`"external"`, it names a package and its import stays unbound. With `"tsconfig"`:
+
+- The importing file's nearest `tsconfig.json` (else `jsconfig.json`) applies:
+  the one in its own directory or the closest above it. Each package of a
+  monorepo is therefore governed by its own config.
+- Its `extends` chain is followed inside the repository, up to 8 configs deep. A
+  base may be a relative path or a file of a workspace package
+  (`@repo/config/base.json`). A package is found through any indexed file in
+  its directory, its own `package.json` included while `[config_artifacts]` is
+  on. A base outside the repository contributes nothing.
+- The specifier is rewritten by the `compilerOptions.paths` pattern it matches
+  best (an exact pattern, else the longest prefix), each substitution in turn,
+  then by `compilerOptions.baseUrl`. Each rewrite resolves like a relative
+  specifier: extensions first, then `index`. The first rewrite that names a
+  file decides; one that names two files (`ui.ts` beside `ui.tsx`) leaves the
+  import unbound.
+- Otherwise, a specifier naming a workspace package (the `name` of a
+  `package.json` in a directory of an indexed file or above one) resolves to
+  that package's entry. The candidates are tried in this order: `exports` (its
+  `import`, `types` and `default` conditions), then `types`, `module`, `main`,
+  then the package's `index`. A subpath (`@acme/ui/button`) resolves through the
+  `exports` subpaths, or under the package root when `exports` lists none. A
+  name two packages declare resolves to neither.
+
+A call through such an import binds exactly as a call through a relative import
+does. A call through an external package (`react::useState`) stays unbound, even
+beside a workspace function of the same name. Editing any `.json` file (a
+config, an `extends` base, a `package.json`) re-binds the imports on the next
+sync. The key requires `import_specifier = "path"`.
+
+```toml
+# Ruby: a bare `require 'a/b'` binds against the repository's load roots.
+bare_specifiers = "load-path"
+```
+
+With `"load-path"`, a bare specifier binds against the **load roots**: the
+repository root, plus each gem's `require_paths`, read from every `*.gemspec`
+in a directory of an indexed file of the language or above one. A gem whose
+gemspec assigns no `require_paths` (or `require_path`) has `lib`; a literal
+list (`["lib", "ext"]`, `["lib".freeze]`, `%w[lib ext]`, `"lib"`, `<< "ext"`,
+`+= ["ext"]`) replaces or extends it, and a computed value (`Dir[…]`, a
+constant, an interpolation, `.push(…)`) contributes no root. Only code is read:
+a mention in a comment, an `=begin` block or a heredoc assigns nothing. Without
+a gemspec, `lib/` is not a load root.
+
+- `require 'rack/lint'` binds the one file `<root>/rack/lint.rb` across every
+  root; a trailing `.rb` names the file itself. A specifier that two roots
+  answer stays unbound, and so does one that no root answers
+  (`require 'json'`, a gem from outside the repository).
+- A relative specifier (`require_relative`) binds the one file it names beside
+  the requiring file, `..` included, never a directory's `index` file.
+- A bare `require './x'` names a file under the working directory, read as
+  `x` against the load roots — never beside the requiring file. One headed by
+  `../`, or an absolute path, records no import.
+
+Editing a `*.gemspec` re-binds the requires on the next sync. The key requires
+`import_specifier = "path"`.
+
+```toml
+# C, C++: `#include <a/b.h>` binds under the include roots; `"x.h"` beside the
+# including file first.
+bare_specifiers = "include-roots"
+```
+
+With `"include-roots"`, a header is named whole, extension included, so
+`hash.hpp` beside `hash.cpp` is no ambiguity:
+
+- `#include "x.h"` binds the file it names beside the including file, `..`
+  included; when there is none, it binds as `<x.h>` does.
+- `#include <a/b.h>` binds the one file `<root>/a/b.h` across the **include
+  roots**: every directory named `include` or `src`, at any depth, and every
+  directory holding an `include` directory (a repository root with `include/`
+  is one). Only directories of indexed files of the language count. A header
+  two roots answer stays unbound, and so does one no root answers (`<vector>`,
+  or a vendored library under a directory that is no root).
+- An absolute header (`"/opt/x.h"`) records no import, and nor does a
+  macro-named one (`#include HEADER`): no preprocessor runs.
+
+A free or qualified call and, in C++, a base class then bind through the
+declarations the file's includes make visible, transitively (see [`logos languages`](usage.md)
+for the reach). The root set is read off the indexed files, and any change
+re-binds every reference of the language on the next sync. The key requires
+`import_specifier = "path"`.
+
+#### Re-exports, default exports and dynamic imports (TypeScript, TSX)
+
+A call through an import binds to what the imported module provides under that
+name, not only to a function the module defines itself:
+
+- **Re-exports are followed.** `export * from './spinner'` and
+  `export { a as b } from './x'` (`{ default }` and `{ default as X }`
+  included) are imports of the module they name. A name imported from a barrel
+  is followed through them, barrel after barrel, up to 8 re-exports deep. A
+  module's own export of a name hides one an `export *` brings in, and
+  `export *` never re-exports `default`. An imported name exported again
+  (`import { a } from './x'; export { a };`) is a re-export too.
+- **Default imports bind.** `import App from './app'` and
+  `import { default as App } from './app'` name the module's default export:
+  `export default App`, `export default function App() {}`, or
+  `export { App as default }`. For `export default <expression>`, it is the
+  `default` symbol of that statement.
+- **A literal `import('./routes/landing')` is an import.** It records an import
+  edge from the function that makes it. A template or computed specifier
+  records none.
+- **A call through an imported class binds among its methods.**
+  `UserMapper.toDomain(raw)` after `import { UserMapper } from
+  './mappers/user.mapper'` — or a default or aliased import of the class —
+  binds to that class's one method `toDomain`, static or not, never a function
+  of that name beside the class. A class from an external package
+  (`Logger.log()` from `@nestjs/common`), an imported function or value
+  (`config.get()`), a class declaring the name twice, or a name that reaches two
+  classes leaves the call unbound. A call through a namespace import
+  (`import * as utils`, `utils.format()`) binds the module's function, as
+  before.
+
+The call binds only when exactly one definition is reached. A re-export cycle,
+or a name that two modules provide (two `export *` that both bring in
+`helper`), leaves the call unbound. One definition reached by two routes is
+still one. Only a top-level function or value binding is a call target this
+way, never a class itself — a member call on an imported class binds among the
+class's methods, as above. A call through a namespace a barrel re-exports with
+`export * as ns` (`ns.f()`) is not followed.
+
+#### CommonJS modules (`commonjs`)
+
+```toml
+# JavaScript: `require` bindings and `module.exports` are imports and exports.
+commonjs = true
+```
+
+A `javascript` file's CommonJS imports and exports bind like the ECMAScript
+ones above. Only the JavaScript plugin declares the key; it defaults to `false`,
+where a `require()` call records its import edge and binds no name.
+
+- **`const m = require('./x')` is a qualifier.** `m.f()` binds what `x`
+  provides under `f`, and `m()` calls `x`'s export object (below). `var` and
+  `let` declarations count too.
+- **`const { f, g: h } = require('./x')` binds named imports.** `f()` and `h()`
+  bind what `x` provides under `f` and `g`, a default value (`{ f = d }`)
+  included. A rest element or a nested pattern binds nothing.
+- **`module.exports = X` and `const X = module.exports` name the export
+  object.** Its members are the module's names: `User.exists` of
+  `const User = module.exports; User.exists = async function …` is what
+  `user.exists()` binds after `const user = require('./user')`. The object is
+  the module's default export as well, for `m()` and for
+  `import X from './x'`. A module that assigns two different objects to
+  `module.exports` exports neither's members.
+- **`module.exports = { a, b: c }` exports `c` under `b`.** A shorthand `a`
+  exports the declaration found by its own name. A value the module imported
+  by name (`const { lookup } = require('./dns')`) is re-exported.
+
+Only a `require` that is the whole initialiser of a declaration at the top of
+the file binds a name. A `require` inside a function or a block, a called one
+(`require('./x')(User)`), or one read for a property (`require('./x').y`)
+records its import edge and binds none, and a function parameter or local
+named like the binding shadows it. Only a top-level `module.exports` statement
+records an export, and a function assigned to it directly
+(`module.exports = function () {}`) names no declaration. A `require` of an external package (`require('express')`) stays
+unbound, and so does every call through it (`express.Router()`), even beside a
+workspace function of the same name. The specifier resolves as an `import`
+specifier does: relative, or through `bare_specifiers` aliases and workspace
+packages. A method of a class exported this way (`module.exports = Foo`,
+`m.create()` on a static `create`) is not a call target.
 
 ### Outbound HTTP client calls (`invocations`)
 

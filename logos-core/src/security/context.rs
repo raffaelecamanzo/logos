@@ -365,6 +365,24 @@ pub(crate) fn in_test_symbols(engine: &Engine, findings: &[&SecurityFinding]) ->
         .collect())
 }
 
+/// The symbol that encloses each finding — the node [`contexts`] binds, which a
+/// suppression's evidence always includes ([FR-SC-32]) — or `None` for a
+/// finding that binds none ([`UnboundBecause`]).
+///
+/// # Errors
+/// A store failure.
+///
+/// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
+pub(crate) fn enclosing_symbols(engine: &Engine, findings: &[&SecurityFinding]) -> Result<Vec<Option<NodeRow>>> {
+    let anchors: Vec<Result<(&str, u32), UnboundBecause>> = findings.iter().map(|f| anchor(f)).collect();
+    let paths = anchored_paths(&anchors);
+    if paths.is_empty() {
+        return Ok(vec![None; findings.len()]);
+    }
+    let spans = engine.nav_runtime()?.submit_read(move |store| store.span_nodes_in_files(&paths))?;
+    Ok(bind(&spans, &anchors).into_iter().map(|row| row.ok().cloned()).collect())
+}
+
 /// Each finding's code scope by this engine's graph ([`super::scope::scopes`]
 /// over [`in_test_symbols`]): what the Files & Risk and hotspot findings cell
 /// counts by. Here, beside the graph read, so the engine names one module for

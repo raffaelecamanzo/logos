@@ -15,9 +15,15 @@
 //!   unmatched, ambiguous or historical finding is `n/a` — there is no file to
 //!   compare.
 //!
+//! - **One advisory, one finding** ([FR-SC-29]): the findings several dependency
+//!   scanners — or one, under two ids — report for one advisory on one
+//!   lockfile, package and version are read as one, naming every reporter
+//!   ([`super::merge`]). The rows stay stored per scanner.
+//!
 //! Every read is ordered, so the result is byte-identical across runs for the
 //! same store and tree ([NFR-RA-06]).
 //!
+//! [FR-SC-29]: ../../../../docs/specs/requirements/FR-SC-29.md
 //! [FR-SC-02]: ../../../../docs/specs/requirements/FR-SC-02.md
 //! [FR-CV-05]: ../../../../docs/specs/requirements/FR-CV-05.md
 //! [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
@@ -45,6 +51,20 @@ use crate::history::{FRESHNESS_FRESH, FRESHNESS_NA, FRESHNESS_STALE};
 /// [ADR-28]: ../../../../docs/specs/architecture/decisions/ADR-28.md
 pub fn read_latest(root: &Path) -> Result<SecurityView> {
     read_where(root, LATEST, None, true)
+}
+
+/// The finding in the latest snapshots whose fingerprint is `fingerprint`, or
+/// that had it before a re-key (its legacy fingerprints), or a merged one with
+/// a reporter known by it ([`SecurityFinding::known_by`]); the first in store
+/// order. `None` when no stored finding has it.
+///
+/// # Errors
+/// Returns an error only on an unexpected store failure.
+pub fn stored_finding(root: &Path, fingerprint: &str) -> Result<Option<SecurityFinding>> {
+    Ok(read_latest(root)?
+        .findings
+        .into_iter()
+        .find(|f| f.known_by(fingerprint)))
 }
 
 /// Every scanner's latest snapshot as [`read_latest`] reads it, without its
@@ -123,12 +143,14 @@ fn read_where(root: &Path, filter: &str, param: Option<&str>, with_findings: boo
                 }
                 None => FRESHNESS_NA,
             };
-            findings.push(SecurityFinding {
+            let package = row.package;
+            findings.push((SecurityFinding {
                 scanner_name: snap.scanner_name.clone(),
                 scanner_version: snap.scanner_version.clone(),
                 head_sha: snap.head_sha.clone(),
                 fingerprint: row.fingerprint,
                 severity: row.severity,
+                confidence: row.confidence,
                 cwes: row.cwes,
                 rule_id: row.rule_id,
                 message: row.message,
@@ -144,11 +166,12 @@ fn read_where(root: &Path, filter: &str, param: Option<&str>, with_findings: boo
                 commits: row.commits,
                 legacy_fingerprints: row.legacy_fingerprints,
                 freshness,
-            });
+                reporters: Vec::new(),
+            }, package));
         }
     }
 
-    Ok(SecurityView { snapshots, findings })
+    Ok(SecurityView { snapshots, findings: super::merge::merge(findings, root) })
 }
 
 /// The snapshots `filter` selects (see [`read_where`]), by scanner name, each

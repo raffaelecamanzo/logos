@@ -590,3 +590,41 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
     assert_eq!(injection_2021, ("A03:2021".to_string(), Some(5), Some(2)));
     assert_eq!(page["counts"]["excluded"]["test"], 3, "{}", page["counts"]);
 }
+
+/// `security_reconfirm` over a real index ([FR-SC-32], S-818): `evidence` reaches
+/// the engine — an entry that records none gains the named symbol and the finding's
+/// own enclosing one — and a call without it re-records what the entry names.
+///
+/// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+#[tokio::test(flavor = "multi_thread")]
+async fn security_reconfirm_records_the_named_evidence_and_re_records_without_it() {
+    let f = fixture();
+    let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
+    f.direct(|e| e.security_ingest(&semgrep));
+    let findings = f.direct(|e| e.security_findings(&FindingsFilter::default()));
+    let fingerprint = findings["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["start_line"] == 12)
+        .unwrap()["fingerprint"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ignore = f.root.join(".logos/security-ignore.toml");
+    fs::write(&ignore, format!("[[ignore]]\nfingerprint = \"{fingerprint}\"\nreason = \"accepted\"\n")).unwrap();
+
+    let (client, server) = boot(&f).await;
+    let written = call(&client, "security_reconfirm", json!({"fingerprint": fingerprint, "evidence": ["connect"]})).await.unwrap();
+    assert_eq!(written["entry"]["reason"], "accepted");
+    let symbols: Vec<&str> = written["entry"]["evidence"].as_array().unwrap().iter().map(|e| e["symbol"].as_str().unwrap()).collect();
+    assert_eq!(symbols.len(), 2, "{written}");
+    assert!(symbols.iter().any(|s| s.ends_with("connect().")) && symbols.iter().any(|s| s.ends_with("find().")), "{symbols:?}");
+    let on_disk = fs::read_to_string(&ignore).unwrap();
+
+    let again = call(&client, "security_reconfirm", json!({"fingerprint": fingerprint})).await.unwrap();
+    assert_eq!(again["entry"]["evidence"], written["entry"]["evidence"], "unchanged code re-records the same hashes");
+    assert_eq!(fs::read_to_string(&ignore).unwrap(), on_disk);
+    client.cancel().await.ok();
+    server.abort();
+}

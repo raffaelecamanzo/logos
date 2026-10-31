@@ -1,0 +1,13 @@
+// A deadline handed in as an `Instant` parameter is scaled where the caller builds
+// it; the assertion inside cannot scale it again. A `Duration` parameter is a
+// different thing: nothing scaled it, so the bound it sets is a hit.
+fn wait_until(deadline: Instant, mut done: impl FnMut() -> bool) {
+    while !done() {
+        assert!(Instant::now() < deadline, "never became ready");
+    }
+}
+
+fn a_duration_parameter_is_unscaled(budget: Duration) {
+    let start = Instant::now();
+    assert!(start.elapsed() < budget);
+}

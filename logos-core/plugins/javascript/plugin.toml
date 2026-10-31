@@ -1,0 +1,161 @@
+# Declarative descriptor for JavaScript (S-538, FR-PL-08, FR-PL-01, ADR-09):
+# `.js`/`.mjs`/`.cjs`/`.jsx` sources, labelled `javascript`. JavaScript is its
+# own language but not its own grammar: it parses with the TSX grammar, so JSX
+# inside a `.js` file parses, and it SHARES the `tsx` plugin's queries rather
+# than copying them — `grammars.rs` declares this entry with
+# `entry!("javascript", shares tsx_entry(), layers ["symbols", "frameworks"])`,
+# which takes the TSX `Language` and the very `tsx/queries/*.scm` assets the
+# `tsx` row embeds. A change to a shared query therefore reaches JavaScript with no second
+# copy to keep in step, and the query compiles against the grammar it was
+# written for. Droppable `.scm` query overrides resolve under
+# `.logos/plugins/javascript/queries/` (FR-PL-04, UAT-PL-03), apart from TSX's.
+#
+# Its own queries are two layers, each appended to the `tsx` file of the same
+# name. `queries/symbols.scm` (S-539, FR-EX-18) declares the functions
+# JavaScript defines by assignment, `exports` or prototype, which TypeScript
+# does not read; `queries/frameworks.scm` (S-541, FR-FW-03) reads Express
+# routes with a template-literal path, so TypeScript's routes are untouched. An
+# override of either file replaces its pair.
+#
+# Every semantic key below matches the `typescript`/`tsx` descriptors, whose
+# rows JavaScript files were read under before S-538, except where a comment
+# says otherwise.
+
+name = "javascript"
+extensions = ["js", "mjs", "cjs", "jsx"]
+
+# Member paths join with a dot (`a.b.c`). An import specifier is a different
+# grammar — a PATH — and is declared separately (S-439, CR-142 D1): only `/`
+# separates, a relative specifier resolves against the importing file, and a
+# trailing extension below is stripped so `"./nav.js"` and `"./nav"` name the
+# same file. A JavaScript file may import a TypeScript one and the reverse, so
+# the list is the TypeScript family's.
+module_separator = "."
+import_specifier = "path"
+specifier_extensions = ["ts", "tsx", "js", "jsx", "mjs", "cjs"]
+# A bare specifier (`@/lib/api`, `@acme/ui`) binds through the importing file's
+# nearest `jsconfig.json`/`tsconfig.json` (`extends`, `paths`, `baseUrl`) and
+# the workspace packages' `package.json` names (S-531, FR-RS-02); one neither
+# rewrites (`react`) names an external package and stays unbound.
+bare_specifiers = "tsconfig"
+# CommonJS modules (S-540, FR-RS-22) — JavaScript only; TypeScript's rows
+# declare none. A top-level `const m = require('./x')` qualifies `m.f()` as
+# `x::f`, `const { f, g: h } = require('./x')` binds named imports, and
+# `module.exports = X` / `const X = module.exports` records the module's export
+# object. A `require` of an external package binds nothing.
+commonjs = true
+
+# tree-sitter-typescript 0.23 (TSX Language) is generated against ABI 14.
+abi_version = 14
+
+# An unqualified call (`m()`) is never a call on the current instance in
+# JavaScript: it is a free call, bound by scope (S-515, CR-169).
+implicit_receiver = "none"
+
+# JavaScript enforces no arity (S-592, FR-RS-43; Sprint 91 Autonomous Decision
+# 3): a JS call may pass any number of arguments to any function, so a call in
+# any file of this language is never filtered by a parameter range.
+arity_unchecked_extensions = ["js", "mjs", "cjs", "jsx"]
+
+capabilities = ["symbols", "references", "frameworks", "invocations", "locals"]
+
+# The member-access capability (S-523, CR-171, ADR-39; S-542): Cohesion scores a
+# class only in a language that declares it. JavaScript declared none from
+# S-538 (as before it, when the TypeScript grammars carved its extensions out)
+# because a JS class's fields are usually assigned only in its constructor
+# (`this.x = …`), which declared no `Field` for `this.x` to bind to, so its
+# LCOM4 would rest on calls alone. The `javascript` symbols layer now declares
+# each such field once per class, and the shared `references.scm` captures the
+# `this.x` access (never a callee, `this.f()`), so its classes' LCOM4 has its
+# shared-field links.
+member_access = true
+
+complexity_keywords = ["if", "else", "for", "while", "do", "case", "catch", "&&", "||", "?"]
+
+# Block-structure nesting node kinds for per-function max nesting depth
+# (CR-005, FR-EX-07): the TSX grammar's control-flow statements.
+nesting_block_kinds = ["if_statement", "for_statement", "for_in_statement", "while_statement", "do_statement", "switch_statement", "try_statement"]
+
+# Callable body node kinds for the has-body fact (S-500, CR-163, FR-EX-11):
+# identical to the `tsx` descriptor's, whose `symbols` query this language runs.
+body_node_kinds = ["statement_block", "arrow_function", "function_expression", "call_expression"]
+
+# Exports are structural: a declaration under an `export_statement` ancestor
+# is an exported dead-code root (FR-AN-01).
+export_convention = "export-statement"
+
+# How JavaScript marks a function as a test (S-027, FR-EX-06, ADR-18): a
+# function lexically enclosed by an `it`/`test`/`describe` call.
+test_convention = "js-callback"
+
+# The TypeScript family's framework set (FR-FW-03): Express + Next.js, react
+# riding along, and NestJS — identical to the `typescript`/`tsx` rows, which a
+# shared `frameworks.scm` capturing `@nestjs::common` decorators requires.
+framework_detectors = ["express", "next", "react", "@nestjs::common"]
+
+# Canonical reference prefixes gating outbound **HTTP client-call** capture
+# (S-343, CR-108, FR-WS-08): identical to the `typescript`/`tsx` rows, for the
+# shared `invocations.scm`. NON-INDEPENDENT GATE: `fetch` is one — the general
+# rule is stated once on `extract::capture_http_client_call_arm`, the
+# TypeScript-family half on the `typescript` descriptor's row.
+http_client_detectors = ["axios", "fetch"]
+
+# Structural types (S-535, CR-173, FR-EX-17), as the TypeScript family reads
+# them: a class's `extends` and a `new` bind a class, and a relation written
+# through an import binds only within what that import binds to.
+structural_types = true
+
+# How a JavaScript file becomes a framework candidate beyond a ledger row
+# naming a detector (S-541, CR-174, FR-FW-03). JavaScript only:
+# - `detectors_import_only`: the detectors match import references alone, so a
+#   middleware's `next()` callback does not read as Next.js. The TypeScript rows
+#   still match every reference kind: TypeScript's
+#   `import express = require("express")` records no import row yet.
+# - `receiver_parameters`: an Express router module is a function that receives
+#   the `app` or `router` it registers on (`module.exports = function (app,
+#   middleware) { app.get(...) }`) and imports nothing from `express`, so a file
+#   binding a parameter of either name is a candidate. The TypeScript rows
+#   declare none.
+[framework_candidacy]
+detectors_import_only = true
+receiver_parameters = ["app", "router"]
+
+# Declared cross-file reach (S-570, CR-180, FR-PL-09): some relations bind
+# across files, not all.
+# Verified by `tests/reach_declared.rs`, which indexes a fixture and fails when a
+# declared relation binds nothing across files or an undeclared one does — a
+# change that alters this language's reach updates this table in the same change.
+[reach]
+level = "partial"
+cross_file = ["calls", "imports", "type_relations"]
+
+# The shared `tsx/queries/*.scm` assets, at the relative paths the `tsx` entry
+# embeds them under; `symbols` with this plugin's own layer appended.
+[queries]
+symbols = "queries/symbols.scm"
+references = "queries/references.scm"
+frameworks = "queries/frameworks.scm"
+invocations = "queries/invocations.scm"
+# A callable's local bindings (S-593, FR-EX-33), as `.js` files recorded them
+# under the TypeScript plugin before S-538.
+locals = "queries/locals.scm"
+# Captured `@fw.route.method` text → HTTP method (S-015): identical to the
+# `typescript`/`tsx` tables, for the shared `frameworks.scm`.
+[framework_methods]
+get = "GET"
+post = "POST"
+put = "PUT"
+delete = "DELETE"
+patch = "PATCH"
+head = "HEAD"
+options = "OPTIONS"
+all = "ANY"
+use = "ANY"
+Get = "GET"
+Post = "POST"
+Put = "PUT"
+Delete = "DELETE"
+Patch = "PATCH"
+Head = "HEAD"
+Options = "OPTIONS"
+All = "ANY"

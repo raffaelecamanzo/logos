@@ -27,7 +27,7 @@ use serde::Serialize;
 
 use crate::model::{EdgeKind, NodeKind};
 use crate::models::pipeline::PersistenceHealth;
-use crate::models::quality::CrossFileAbsence;
+use crate::models::quality::{CrossFileAbsence, ReferenceFigureAbsence};
 
 /// Result of an FTS5-ranked full-text search over the code graph (FR-NV-01).
 #[derive(Debug, Default, Serialize)]
@@ -1017,14 +1017,39 @@ pub struct StatusInfo {
     /// the native wiki tier consumes — readable by a second process opening the
     /// same `logos.db`.
     pub graph_revision: u64,
+    /// The reference-resolution headline ([FR-RS-49], [S-635]): bound code
+    /// references over the **internal candidates**, a lower bound, beside its
+    /// population. Read this, not
+    /// [`resolution_coverage`](Self::resolution_coverage).
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    /// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+    pub internal_resolution: InternalResolution,
+    /// The doc references' own resolution, stated apart from the code headline
+    /// ([FR-RS-49]).
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    pub doc_resolution: DocResolution,
     /// Reference ledger size (S-011), less its capture-before-delete rows — each
     /// a duplicate of a reference its source file's own row records (S-598).
+    /// **Deprecated** ([FR-RS-49]): it mixes doc references with code, and
+    /// external code with internal; kept unchanged for existing consumers.
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
     pub refs_total: u64,
-    /// Those ledger rows currently bound to an edge.
+    /// Those ledger rows currently bound to an edge. **Deprecated**, as
+    /// [`refs_total`](Self::refs_total) is.
     pub refs_resolved: u64,
     /// Ledger rows persisted for retry — never fabricated (NFR-RA-05).
     pub refs_unresolved: u64,
     /// The resolution bound-ratio (FR-RS-04); `1.0` for an empty ledger.
+    /// **Deprecated** ([FR-RS-49]) in favour of
+    /// [`internal_resolution`](Self::internal_resolution), and kept unchanged:
+    /// its denominator holds the doc references and the external code no
+    /// repository could resolve, so it cannot reach `1.0` on a perfectly
+    /// resolved one.
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
     ///
     /// One ratio over every language, so a language binding nothing across a
     /// file boundary is averaged into the rest — [CR-142]'s defect survived 74
@@ -1078,9 +1103,9 @@ pub struct StatusInfo {
 /// `language` is the grammar as the plugin substrate records it on each file
 /// (`files.language`), the token [`LanguageCount`] uses. That is the resolver's
 /// own unit — `module_separator` and `import_strategy` are declared per plugin
-/// — so `.js` files read under `typescript`, the plugin that parses them, and
-/// `.jsx` under `tsx`. [CR-142] §3.1 split those rows by file extension; this
-/// row is their sum.
+/// — so `.js`, `.mjs`, `.cjs` and `.jsx` files read under `javascript`, the
+/// plugin that labels them (S-538), though it parses with the TSX grammar.
+/// [CR-142] §3.1 split rows by file extension; a row is its plugin's sum.
 ///
 /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
 /// [S-441]: ../../../docs/planning/journal.md#s-441-resolution-coverage-is-reported-per-language-with-its-denominator
@@ -1100,9 +1125,10 @@ pub struct LanguageResolution {
     /// Why this language's unbound `Calls` rows stay unbound, by reason (S-468,
     /// [FR-RS-10], [CR-150] §3.2 C) — present on the `status` row of a
     /// **package-shaped** language (Java) or declared-namespace one (PHP, C#,
-    /// Kotlin and Scala, S-518), and of a language that proves a receiver's
-    /// declared type through peeled wrappers (Rust, S-589, [FR-RS-42]); absent
-    /// from every other row.
+    /// Kotlin and Scala, S-518), of a language that proves a receiver's
+    /// declared type through peeled wrappers (Rust, S-589, [FR-RS-42]), and of
+    /// a language one of whose unbound calls is through a local value (S-594,
+    /// `local-binding`); absent from every other row.
     ///
     /// A status-only extension: the reasons are decided by re-walking each
     /// unbound row through the binder, which needs the whole graph, so the
@@ -1115,11 +1141,93 @@ pub struct LanguageResolution {
     /// [S-442]: ../../../docs/planning/journal.md#s-442-a-relational-answer-states-the-resolution-denominator-it-was-computed-over
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_residue: Option<CallResidue>,
+    /// How many of this language's files are `.h` headers, on the row of the
+    /// language that reads them in a repository holding both C and C++
+    /// sources (S-572, S-582, [FR-PL-07]) — present on that one row of a
+    /// `status` read over one, absent from every other row.
+    ///
+    /// Flattened, so the row carries `headers` and `note` side by side;
+    /// being one value, the count never ships without its explanation. A
+    /// status-only extension for the reason [`call_residue`](Self::call_residue)
+    /// is: the note comes from the language registry, which the aggregate reads
+    /// the relational answers attach do not have.
+    ///
+    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub header_ownership: Option<HeaderOwnership>,
+    /// How many of this language's files were extracted from a parse holding
+    /// an ERROR or MISSING node, and their share (S-571, [FR-IX-14]) —
+    /// present on every row of a `status` read, absent from the rows a
+    /// relational answer attaches, which state its denominator and nothing
+    /// more.
+    ///
+    /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parse_damage: Option<ParseDamage>,
 }
 
-/// The reasons a package-shaped language's — or Rust's (S-589) — unbound
-/// `Calls` rows stay unbound (S-468, [FR-RS-10], [CR-150] §3.2 C), each counted
-/// over one denominator — [`unbound`](Self::unbound), the language's
+/// One language's **parse damage** (S-571, [FR-IX-14], [CR-181]): the files
+/// whose parse tree held an ERROR or MISSING node. Tree-sitter recovers from
+/// such an error, so the file is still extracted, but around the damage a
+/// declaration's span and figures may be artefacts of the misparse — what the
+/// count says is "the parse contained errors", not "unusable".
+///
+/// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
+/// [CR-181]: ../../../docs/requests/CR-181-cpp-is-declared-as-limited-support-and-parse-damage-is-reported.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ParseDamage {
+    /// The row's files whose parse was damaged.
+    pub files: u64,
+    /// The row's files that record no parse damage either way: indexed before
+    /// logos.db migration 44 and not re-extracted since. "Not recorded", never
+    /// counted as clean ([NFR-CC-04]): the next scan or index records them.
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    pub unrecorded: u64,
+    /// The damaged files' share of the row's files that record either way —
+    /// its [`files`](LanguageResolution::files) less the unrecorded ones — in
+    /// percent, **floored**, never stated higher than it is; `0` when none
+    /// records.
+    pub share_percent: u64,
+}
+
+impl ParseDamage {
+    /// `damaged` of `files`, `unrecorded` of which record nothing; the share
+    /// is floored over the recorded ones.
+    #[must_use]
+    pub fn of(damaged: u64, files: u64, unrecorded: u64) -> Self {
+        Self {
+            files: damaged,
+            unrecorded,
+            share_percent: (damaged * 100).checked_div(files.saturating_sub(unrecorded)).unwrap_or(0),
+        }
+    }
+}
+
+/// The per-repository `.h` rule, as `status` discloses it on the row of the
+/// language that reads the headers of a repository holding both C and C++
+/// sources (S-572, S-582, [FR-PL-07], [CR-182]).
+///
+/// A `.h` header is ambiguous between C and C++; C reads it in a repository
+/// whose C sources outnumber its C++ ones, C++ otherwise, so where both are
+/// present some headers may be read as the other language.
+///
+/// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
+/// [CR-182]: ../../../docs/requests/CR-182-c-is-declared-as-limited-support-and-header-ownership-is-disclosed.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HeaderOwnership {
+    /// The row's files that are `.h` headers — its `files` less the
+    /// language's own sources.
+    pub headers: u64,
+    /// The row's plugin's own disclosure of the rule — the text
+    /// `logos languages` shows beside its row.
+    pub note: String,
+}
+
+/// The reasons a package-shaped language's — or Rust's (S-589), or that of any
+/// language holding a call through a local value (S-594) — unbound `Calls`
+/// rows stay unbound (S-468, [FR-RS-10], [CR-150] §3.2 C), each counted over
+/// one denominator — [`unbound`](Self::unbound), the language's
 /// `calls.references − calls.bound`.
 ///
 /// The reasons partition the denominator: `unbound = Σ reasons + unclassified`.
@@ -1127,12 +1235,13 @@ pub struct LanguageResolution {
 /// | reason | the row stays unbound because |
 /// |---|---|
 /// | `no-receiver-evidence` | the file proves no receiver type (a bare Method-form row, or a bare call naming no import) — every receiver call whose shape is `other` or absent (S-514, [FR-RS-12]) |
-/// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member; for a Rust path call, the path's head leaves the repository (std, an external crate) |
-/// | `name-not-in-scope` | no rung reaches a repository callable of the name — a prelude or std function reached by a bare name, a closure or a local, an item the file does not import (Rust, S-607) |
+/// | `external-type` | the receiver's type is declared by no file of this repository — the JDK, a library, a generated type, or (outside a workspace) another member; for a Rust path call, the path's head leaves the repository (std, an external crate); for a call through a local import, the import's path reaches nothing here (S-594) |
+/// | `local-binding` | a bare call names a parameter or a variable the caller's body binds where the call is — a call through a value (S-594, [FR-RS-44]) |
+/// | `name-not-in-scope` | no rung reaches a repository callable of the name — a prelude or std function reached by a bare name, an item the file does not import (Rust, S-607); a local import the binder reads no import of (S-594) |
 /// | `no-applicable-overload` | callables of the name were found, and none admits the call's argument count — no free function or import the language goes on to admits it either (S-592) |
 /// | `type-in-another-member` | the receiver's type is declared by another workspace member (workspace scope only) |
 /// | `not-a-callable` | the call names a repository declaration that is not a callable — an enum variant or a tuple-struct constructor (Rust, S-607) |
-/// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one |
+/// | `overload-ambiguous` | the type, or the nearest supertype level holding the name, declares two or more callables of that name — or two static imports each supply one, or a call through a local import the file's imports of that name disagree on (S-594) |
 /// | `type-ambiguous` | the type's name reaches two declarations here (a `src/main` and a `src/test` class of one name) |
 /// | `supertype-unreached` | the type is here, and neither it nor any supertype reached here declares the name — the chain leaves the repository, stops at an interface, or cycles |
 ///
@@ -1145,6 +1254,7 @@ pub struct LanguageResolution {
 ///
 /// [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
 /// [FR-RS-12]: ../../../docs/specs/requirements/FR-RS-12.md
+/// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
 /// [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallResidue {
@@ -1158,6 +1268,13 @@ pub struct CallResidue {
     /// that did not re-select it). A capture-before-delete row is no call site
     /// and is not counted (S-598). `0` on a package-shaped row of a graph
     /// freshly indexed by this binary.
+    ///
+    /// On the row of a language counted only for its calls through a local
+    /// value (S-594, [FR-RS-44]), also every unbound row but those: the
+    /// binder does not re-walk that language's rows, so it states
+    /// `local-binding` alone.
+    ///
+    /// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
     ///
     /// `0` on the Rust row of a fresh index too (S-607, [FR-RS-47]): every
     /// unbound Rust call carries a reason — a path whose head leaves the
@@ -1178,6 +1295,18 @@ pub struct CallResidue {
     /// declared under — the other half of that comparison. Not serialised.
     #[serde(skip)]
     pub(crate) declared_types: Vec<Vec<String>>,
+    /// The `external-type` rows counted per target, and per target by the
+    /// fully-qualified names each could be — what the reference classes
+    /// ([FR-RS-49]) read to add the rows only the binder proves external
+    /// (`HashMap::new` beside a repository `new`) to the name test's, and what a
+    /// workspace re-reads them by (S-637). Not serialised, and left as it is
+    /// when a workspace moves rows to `type-in-another-member`: a member's own
+    /// figure is its own.
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    #[serde(skip)]
+    pub(crate) external_type_targets:
+        std::collections::BTreeMap<String, std::collections::BTreeMap<Vec<Vec<String>>, u64>>,
 }
 
 /// Why a package-shaped or Rust `Calls` row stays unbound — a key of
@@ -1192,10 +1321,14 @@ pub enum CallResidueReason {
     /// a Rust path call, the path's head leaves the repository (std, an
     /// external crate; S-607).
     ExternalType,
+    /// A bare call names a parameter or a variable the caller's body binds
+    /// where the call is: a call through a value (S-594, [FR-RS-44]).
+    ///
+    /// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+    LocalBinding,
     /// No rung reaches a repository callable of the name (S-607, [FR-RS-47]):
-    /// a prelude or std function reached by a bare name, a closure or a local,
-    /// an item the file does not import, or a module that declares no such
-    /// item.
+    /// a prelude or std function reached by a bare name, an item the file
+    /// does not import, or a module that declares no such item.
     ///
     /// [FR-RS-47]: ../../../docs/specs/requirements/FR-RS-47.md
     NameNotInScope,
@@ -1236,8 +1369,9 @@ pub enum ResidueScope {
 
 impl CallResidue {
     /// The reasons a repository-scoped readout counts, in token order.
-    pub const REPOSITORY_REASONS: [CallResidueReason; 8] = [
+    pub const REPOSITORY_REASONS: [CallResidueReason; 9] = [
         CallResidueReason::ExternalType,
+        CallResidueReason::LocalBinding,
         CallResidueReason::NameNotInScope,
         CallResidueReason::NoApplicableOverload,
         CallResidueReason::NoReceiverEvidence,
@@ -1256,11 +1390,7 @@ impl CallResidue {
         let moved: u64 = self
             .external_candidates
             .iter()
-            .filter(|(candidates, _)| {
-                candidates
-                    .iter()
-                    .any(|fqn| (1..=fqn.len()).any(|k| elsewhere(&fqn[..k])))
-            })
+            .filter(|(candidates, _)| Self::declared_elsewhere(candidates, elsewhere))
             .map(|(_, rows)| rows)
             .sum();
         if let Some(external) = self.reasons.get_mut(&CallResidueReason::ExternalType) {
@@ -1269,6 +1399,17 @@ impl CallResidue {
         self.reasons
             .insert(CallResidueReason::TypeInAnotherMember, moved);
         self.scope = ResidueScope::Workspace;
+    }
+
+    /// Whether an `external-type` row that could be any of `candidates` names
+    /// a type `elsewhere` declares: a candidate, or a leading run of its
+    /// segments (an outer type, for a nested one). The one decision
+    /// [`split_by_workspace`](Self::split_by_workspace) and the workspace
+    /// reference resolution (S-637) both make.
+    pub(crate) fn declared_elsewhere(candidates: &[Vec<String>], elsewhere: &dyn Fn(&[String]) -> bool) -> bool {
+        candidates
+            .iter()
+            .any(|fqn| (1..=fqn.len()).any(|k| elsewhere(&fqn[..k])))
     }
 }
 
@@ -1316,6 +1457,20 @@ pub struct RelationResolution {
     pub cross_file_edges: Option<u64>,
     /// Why there is no cross-file figure; `None` exactly when there is one.
     pub cross_file_absence: Option<CrossFileAbsence>,
+    /// Of the unbound [`references`](Self::references), the ones **provably
+    /// external** — whose target cannot name a symbol of this graph ([FR-RS-49],
+    /// [S-635]); [`InternalResolution`] counts the same rows over every class.
+    ///
+    /// A status-only extension, for the reason
+    /// [`LanguageResolution::call_residue`] is: the class is decided over every
+    /// name the graph declares, which the three aggregate reads the relational
+    /// answers attach do not hold. Absent there, so those answers serialise as
+    /// before.
+    ///
+    /// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+    /// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provably_external: Option<u64>,
 }
 
 impl RelationResolution {
@@ -1337,7 +1492,131 @@ impl RelationResolution {
             same_file_edges,
             cross_file_edges,
             cross_file_absence,
+            provably_external: None,
         }
+    }
+}
+
+/// Reference resolution over the code references that **could be internal**
+/// ([FR-RS-49], [S-635], [CR-212]): the `status` headline.
+///
+/// Every reported ledger row (the [FR-RS-04] population) is classified once:
+/// a doc reference (counted by [`DocResolution`] instead), a **provably
+/// external** code reference, or an **internal candidate** — every other code
+/// reference, bound or not. The ratio is bound code references over internal
+/// candidates, and it is a **lower bound**: the internal candidates still hold
+/// external calls whose names collide with names this graph declares — method
+/// calls on a value of unknown type, mostly — which nothing short of type
+/// inference tells apart. Hence its name.
+///
+/// The population rides beside the ratio — `internal_candidates` of
+/// `code_references`, `provably_external` left out — so an extraction gap that
+/// makes calls look external is visible as a surge in that count.
+///
+/// Deliberately not derived `Default`: a defaulted value would carry neither a
+/// ratio nor its absence. [`measured`](Self::measured) is the one constructor,
+/// and [`Default`] is its empty population.
+///
+/// [FR-RS-04]: ../../../docs/specs/requirements/FR-RS-04.md
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+/// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+/// [CR-212]: ../../../docs/requests/CR-212-reference-resolution-is-stated-over-the-references-that-could-be-internal.md
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct InternalResolution {
+    /// Bound code references — the numerator. A bound reference is always an
+    /// internal candidate.
+    pub resolved: u64,
+    /// Code references that could name a symbol of this graph — the
+    /// denominator: `code_references − provably_external`.
+    pub internal_candidates: u64,
+    /// Unbound code references whose target cannot name a symbol of this
+    /// graph, left out of the denominator.
+    pub provably_external: u64,
+    /// Every code reference — the reported ledger less its doc references.
+    pub code_references: u64,
+    /// `resolved / internal_candidates`, a lower bound on how much of the
+    /// internal code is resolved; `None` exactly when
+    /// [`absence`](Self::absence) names why.
+    pub lower_bound: Option<f64>,
+    /// Why there is no ratio; `None` exactly when there is one.
+    pub absence: Option<ReferenceFigureAbsence>,
+}
+
+impl InternalResolution {
+    /// Classify one population into the headline — the one place its ratio
+    /// becomes a figure or a named absence. `provably_external` never exceeds
+    /// the unbound code references, so `resolved ≤ internal_candidates`.
+    #[must_use]
+    pub fn measured(code_references: u64, resolved: u64, provably_external: u64) -> Self {
+        let internal_candidates = code_references.saturating_sub(provably_external);
+        let (lower_bound, absence) = if code_references == 0 {
+            (None, Some(ReferenceFigureAbsence::NoReferencesRecorded))
+        } else if internal_candidates == 0 {
+            (
+                None,
+                Some(ReferenceFigureAbsence::NoInternalCandidates { provably_external }),
+            )
+        } else {
+            (Some(resolved as f64 / internal_candidates as f64), None)
+        };
+        Self {
+            resolved,
+            internal_candidates,
+            provably_external,
+            code_references,
+            lower_bound,
+            absence,
+        }
+    }
+}
+
+impl Default for InternalResolution {
+    fn default() -> Self {
+        Self::measured(0, 0, 0)
+    }
+}
+
+/// Resolution of the **doc references** — the code spans and links of the
+/// documentation ([FR-RS-49], [S-635]) — stated apart from the code headline
+/// ([`InternalResolution`]), which they would otherwise prop up: they measure
+/// doc-to-code linking, not code resolution.
+///
+/// [FR-RS-49]: ../../../docs/specs/requirements/FR-RS-49.md
+/// [S-635]: ../../../docs/planning/journal.md#s-635-reference-resolution-separates-documentation-external-and-internal-candidate-references-on-every-status-surface
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DocResolution {
+    /// Reported doc-reference rows — the denominator.
+    pub references: u64,
+    /// Of those, the bound ones — the numerator.
+    pub resolved: u64,
+    /// `resolved / references`; `None` exactly when
+    /// [`absence`](Self::absence) names why.
+    pub ratio: Option<f64>,
+    /// Why there is no ratio; `None` exactly when there is one.
+    pub absence: Option<ReferenceFigureAbsence>,
+}
+
+impl DocResolution {
+    /// The doc figure over `references`, or its absence when there are none.
+    #[must_use]
+    pub fn measured(references: u64, resolved: u64) -> Self {
+        let (ratio, absence) = if references == 0 {
+            (None, Some(ReferenceFigureAbsence::NoReferencesRecorded))
+        } else {
+            (Some(resolved as f64 / references as f64), None)
+        };
+        Self {
+            references,
+            resolved,
+            ratio,
+            absence,
+        }
+    }
+}
+
+impl Default for DocResolution {
+    fn default() -> Self {
+        Self::measured(0, 0)
     }
 }
 
@@ -1700,6 +1979,14 @@ pub struct SymbolRef {
     pub file: Option<String>,
     /// 1-based start line of the declaration, when recorded.
     pub line: Option<u32>,
+    /// The trait method a `callers`, `callees` or `impact` row was reached
+    /// through, as `"<Trait>::<method>"`: set only when every edge that
+    /// reaches the row is a trait fan-out's dispatch edge (S-712, [CR-226]).
+    /// Absent from the wire otherwise, so every other row reads as before.
+    ///
+    /// [CR-226]: ../../../docs/requests/CR-226-dispatch-is-not-a-dependency.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 // ── Graph-elements (FR-UI-08, ADR-29) ───────────────────────────────────────
@@ -2024,6 +2311,7 @@ mod tests {
             scope: ResidueScope::Repository,
             external_candidates,
             declared_types: Vec::new(),
+            external_type_targets: std::collections::BTreeMap::new(),
         }
     }
 

@@ -665,7 +665,7 @@ fn serve_ui_starts_on_a_chat_and_wiki_configured_project() {
     let addr: SocketAddr = ([127, 0, 0, 1], port).into();
 
     // Bounded wait for the listener; a server that exits first fails with its stderr.
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + logos_core::perf::scaled(Duration::from_secs(60));
     let mut server = server;
     loop {
         if let Some(code) = server.0.as_mut().expect("running").try_wait().expect("polls") {

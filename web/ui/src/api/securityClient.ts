@@ -3,7 +3,7 @@
  * S-672, FR-SC-12; NFR-SE-06).
  *
  * The read (`fetchScanJob`) is a GET like every other view's. Start, cancel,
- * suppress and unsuppress go
+ * suppress, unsuppress and reconfirm go
  * through the {@link apiMutate} seam, which echoes the per-session intent token
  * the server's same-origin/intent guard requires — the same path the Config
  * editor's writes take (`configClient.ts`). Every request carries the selected
@@ -147,13 +147,29 @@ async function cancelJob<J>(path: string): Promise<J | null> {
 }
 
 /** `POST /api/v1/security/suppress` — add a suppression to the committed ignore
- *  file: one finding's fingerprint, or everything under a path (S-770). `reason`
+ *  file: one finding's fingerprint, everything under a path (S-770), or a rule of
+ *  one scanner in every file (S-814). `reason`
  *  is required, `expires` (`YYYY-MM-DD`) is the last day it suppresses, `null`
  *  until removed. The server writes a path in its canonical spelling. A refusal
  *  (a blank reason, a past expiry, a whole-project glob, a hand-spelled file)
  *  throws with the server's reason. */
-export async function suppressFinding(selector: SecuritySelector, reason: string, expires: string | null): Promise<SecurityIgnoreWrite> {
-  return triage("/api/v1/security/suppress", { ...selector, reason, expires });
+export async function suppressFinding(
+  selector: SecuritySelector,
+  reason: string,
+  expires: string | null,
+  evidence: readonly string[] = [],
+): Promise<SecurityIgnoreWrite> {
+  // `evidence` is sent only when given, so a suppression without it is the
+  // request it always was.
+  return triage("/api/v1/security/suppress", { ...selector, reason, expires, ...(evidence.length > 0 ? { evidence } : {}) });
+}
+
+/** `POST /api/v1/security/reconfirm` — re-record the evidence hashes of the entry
+ *  that suppresses the finding with this `fingerprint`, keeping its reason
+ *  (FR-SC-32, S-818). A refusal (no evidence, an evidence symbol that no longer
+ *  exists, an index behind its file) throws with the server's reason. */
+export async function reconfirmFinding(fingerprint: string): Promise<SecurityIgnoreWrite> {
+  return triage("/api/v1/security/reconfirm", { fingerprint });
 }
 
 /** `POST /api/v1/security/unsuppress` — remove the entry `selector` names: a

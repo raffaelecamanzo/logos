@@ -68,6 +68,7 @@ fn status_json_carries_the_rust_rows_call_residue() {
             "unbound": 5,
             "reasons": {
                 "external-type": 1,
+                "local-binding": 0,
                 "name-not-in-scope": 1,
                 "no-applicable-overload": 0,
                 "no-receiver-evidence": 1,

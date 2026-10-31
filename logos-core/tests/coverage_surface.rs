@@ -713,3 +713,41 @@ fn gate_is_byte_identical_after_auto_ingest() {
         "auto coverage ingest never moves the gate (BR-28, UAT-CV-02)"
     );
 }
+
+// ── S-802 / FR-CV-11: the last-run record's duration and cause ───────────────
+
+/// `coverage status` carries a tool's last run with its `duration_ms` and
+/// `cause` when the record holds them, and a record written by 1.21.2 — which
+/// holds neither — reads without error, its tool keeping its last run with both
+/// fields absent: never `0`, never empty text.
+#[test]
+fn coverage_status_carries_a_last_runs_duration_and_cause_and_reads_a_record_without_them() {
+    let tmp = TempDir::new().expect("temp root");
+    let repo = tmp.path();
+    sh_git(repo, &["init", "-q", "-b", "main"]);
+    commit(repo, "Cargo.toml", "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n", "add a Rust marker");
+    commit(repo, "go.mod", "module example.com/fixture\n\ngo 1.23\n", "add a Go marker");
+    let record = repo.join(".logos/coverage/last-run.json");
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    std::fs::write(
+        &record,
+        r#"{
+  "cargo-llvm-cov": {"outcome": "failed", "exit_code": 2, "head_sha": null, "finished_at": 7, "log": null},
+  "go": {"outcome": "tests_failed", "exit_code": 1, "head_sha": null, "finished_at": 9, "log": null,
+         "duration_ms": 4321, "cause": "FAILED marker-test"}
+}"#,
+    )
+    .unwrap();
+
+    let engine = Engine::start(repo).expect("engine starts");
+    let status = serde_json::to_value(engine.coverage_status().expect("coverage status")).unwrap();
+    let last_run = |tool: &str| {
+        let tools = status["runner"]["tools"].as_array().expect("the runner's tools");
+        tools.iter().find(|t| t["tool"] == tool).unwrap_or_else(|| panic!("{tool}: {status}"))["last_run"].clone()
+    };
+    let old = last_run("cargo-llvm-cov");
+    assert_eq!((&old["outcome"], &old["finished_at"]), (&serde_json::json!("failed"), &serde_json::json!(7)), "{old}");
+    assert!(old.get("duration_ms").is_none() && old.get("cause").is_none(), "absent, not 0 or empty: {old}");
+    let new = last_run("go");
+    assert_eq!((&new["duration_ms"], &new["cause"]), (&serde_json::json!(4321), &serde_json::json!("FAILED marker-test")), "{new}");
+}

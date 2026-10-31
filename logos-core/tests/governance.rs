@@ -1409,31 +1409,31 @@ fn downgrade_all_snapshots_to(root: &Path, version: i64) {
     .expect("downgrade the recorded semantics version");
 }
 
-/// The CR-171 upgrade boundary (S-523, [FR-GV-10]; S-502 pinned the v6 → v7
-/// one the same way): a baseline saved by a v7 build (before the graph
-/// dimensions needed cross-module edges and Cohesion needed `member_access`)
-/// is incomparable to a v8 run. The first gate after the upgrade passes
+/// The CR-252 upgrade boundary (S-816, [FR-GV-10]; S-523 pinned the v7 → v8
+/// one the same way): a baseline saved by a v8 build (before Cohesion linked
+/// inherited members and needed `cohesion_min_classes` classes) is
+/// incomparable to a v9 run. The first gate after the upgrade passes
 /// informationally with the re-baseline notice; the second compares normally
 /// against the snapshot the first re-based to. One bump, one re-baseline,
 /// nothing re-blessed by hand.
 ///
 /// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
 #[test]
-fn a_v7_baseline_re_baselines_once_under_semantics_v8() {
+fn a_v8_baseline_re_baselines_once_under_semantics_v9() {
     assert_eq!(
         logos_core::metrics::METRIC_SEMANTICS_VERSION,
-        8,
-        "CR-171 is semantics v8"
+        9,
+        "CR-252 is semantics v9"
     );
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     assert!(engine.index().warnings.is_empty());
     assert!(engine.gate(None, true, true).expect("gate --save runs").saved);
-    downgrade_all_snapshots_to(tmp.path(), 7);
+    downgrade_all_snapshots_to(tmp.path(), 8);
 
     let first = engine.gate(None, false, true).expect("gate runs");
-    assert!(first.passed, "a v7 baseline never fails a v8 gate: {}", first.message);
-    assert!(first.saved, "the first v8 gate re-baselines");
+    assert!(first.passed, "a v8 baseline never fails a v9 gate: {}", first.message);
+    assert!(first.saved, "the first v9 gate re-baselines");
     assert!(
         first
             .message
@@ -2349,12 +2349,12 @@ fn health_reports_store_integrity_and_counts() {
     );
     // Migration 27 (S-513, CR-168) added the persist-failure record, after
     // migration 26 (S-498, CR-162) added the snapshot offender lists.
-    // This assertion tracks the latest applied migration — the store reports 35
-    // once fully migrated (`federation::broker`'s
+    // This assertion tracks the latest applied migration — the store reports 44
+    // (S-571, the parse damage) once fully migrated (`federation::broker`'s
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 40, "migration 40 applied");
+    assert_eq!(health.schema_version, 44, "migration 44 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);

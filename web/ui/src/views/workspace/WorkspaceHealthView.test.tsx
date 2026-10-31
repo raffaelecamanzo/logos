@@ -232,35 +232,42 @@ describe("governance is advisory and its empty is honest (ADR-56, AC3)", () => {
 
 describe("no aggregate of per-member signals is rendered (BR-56, AC5)", () => {
   it("shows each member's own reference resolution and no mean of them", async () => {
+    // Each member's figure is its `internal_resolution` (S-635), the one the
+    // Workspace Dashboard's Members column states (S-637) — never the deprecated
+    // whole-ledger ratio, which every member here sets to something else.
+    const own = (resolved: number, candidates: number, external: number) => ({
+      resolution_coverage: 0.9,
+      refs_resolved: 9,
+      refs_total: 10,
+      internal_resolution: {
+        resolved,
+        internal_candidates: candidates,
+        provably_external: external,
+        code_references: candidates + external,
+        lower_bound: resolved / candidates,
+        absence: null,
+      },
+    });
     await mount({
       status: workspaceStatus({
         members: [
-          memberStatus("api", {
-            result: statusInfo({ resolution_coverage: 0.4, refs_resolved: 40, refs_total: 100 }),
-          }),
-          memberStatus("orders", {
-            result: statusInfo({ resolution_coverage: 0.6, refs_resolved: 600, refs_total: 1000 }),
-          }),
-          memberStatus("web", {
-            result: statusInfo({
-              resolution_coverage: 0.8,
-              refs_resolved: 8_000,
-              refs_total: 10_000,
-            }),
-          }),
+          memberStatus("api", { result: statusInfo(own(40, 100, 20)) }),
+          memberStatus("orders", { result: statusInfo(own(600, 1_000, 5)) }),
+          memberStatus("web", { result: statusInfo(own(8_000, 10_000, 300)) }),
         ],
       }),
     });
     const members = card(/^Members$/);
     // Each member's own figure, with the denominator it was computed over — three
     // different denominators, so a bare percentage cannot satisfy this (CR-111).
-    for (const own of [
-      "40.0% (40 of 100 refs)",
-      "60.0% (600 of 1,000 refs)",
-      "80.0% (8,000 of 10,000 refs)",
+    for (const figure of [
+      "40.0% (40 of 100 internal candidates; 120 code references, 20 provably external)",
+      "60.0% (600 of 1,000 internal candidates; 1,005 code references, 5 provably external)",
+      "80.0% (8,000 of 10,000 internal candidates; 10,300 code references, 300 provably external)",
     ]) {
-      expect(within(members).getByText(own)).toBeInTheDocument();
+      expect(within(members).getByText(figure)).toBeInTheDocument();
     }
+    expect(within(members).queryByText(/of 10 refs/)).toBeNull();
     // The mean of the three is 0.6, which `orders` legitimately owns — so the
     // roll-up is pinned by counting rather than by absence.
     expect(within(members).getAllByText(/60\.0%/)).toHaveLength(1);

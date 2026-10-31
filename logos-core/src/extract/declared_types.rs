@@ -73,8 +73,7 @@ const AVRO_SCHEMA_EXTENSION: &str = ".avsc";
 /// tooling's own default include pattern is — `x.avsc.bak` and `x.AVSC` are
 /// not schemas.
 pub fn is_avro_schema(rel: &str) -> bool {
-    let base = rel.rsplit('/').next().unwrap_or(rel);
-    base.len() > AVRO_SCHEMA_EXTENSION.len() && base.ends_with(AVRO_SCHEMA_EXTENSION)
+    crate::resolve::rel_path::names_suffixed_file(rel, AVRO_SCHEMA_EXTENSION)
 }
 
 /// The kind of a declared type — the persisted vocabulary
@@ -82,7 +81,7 @@ pub fn is_avro_schema(rel: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
     /// A class — in Java also a `record`, which the grammar captures as one; in
-    /// Kotlin also an `object` and an `enum class`.
+    /// Kotlin also an `object`. An `enum class` is an [`Enum`](Self::Enum).
     Class,
     Interface,
     Enum,
@@ -362,27 +361,65 @@ pub(crate) fn file_namespace(
     source_len: usize,
 ) -> Option<String> {
     let scoped = replaced_statements(scopes);
-    let at = |pos: usize| -> Vec<String> {
-        let mut enclosing: Vec<&NamespaceScope> = scoped
-            .iter()
-            .filter(|s| s.start <= pos && pos <= s.end)
-            .collect();
-        enclosing.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
-        enclosing
-            .into_iter()
-            .flat_map(|s| s.segments.iter().cloned())
-            .collect()
-    };
     let positions: Vec<usize> = if top_level.is_empty() {
         vec![source_len]
     } else {
         top_level.to_vec()
     };
-    let mut namespaces = positions.into_iter().map(at);
+    let mut namespaces = positions.into_iter().map(|pos| in_force(&scoped, pos));
     let first = namespaces.next().unwrap_or_default();
     let agreed = namespaces.all(|n| n == first);
     let stranded = first.is_empty() && !scopes.is_empty();
     (agreed && !stranded).then(|| crate::resolve::package_key::namespace_text(&first))
+}
+
+/// The namespace block a `using` at byte `pos` of a file is read in (S-603),
+/// as segments: the names of the namespace declarations enclosing it,
+/// outermost first, as [`file_namespace`] reads each top-level declaration's
+/// (`top_level`, their start bytes) — so a `using` written in
+/// `namespace A { namespace B { … } }` is in `A.B`, one after a
+/// `namespace A.B;` in `A.B`, and one before it in none (empty: the file's).
+///
+/// The binder reads a block's `using`s for every declaration of the file, so
+/// a block is named only when the innermost declaration enclosing the `using`
+/// encloses **every** one of `top_level`. One enclosing some but not all
+/// (`namespace A.B { using X; class D {} } namespace A.B { class C : Foo {} }`)
+/// yields the file's (empty): its `using`s are read after every level, as
+/// before blocks were recorded, never early for a declaration outside it.
+/// `None` when it encloses none: a block holding only `using`s
+/// (`namespace A { using X; }` beside a `namespace A.B { … }`) applies them to
+/// no declaration of the file, so they are read nowhere ([NFR-RA-05]).
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+pub(crate) fn using_block(scopes: &[NamespaceScope], pos: usize, top_level: &[usize]) -> Option<Vec<String>> {
+    let scoped = replaced_statements(scopes);
+    let innermost = scoped
+        .iter()
+        .filter(|s| s.start <= pos && pos <= s.end)
+        .max_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    if let Some(block) = innermost {
+        let inside = |&d: &usize| block.start <= d && d <= block.end;
+        if !top_level.iter().any(inside) {
+            return None;
+        }
+        if !top_level.iter().all(inside) {
+            return Some(Vec::new());
+        }
+    }
+    Some(in_force(&scoped, pos))
+}
+
+/// The namespace `scoped` ([`replaced_statements`]) puts in force at `pos`.
+fn in_force(scoped: &[NamespaceScope], pos: usize) -> Vec<String> {
+    let mut enclosing: Vec<&NamespaceScope> = scoped
+        .iter()
+        .filter(|s| s.start <= pos && pos <= s.end)
+        .collect();
+    enclosing.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+    enclosing
+        .into_iter()
+        .flat_map(|s| s.segments.iter().cloned())
+        .collect()
 }
 
 /// The dotted name a captured `package` name node spells: its identifier
