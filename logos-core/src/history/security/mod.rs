@@ -23,7 +23,7 @@
 //!    the snapshot is anchored to HEAD and the scanner ([FR-SC-02]).
 //!
 //! [`read_latest`] is the reader the later stories build on. There is no CLI, MCP
-//! or watcher surface here; [`crate::Engine::security_ingest`] is the one entry.
+//! or watcher surface here; [`crate::Security::ingest`] is the one entry.
 //!
 //! # Indexed-path source
 //! [`ingest`] takes the indexed-file set as a parameter, exactly as coverage's
@@ -81,6 +81,7 @@ pub use overlay::{path_findings, PathFindings};
 pub use owasp::{classify, OwaspEdition, OwaspReport};
 pub use parse::{PackageCoordinate, ParsedFinding, ParsedRun, Region, SecurityFormat};
 pub(crate) use parse::message_package;
+pub(crate) use secret::{commit_source, project_prefix, tree_source};
 pub use read::{latest_snapshots, read_at, read_baseline, read_latest, stored_finding};
 pub use evidence::{ChangeKind, Evidence, EvidenceChange, EvidenceSource, EvidenceSymbol, GraphEvidence};
 pub use suppress::{
@@ -932,8 +933,9 @@ fn bind_own_path(
 /// it never spells a project file it is not. An absolute path under `root` is
 /// taken relative to it, so the checkout's directory never enters a key
 /// (history.db migration 10); one outside `root` keeps its spelling. The one
-/// spelling a history-mode result's key, and its still-on-its-line read, use.
-fn project_relative(root: &Path, prefix: &str, report: &str) -> String {
+/// spelling a history-mode result's key, its still-on-its-line read and its
+/// code scope's re-anchored read (`security::historical`) use.
+pub(crate) fn project_relative(root: &Path, prefix: &str, report: &str) -> String {
     let path = normalise_report_path(report);
     if path.starts_with('/') || Path::new(&path).is_absolute() {
         return project_location(root, &path).unwrap_or(path);

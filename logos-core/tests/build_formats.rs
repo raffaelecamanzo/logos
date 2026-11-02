@@ -41,7 +41,7 @@ fn names_of(facts: &logos_core::extract::Facts, kind: NodeKind) -> Vec<&str> {
 #[test]
 fn build_grammars_load_and_are_listed_with_their_claims() {
     let tmp = tempfile::tempdir().unwrap();
-    let info = logos_core::Engine::open(tmp.path()).languages();
+    let info = logos_core::Engine::open(tmp.path()).graph().languages();
     let find = |name: &str| {
         info.languages
             .iter()
@@ -265,11 +265,11 @@ mod neutrality {
         );
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let rt = engine.runtime().unwrap();
 
         // Measurement 1 — code only.
-        let base = engine.scan(true).expect("scan runs").metrics;
+        let base = engine.quality().scan(true).expect("scan runs").metrics;
         assert!(
             !base.empty && base.aggregate_signal.is_some(),
             "the code fixture yields a real signal"
@@ -292,7 +292,7 @@ mod neutrality {
             "#!/usr/bin/env bash\ndeploy() {\n  echo deploying\n}\n",
         );
 
-        let with_shell = engine.scan(true).expect("scan runs").metrics;
+        let with_shell = engine.quality().scan(true).expect("scan runs").metrics;
         assert!(
             shell_function_count(rt) > 0,
             "shell functions were ingested — the invariance assertion is meaningful"
@@ -304,7 +304,7 @@ mod neutrality {
             fs::remove_file(tmp.path().join(format!("scripts/task{i}.sh"))).unwrap();
         }
         fs::remove_file(tmp.path().join("deploy.bash")).unwrap();
-        let removed = engine.scan(true).expect("scan runs").metrics;
+        let removed = engine.quality().scan(true).expect("scan runs").metrics;
         assert_eq!(shell_function_count(rt), 0, "shell is gone from the graph");
         assert_signal_byte_identical(&base, &removed);
     }

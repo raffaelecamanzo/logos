@@ -38,9 +38,9 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// (S-022, zero policy per ADR-03) ≈10. Any growth beyond this means logic is
 /// leaking into the surface — move it to logos-core instead of raising the budget.
 /// (S-053 raised 575→660 for the four wiki twins; S-140/CR-036 raised 660→675 for
-/// the `coverage_refresh` twin, a single `Engine::coverage_refresh` delegation;
+/// the `coverage_refresh` twin, a single `Coverage::refresh` delegation;
 /// S-204/S-205/CR-052 raised 675→680 for the `doctor` and `verify` quality twins,
-/// each a single `Engine::doctor`/`Engine::verify` delegation; S-263/CR-062 raised
+/// each a single `Quality::doctor`/`Quality::verify` delegation; S-263/CR-062 raised
 /// 680→690 for the `wiki_materialize` twin, a single `Engine::wiki_materialize`
 /// delegation — logic lives in logos-core governance/wiki, not the surface.
 /// S-284/CR-076 raised 690→693 for a genuine surface addition; that +3 was
@@ -114,7 +114,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// adapter at 934; 940 is that measurement plus the usual small headroom.
 ///
 /// Delegation-only, and there is nothing to trim: the tool is an attribute, a
-/// signature, and ONE `Engine::impact_intersection` call, plus a typed
+/// signature, and ONE `Navigation::impact_intersection` call, plus a typed
 /// `ImpactIntersectionParams` (`items`/`depth`). This guard counts EVERY
 /// non-blank line including doc comments, so roughly half the delta is the
 /// tool `description` and the two param doc lines — the wire contract an MCP
@@ -129,7 +129,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// against the S-358 base of 934, the change costs +18, landing the adapter at
 /// 952; 960 is that measurement plus the usual small headroom.
 ///
-/// Delegation-only again: an attribute, a signature, and ONE `Engine::precedent`
+/// Delegation-only again: an attribute, a signature, and ONE `Navigation::precedent`
 /// call, plus a typed `PrecedentParams` (`target`/`limit`). As with its
 /// predecessor, roughly half the delta is the tool `description` — and here that
 /// is load-bearing rather than incidental: the description is where an MCP host
@@ -146,7 +146,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// `BranchOverlapParams` schema struct (+11 — two derives, the struct line, and
 /// three fields each carrying the doc line that IS its wire description), the
 /// `#[tool]` registration (+11 — the attribute, the long `description` an MCP
-/// host reads, the signature and ONE `Engine::branch_overlap` call), and one
+/// host reads, the signature and ONE `Navigation::branch_overlap` call), and one
 /// roster comment line. Nothing computed here: ref resolution, the diff parse
 /// and the span attribution are all `logos_core::navigate::branch`, so the
 /// three surfaces cannot drift in what they accept (ADR-01).
@@ -350,7 +350,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// `logos improvements` ([FR-QM-17]). Measured 1277→1283 (+6), 2 lines of
 /// headroom. A sibling session in the same iteration adds its own delta to the
 /// 1279 this one branched from; the merged budget is the sum. Delegation only:
-/// the list is one `Engine::improvements` call over the shared `RepoParams`.
+/// the list is one `Readouts::improvements` call over the shared `RepoParams`.
 ///
 /// | Region | Δ |
 /// |---|---|
@@ -365,7 +365,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// ([FR-GV-24]). Measured 1283→1297 (+14); the 2 lines of headroom are kept.
 /// Sibling sessions in Iteration 4 add their own deltas to the 1285 this one
 /// branched from; the merged budget is the sum. Delegation only: the delta is
-/// one `Engine::review` call.
+/// one `Review::delta` call.
 ///
 /// | Region | Δ |
 /// |---|---|
@@ -397,7 +397,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// ([FR-SC-14]). Measured 1283→1287 (+4), 2 lines of headroom. A sibling
 /// session in the same iteration adds its own delta to the 1285 this one
 /// branched from; the merged budget is the sum. Delegation only: the column and
-/// the filter are `Engine::hotspots_with_findings`, the call the CLI and
+/// the filter are `History::hotspots_with_findings`, the call the CLI and
 /// `GET /api/v1/files` also make.
 ///
 /// | Region | Δ |
@@ -416,7 +416,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// 2 lines of headroom it branched with kept. Sibling sessions in Iteration 5
 /// add their own deltas to the 1303 this one branched from; the merged budget
 /// is the sum. Delegation only: the request goes to
-/// `Engine::security_scan_selected`, the call the CLI makes.
+/// `Security::scan_selected`, the call the CLI makes.
 ///
 /// | Region | Δ |
 /// |---|---|
@@ -430,7 +430,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// 1308→1313 (+5); the budget rises by that delta, the 2 lines of headroom it
 /// branched with kept. Sibling sessions in Sprint 107 Iteration 5 add their own
 /// deltas to the 1310 this one branched from; the merged budget is the sum.
-/// Delegation only: the projection is `Engine::review_branches`, the call the
+/// Delegation only: the projection is `Review::branches`, the call the
 /// CLI makes.
 ///
 /// | Region | Δ |
@@ -461,7 +461,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// 2 lines of headroom it branched with kept. Sibling sessions in Sprint 108
 /// Iteration 2 add their own deltas to the 1318 this one branched from; the
 /// merged budget is the sum. Delegation only: the listing is
-/// `Engine::review_headroom`, the call the CLI makes; the two refusals mirror
+/// `Review::headroom`, the call the CLI makes; the two refusals mirror
 /// the CLI's usage errors.
 ///
 /// | Region | Δ |
@@ -476,12 +476,12 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// 1328→1350 (+22); the budget rises by that delta, the 2 lines of headroom it
 /// branched with kept. Sibling sessions in Sprint 108 Iteration 3 add their own
 /// deltas to the 1330 this one branched from; the merged budget is the sum.
-/// Delegation only: the run is `Engine::coverage_run`, the call the CLI makes.
+/// Delegation only: the run is `Coverage::run`, the call the CLI makes.
 ///
 /// | Region | Δ |
 /// |---|---|
 /// | `CoverageRunParams` (`tool`, and the refused `repo`) | **+13** |
-/// | the `coverage_run` tool: the attribute and one `Engine::coverage_run` delegation | **+8** |
+/// | the `coverage_run` tool: the attribute and one `Coverage::run` delegation | **+8** |
 /// | the crate doc's coverage tool count | **+1** |
 /// | | **+22** |
 ///
@@ -513,7 +513,7 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `SecurityReconfirmParams` (`fingerprint`, `evidence`, and the captured, refused `repo`) | **+12** |
-/// | the `security_reconfirm` tool: the attribute, the `default_member_only` refusal and one `Engine::security_reconfirm_with_evidence` delegation | **+8** |
+/// | the `security_reconfirm` tool: the attribute, the `default_member_only` refusal and one `Findings::reconfirm_with_evidence` delegation | **+8** |
 /// | | **+20** |
 ///
 /// Delegation only: finding the entry, pinning the evidence and the write are the

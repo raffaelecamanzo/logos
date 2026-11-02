@@ -72,7 +72,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -116,7 +116,7 @@ fn calls_from(rt: &Runtime, caller: &str) -> Vec<String> {
 /// The `language` row's call residue: its non-zero reasons.
 fn residue(engine: &Engine, language: &str) -> BTreeMap<R, u64> {
     let residue: CallResidue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == language)
@@ -348,15 +348,15 @@ fn sync_equals_a_full_reindex_when_a_java_default_or_implements_clause_changes()
     ];
     for (file, text) in edits {
         write(tmp.path(), file, &text);
-        engine.sync(&[file.into()]);
+        engine.pipeline().sync(&[file.into()]);
         assert_eq!(graph_fingerprint(rt), cold(&files, &tmp), "after writing {file}:\n{text}");
     }
     // The edits moved the calls, and moved them back.
     write(tmp.path(), JAVA_I, &i.replace("default void m(int a) {}", "void m(int a);"));
-    engine.sync(&[JAVA_I.into()]);
+    engine.pipeline().sync(&[JAVA_I.into()]);
     assert_eq!(calls_from(rt, "User.callProven"), Vec::<String>::new());
     write(tmp.path(), JAVA_I, i);
-    engine.sync(&[JAVA_I.into()]);
+    engine.pipeline().sync(&[JAVA_I.into()]);
     assert_eq!(calls_from(rt, "User.callProven"), ["I.m"]);
 }
 

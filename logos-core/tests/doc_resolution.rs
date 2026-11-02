@@ -1,6 +1,6 @@
 //! Integration tests for documentation link resolution (S-035 / FR-DG-03,
 //! FR-DG-04, FR-RS-03, NFR-RA-05, ADR-19), exercised end-to-end through
-//! [`Engine::index`]/[`Engine::sync`] against real temp-directory fixtures and
+//! [`Pipeline::index`](crate::Pipeline::index)/[`Pipeline::sync`](crate::Pipeline::sync) against real temp-directory fixtures and
 //! the Logos dogfood `docs/` tree.
 //!
 //! Coverage by acceptance criterion:
@@ -97,7 +97,7 @@ fn doc_to_doc_link_with_anchor_binds_to_the_one_docsection() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let b_section = node_id(rt, "B", NodeKind::DocSection);
     let target = node_id(rt, "Target Heading", NodeKind::DocSection);
@@ -115,7 +115,7 @@ fn doc_to_doc_link_without_anchor_binds_to_the_docfile() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let b_section = node_id(rt, "B", NodeKind::DocSection);
     let a_file = node_id(rt, "a.md", NodeKind::DocFile);
@@ -138,7 +138,7 @@ fn doc_link_to_missing_target_binds_once_the_target_is_added() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert!(
         edges_of(rt, EdgeKind::DocReference).is_empty(),
         "a.md does not exist yet — the link must stay unresolved (NFR-RA-05)"
@@ -154,7 +154,7 @@ fn doc_link_to_missing_target_binds_once_the_target_is_added() {
         "docs/a.md",
         "# A\n\n## Target Heading\n\nbody\n",
     );
-    engine.sync(&[PathBuf::from("docs/a.md")]);
+    engine.pipeline().sync(&[PathBuf::from("docs/a.md")]);
 
     let b_section = node_id(rt, "B", NodeKind::DocSection);
     let target = node_id(rt, "Target Heading", NodeKind::DocSection);
@@ -178,7 +178,7 @@ fn cross_directory_parent_relative_link_binds() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let b_section = node_id(rt, "B", NodeKind::DocSection);
     let target = node_id(rt, "Target", NodeKind::DocSection);
@@ -200,7 +200,7 @@ fn bare_anchor_self_link_binds_within_the_same_file() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let a_section = node_id(rt, "A", NodeKind::DocSection);
     let second = node_id(rt, "Second Heading", NodeKind::DocSection);
@@ -224,7 +224,7 @@ fn explicit_repo_path_binds_to_the_code_file_module() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let guide = node_id(rt, "Guide", NodeKind::DocSection);
     // `src/util.rs` → module key (crate, [util]) → the file-root module "util".
@@ -253,7 +253,7 @@ fn an_explicit_repo_path_binds_through_the_files_own_module_model() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let guide = node_id(rt, "Guide", NodeKind::DocSection);
     let rules = node_id(rt, "rules", NodeKind::Module);
@@ -277,7 +277,7 @@ fn duplicate_heading_anchor_stays_unresolved() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // No DocReference edge targets either "Notes" section.
     let notes_ids = rt
@@ -318,7 +318,7 @@ fn doc_to_code_unique_symbol_token_binds() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let guide = node_id(rt, "Guide", NodeKind::DocSection);
     let func = node_id(rt, "extract_files", NodeKind::Function);
@@ -344,7 +344,7 @@ fn doc_to_code_two_candidate_mention_stays_unresolved() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // No DocReference edge targets either `run` (NFR-RA-05).
     let run_ids = rt
@@ -379,7 +379,7 @@ fn prose_word_with_no_symbol_is_never_linked() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         edges_of(rt, EdgeKind::DocReference).is_empty(),
@@ -403,9 +403,9 @@ fn doc_reference_edges_are_byte_identical_across_runs() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
 
-    let first_run = engine.index();
+    let first_run = engine.pipeline().index();
     let first = doc_ref_symbols(rt);
-    let second_run = engine.index();
+    let second_run = engine.pipeline().index();
     let second = doc_ref_symbols(rt);
     assert_eq!(first, second, "the bound doc-reference set is reproducible");
     assert!(
@@ -434,7 +434,7 @@ fn editing_a_doc_rebinds_its_references_through_sync() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert!(
         edges_of(rt, EdgeKind::DocReference).is_empty(),
         "b.md has no references yet"
@@ -447,7 +447,7 @@ fn editing_a_doc_rebinds_its_references_through_sync() {
         "docs/b.md",
         "# B\n\nSee [target](a.md#target) and call `extract_files`.\n",
     );
-    let result = engine.sync(&[PathBuf::from("docs/b.md")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("docs/b.md")]);
     assert_eq!(result.files_modified, 1);
 
     let b_section = node_id(rt, "B", NodeKind::DocSection);
@@ -502,7 +502,7 @@ fn dogfood_resolves_doc_references_on_logos_own_docs() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let doc_edges = edges_of(rt, EdgeKind::DocReference);
     println!("dogfood doc references bound: {}", doc_edges.len());
@@ -530,7 +530,7 @@ fn dogfood_resolves_doc_references_on_logos_own_docs() {
 
     // Determinism: a second index binds a symbol-identical set (NFR-RA-06).
     let once = doc_ref_symbols(rt);
-    engine.index();
+    engine.pipeline().index();
     let again = doc_ref_symbols(rt);
     assert_eq!(once, again, "doc-reference resolution is reproducible");
 }

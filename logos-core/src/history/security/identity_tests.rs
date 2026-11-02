@@ -585,8 +585,8 @@ pub(super) fn ratchet_violations(root: &Path) -> Vec<String> {
     });
     let status = crate::security::status(
         engine.root(),
-        &engine.scan_environment(),
-        engine.tools_manifest(),
+        &engine.security().tools().environment(),
+        engine.security().tools().manifest(),
         crate::engine::today_utc(),
         VersionProbes::Never,
         false,
@@ -645,7 +645,7 @@ fn a_checked_in_baseline_blessed_before_the_rekey_still_knows_each_secret() {
             tools_dir: None,
             nvd_api_key: None,
         })
-        .security_bless()
+        .security().findings().bless()
         .unwrap();
     assert!(blessed.recorded, "{blessed:?}");
     assert_eq!(ratchet_violations(&root), Vec::<String>::new(), "the old keys on both sides");
@@ -762,7 +762,7 @@ fn bless(dir: &Path, checkout: &Path, findings: usize) {
             tools_dir: None,
             nvd_api_key: None,
         })
-        .security_bless()
+        .security().findings().bless()
         .unwrap();
     assert!(blessed.recorded && blessed.findings == findings, "{blessed:?}");
 }
@@ -1340,7 +1340,7 @@ fn migration_10_marks_osv_snapshots_and_the_next_ingest_rekeys_every_surface() {
     let status = crate::security::status(
         &root,
         &crate::security::ScanEnvironment { user_dir: Some(user), search_path: Some(std::ffi::OsString::new()), tools_dir: None, nvd_api_key: None },
-        crate::engine::Engine::open(&root).tools_manifest(),
+        crate::engine::Engine::open(&root).security().tools().manifest(),
         today,
         crate::security::VersionProbes::Never,
         false,

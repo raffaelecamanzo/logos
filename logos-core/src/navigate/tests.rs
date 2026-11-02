@@ -669,6 +669,7 @@ fn the_precedent_reach_clause_names_only_a_language_without_a_cross_file_figure(
         call_residue: None,
         header_ownership: None,
         parse_damage: None,
+        interfaces: None,
     };
     let over = |rows: Vec<LanguageResolution>| {
         let anchors: Vec<Option<String>> = rows.iter().map(|r| Some(r.language.clone())).collect();
@@ -919,7 +920,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             write(tmp.path(), rel, contents);
         }
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         (tmp, engine)
     }
 
@@ -953,7 +954,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
 
     /// `status`, asserted to state a residue equal to a fresh walk's.
     fn status_equal_to_fresh(engine: &Engine) -> StatusInfo {
-        let status = engine.status();
+        let status = engine.graph().status();
         assert!(
             status.warnings.iter().all(|w| !w.contains("call residue")),
             "{:?}",
@@ -976,12 +977,12 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     #[test]
     fn two_status_calls_on_an_unchanged_graph_walk_the_residue_once() {
         let (_tmp, engine) = lib_only();
-        assert_eq!(engine.call_residue_walks(), 0, "indexing walks no residue");
+        assert_eq!(engine.graph().call_residue_walks(), 0, "indexing walks no residue");
 
         let first = status_equal_to_fresh(&engine);
         let second = status_equal_to_fresh(&engine);
         assert_eq!(
-            engine.call_residue_walks(),
+            engine.graph().call_residue_walks(),
             1,
             "the second status on the same graph is a memo hit"
         );
@@ -1008,13 +1009,13 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let reason = |status: &StatusInfo| stated(status)["java"].reasons[&CallResidueReason::NoApplicableOverload];
         let miss = status_equal_to_fresh(&engine);
         let hit = status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 1, "the second status is a memo hit");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "the second status is a memo hit");
         assert_eq!((reason(&miss), reason(&hit)), (1, 1), "`m()` fits no `m`");
 
         write(tmp.path(), base, "package com.x;\n\npublic class Base {\n    public void m() {}\n}\n");
-        engine.sync(&[PathBuf::from(base)]);
+        engine.pipeline().sync(&[PathBuf::from(base)]);
         let after = status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 2, "the sync moved the revision");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "the sync moved the revision");
         assert_eq!(reason(&after), 0, "`m()` binds the base's `m()` now");
     }
 
@@ -1024,15 +1025,15 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let before = status_equal_to_fresh(&engine);
 
         write(tmp.path(), "src/lib.rs", &format!("{LIB_RS}pub fn more(x: &S) {{ x.gone(); }}\n"));
-        let synced = engine.sync(&[PathBuf::from("src/lib.rs")]);
+        let synced = engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
         assert_eq!(synced.files_modified, 1);
 
         let after = status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 2, "the sync moved the revision");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "the sync moved the revision");
         assert!(after.graph_revision > before.graph_revision);
         assert_eq!(rust_unbound(&after), rust_unbound(&before) + 1, "the new row is counted");
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 2, "and the new revision is cached");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "and the new revision is cached");
     }
 
     #[test]
@@ -1042,7 +1043,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
 
         write(tmp.path(), ".logos/config.toml", "[resolution]\npolicy = \"strict\"\n");
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 2, "a new policy re-walks");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "a new policy re-walks");
 
         // A key the walk does not read today still moves the memo: the whole
         // section is the key, so a key the binder starts reading is covered.
@@ -1052,7 +1053,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             "[resolution]\npolicy = \"strict\"\n\n[resolution.import_roots]\npython = [\"lib\"]\n",
         );
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 3, "an import-roots edit re-walks");
+        assert_eq!(engine.graph().call_residue_walks(), 3, "an import-roots edit re-walks");
 
         // An edit outside `[resolution]` is not a residue input.
         write(
@@ -1062,7 +1063,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
              [resolution.import_roots]\npython = [\"lib\"]\n",
         );
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 3, "an edit outside [resolution] is a hit");
+        assert_eq!(engine.graph().call_residue_walks(), 3, "an edit outside [resolution] is a hit");
     }
 
     #[test]
@@ -1087,7 +1088,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
 
         let after = status_equal_to_fresh(&engine);
         assert_eq!(after.graph_revision, before.graph_revision, "no revision advance");
-        assert_eq!(engine.call_residue_walks(), 2, "the schema version moved the key");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "the schema version moved the key");
         assert_eq!(rust_unbound(&after), rust_unbound(&before) - 1);
     }
 
@@ -1119,7 +1120,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         tx.commit().unwrap();
 
         let after = status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 2, "the advance re-walks");
+        assert_eq!(engine.graph().call_residue_walks(), 2, "the advance re-walks");
         assert_eq!(
             rust_unbound(&after),
             rust_unbound(&before),
@@ -1134,7 +1135,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         status_equal_to_fresh(&engine);
         write(tmp.path(), ".logos/config.toml", "[resolution\npolicy = ");
 
-        let status = engine.status();
+        let status = engine.graph().status();
         assert!(stated(&status).is_empty(), "no residue under an unread policy");
         assert!(
             status.warnings.iter().any(|w| w.contains(
@@ -1143,12 +1144,12 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             "{:?}",
             status.warnings
         );
-        assert_eq!(engine.call_residue_walks(), 1, "the unread config walked nothing");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "the unread config walked nothing");
 
         // The readable config is the primed key again: a hit, never a walk.
         fs::remove_file(tmp.path().join(".logos/config.toml")).unwrap();
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 1, "the failure displaced nothing");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "the failure displaced nothing");
     }
 
     #[test]
@@ -1167,8 +1168,8 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             .submit_write(|w| w.advance_graph_revision())
             .unwrap();
 
-        let failed = engine.status();
-        assert_eq!(engine.call_residue_walks(), 2, "the miss attempted a walk");
+        let failed = engine.graph().status();
+        assert_eq!(engine.graph().call_residue_walks(), 2, "the miss attempted a walk");
         assert!(stated(&failed).is_empty(), "the stale entry is not served on a failure");
         assert!(
             failed.warnings.iter().any(|w| w.contains(
@@ -1184,7 +1185,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             .execute_batch("ALTER TABLE nodes ADD COLUMN self_type TEXT")
             .unwrap();
         status_equal_to_fresh(&engine);
-        assert_eq!(engine.call_residue_walks(), 3, "the failure cached nothing");
+        assert_eq!(engine.graph().call_residue_walks(), 3, "the failure cached nothing");
     }
 
     // ── Every writer of `unresolved_refs` or `edges` advances the revision ──
@@ -1196,7 +1197,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     /// revision, re-walked, and left `status` stating the fresh residue.
     fn assert_writer_advances(engine: &Engine, what: &str, write: impl FnOnce()) -> StatusInfo {
         let before = status_equal_to_fresh(engine);
-        let walks = engine.call_residue_walks();
+        let walks = engine.graph().call_residue_walks();
         write();
         let after = status_equal_to_fresh(engine);
         assert!(
@@ -1205,7 +1206,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
             before.graph_revision,
             after.graph_revision
         );
-        assert_eq!(engine.call_residue_walks(), walks + 1, "{what} re-walks the residue");
+        assert_eq!(engine.graph().call_residue_walks(), walks + 1, "{what} re-walks the residue");
         after
     }
 
@@ -1213,7 +1214,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     fn writer_index_advances_the_revision() {
         let (_tmp, engine) = lib_only();
         assert_writer_advances(&engine, "a re-index", || {
-            engine.index();
+            engine.pipeline().index();
         });
     }
 
@@ -1222,7 +1223,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = lib_only();
         let after = assert_writer_advances(&engine, "a sync that adds a file", || {
             write(tmp.path(), "src/extra.rs", EXTRA_RS);
-            assert_eq!(engine.sync(&[PathBuf::from("src/extra.rs")]).files_added, 1);
+            assert_eq!(engine.pipeline().sync(&[PathBuf::from("src/extra.rs")]).files_added, 1);
         });
         assert_eq!(rust_unbound(&after), 5);
     }
@@ -1232,7 +1233,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = indexed(&[("src/lib.rs", LIB_RS), ("src/extra.rs", EXTRA_RS)]);
         let after = assert_writer_advances(&engine, "a sync that removes a file", || {
             fs::remove_file(tmp.path().join("src/extra.rs")).unwrap();
-            assert_eq!(engine.sync(&[PathBuf::from("src/extra.rs")]).files_removed, 1);
+            assert_eq!(engine.pipeline().sync(&[PathBuf::from("src/extra.rs")]).files_removed, 1);
         });
         assert_eq!(rust_unbound(&after), 4);
     }
@@ -1242,7 +1243,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = indexed(&[("src/lib.rs", LIB_RS), ("src/extra.rs", EXTRA_RS)]);
         let after = assert_writer_advances(&engine, "a reconcile that sweeps a deleted file", || {
             fs::remove_file(tmp.path().join("src/extra.rs")).unwrap();
-            engine.run_reconcile().expect("reconcile runs");
+            engine.pipeline().run_reconcile().expect("reconcile runs");
         });
         assert_eq!(rust_unbound(&after), 4);
     }
@@ -1254,7 +1255,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = indexed(&[("src/lib.rs", LIB_RS), ("src/extra.rs", EXTRA_RS)]);
         let after = assert_writer_advances(&engine, "a reconcile that purges an excluded file", || {
             write(tmp.path(), ".logos/config.toml", "exclude = [\"src/extra.rs\"]\n");
-            let outcome = engine.run_reconcile().expect("reconcile runs");
+            let outcome = engine.pipeline().run_reconcile().expect("reconcile runs");
             assert_eq!(outcome.reconciled_files, 1, "the purge removed extra.rs");
         });
         assert_eq!(rust_unbound(&after), 4);
@@ -1267,7 +1268,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         // the first navigation call after the config narrows runs the purge.
         let after = assert_writer_advances(&engine, "the navigation prologue's purge", || {
             write(tmp.path(), ".logos/config.toml", "exclude = [\"src/extra.rs\"]\n");
-            let _ = engine.search("extra", None, None);
+            let _ = engine.navigation().search("extra", None, None);
         });
         assert_eq!(rust_unbound(&after), 4);
     }
@@ -1281,14 +1282,14 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         purge();
         let after = status_equal_to_fresh(engine);
         assert_eq!(after.graph_revision, before.graph_revision, "nothing purged, nothing advanced");
-        assert_eq!(engine.call_residue_walks(), 1, "so the memo answers");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "so the memo answers");
     }
 
     #[test]
     fn a_navigation_prologue_that_purges_nothing_advances_nothing() {
         let (tmp, engine) = lib_only();
         assert_empty_purge_advances_nothing(&engine, tmp.path(), || {
-            let _ = engine.search("run", None, None);
+            let _ = engine.navigation().search("run", None, None);
         });
     }
 
@@ -1296,7 +1297,7 @@ pub fn chain(x: &S) { x.run(); make().run(); }
     fn a_reconcile_that_purges_nothing_advances_nothing() {
         let (tmp, engine) = lib_only();
         assert_empty_purge_advances_nothing(&engine, tmp.path(), || {
-            assert_eq!(engine.run_reconcile().expect("reconcile runs").reconciled_files, 0);
+            assert_eq!(engine.pipeline().run_reconcile().expect("reconcile runs").reconciled_files, 0);
         });
     }
 
@@ -1329,12 +1330,12 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = lib_only();
         let before = status_equal_to_fresh(&engine);
         write(tmp.path(), ".logos/rules.toml", LAYER_NAMED_MAKE);
-        engine.check_rules(None, false).expect("check_rules runs");
+        engine.quality().check_rules(None, false).expect("check_rules runs");
         assert!(has_layer_make(&engine), "check_rules re-materialised the new layer");
 
         let after = status_equal_to_fresh(&engine);
         assert_eq!(after.graph_revision, before.graph_revision, "a re-materialisation advances nothing");
-        assert_eq!(engine.call_residue_walks(), 1, "so the memo answers");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "so the memo answers");
     }
 
     #[test]
@@ -1348,12 +1349,12 @@ pub fn chain(x: &S) { x.run(); make().run(); }
         let (tmp, engine) = lib_only();
         let before = status_equal_to_fresh(&engine);
         write(tmp.path(), ".logos/rules.toml", LAYER_NAMED_MAKE);
-        let noop = engine.sync(&[PathBuf::from("src/lib.rs")]);
+        let noop = engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
         assert_eq!(noop.files_added + noop.files_modified + noop.files_removed, 0);
         assert!(has_layer_make(&engine), "the no-op sync's annotate pass wrote the new layer");
 
         let after = status_equal_to_fresh(&engine);
         assert_eq!(after.graph_revision, before.graph_revision, "a no-op sync advances nothing");
-        assert_eq!(engine.call_residue_walks(), 1, "so the memo answers");
+        assert_eq!(engine.graph().call_residue_walks(), 1, "so the memo answers");
     }
 }

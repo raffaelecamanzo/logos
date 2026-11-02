@@ -32,7 +32,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -271,7 +271,7 @@ fn a_one_file_edit_re_derives_that_files_rows_and_sync_equals_a_full_reindex() {
             .replace("pub fn via_param(x: &A)", "pub fn via_param(x: Box<B>)")
             .replace("let x: Arc<B> = make(); x.f();", "let x: Arc<B> = make(); let x = x; x.f();"),
     );
-    engine.sync(&[CALLER_FILE.into()]);
+    engine.pipeline().sync(&[CALLER_FILE.into()]);
 
     let rows = calls_from(&tmp, rt, CALLER_FILE);
     assert!(rows.contains(&typed("via_param", "B::f", Some("Box"))), "{rows:#?}");

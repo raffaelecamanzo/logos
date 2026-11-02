@@ -44,7 +44,7 @@ fn index(files: &[(&str, &str)]) -> (tempfile::TempDir, Engine, logos_core::mode
         write(tmp.path(), rel, contents);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let stats = engine.index().framework;
+    let stats = engine.pipeline().index().framework;
     (tmp, engine, stats)
 }
 
@@ -727,7 +727,7 @@ fn sync_matches_reindex(
         }
         touched.push(std::path::PathBuf::from(rel));
     }
-    let _ = engine.sync(&touched);
+    let _ = engine.pipeline().sync(&touched);
     let synced = route_names(engine.runtime().unwrap());
 
     let fresh_tmp = tempfile::tempdir().unwrap();
@@ -742,7 +742,7 @@ fn sync_matches_reindex(
         }
     }
     let fresh = Engine::start(fresh_tmp.path()).expect("engine starts");
-    fresh.index();
+    fresh.pipeline().index();
     (indexed, synced, route_names(fresh.runtime().unwrap()))
 }
 
@@ -1032,10 +1032,10 @@ public static class CatalogApi
 "#,
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     // The operation references were unbindable until the routes existed; a
     // no-op sync re-runs resolution over the full ledger (FR-RS-03).
-    let _ = engine.sync(&[] as &[std::path::PathBuf]);
+    let _ = engine.pipeline().sync(&[] as &[std::path::PathBuf]);
     let rt = engine.runtime().unwrap();
 
     let bound = rt

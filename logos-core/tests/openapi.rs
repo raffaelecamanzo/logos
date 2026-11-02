@@ -97,7 +97,7 @@ fn openapi_document_is_promoted_and_non_openapi_is_not() {
     write(root, "gateway/api.yaml", NOT_OPENAPI_YAML);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     // The OpenAPI spec promoted: a path-template ApiPath per `paths` entry.
@@ -133,10 +133,10 @@ fn path_template_search_returns_the_apipath_node_kind_filterable() {
     write(root, "openapi/api.yaml", OPENAPI_YAML);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Searching a known path template, filtered to ApiPath, returns the node.
-    let hits = engine.search("pets", Some(NodeKind::ApiPath), None);
+    let hits = engine.navigation().search("pets", Some(NodeKind::ApiPath), None);
     assert!(hits.warnings.is_empty(), "{:?}", hits.warnings);
     assert!(
         hits.hits.iter().any(|h| h.name == "/pets"),
@@ -150,7 +150,7 @@ fn path_template_search_returns_the_apipath_node_kind_filterable() {
     );
 
     // The kind filter genuinely excludes: the same query as a Function returns nothing.
-    let none = engine.search("pets", Some(NodeKind::Function), None);
+    let none = engine.navigation().search("pets", Some(NodeKind::Function), None);
     assert!(
         none.hits.is_empty(),
         "a path template is not a Function: {:?}",
@@ -159,7 +159,7 @@ fn path_template_search_returns_the_apipath_node_kind_filterable() {
 
     // The ConfigFile is profile-tagged in its FTS-indexed body: an `openapi`
     // search filtered to ConfigFile finds the spec via its tag.
-    let tagged = engine.search("openapi", Some(NodeKind::ConfigFile), None);
+    let tagged = engine.navigation().search("openapi", Some(NodeKind::ConfigFile), None);
     assert!(
         tagged.hits.iter().any(|h| h.name == "api.yaml"),
         "the profile-tagged ConfigFile is found via its body tag: {:?}",
@@ -175,7 +175,7 @@ fn json_spec_promotes_to_the_same_anchors_as_its_yaml_twin() {
         let tmp = tempfile::tempdir().unwrap();
         write(tmp.path(), rel, src);
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let rt = engine.runtime().expect("runtime present");
         let mut paths = node_names(rt, NodeKind::ApiPath);
         paths.sort();

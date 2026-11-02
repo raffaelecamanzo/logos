@@ -145,6 +145,26 @@
     (variable_declaration
       (identifier) @symbol.field)))
 
+; A top-level `val`/`var` → Variable and `const val` → Constant (S-831,
+; FR-EX-24): a term of the file's package that `import app.util.NAME` names, and
+; never a Field — a Field is a member of a class, and the field-sharing LCOM4
+; input a top-level property is not. Only a direct child of the file: a
+; function-local `val` is a statement of its body, and a destructuring
+; `val (a, b) = …` holds a `multi_variable_declaration`, which this does not
+; match. A `const` modifier re-kinds the Variable by a marker
+; (`@decl.constant`, extract::definition), not a second pattern: two patterns
+; naming one declaration are taken first-wins and which comes first is not the
+; query's to say. A typed top-level property still types no receiver
+; (references.scm, S-563).
+(source_file
+  (property_declaration
+    (variable_declaration
+      (identifier) @symbol.variable)))
+(source_file
+  (property_declaration
+    (modifiers (property_modifier "const"))
+    (variable_declaration) @decl.constant))
+
 ; A primary-constructor `val`/`var` parameter → Field (S-559, FR-EX-24): a
 ; property of its class, declared where the class is. A plain parameter
 ; (`c: Int`) is no property and names none. The binding keyword precedes the
@@ -180,6 +200,15 @@
   [(annotated_expression (infix_expression))
    (annotated_expression (annotated_expression (infix_expression)))
    (annotated_expression (annotated_expression (annotated_expression (infix_expression))))] @damage.misread)
+; A `const val` written after an annotation (`@JvmField const val K = 5`) is the
+; same loss (S-831): `const` is a soft keyword, so the grammar reads `const val K`
+; as an infix call and the line as an assignment of the number to it. No
+; property is declared, so the constant is counted into the warning too.
+(source_file
+  (assignment
+    left: [(annotated_expression (infix_expression))
+           (annotated_expression (annotated_expression (infix_expression)))
+           (annotated_expression (annotated_expression (annotated_expression (infix_expression))))]) @damage.misread)
 
 ; The file's `package` header (S-472, S-518, FR-RS-13). Not a declaration — its
 ; capture group is `module`, not `symbol`, so the declaration walk skips it. It is
@@ -188,6 +217,22 @@
 ; `src/main/java`), so a Multiplatform file's imports bind like a JVM one's.
 (package_header
   (qualified_identifier) @module.namespace)
+
+; The facade class the file's own `@file:JvmName("Slugs")` names (S-832,
+; FR-RS-31) — the class Java reaches the file's top-level functions through, in
+; place of the `<Stem>Kt` the descriptor's `file_facade` suffix derives. Like
+; the package header, its group is `module`: it names no declaration. The
+; annotation's last type segment is `JvmName` (`kotlin.jvm.JvmName` too); any
+; other file annotation (`@file:Suppress("…")`) names nothing. Its one argument
+; may be named (`name = "Slugs"`) and its string raw (`"""Slugs"""`).
+(file_annotation
+  (constructor_invocation
+    (user_type (identifier) @_annotation .)
+    (value_arguments
+      . (value_argument
+          [(string_literal (string_content) @module.facade)
+           (multiline_string_literal (string_content) @module.facade)])))
+  (#eq? @_annotation "JvmName"))
 
 ; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
 ; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a

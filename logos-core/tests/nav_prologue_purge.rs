@@ -142,7 +142,7 @@ fn narrowing_config_then_a_navigation_read_purges_now_unadmitted_symbols() {
 
     // Index under the default (wide) config: util.rs is admitted and indexed,
     // and the index records the admission fingerprint.
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed");
 
     // Narrow the config to exclude util.rs — but run NO governance command.
@@ -150,7 +150,7 @@ fn narrowing_config_then_a_navigation_read_purges_now_unadmitted_symbols() {
 
     // The very first navigation read runs the one-time prologue, which detects
     // the config change and purges the now-unadmitted nodes *before* serving.
-    let hits = engine.search("run", None, None);
+    let hits = engine.navigation().search("run", None, None);
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -182,9 +182,9 @@ fn the_prologue_purge_runs_at_most_once_per_config_change() {
     {
         let engine_a = Engine::start(tmp.path()).expect("engine A starts");
         let rt_a = engine_a.runtime().expect("runtime A");
-        engine_a.index();
+        engine_a.pipeline().index();
         write_config(tmp.path(), "exclude = [\"src/util.rs\"]\n");
-        let _ = engine_a.search("run", None, None);
+        let _ = engine_a.navigation().search("run", None, None);
         assert!(
             !has_nodes_for_file(rt_a, "src/util.rs"),
             "util.rs purged on the first (narrowing) prologue"
@@ -202,7 +202,7 @@ fn the_prologue_purge_runs_at_most_once_per_config_change() {
     // B's first navigation read runs its prologue: the stored fingerprint now
     // matches the (unchanged) config, so the gate short-circuits — no purge, no
     // discovery walk, no write.
-    let _ = engine_b.search("alpha", None, None);
+    let _ = engine_b.navigation().search("alpha", None, None);
 
     assert_eq!(
         before,
@@ -227,13 +227,13 @@ fn unchanged_config_prologue_does_no_write_and_no_node_churn() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     let before = canonical_graph(rt);
     let alpha_before = alpha_rowid(rt);
 
     // The first navigation read runs the prologue under the unchanged config.
-    let _ = engine.search("alpha", None, None);
+    let _ = engine.navigation().search("alpha", None, None);
 
     assert_eq!(
         before,
@@ -261,7 +261,7 @@ fn a_fresh_index_prologue_does_not_double_purge() {
 
     // No explicit index: the first navigation read both auto-indexes and runs
     // the (no-op) config-change purge.
-    let hits = engine.search("alpha", None, None);
+    let hits = engine.navigation().search("alpha", None, None);
 
     assert!(
         has_nodes_for_file(rt, "src/lib.rs") && has_nodes_for_file(rt, "src/util.rs"),
@@ -286,14 +286,14 @@ fn the_prologue_purge_fires_from_a_non_search_navigation_read() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed");
 
     write_config(tmp.path(), "exclude = [\"src/util.rs\"]\n");
 
     // A `node` read is the first navigation call on this engine → runs the
     // prologue, which purges before serving.
-    let _ = engine.node("crate::util::run", false);
+    let _ = engine.navigation().node("crate::util::run", false);
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),

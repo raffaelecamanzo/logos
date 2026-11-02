@@ -1,5 +1,5 @@
 //! Branch and merge symbol overlap (S-360 / [FR-NV-13], [FR-CL-04],
-//! [NFR-CC-04], CR-114), exercised end-to-end through `Engine::branch_overlap`
+//! [NFR-CC-04], CR-114), exercised end-to-end through `Navigation::branch_overlap`
 //! against real git fixtures.
 //!
 //! Coverage by acceptance criterion:
@@ -123,7 +123,7 @@ fn branch(root: &Path, name: &str, changes: &[(&str, String)]) {
 /// An engine over the repository as it stands, indexed.
 fn indexed_engine(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -216,7 +216,7 @@ fn sprint_63_replay_names_the_two_arms_that_never_reached_the_roster() {
     let tmp = sprint_63_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(
+    let result = engine.navigation().branch_overlap(
         &refs(&["kotlin", "python", "csharp", "ruby", "php"]),
         None,
         Some("merged"),
@@ -278,7 +278,7 @@ fn contended_symbols_are_ordered_most_contended_first() {
     git(root, &["checkout", "-q", "merged"]);
     let engine = indexed_engine(root);
 
-    let result = engine.branch_overlap(
+    let result = engine.navigation().branch_overlap(
         &refs(&["kotlin", "python", "csharp", "ruby", "php"]),
         None,
         None,
@@ -341,7 +341,7 @@ fn work_a_ref_did_and_the_merge_did_not_is_reported_lost() {
     let tmp = dropped_work_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["wanted", "landed"]), None, Some("partial"));
+    let result = engine.navigation().branch_overlap(&refs(&["wanted", "landed"]), None, Some("partial"));
     let merge = result.merge.as_ref().expect("a merge result was stated");
 
     // Both kinds of loss, and the ordering rule between them: the stronger
@@ -398,7 +398,7 @@ fn refs_with_no_shared_symbol_report_no_contention_and_no_merge_block() {
     let tmp = dropped_work_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["wanted", "landed"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["wanted", "landed"]), None, None);
     assert!(result.contended.is_empty(), "{:?}", result.contended);
     assert_eq!(result.contended_total, 0);
     assert!(result.merge.is_none(), "no merge was stated");
@@ -432,7 +432,7 @@ fn a_ref_that_deletes_a_file_contends_with_one_that_edits_it() {
     );
     let engine = indexed_engine(root);
 
-    let result = engine.branch_overlap(&refs(&["remover", "editor"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["remover", "editor"]), None, None);
     let row = contended(&result, "rust_capture").expect("the deleted symbol is contended");
     assert_eq!(row.modified_by, ["remover", "editor"]);
     assert!(row.absent_from.is_empty(), "both refs touch it");
@@ -457,7 +457,7 @@ fn the_payload_states_its_limits_including_the_unindexed_symbol_bound() {
     branch(root, "two", &[("src/lib.rs", lib_rs(&["two"]))]);
     let engine = indexed_engine(root);
 
-    let result = engine.branch_overlap(&refs(&["one", "two"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["one", "two"]), None, None);
     let coverage = &result.coverage;
     assert!(
         coverage
@@ -526,7 +526,7 @@ fn a_contended_set_beyond_the_cap_is_truncated_with_the_elision_counted() {
     branch(root, "third", &[("src/wide.rs", only_first)]);
     let engine = indexed_engine(root);
 
-    let result = engine.branch_overlap(&refs(&["left", "right", "third"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["left", "right", "third"]), None, None);
     // 120, not 121: the file's module node encloses every function, so the
     // innermost rule keeps the functions and drops it — the nesting case the
     // unit test pins, observed here at scale.
@@ -557,7 +557,7 @@ fn every_way_the_base_can_fail_says_which_one_happened() {
 
     // (1) A stated base that does not resolve names itself — and must NOT
     // advise passing `--base`, which the caller already did.
-    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), Some("no-such-base"), None);
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "ruby"]), Some("no-such-base"), None);
     assert_eq!(
         result.base_origin,
         "no-such-base was stated as the base but does not resolve"
@@ -584,7 +584,7 @@ fn every_way_the_base_can_fail_says_which_one_happened() {
     write(root, "src/island.rs", "pub fn island() {}\n");
     commit(root, "island");
     git(root, &["checkout", "-q", "merged"]);
-    let result = engine.branch_overlap(&refs(&["kotlin", "island"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "island"]), None, None);
     assert_eq!(result.base_origin, "the supplied refs have no common ancestor");
     assert!(
         result.warnings.iter().any(|w| w.contains("no common ancestor")),
@@ -594,7 +594,7 @@ fn every_way_the_base_can_fail_says_which_one_happened() {
 
     // (3) An empty optional is an ABSENT optional, on every surface — so this
     // falls back to the merge-base rather than collapsing the whole answer.
-    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), Some(""), Some("  "));
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "ruby"]), Some(""), Some("  "));
     assert_eq!(
         result.base_origin,
         "the common ancestor (git merge-base) of the supplied refs"
@@ -611,7 +611,7 @@ fn no_refs_and_an_unresolvable_merge_are_honest_warnings() {
     let tmp = sprint_63_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&[], None, None);
+    let result = engine.navigation().branch_overlap(&[], None, None);
     assert!(result.refs.is_empty());
     assert!(result.merge.is_none());
     assert!(
@@ -622,7 +622,7 @@ fn no_refs_and_an_unresolvable_merge_are_honest_warnings() {
 
     // A merge result that is not a commit leaves `merge: null`, which a
     // consumer could read as "no losses" — so it must never be silent.
-    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), None, Some("no-such-merge"));
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "ruby"]), None, Some("no-such-merge"));
     assert!(result.merge.is_none());
     assert!(
         result
@@ -656,7 +656,7 @@ fn a_change_the_index_cannot_see_is_counted_not_dropped() {
     branch(root, "quiet", &[("src/arms.rs", arm_rs("quiet"))]);
     let engine = indexed_engine(root);
 
-    let result = engine.branch_overlap(&refs(&["grown", "quiet"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["grown", "quiet"]), None, None);
     assert!(
         result.coverage.unattributed_hunks >= 1,
         "the appended function is past every indexed span: {:?}",
@@ -672,7 +672,7 @@ fn a_change_the_index_cannot_see_is_counted_not_dropped() {
 
     // The indexed working tree IS `main`, and `main` is neither ref, so both
     // drift. Compare with a ref that is the snapshot: it contributes nothing.
-    let result = engine.branch_overlap(&refs(&["main", "quiet"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["main", "quiet"]), None, None);
     assert!(
         !result
             .coverage
@@ -691,7 +691,7 @@ fn a_stated_base_overrides_the_merge_base() {
     let tmp = sprint_63_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["kotlin", "ruby"]), Some("merged"), None);
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "ruby"]), Some("merged"), None);
     assert_eq!(result.base_origin, "stated by the caller as merged");
     assert!(result.base.is_some());
     // Against the merge result the two refs read as *removing* the entries the
@@ -710,7 +710,7 @@ fn an_unresolvable_ref_is_a_warning_not_an_error() {
     let tmp = sprint_63_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["kotlin", "no-such-branch", "ruby"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin", "no-such-branch", "ruby"]), None, None);
     assert_eq!(result.coverage.unresolved_refs, ["no-such-branch"]);
     assert!(
         result
@@ -735,7 +735,7 @@ fn fewer_than_two_refs_without_a_merge_is_an_honest_warning() {
     let tmp = sprint_63_repo();
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["kotlin"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin"]), None, None);
     assert!(
         result
             .warnings
@@ -747,7 +747,7 @@ fn fewer_than_two_refs_without_a_merge_is_an_honest_warning() {
     assert!(result.contended.is_empty());
 
     // One ref *plus* a merge result is a complete question, so it must not warn.
-    let result = engine.branch_overlap(&refs(&["kotlin"]), None, Some("merged"));
+    let result = engine.navigation().branch_overlap(&refs(&["kotlin"]), None, Some("merged"));
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.merge.is_some());
 }
@@ -761,7 +761,7 @@ fn a_project_without_git_degrades_with_warnings_and_still_states_its_limits() {
     write(tmp.path(), "src/lib.rs", &lib_rs(&[]));
     let engine = indexed_engine(tmp.path());
 
-    let result = engine.branch_overlap(&refs(&["main", "topic"]), None, None);
+    let result = engine.navigation().branch_overlap(&refs(&["main", "topic"]), None, None);
     assert_eq!(result.coverage.unresolved_refs, ["main", "topic"]);
     assert!(result.base.is_none());
     assert!(result.contended.is_empty());

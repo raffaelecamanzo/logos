@@ -225,7 +225,7 @@ pub(crate) fn branch_overlap(
         paths.extend(changes.keys().cloned());
     }
     let path_list: Vec<String> = paths.iter().cloned().collect();
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let spans = runtime.submit_read(move |store| store.span_nodes_in_files(&path_list))?;
     let mut by_path: BTreeMap<&str, Vec<&NodeRow>> = BTreeMap::new();
     for row in &spans {

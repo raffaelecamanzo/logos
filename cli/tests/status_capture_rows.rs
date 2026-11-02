@@ -43,7 +43,10 @@ use tempfile::TempDir;
 const A_FILE: &str = "a/a.go";
 const B_FILE: &str = "b/b.go";
 const GO_MOD: &str = "module example.com/m\n\ngo 1.22\n";
-const A_GO: &str = "package a\n\nfunc F() {}\n";
+/// `T` implements `Namer` (S-830): the row's `interfaces` figures are non-zero,
+/// so the surfaces agree on a count, not on an absence.
+const A_GO: &str =
+    "package a\n\nfunc F() {}\n\ntype Namer interface {\n\tName() string\n}\n\ntype T struct{}\n\nfunc (T) Name() string { return \"\" }\n";
 const B_GO: &str = "package b\n\nimport \"example.com/m/a\"\n\nfunc G() {\n\ta.F()\n}\n";
 
 /// The status fields that are resolution figures — everything else (paths, sizes,
@@ -216,6 +219,14 @@ fn a_synced_store_and_a_cold_reindex_report_the_same_figures_through_the_cli() {
     // The 1.10.0 numbers, named: one call and one import, bound, either way.
     let go = &synced["resolution_by_language"][0];
     assert_eq!(go["language"], json!("go"));
+    assert_eq!(
+        go["interfaces"],
+        json!({
+            "in_scope": 1, "computed": 1, "implements": 1,
+            "not_computed": { "generic": 0, "unresolved_embedding": 0 }, "empty": 0,
+        }),
+        "the method-set figures (S-830): {go}"
+    );
     for class in ["calls", "imports"] {
         assert_eq!(
             (&go[class]["references"], &go[class]["bound"]),

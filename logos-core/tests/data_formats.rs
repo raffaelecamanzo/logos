@@ -80,7 +80,7 @@ fn verification_preflight_lists_all_three_grammars_as_artifact_plugins() {
     // `logos languages` prints (FR-PL-06 as modified): each grammar's crate
     // resolved, it loaded at the workspace ABI, and its descriptor parsed.
     let tmp = tempfile::tempdir().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
 
     for (name, exts) in [
         ("yaml", &["yml", "yaml"][..]),
@@ -391,7 +391,7 @@ fn lock_files_are_excluded_by_default_and_re_admitted_on_override() {
     write(root, "vendor/app.min.json", r#"{"a":1}"#);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let files = indexed_paths(rt);
@@ -428,7 +428,7 @@ fn lock_files_are_excluded_by_default_and_re_admitted_on_override() {
     write(root2, "pnpm-lock.yaml", "lockfileVersion: '6.0'\n");
 
     let engine2 = Engine::start(root2).expect("engine starts");
-    engine2.index();
+    engine2.pipeline().index();
     let rt2 = engine2.runtime().expect("runtime present");
     let files2 = indexed_paths(rt2);
     assert!(
@@ -452,10 +452,10 @@ fn section_keys_are_fts_searchable_and_kind_filterable() {
     );
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // A known section key is found, filtered to the ConfigSection kind.
-    let hits = engine.search("connectionString", Some(NodeKind::ConfigSection), None);
+    let hits = engine.navigation().search("connectionString", Some(NodeKind::ConfigSection), None);
     assert!(hits.warnings.is_empty(), "{:?}", hits.warnings);
     assert!(
         hits.hits.iter().any(|h| h.name == "connectionString"),
@@ -470,7 +470,7 @@ fn section_keys_are_fts_searchable_and_kind_filterable() {
 
     // The kind filter genuinely excludes: a Function-kind search for the same key
     // returns nothing (config nodes never carry the code kinds).
-    let none = engine.search("connectionString", Some(NodeKind::Function), None);
+    let none = engine.navigation().search("connectionString", Some(NodeKind::Function), None);
     assert!(
         none.hits.is_empty(),
         "a config key is not a Function: {:?}",
@@ -528,7 +528,7 @@ cert = \"a.pem\"
     );
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let files = node_count(rt, NodeKind::ConfigFile);
@@ -561,7 +561,7 @@ cert = \"a.pem\"
     // member (`scripts`), and a TOML table token (`package`, from `[package]`,
     // which the FTS tokenizer splits out of the bracketed header).
     for key in ["replicaCount", "repository", "scripts", "package"] {
-        let hits = engine.search(key, Some(NodeKind::ConfigSection), None);
+        let hits = engine.navigation().search(key, Some(NodeKind::ConfigSection), None);
         assert!(
             hits.hits.iter().any(|h| h.name.contains(key)),
             "{key} is FTS-searchable: {:?}",
@@ -607,8 +607,8 @@ pub fn beta() -> u32 {
     let bare = tempfile::tempdir().unwrap();
     write(bare.path(), "src/lib.rs", CODE);
     let e1 = Engine::start(bare.path()).expect("engine starts");
-    e1.index();
-    let m1 = e1.scan(true).expect("scan runs").metrics;
+    e1.pipeline().index();
+    let m1 = e1.quality().scan(true).expect("scan runs").metrics;
     assert!(
         !m1.empty && m1.aggregate_signal.is_some(),
         "the code-only project has a signal"
@@ -633,8 +633,8 @@ pub fn beta() -> u32 {
         "[server]\nhost = \"a\"\n[server.tls]\nenabled = true\n",
     );
     let e2 = Engine::start(mixed.path()).expect("engine starts");
-    e2.index();
-    let m2 = e2.scan(true).expect("scan runs").metrics;
+    e2.pipeline().index();
+    let m2 = e2.quality().scan(true).expect("scan runs").metrics;
 
     // The config nodes genuinely exist in (b)...
     let rt2 = e2.runtime().expect("runtime present");

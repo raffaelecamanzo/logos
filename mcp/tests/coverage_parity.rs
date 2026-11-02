@@ -2,7 +2,7 @@
 //! CR-007, [FR-CV-06], [FR-CV-07]).
 //!
 //! Both surfaces delegate to the **one** `api` entrypoint per command
-//! (`Engine::coverage_status` / `Engine::hotspots`, [NFR-CC-01]) and serialise its
+//! (`Coverage::status` / `History::hotspots`, [NFR-CC-01]) and serialise its
 //! read-model — the CLI via `serde_json`, the MCP twin via `Content::json`. This
 //! proves the wire payloads are byte-identical for the same store state over a
 //! real git-history + indexed + coverage-ingested fixture. (The full 25-tool
@@ -73,7 +73,7 @@ fn fixture() -> tempfile::TempDir {
         // Ingest coverage through a transient engine, then drop it so the server
         // owns the store with a single writer at a time.
         let engine = Engine::start(repo).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let lines: String = (1..=5).map(|n| format!("DA:{n},1\n")).collect();
         let report = repo.join("coverage.info");
         std::fs::write(
@@ -82,7 +82,7 @@ fn fixture() -> tempfile::TempDir {
         )
         .unwrap();
         engine
-            .coverage_ingest(&report, None)
+            .coverage().ingest(&report, None)
             .expect("coverage ingest");
     }
     tmp
@@ -128,7 +128,7 @@ async fn cli_and_mcp_coverage_status_payloads_are_identical() {
 
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_value(engine.coverage_status().expect("coverage status")).unwrap()
+        serde_json::to_value(engine.coverage().status().expect("coverage status")).unwrap()
     };
 
     let (client, server) = boot(root).await;
@@ -159,12 +159,12 @@ async fn cli_and_mcp_untested_hotspots_payloads_are_identical() {
     // Warm the lazy mine so neither compared call carries the first-mine notice.
     Engine::start(root)
         .expect("engine")
-        .hotspots(None, true, false)
+        .history().hotspots(None, true, false)
         .expect("warm-up");
 
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_value(engine.hotspots(None, true, false).expect("hotspots")).unwrap()
+        serde_json::to_value(engine.history().hotspots(None, true, false).expect("hotspots")).unwrap()
     };
 
     let (client, server) = boot(root).await;
@@ -209,7 +209,7 @@ async fn mcp_coverage_ingest_returns_the_ingest_summary() {
     commit(root, "src/lib.rs", "pub fn a() -> i64 { 0 }\n", "lib");
     let report = root.join("coverage.info");
     std::fs::write(&report, "TN:suite\nSF:src/lib.rs\nDA:1,1\nend_of_record\n").unwrap();
-    Engine::start(root).expect("engine").index();
+    Engine::start(root).expect("engine").pipeline().index();
 
     let (client, server) = boot(root).await;
     let args = Map::from_iter([(
@@ -256,7 +256,7 @@ async fn mcp_coverage_refresh_spawns_nothing_without_consent_and_returns_the_ins
     )
     .unwrap();
     let env = logos_core::security::ScanEnvironment { user_dir: Some(user.clone()), search_path: None, tools_dir: None, nvd_api_key: None };
-    Engine::start(&root).expect("engine").index();
+    Engine::start(&root).expect("engine").pipeline().index();
 
     let (client, server) = boot_engine(Engine::start(&root).expect("engine").with_scan_environment(env.clone())).await;
     let refused = client
@@ -309,7 +309,7 @@ fn go_project() -> (tempfile::TempDir, std::path::PathBuf, logos_core::security:
     .unwrap();
     std::fs::set_permissions(&go, std::fs::Permissions::from_mode(0o755)).unwrap();
     logos_core::coverage::consent::require(Some(&user), &root, &["go"], None, true, "logos coverage run").expect("consent");
-    Engine::start(&root).expect("engine").index();
+    Engine::start(&root).expect("engine").pipeline().index();
     let env = logos_core::security::ScanEnvironment { user_dir: Some(user), search_path: Some(bin.into_os_string()), tools_dir: None, nvd_api_key: None };
     (tmp, root, env)
 }
@@ -343,8 +343,8 @@ async fn cli_and_mcp_coverage_run_and_extended_status_payloads_are_identical() {
     let engine = || Engine::start(&root).expect("engine").with_scan_environment(env.clone());
     // A first run ingests the report; the two compared runs then find it
     // already ingested at this HEAD, as each other would.
-    engine().coverage_run(None, false).expect("the first run");
-    let cli = serde_json::to_value(engine().coverage_run(None, false).expect("the CLI run")).unwrap();
+    engine().coverage().run(None, false).expect("the first run");
+    let cli = serde_json::to_value(engine().coverage().run(None, false).expect("the CLI run")).unwrap();
 
     let (client, server) = boot_engine(engine()).await;
     let started = mcp_payload(&client, "coverage_run", None).await;
@@ -369,7 +369,7 @@ async fn cli_and_mcp_coverage_run_and_extended_status_payloads_are_identical() {
 
     client.cancel().await.ok();
     server.abort();
-    let cli_status = serde_json::to_value(engine().coverage_status().expect("status")).unwrap();
+    let cli_status = serde_json::to_value(engine().coverage().status().expect("status")).unwrap();
     assert!(cli_status.get("job").is_none(), "the CLI runs no job: {cli_status}");
     assert_eq!(cli_status, status, "CLI and MCP coverage_status payloads must be byte-identical (FR-CV-06)");
     let row = status["runner"]["tools"].as_array().unwrap().iter().find(|t| t["tool"] == "go").unwrap().clone();

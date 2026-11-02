@@ -1,5 +1,5 @@
 //! Route groups, bracket tokens and paths that ignore a class prefix (S-554,
-//! [CR-177], [FR-FW-03], [FR-FW-05], [NFR-RA-05]).
+//! [CR-177], S-821, [CR-255], [FR-FW-03], [FR-FW-05], [NFR-RA-05]).
 //!
 //! # A minimal API's prefix is a value, not a declaration
 //!
@@ -24,7 +24,9 @@
 //! - `@fw.group.call` + `@fw.group.receiver` — every call `x.m(…)` as a *link*
 //!   of a chain, with `@fw.group.path` / `@fw.group.path.opaque` on the one
 //!   that adds a prefix (`MapGroup`). A link that names no path is transparent:
-//!   `HasApiVersion(1.0)` returns the group it was called on;
+//!   `HasApiVersion(1.0)` returns the group it was called on. A link marked
+//!   `@fw.group.foreign` is a call the dialect reads nothing about: called on a
+//!   plain builder it is one, called on a group it is unknown;
 //! - `@fw.group.name` + `@fw.group.scope` — a name the code binds over a
 //!   range: to an initializer (`@fw.group.init`), to a value known to be a
 //!   plain endpoint builder (`@fw.group.root`), or to nothing the pass can read
@@ -34,15 +36,24 @@
 //!
 //! [`Facts::resolve`] walks the expression and answers one of three things:
 //!
-//! - **no prefix** — the chain ends at an identifier nothing binds (`app`), or
-//!   at one bound to a plain builder: the route keeps its own path;
+//! - **no prefix** — the chain ends at an identifier the dialect proves a root
+//!   (`@fw.group.root.name`), or at one bound to a plain builder: the route
+//!   keeps its own path;
 //! - **a prefix** — the chain crossed one or more group links, each joined by
 //!   [`join_under`] — under `@fw.group.absorbs`, a path of exactly `/` is the
 //!   group itself; a name bound to an initializer is followed into it;
 //! - **unknown** — the chain ends at a call or expression the pass cannot read
-//!   (`Build(app)`), at a name bound to a parameter, or crosses a group whose
-//!   path is not a written literal. The route is **refused and counted**, never
+//!   (`Build(app)`), at a name nothing binds or proves a root, at a name bound
+//!   to a parameter, crosses a group whose path is not a written literal, or
+//!   crosses a foreign call made on a group. The route is **refused and counted**, never
 //!   promoted at the partial path ([NFR-RA-05], [`super::RouteRefusal::PathNotComposed`]).
+//!
+//! Under `@fw.group.root.default` (Gin, whose receivers are mostly a plain
+//! engine — `r := gin.Default()`, a field, a parameter) the default flips: a
+//! name nothing binds and an expression the pass cannot read are plain
+//! builders, so only a chain that crosses a group link, or a name bound to a
+//! parameter the dialect captures, can be unknown. Without the marker every
+//! such receiver is unknown (ASP.NET Core).
 //!
 //! Known ceiling, the transparent-link rule's own: a builder method that
 //! returns a *different* group than the one it was called on reads as the same
@@ -64,6 +75,7 @@
 //! of a query.
 //!
 //! [CR-177]: ../../../../docs/requests/CR-177-csharp-calls-members-routes-partials-and-typed-receivers-resolve.md
+//! [CR-255]: ../../../../docs/requests/CR-255-route-groups-and-mounts-compose-their-prefixes.md
 //! [FR-FW-03]: ../../../../docs/specs/requirements/FR-FW-03.md
 //! [FR-FW-05]: ../../../../docs/specs/requirements/FR-FW-05.md
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
@@ -107,6 +119,10 @@ impl Expr {
 /// most about one call wins ([`Capture::finish`]).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum LinkPath {
+    /// A call the dialect reads nothing about (`@fw.group.foreign`): its result
+    /// is a plain builder when it was called on one, and unknown when it was
+    /// called on a group, which it may or may not return.
+    Foreign,
     /// Nothing: the call returns the group it was called on.
     Transparent,
     /// A path the pass cannot read (a variable, a raw string, a named argument).
@@ -141,6 +157,26 @@ struct Binding {
     /// The range the binding is visible over.
     scope: (usize, usize),
     bound: Bound,
+    /// Declared across its whole scope (`@fw.group.hoisted`): a member, or a
+    /// package-level variable.
+    hoisted: bool,
+}
+
+impl Binding {
+    /// Where the binding's initializer is read from. A local reads what is
+    /// declared before its own name, which is never itself. A hoisted binding
+    /// is visible across its scope, and so are its hoisted siblings: it reads
+    /// from the scope's last byte, so `var v1 = api.Group("/v1")` sees the
+    /// package-level `api` declared beside it, before it or after it. A
+    /// binding that reads itself that way is a cycle, which [`MAX_DEPTH`]
+    /// ends as unknown.
+    fn reads_from(&self) -> usize {
+        if self.hoisted {
+            self.scope.1.saturating_sub(1)
+        } else {
+            self.decl
+        }
+    }
 }
 
 /// What a receiver resolves to.
@@ -170,9 +206,11 @@ pub(super) struct Facts {
     /// binds and nothing proves is not one.
     root_names: HashSet<String>,
     /// Names the file assigns to after their declaration
-    /// (`@fw.group.assigned`): such a name is whatever it was last given, which
-    /// no declaration states.
-    assigned: HashSet<String>,
+    /// (`@fw.group.assigned`), each with the value of every assignment, keyed by
+    /// the assigned name's start byte: such a name is whatever it was last given,
+    /// which no declaration states. A value is `None` where the dialect captured
+    /// none (`@fw.group.assigned.value`), which makes the name unknown.
+    assigned: HashMap<String, HashMap<usize, Option<Expr>>>,
     /// Registrations whose path is final as captured: composed here, or
     /// written absolute. `compose_prefixes` does not join a class prefix onto
     /// them.
@@ -183,6 +221,12 @@ pub(super) struct Facts {
     /// file, not per link: groups are one dialect's mechanism, and a file is one
     /// language.
     absorbs: bool,
+    /// `true` once a registration's receiver carried `@fw.group.root.default`:
+    /// the dialect's receivers are plain builders unless a group link or a
+    /// bound parameter says otherwise — a name nothing binds, and an expression
+    /// the pass cannot read, keep the route's own path. Held per file, like
+    /// [`Facts::absorbs`].
+    root_default: bool,
 }
 
 impl Facts {
@@ -212,6 +256,39 @@ impl Facts {
             .max_by_key(|b| (b.scope.0, b.decl))
     }
 
+    /// `true` when the variable `name` names at byte `at` is assigned anything
+    /// but a plain builder: a value the dialect did not capture, or one that
+    /// resolves to a group or to unknown. An assignment re-binds the variable
+    /// its own position sees — the same binding, or, where the facts bind
+    /// neither, the same unbound name — so an `r = t` in another function, on
+    /// another `r`, says nothing about this one. A name only ever assigned plain
+    /// builders (`router = gin.New()`) is read as its declaration says. A value
+    /// that reads the name itself (`g = g.Group("/x")`) recurses until
+    /// [`MAX_DEPTH`], which answers unknown.
+    fn assigned_other_than_a_root(&self, name: &str, at: usize, depth: u8) -> bool {
+        let Some(values) = self.assigned.get(name) else {
+            return false;
+        };
+        let binding_at = |pos: usize| self.visible(name, pos).map(|b| (b.decl, b.scope));
+        let seen = binding_at(at);
+        values.iter().any(|(&pos, value)| {
+            binding_at(pos) == seen
+                && value
+                    .as_ref()
+                    .is_none_or(|value| self.resolve(value, value.range.0, depth + 1) != Outcome::Prefix(None))
+        })
+    }
+
+    /// What a receiver the facts say nothing about is: a plain builder under
+    /// [`Facts::root_default`], otherwise unknown.
+    fn unread(&self) -> Outcome {
+        if self.root_default {
+            Outcome::Prefix(None)
+        } else {
+            Outcome::Unknown
+        }
+    }
+
     fn resolve(&self, expr: &Expr, at: usize, depth: u8) -> Outcome {
         if depth > MAX_DEPTH {
             return Outcome::Unknown;
@@ -220,6 +297,8 @@ impl Facts {
             let parent = self.resolve(&link.receiver, at, depth + 1);
             return match (&link.path, parent) {
                 (_, Outcome::Unknown) | (LinkPath::Opaque, _) => Outcome::Unknown,
+                (LinkPath::Foreign, Outcome::Prefix(None)) => Outcome::Prefix(None),
+                (LinkPath::Foreign, Outcome::Prefix(Some(_))) => Outcome::Unknown,
                 (LinkPath::Transparent, parent) => parent,
                 (LinkPath::Literal(path), Outcome::Prefix(parent)) => Outcome::Prefix(Some(match parent {
                     Some(parent) => join_under(&parent, path, self.absorbs),
@@ -228,20 +307,20 @@ impl Facts {
             };
         }
         let Some(name) = &expr.name else {
-            return Outcome::Unknown;
+            return self.unread();
         };
-        if self.assigned.contains(name) {
+        if self.assigned_other_than_a_root(name, at, depth) {
             return Outcome::Unknown;
         }
         match self.visible(name, at) {
             // A name nothing binds is a field, a pattern variable, a loop
             // variable, a type: only one the dialect proves is a root is.
             None if self.root_names.contains(name) => Outcome::Prefix(None),
-            None => Outcome::Unknown,
+            None => self.unread(),
             Some(binding) => match &binding.bound {
                 Bound::Root => Outcome::Prefix(None),
                 Bound::Opaque => Outcome::Unknown,
-                Bound::Init(init) => self.resolve(init, binding.decl, depth + 1),
+                Bound::Init(init) => self.resolve(init, binding.reads_from(), depth + 1),
             },
         }
     }
@@ -351,7 +430,7 @@ fn absolute_path(written: &str, marked: bool) -> (String, bool) {
 }
 
 /// `true` for a plain identifier — the expression a binding is looked up by.
-fn is_identifier(s: &str) -> bool {
+pub(super) fn is_identifier(s: &str) -> bool {
     !s.is_empty() && s.chars().enumerate().all(|(at, c)| c == '_' || c.is_alphabetic() || (at > 0 && c.is_alphanumeric()))
 }
 
@@ -371,9 +450,12 @@ pub(super) struct Capture<'t> {
     root: bool,
     root_name: Option<Node<'t>>,
     assigned: Option<Node<'t>>,
+    assigned_value: Option<Node<'t>>,
     hoisted: bool,
     absolute: bool,
     absorbs: bool,
+    foreign: bool,
+    root_default: bool,
     controller: Option<Node<'t>>,
 }
 
@@ -406,9 +488,12 @@ impl<'t> Capture<'t> {
             "root" => self.root = true,
             "root.name" => self.root_name = Some(node),
             "assigned" => self.assigned = Some(node),
+            "assigned.value" => self.assigned_value = Some(node),
             "hoisted" => self.hoisted = true,
             "absolute" => self.absolute = true,
             "absorbs" => self.absorbs = true,
+            "foreign" => self.foreign = true,
+            "root.default" => self.root_default = true,
             "token.controller" => self.controller = Some(node),
             _ => {}
         }
@@ -431,19 +516,33 @@ impl<'t> Capture<'t> {
             facts.receivers.insert(at, Expr::of(receiver, src));
         }
         facts.absorbs |= self.absorbs;
+        facts.root_default |= self.root_default;
         if let (Some(call), Some(receiver)) = (self.call, self.receiver) {
             let path = self.link_path(src);
             let range = (call.start_byte(), call.end_byte());
-            // One call is matched by the transparent pattern, by the one that
-            // marks its first argument opaque and by the one that reads it as a
-            // literal: the last two are each right about what they matched, so
-            // the most that any of them read wins, whatever the match order.
+            // One call is matched by a dialect's catch-all foreign pattern, by
+            // the transparent one, by the one that marks its first argument
+            // opaque and by the one that reads it as a literal: each is right
+            // about what it matched, so the most that any of them read wins,
+            // whatever the match order.
             if facts.links.get(&range).is_none_or(|known| known.path < path) {
                 facts.links.insert(range, Link { receiver: Expr::of(receiver, src), path });
             }
         }
         if let Some(name) = self.assigned {
-            facts.assigned.insert(text(name, src).trim().to_string());
+            // One assigned name is matched by the pattern that marks every
+            // assigned name and by the one that pairs it with its value: the
+            // value, where one was read, is kept whatever the match order.
+            let value = self.assigned_value.map(|value| Expr::of(value, src));
+            let slot = facts
+                .assigned
+                .entry(text(name, src).trim().to_string())
+                .or_default()
+                .entry(name.start_byte())
+                .or_default();
+            if value.is_some() {
+                *slot = value;
+            }
         }
         if let Some(name) = self.root_name {
             facts.root_names.insert(text(name, src).trim().to_string());
@@ -461,6 +560,7 @@ impl<'t> Capture<'t> {
                 decl: if self.hoisted { scope.start_byte() } else { name.start_byte() },
                 scope: (scope.start_byte(), scope.end_byte()),
                 bound,
+                hoisted: self.hoisted,
             };
             facts.bindings.entry(binding.name.clone()).or_default().push(binding);
         }
@@ -483,6 +583,7 @@ impl<'t> Capture<'t> {
                 }
             }
             (None, Some(_)) => LinkPath::Opaque,
+            (None, None) if self.foreign => LinkPath::Foreign,
             (None, None) => LinkPath::Transparent,
         }
     }
@@ -570,6 +671,7 @@ mod tests {
             decl: 4,
             scope: (0, 100),
             bound: Bound::Init(expr(10, 30, None)),
+            hoisted: false,
         });
         // A nested group written `/` is its parent only under the opt-in.
         assert_eq!(facts.resolve(&expr(40, 60, None), 70, 0), Outcome::Prefix(Some("/books/".to_string())));
@@ -590,12 +692,14 @@ mod tests {
             decl: 4,
             scope: (0, 100),
             bound: Bound::Init(expr(10, 30, None)),
+            hoisted: false,
         });
         bind(&mut facts, Binding {
             name: "b".into(),
             decl: 44,
             scope: (40, 90),
             bound: Bound::Init(expr(50, 70, None)),
+            hoisted: false,
         });
         let at_b = facts.resolve(&expr(80, 81, Some("b")), 80, 0);
         assert_eq!(at_b, Outcome::Prefix(Some("/a/b".to_string())));
@@ -619,6 +723,7 @@ mod tests {
             decl: 1,
             scope: (0, 50),
             bound: Bound::Opaque,
+            hoisted: false,
         });
         link(&mut facts, (10, 20), expr(10, 11, Some("app")), LinkPath::Opaque);
         assert_eq!(facts.resolve(&expr(30, 31, Some("g")), 30, 0), Outcome::Unknown);
@@ -640,6 +745,7 @@ mod tests {
             decl: 1,
             scope: (0, 50),
             bound: Bound::Init(expr(20, 40, None)),
+            hoisted: false,
         });
         assert_eq!(
             facts.resolve(&expr(45, 46, Some("g")), 45, 0),
@@ -648,7 +754,75 @@ mod tests {
     }
 
     #[test]
+    fn under_root_default_only_a_group_or_a_bound_parameter_is_unknown() {
+        // `s.router` (not a name), `r` (unbound), `gin.Default()` (a foreign call
+        // on an unbound name), `g = r.Group("/api")`, `g.Other()` (a foreign call
+        // on a group), `rg` (a bound parameter).
+        let mut facts = Facts::default();
+        link(&mut facts, (10, 20), expr(10, 13, Some("gin")), LinkPath::Foreign);
+        link(&mut facts, (30, 40), expr(30, 31, Some("r")), LinkPath::Literal("/api".into()));
+        link(&mut facts, (50, 60), expr(50, 51, Some("g")), LinkPath::Foreign);
+        bind(&mut facts, Binding {
+            name: "g".into(),
+            decl: 25,
+            scope: (0, 100),
+            bound: Bound::Init(expr(30, 40, None)),
+            hoisted: false,
+        });
+        bind(&mut facts, Binding {
+            name: "rg".into(),
+            decl: 1,
+            scope: (0, 100),
+            bound: Bound::Opaque,
+            hoisted: false,
+        });
+        let field = expr(70, 78, None);
+        let bare = expr(80, 81, Some("r"));
+        // Without the marker, each receiver the facts say nothing about is unknown.
+        assert_eq!(facts.resolve(&field, 90, 0), Outcome::Unknown);
+        assert_eq!(facts.resolve(&bare, 90, 0), Outcome::Unknown);
+        assert_eq!(facts.resolve(&expr(10, 20, None), 90, 0), Outcome::Unknown);
+        facts.root_default = true;
+        assert_eq!(facts.resolve(&field, 90, 0), Outcome::Prefix(None));
+        assert_eq!(facts.resolve(&bare, 90, 0), Outcome::Prefix(None));
+        assert_eq!(facts.resolve(&expr(10, 20, None), 90, 0), Outcome::Prefix(None));
+        assert_eq!(facts.resolve(&expr(90, 91, Some("g")), 90, 0), Outcome::Prefix(Some("/api".to_string())));
+        // A foreign call on a group may return anything; a bound parameter is
+        // whichever group the caller chose.
+        assert_eq!(facts.resolve(&expr(50, 60, None), 90, 0), Outcome::Unknown);
+        assert_eq!(facts.resolve(&expr(90, 92, Some("rg")), 90, 0), Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_hoisted_initializer_reads_its_hoisted_siblings_and_a_cycle_is_unknown() {
+        // A file 0..100 declaring, as package-level variables, `v1 =
+        // api.Group("/v1")` before `api = r.Group("/api")`, and the cycle
+        // `a = b.Group("/a")`, `b = a.Group("/b")`. A hoisted binding's
+        // declaration is its scope's start.
+        let mut facts = Facts { root_default: true, ..Facts::default() };
+        link(&mut facts, (14, 30), expr(14, 17, Some("api")), LinkPath::Literal("/v1".into()));
+        link(&mut facts, (44, 60), expr(44, 45, Some("r")), LinkPath::Literal("/api".into()));
+        link(&mut facts, (64, 70), expr(64, 65, Some("b")), LinkPath::Literal("/a".into()));
+        link(&mut facts, (74, 80), expr(74, 75, Some("a")), LinkPath::Literal("/b".into()));
+        for (name, init) in [("v1", (14, 30)), ("api", (44, 60)), ("a", (64, 70)), ("b", (74, 80))] {
+            bind(&mut facts, Binding {
+                name: name.into(),
+                decl: 0,
+                scope: (0, 100),
+                bound: Bound::Init(expr(init.0, init.1, None)),
+                hoisted: true,
+            });
+        }
+        assert_eq!(
+            facts.resolve(&expr(90, 92, Some("v1")), 90, 0),
+            Outcome::Prefix(Some("/api/v1".to_string()))
+        );
+        assert_eq!(facts.resolve(&expr(90, 91, Some("a")), 90, 0), Outcome::Unknown);
+    }
+
+    #[test]
     fn a_link_that_read_more_replaces_one_that_read_less() {
+        assert!(LinkPath::Foreign < LinkPath::Transparent);
         assert!(LinkPath::Transparent < LinkPath::Opaque);
         assert!(LinkPath::Opaque < LinkPath::Literal("/x".into()));
     }

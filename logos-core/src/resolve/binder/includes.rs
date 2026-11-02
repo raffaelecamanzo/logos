@@ -19,19 +19,23 @@
 //! base class are looked up the way C++ reads a name, level by level from the
 //! innermost scope of the source — its enclosing classes and namespaces, an
 //! out-of-line member's own class included — out to the global one, each
-//! level reading the path under it ([`Ctx::include_lookup`]). At a level the
+//! level reading the path under it ([`IncludeLookup::include_lookup`]). At a level the
 //! including file's own declarations decide first — the base lexical rule a
 //! definition beside its own header's prototype relied on — then those of every
 //! file its includes reach; the first level holding any decides, exactly one or
-//! nothing. A rooted `::f` is read at the global level alone. A `using`
+//! nothing — save that an included prototype whose recorded parameters differ
+//! from those of every own-file candidate of its name, spelling aside, is
+//! another overload, which joins them in C++ (S-820, [`super::prototype_pairs`]). A call landing on a
+//! prototype paired with a definition in another file binds the definition.
+//! A rooted `::f` is read at the global level alone. A `using`
 //! declaration or directive brings its names in where it is written: one in
 //! the file or a namespace at that namespace's level, wherever the namespace
 //! is reopened in the file; one in a function or a class inside it alone
-//! ([`Ctx::usings_in_scope`]). A namespace holds functions and a class its
+//! ([`IncludeLookup::usings_in_scope`]). A namespace holds functions and a class its
 //! members: an out-of-line member definition (`void Cls::m() {}`, which S-577
 //! keeps under its namespace) is reached only through its class's name, never
 //! as a free function, and an included file's member of a class extraction
-//! never captured is not reached at all ([`Index::is_stray_member`]).
+//! never captured is not reached at all ([`IncludeScope::is_stray_member`](super::includes::IncludeScope::is_stray_member)).
 //!
 //! Not read: a preprocessor's macros and conditionals (an include under
 //! `#ifdef` counts), `compile_commands.json`, overloads by argument type beyond
@@ -41,6 +45,8 @@
 //! [FR-RS-38]: ../../../../docs/specs/requirements/FR-RS-38.md
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 
+use std::ops::Deref;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::extract::refs::is_relative_head;
@@ -49,6 +55,9 @@ use crate::model::{EdgeKind, NodeId, NodeKind, RefForm};
 
 use super::super::rel_path::{dir_segments, fold_path};
 use super::{exactly_one, is_class_like, split, Ctx, Index, Outcome, Res, Residue, Want, FULLY_QUALIFIED_HEAD};
+use super::call_reach::CallReach;
+use super::link_unit::LinkUnit;
+use super::supertype_climb::SupertypeClimb;
 
 /// What the binder knows of the include-roots languages' files.
 #[derive(Debug, Default)]
@@ -181,7 +190,7 @@ impl IncludeScope {
         let spec = segs.join("/");
         if segs.first().is_some_and(|h| is_relative_head(h)) {
             if let Some(path) = fold_path(&dir_segments(source_file), &spec) {
-                match file_at_path(ix, &path) {
+                match Self::file_at(ix, &path) {
                     Res::NotFound => {}
                     decided => return decided,
                 }
@@ -191,7 +200,7 @@ impl IncludeScope {
         for root in &self.roots {
             let base: Vec<&str> = root.split('/').filter(|s| !s.is_empty()).collect();
             let Some(path) = fold_path(&base, &spec) else { continue };
-            match file_at_path(ix, &path) {
+            match Self::file_at(ix, &path) {
                 Res::Found(file) => found.push(file),
                 Res::NotFound => {}
                 Res::Ambiguous => return Res::Ambiguous,
@@ -200,6 +209,18 @@ impl IncludeScope {
         found.sort();
         found.dedup();
         exactly_one(&found)
+    }
+
+    /// Whether file root `from`'s includes reach file root `to`, transitively
+    /// (S-820, [`super::prototype_pairs`]).
+    pub(super) fn reaches(&self, from: NodeId, to: NodeId) -> bool {
+        self.visible.get(&from).is_some_and(|reach| reach.binary_search(&to).is_ok())
+    }
+
+    /// The class path out-of-line member `id`'s symbol spells, when its
+    /// container is no class ([`IncludeScope::qualifiers`]).
+    pub(super) fn qualifier(&self, id: NodeId) -> Option<&[String]> {
+        self.qualifiers.get(&id).map(Vec::as_slice)
     }
 }
 
@@ -213,15 +234,6 @@ fn is_include_row(r: &UnresolvedRefRow) -> bool {
 /// `Path` row naming the local binding it brings in.
 fn is_using_row(r: &UnresolvedRefRow) -> bool {
     r.kind == EdgeKind::Imports && (r.form == RefForm::Glob || (r.form == RefForm::Path && r.alias.is_some()))
-}
-
-/// The file root of the include-roots file at the project-relative `path`,
-/// matched whole — extension included.
-fn file_at_path(ix: &Index, path: &str) -> Res {
-    if !ix.layout.resolves_includes(path) {
-        return Res::NotFound;
-    }
-    ix.file_root_at(path)
 }
 
 /// Every file root `root`'s includes reach through `direct`, itself excluded,
@@ -242,14 +254,40 @@ fn reach(root: NodeId, direct: &HashMap<NodeId, Vec<NodeId>>) -> Vec<NodeId> {
     out
 }
 
-impl Ctx<'_> {
+/// A row of an include-roots language, read through its include scope.
+#[derive(Clone, Copy)]
+pub(super) struct IncludeLookup<'c, 'a> {
+    pub(super) cx: &'c Ctx<'a>,
+}
+
+impl<'a> Deref for IncludeLookup<'_, 'a> {
+    type Target = Ctx<'a>;
+
+    fn deref(&self) -> &Ctx<'a> {
+        self.cx
+    }
+}
+
+impl IncludeLookup<'_, '_> {
+    /// Whether the source's file is of a language whose files make one link
+    /// unit (C, S-584) — which overloads nothing (S-820).
+    fn source_links_units(&self) -> bool {
+        self.source_file_is(|layout, p| layout.links_units(p))
+    }
+
     /// Whether the source's file is of an include-roots language (S-579).
     fn reads_includes(&self) -> bool {
+        self.source_file_is(|layout, p| layout.resolves_includes(p))
+    }
+
+    /// Whether the source's project-relative path satisfies `test` under the
+    /// index's layout.
+    fn source_file_is(&self, test: impl Fn(&super::PackageLayout, &str) -> bool) -> bool {
         self.ix
             .info
             .get(&self.source)
             .and_then(|i| i.file_path.as_deref())
-            .is_some_and(|p| self.ix.layout.resolves_includes(p))
+            .is_some_and(|p| test(&self.ix.layout, p))
     }
 
     /// Bind a row of an include-roots language that its include scope decides
@@ -259,12 +297,13 @@ impl Ctx<'_> {
     /// - an `#include` binds the one file it names ([`IncludeScope::resolve_header`]);
     /// - a `using` declaration the one declaration it names, a `using`
     ///   directive the one namespace — never several reopenings of it;
-    /// - a Path-form call the one callable [`include_lookup`](Ctx::include_lookup) reaches;
+    /// - a Path-form call the one callable [`include_lookup`](IncludeLookup::include_lookup) reaches;
     /// - a type relation this arm sees is not a class's own (a base clause
     ///   error recovery left outside its class): it binds nothing.
     ///
     /// [FR-RS-38]: ../../../../docs/specs/requirements/FR-RS-38.md
     pub(super) fn resolve_include_row(&self, r: &UnresolvedRefRow) -> Option<Outcome> {
+        let link_unit = LinkUnit { cx: self.cx };
         if r.form == RefForm::Symbol || !self.reads_includes() {
             return None;
         }
@@ -282,10 +321,13 @@ impl Ctx<'_> {
                 // (CR-068 Part B), as its scope walk did before (S-579).
                 self.bare_path_call.set(segs.len() == 1);
                 let (res, level) = self.include_lookup_at(&segs, |k| want.admits(k));
-                // A C call its includes leave undecided reads its link unit (S-584).
-                let res = self.across_link_unit(&segs, r.line, res);
+                // A call landing on a paired prototype binds its definition
+                // (S-820) — before a C call its includes leave undecided reads
+                // its link unit (S-584), and after a qualified or typed
+                // receiver call finds its class's member.
+                let res = link_unit.across_link_unit(&segs, r.line, self.ix.pairs.through_pair(res));
                 self.bare_path_call.set(false);
-                self.class_member(&segs, res, level)
+                self.ix.pairs.through_pair(self.class_member(&segs, res, level))
             }
             (EdgeKind::Extends | EdgeKind::Implements | EdgeKind::TypeUses | EdgeKind::Instantiates, _) => {
                 return Some(Outcome::Unbound)
@@ -305,9 +347,9 @@ impl Ctx<'_> {
 
     /// A qualified call `T::m`, read as C++ reads a qualified name in a class's
     /// scope (S-581, [FR-RS-39]): `T` first — the one class-like declaration
-    /// [`include_lookup`](Ctx::include_lookup) reaches — then `m` among its
+    /// [`include_lookup`](IncludeLookup::include_lookup) reaches — then `m` among its
     /// members and, failing them, its nearest proven base's
-    /// ([`type_member`](Ctx::type_member)). The call a typed receiver records
+    /// ([`type_member`](super::supertype_climb::SupertypeClimb::type_member)). The call a typed receiver records
     /// (`s.ship()` on a `SpecialOrder s`) is such a call, and so is a written
     /// `Derived::m()`. `level` is where the lookup of the whole path decided:
     /// an answer at `T`'s own level or nearer stands, and so does every other
@@ -319,6 +361,7 @@ impl Ctx<'_> {
     ///
     /// [FR-RS-39]: ../../../../docs/specs/requirements/FR-RS-39.md
     fn class_member(&self, segs: &[String], res: Res, level: Option<usize>) -> Res {
+        let supertype_climb = SupertypeClimb { cx: self.cx };
         let Some((name, qualifier)) = segs.split_last().filter(|(_, q)| !q.is_empty()) else {
             return res;
         };
@@ -328,7 +371,7 @@ impl Ctx<'_> {
         if res != Res::NotFound && level >= Some(ty_level) {
             return res;
         }
-        self.type_member(ty, name)
+        supertype_climb.type_member(ty, name)
     }
 
     /// A class's type relation of an include-roots language (S-579), read from
@@ -348,11 +391,13 @@ impl Ctx<'_> {
 
     /// Look `segs` up as C++ reads a name (S-579, [FR-RS-38]; the module
     /// docs): a bare name first among what the source's own callables nest
-    /// ([`nested_name`](Ctx::nested_name)), then level by level from the
+    /// ([`nested_name`](IncludeLookup::nested_name)), then level by level from the
     /// innermost scope of [`lexical_start`](Ctx::lexical_start) out to the
     /// global one, at each the source file's own declarations of `segs` under
     /// the level first, then those of every file its includes reach, each
-    /// level adding the names of the `using`s in force there. The first set holding a
+    /// level adding the names of the `using`s in force there — an included
+    /// prototype of other recorded parameters, spelling aside, joining a C++ own file's set as
+    /// another overload ([`PrototypePairs::distinct_overloads`](super::prototype_pairs::PrototypePairs::distinct_overloads), S-820). The first set holding a
     /// callable the call's arguments admit ([`applicable`](Ctx::applicable)) —
     /// or any declaration `admit` takes — decides, exactly one or nothing
     /// ([NFR-RA-05]).
@@ -361,7 +406,7 @@ impl Ctx<'_> {
     /// sits in a body extraction did not capture — a destructor, an operator,
     /// a macro's — which may be a member's: there the file's own out-of-line
     /// members are names of their namespace too, as its scope walk read them
-    /// before includes were ([`Index::declared_under`]).
+    /// before includes were ([`IncludeScope::declared_under`](super::includes::IncludeScope::declared_under)).
     ///
     /// [FR-RS-38]: ../../../../docs/specs/requirements/FR-RS-38.md
     /// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
@@ -369,15 +414,16 @@ impl Ctx<'_> {
         self.include_lookup_at(segs, admit).0
     }
 
-    /// [`include_lookup`](Ctx::include_lookup), with the level that decided:
+    /// [`include_lookup`](IncludeLookup::include_lookup), with the level that decided:
     /// the depth of its scope chain (`0` the global level), `usize::MAX` for a
     /// name the source's own callables nest, and `None` when nothing did. Two
     /// lookups from one source compare by it — a deeper level is a nearer
     /// scope, whose declaration hides an outer one of the name
-    /// ([`class_member`](Ctx::class_member), S-581).
+    /// ([`class_member`](IncludeLookup::class_member), S-581).
     fn include_lookup_at(&self, segs: &[String], admit: impl Fn(NodeKind) -> bool) -> (Res, Option<usize>) {
+        let ix: &Index = self.ix;
         let start = self.lexical_start.get();
-        let own = self.ix.file_root_of(start);
+        let own = ix.file_root_of(start);
         // A rooted `::f` / `::Base` (headed `FULLY_QUALIFIED_HEAD`) is read at
         // the global level alone.
         let (rooted, segs) = match segs.split_first() {
@@ -392,17 +438,26 @@ impl Ctx<'_> {
                 return (res, Some(usize::MAX));
             }
         }
-        let included = self.ix.includes.visible.get(&own).map_or(&[][..], Vec::as_slice);
+        let included = ix.includes.visible.get(&own).map_or(&[][..], Vec::as_slice);
         let chain = if rooted { Vec::new() } else { self.scope_chain(start, own) };
-        let uncaptured_body = self.ix.info.get(&start).is_some_and(|i| i.kind == NodeKind::Module);
+        let uncaptured_body = ix.info.get(&start).is_some_and(|i| i.kind == NodeKind::Module);
         let usings = self.usings_in_scope(start, own, &chain, rooted);
         for depth in (0..=chain.len()).rev() {
             let paths = self.level_paths(&chain[..depth], segs, &usings);
-            for (files, own_pass) in [(std::slice::from_ref(&own), true), (included, false)] {
-                let found = self.declared_in(files, &paths, &admit, own_pass && uncaptured_body, own_pass);
-                if !found.is_empty() {
-                    return (exactly_one(&found), Some(depth));
+            let mut found = self.declared_in(std::slice::from_ref(&own), &paths, &admit, uncaptured_body, true);
+            if found.is_empty() {
+                found = self.declared_in(included, &paths, &admit, false, false);
+            } else {
+                // An included prototype of other parameters is another
+                // overload, never hidden by the own file's (S-820) — save in
+                // a language that overloads nothing (C).
+                if !self.source_links_units() {
+                    let overloads = ix.pairs.distinct_overloads(ix, &found, || self.declared_in(included, &paths, &admit, false, false));
+                    found.extend(overloads);
                 }
+            }
+            if !found.is_empty() {
+                return (exactly_one(&found), Some(depth));
             }
         }
         (Res::NotFound, None)
@@ -410,24 +465,25 @@ impl Ctx<'_> {
 
     /// A bare `name` declared under the source's callables — a declaration a
     /// function's body nests — innermost first, up to its first enclosing
-    /// namespace or class: the lexical scopes [`scope_chain`](Ctx::scope_chain)
+    /// namespace or class: the lexical scopes [`scope_chain`](IncludeLookup::scope_chain)
     /// does not name. `None` when none declares it.
     fn nested_name(&self, start: NodeId, own: NodeId, name: &str, admit: &impl Fn(NodeKind) -> bool) -> Option<Res> {
+        let ix: &Index = self.ix;
         let mut cursor = Some(start);
-        while let Some(scope) = cursor.filter(|&id| id != own && !self.ix.info.get(&id).is_some_and(|i| is_scope(i.kind))) {
-            let found = self.admitted(self.ix.members_named(scope, name, Want::Any), admit);
+        while let Some(scope) = cursor.filter(|&id| id != own && !ix.info.get(&id).is_some_and(|i| is_scope(i.kind))) {
+            let found = self.admitted(ix.members_named(scope, name, Want::Any), admit);
             if !found.is_empty() {
                 return Some(exactly_one(&found));
             }
-            cursor = self.ix.parent.get(&scope).copied();
+            cursor = ix.parent.get(&scope).copied();
         }
         None
     }
 
     /// The declarations `paths` name under each of `files`, as one candidate
-    /// set ([`admitted`](Ctx::admitted)): out-of-line members as names of their
+    /// set ([`admitted`](IncludeLookup::admitted)): out-of-line members as names of their
     /// namespace when `members`, and a member of a class extraction never
-    /// captured ([`Index::is_stray_member`]) only when the files are the
+    /// captured ([`IncludeScope::is_stray_member`](super::includes::IncludeScope::is_stray_member)) only when the files are the
     /// source's own.
     fn declared_in(
         &self,
@@ -437,31 +493,35 @@ impl Ctx<'_> {
         members: bool,
         own: bool,
     ) -> Vec<NodeId> {
+        let ix: &Index = self.ix;
+        let scope: &IncludeScope = &ix.includes;
         let found: Vec<NodeId> = files
             .iter()
-            .flat_map(|&file| paths.iter().flat_map(move |path| self.ix.declared_under(file, path, members)))
-            .filter(|&id| own || !self.ix.is_stray_member(id))
+            .flat_map(|&file| paths.iter().flat_map(move |path| scope.declared_under(ix, file, path, members)))
+            .filter(|&id| own || !scope.is_stray_member(ix, id))
             .collect();
         self.admitted(found, admit)
     }
 
     /// `found` as a candidate set: of a kind `admit` takes, never the
     /// declaration whose header is being read nor one a repository adds to
-    /// `std` ([`Index::in_std`]), id-sorted and distinct, then
+    /// `std` ([`IncludeScope::in_std`](super::includes::IncludeScope::in_std)), id-sorted and distinct, then
     /// the callables the call's arguments admit and, for a bare call, a free
-    /// function over a same-named method ([`prefer_free_functions`](Ctx::prefer_free_functions)).
+    /// function over a same-named method ([`prefer_free_functions`](super::call_reach::CallReach::prefer_free_functions)).
     fn admitted(&self, mut found: Vec<NodeId>, admit: &impl Fn(NodeKind) -> bool) -> Vec<NodeId> {
+        let call_reach = CallReach { cx: self.cx };
+        let ix: &Index = self.ix;
         found.retain(|&id| {
-            self.ix.info.get(&id).is_some_and(|i| admit(i.kind)) && !self.is_own_header(id) && !self.ix.in_std(id)
+            ix.info.get(&id).is_some_and(|i| admit(i.kind)) && !self.is_own_header(id) && !IncludeScope::in_std(ix, id)
         });
         found.sort_unstable();
         found.dedup();
-        self.prefer_free_functions(self.applicable(found))
+        call_reach.prefer_free_functions(self.applicable(found))
     }
 
     /// The paths `segs` names at one level `scope` of the lookup: under the
     /// level itself, and through each `using` in force at that level
-    /// ([`usings_in_scope`](Ctx::usings_in_scope)) — a directive's namespace
+    /// ([`usings_in_scope`](IncludeLookup::usings_in_scope)) — a directive's namespace
     /// (`using namespace util;` → `util::segs`), and every declaration naming
     /// the head (`using util::Args;` → `util::Args::rest`), so two that name
     /// it make two candidates.
@@ -487,11 +547,12 @@ impl Ctx<'_> {
     ///
     /// [FR-RS-44]: ../../../../docs/specs/requirements/FR-RS-44.md
     pub(super) fn local_using_lookup(&self, name: &str, want: Want) -> Option<Res> {
+        let ix: &Index = self.ix;
         if !self.reads_includes() {
             return None;
         }
         let start = self.lexical_start.get();
-        let own = self.ix.file_root_of(start);
+        let own = ix.file_root_of(start);
         let chain = self.scope_chain(start, own);
         let naming: Vec<(usize, &Using)> = self
             .usings_in_scope(start, own, &chain, false)
@@ -572,44 +633,26 @@ impl Ctx<'_> {
 ///
 /// (A member whose class extraction did not capture — a class template's
 /// specialization `struct formatter<std::byte, Char>`, a class a macro hides —
-/// sits under the namespace instead: [`Index::is_stray_member`].)
+/// sits under the namespace instead: [`IncludeScope::is_stray_member`](super::includes::IncludeScope::is_stray_member).)
 fn is_scope(kind: NodeKind) -> bool {
     kind == NodeKind::Module || is_class_like(kind)
 }
 
-impl Index {
-    /// Whether `r` binds through the include scope (S-579,
-    /// [`Index::ref_affected`]): any row of an include-roots file but a
-    /// capture-before-delete one. An `#include`, a `using`, a Path-form call
-    /// and a base read the include roots, the files the file's includes
-    /// reach, and theirs; a `this->` or in-class call and a member access read
-    /// the supertype hierarchy those bases make — none of which the row's
-    /// target spells. So it is re-bound on every non-empty delta, the stance
-    /// the path-specifier fallback takes for an import.
-    pub(super) fn reads_include_scope(&self, r: &UnresolvedRefRow) -> bool {
-        r.form != RefForm::Symbol
-            && self
-                .by_symbol
-                .get(&r.source_symbol)
-                .and_then(|id| self.info.get(id))
-                .and_then(|i| i.file_path.as_deref())
-                .is_some_and(|p| self.layout.resolves_includes(p))
-    }
-
+impl IncludeScope {
     /// Whether `id` is a method with no class around it: one a namespace holds
     /// whose name spells no class path — the member of a class extraction did
     /// not capture (a template specialization, whose name is no plain
     /// identifier; a class a macro hides). A name looked up from another file
     /// never reaches a class member that way, so the included files offer none
-    /// ([`Ctx::include_lookup`]); the including file's own pass still does, as
+    /// ([`IncludeLookup::include_lookup`]); the including file's own pass still does, as
     /// its lexical scope chain did before includes were read.
-    fn is_stray_member(&self, id: NodeId) -> bool {
-        self.info.get(&id).is_some_and(|i| i.kind == NodeKind::Method)
-            && !self.includes.qualifiers.contains_key(&id)
-            && self
+    fn is_stray_member(&self, ix: &Index, id: NodeId) -> bool {
+        ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Method)
+            && !self.qualifiers.contains_key(&id)
+            && ix
                 .parent
                 .get(&id)
-                .and_then(|p| self.info.get(p))
+                .and_then(|p| ix.info.get(p))
                 .is_some_and(|p| p.kind == NodeKind::Module)
     }
 
@@ -620,12 +663,12 @@ impl Index {
     /// entity whose overload set the repository never holds whole. A
     /// `std::swap(a, b)` names that set, not the one overload a file adds, and
     /// `using namespace std;` the standard's namespace, not a file's block of it.
-    fn in_std(&self, id: NodeId) -> bool {
+    fn in_std(ix: &Index, id: NodeId) -> bool {
         let mut cursor = Some(id);
         while let Some(scope) = cursor {
-            let parent = self.parent.get(&scope).copied();
-            let top_level = parent.is_some_and(|p| self.file_root_of(p) == p && self.file_root_of(scope) == p);
-            if top_level && self.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module && i.name == "std") {
+            let parent = ix.parent.get(&scope).copied();
+            let top_level = parent.is_some_and(|p| ix.file_root_of(p) == p && ix.file_root_of(scope) == p);
+            if top_level && ix.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module && i.name == "std") {
                 return true;
             }
             cursor = parent;
@@ -638,17 +681,17 @@ impl Index {
     /// of the last name. A namespace holds functions: the out-of-line member
     /// definitions it holds (`void Cls::m() {}`) are reached through the class
     /// path their name spells, and as one of its own names only when
-    /// `members` ([`Ctx::include_lookup`]'s uncaptured body).
-    fn declared_under(&self, scope: NodeId, path: &[String], members: bool) -> Vec<NodeId> {
+    /// `members` ([`IncludeLookup::include_lookup`]'s uncaptured body).
+    fn declared_under(&self, ix: &Index, scope: NodeId, path: &[String], members: bool) -> Vec<NodeId> {
         let Some((name, heads)) = path.split_last() else {
             return Vec::new();
         };
-        let namespace = self.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module);
-        let out_of_line = |id: &NodeId| self.includes.qualifiers.get(id);
+        let namespace = ix.info.get(&scope).is_some_and(|i| i.kind == NodeKind::Module);
+        let out_of_line = |id: &NodeId| self.qualifiers.get(id);
         let mut found: Vec<NodeId> = Vec::new();
         if namespace {
             found.extend(
-                self.members_named(scope, name, Want::Any)
+                ix.members_named(scope, name, Want::Any)
                     .into_iter()
                     .filter(|id| match out_of_line(id) {
                         Some(class) => class.as_slice() == heads || (members && heads.is_empty()),
@@ -656,16 +699,26 @@ impl Index {
                     }),
             );
         } else if heads.is_empty() {
-            found.extend(self.members_named(scope, name, Want::Any));
+            found.extend(ix.members_named(scope, name, Want::Any));
         }
         if let Some((head, rest)) = heads.split_first() {
-            for inner in self.members_named(scope, head, Want::Any) {
-                if self.info.get(&inner).is_some_and(|i| is_scope(i.kind)) {
-                    found.extend(self.declared_under(inner, &[rest, std::slice::from_ref(name)].concat(), members));
+            for inner in ix.members_named(scope, head, Want::Any) {
+                if ix.info.get(&inner).is_some_and(|i| is_scope(i.kind)) {
+                    found.extend(self.declared_under(ix, inner, &[rest, std::slice::from_ref(name)].concat(), members));
                 }
             }
         }
         found
+    }
+
+    /// The file root of the include-roots file at the project-relative `path`,
+    /// matched whole — extension included ([`ModuleIndex::file_root_at`](super::module_index::ModuleIndex::file_root_at)).
+    fn file_at(ix: &Index, path: &str) -> Res {
+        if !ix.layout.resolves_includes(path) {
+            return Res::NotFound;
+        }
+        let modules: &super::module_index::ModuleIndex = &ix.modules;
+        modules.file_root_at(path)
     }
 }
 

@@ -154,7 +154,7 @@ fn check_rules_flags_the_layered_violation_and_rerun_is_identical() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -178,7 +178,7 @@ fn check_rules_flags_the_layered_violation_and_rerun_is_identical() {
 
     // FR-GV-02 idempotence: a re-run yields identical violations and the
     // persisted set matches (no duplicate derived artifacts accumulate).
-    let again = engine.check_rules(None, true).expect("re-run");
+    let again = engine.quality().check_rules(None, true).expect("re-run");
     assert_eq!(again.violations, report.violations);
     let persisted = engine
         .runtime()
@@ -201,7 +201,7 @@ fn check_rules_flags_the_layered_violation_and_rerun_is_identical() {
 fn a_project_with_no_contract_reports_no_verdict() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed, None,
         "no contract, nothing else fired → no verdict, not a clean pass (FR-GV-22)"
@@ -240,9 +240,9 @@ fn doctor_reports_ok_on_a_healthy_graph_and_drift_on_a_forced_orphan() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     // Populate the graph (a clean reconcile — no drift, so the debug-build
     // structural assertion after sync holds).
-    engine.check_rules(None, true).expect("populate the graph");
+    engine.quality().check_rules(None, true).expect("populate the graph");
 
-    let healthy = engine.doctor().expect("doctor runs");
+    let healthy = engine.quality().doctor().expect("doctor runs");
     assert!(healthy.ok, "a freshly-indexed graph is structurally sound");
     assert_eq!(
         healthy.node_count, healthy.distinct_symbol_ids,
@@ -252,7 +252,7 @@ fn doctor_reports_ok_on_a_healthy_graph_and_drift_on_a_forced_orphan() {
 
     inject_orphan_shingle(tmp.path());
 
-    let drifted = engine.doctor().expect("doctor runs");
+    let drifted = engine.quality().doctor().expect("doctor runs");
     assert!(!drifted.ok, "doctor detects the forced orphan (FR-GV-18)");
     assert_eq!(drifted.orphan_shingles, 1);
     assert!(
@@ -268,20 +268,20 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // Baseline + populate on a clean graph (reconcile ok — no drift yet).
-    engine.session_start().expect("session_start saves the baseline");
+    engine.quality().session_start().expect("session_start saves the baseline");
 
     // Clean: every gate path passes and doctor is ok. `reconcile=false` reads
     // the just-reconciled graph without re-running sync.
-    let clean_gate = engine.gate(None, false, false).expect("gate runs");
+    let clean_gate = engine.quality().gate(None, false, false).expect("gate runs");
     assert!(clean_gate.passed, "clean graph passes: {}", clean_gate.message);
     assert!(clean_gate.structural_faults.is_empty());
     let baseline_signal = clean_gate.signal;
     assert_eq!(
-        engine.check_rules(None, false).expect("check_rules").passed,
+        engine.quality().check_rules(None, false).expect("check_rules").passed,
         None,
         "clean graph, no contract, nothing fired → no verdict yet (FR-GV-22)"
     );
-    assert!(engine.doctor().expect("doctor").ok);
+    assert!(engine.quality().doctor().expect("doctor").ok);
 
     // Force drift that does NOT move the metric signal.
     inject_orphan_shingle(tmp.path());
@@ -291,7 +291,7 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
     // assertion (NFR-RA-13) would panic on the drift before the gate could
     // report it — the structural fold-in itself runs regardless of reconcile,
     // so this exercises the same code session_end reaches in a release build.
-    let gate = engine.gate(None, false, false).expect("gate runs");
+    let gate = engine.quality().gate(None, false, false).expect("gate runs");
     assert!(!gate.passed, "structural drift hard-fails the gate: {}", gate.message);
     assert_eq!(
         gate.signal, baseline_signal,
@@ -307,7 +307,7 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
     // check_rules exits 1 with an error-severity structural finding (FR-GV-02),
     // even with no rules.toml loaded — the always-on fold-in still yields a
     // real verdict (FR-GV-22: not an empty evaluated set).
-    let check = engine.check_rules(None, false).expect("check_rules runs");
+    let check = engine.quality().check_rules(None, false).expect("check_rules runs");
     assert_eq!(check.passed, Some(false), "structural drift fails check_rules");
     assert!(
         check.violations.iter().any(|v| {
@@ -318,7 +318,7 @@ fn structural_drift_hard_fails_the_gate_and_check_rules_even_when_the_signal_hol
     );
 
     // health folds the verdict in too (CR-052).
-    let health = engine.health(false).expect("health runs");
+    let health = engine.quality().health(false).expect("health runs");
     assert!(!health.ok && !health.structural_ok, "health surfaces the drift");
     assert!(!health.structural_faults.is_empty());
 }
@@ -351,13 +351,13 @@ fn doctor_reports_a_stored_file_a_nested_gitignore_excludes_as_admission_drift()
     let tmp = clean_project();
     write(tmp.path(), "src/gen/leaked.rs", "pub fn leaked() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("populate the graph");
-    assert!(engine.doctor().expect("doctor runs").ok, "no drift while the file is admitted");
+    engine.quality().check_rules(None, true).expect("populate the graph");
+    assert!(engine.quality().doctor().expect("doctor runs").ok, "no drift while the file is admitted");
 
     // The rule arrives without any sync — the store still holds the file.
     write(tmp.path(), "src/gen/.gitignore", "leaked.rs\n");
 
-    let drifted = engine.doctor().expect("doctor runs");
+    let drifted = engine.quality().doctor().expect("doctor runs");
     assert!(!drifted.ok, "doctor detects the nested-ignore drift");
     assert_eq!(drifted.unadmitted_sample, vec!["src/gen/leaked.rs".to_string()]);
     assert!(
@@ -371,16 +371,16 @@ fn doctor_reports_a_stored_file_a_nested_gitignore_excludes_as_admission_drift()
 fn doctor_reports_ok_on_a_healthy_graph_and_admission_drift_on_an_injected_unadmitted_file() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("populate the graph");
+    engine.quality().check_rules(None, true).expect("populate the graph");
 
-    let healthy = engine.doctor().expect("doctor runs");
+    let healthy = engine.quality().doctor().expect("doctor runs");
     assert!(healthy.ok, "a freshly-indexed graph has no admission drift");
     assert_eq!(healthy.unadmitted_files, 0);
     assert!(healthy.unadmitted_sample.is_empty());
 
     let path = inject_unadmitted_file(tmp.path());
 
-    let drifted = engine.doctor().expect("doctor runs");
+    let drifted = engine.quality().doctor().expect("doctor runs");
     assert!(!drifted.ok, "doctor detects the admission drift (FR-GV-20)");
     assert_eq!(drifted.unadmitted_files, 1);
     assert_eq!(drifted.unadmitted_sample, vec![path.to_string()]);
@@ -400,18 +400,18 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // Baseline + populate on a clean graph (no drift yet).
-    engine.session_start().expect("session_start saves the baseline");
+    engine.quality().session_start().expect("session_start saves the baseline");
 
-    let clean_gate = engine.gate(None, false, false).expect("gate runs");
+    let clean_gate = engine.quality().gate(None, false, false).expect("gate runs");
     assert!(clean_gate.passed, "clean graph passes: {}", clean_gate.message);
     assert!(clean_gate.structural_faults.is_empty());
     let baseline_signal = clean_gate.signal;
     assert_eq!(
-        engine.check_rules(None, false).expect("check_rules").passed,
+        engine.quality().check_rules(None, false).expect("check_rules").passed,
         None,
         "clean graph, no contract, nothing fired → no verdict yet (FR-GV-22)"
     );
-    assert!(engine.doctor().expect("doctor").ok);
+    assert!(engine.quality().doctor().expect("doctor").ok);
 
     let path = inject_unadmitted_file(tmp.path());
 
@@ -419,7 +419,7 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
     // `reconcile=false`: this test isolates the S-215 tripwire from the S-214
     // sync/watcher consumer work (a separate story) — no reconcile runs here
     // to (re-)purge or re-admit the injected row.
-    let gate = engine.gate(None, false, false).expect("gate runs");
+    let gate = engine.quality().gate(None, false, false).expect("gate runs");
     assert!(!gate.passed, "admission drift hard-fails the gate: {}", gate.message);
     assert_eq!(
         gate.signal, baseline_signal,
@@ -433,7 +433,7 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
 
     // check_rules exits 1 with a distinct error-severity admission finding,
     // even with no rules.toml loaded (FR-GV-22: not an empty evaluated set).
-    let check = engine.check_rules(None, false).expect("check_rules runs");
+    let check = engine.quality().check_rules(None, false).expect("check_rules runs");
     assert_eq!(check.passed, Some(false), "admission drift fails check_rules");
     assert!(
         check.violations.iter().any(|v| {
@@ -444,7 +444,7 @@ fn admission_drift_hard_fails_the_gate_check_rules_and_health_with_the_signal_un
     );
 
     // health folds the verdict in too.
-    let health = engine.health(false).expect("health runs");
+    let health = engine.quality().health(false).expect("health runs");
     assert!(!health.ok && !health.structural_ok, "health surfaces the admission drift");
     assert!(health.structural_faults.iter().any(|f| f.contains(path)));
 }
@@ -456,9 +456,9 @@ fn doctor_report_json_shape_is_additive_only() {
     // `--json`, MCP, and web surfaces all serialize this struct verbatim.
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("populate the graph");
+    engine.quality().check_rules(None, true).expect("populate the graph");
 
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
     let value = serde_json::to_value(&report).expect("DoctorReport serializes");
     let obj = value.as_object().expect("DoctorReport is a JSON object");
 
@@ -489,9 +489,9 @@ fn verify_reports_ok_on_a_clean_freshly_indexed_graph() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     // A full index leaves the live store population-equal to a fresh reindex.
-    engine.index();
+    engine.pipeline().index();
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(
         report.ok,
         "a freshly-indexed graph matches a fresh reindex: {}",
@@ -534,13 +534,13 @@ fn verify_detects_an_orphan_file_leak_and_never_mutates_the_live_store() {
         "pub fn gone() {}\npub fn also_gone() {}\n",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Live counts before the leak — the read-only-census immutability baseline.
-    let before = engine.health(false).expect("health reads live counts");
+    let before = engine.quality().health(false).expect("health reads live counts");
     fs::remove_file(tmp.path().join("src/gone.rs")).unwrap();
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(
         !report.ok,
         "the orphan-file leak is drift: {}",
@@ -574,14 +574,14 @@ fn verify_detects_an_orphan_file_leak_and_never_mutates_the_live_store() {
     // The live store is opened READ-ONLY for the census — `verify` must not purge
     // the leaked nodes or otherwise mutate the graph (FR-GV-19). Counts are read
     // with reconcile=false so `health` itself never syncs the leak away.
-    let after = engine.health(false).expect("health reads live counts");
+    let after = engine.quality().health(false).expect("health reads live counts");
     assert_eq!(before.nodes, after.nodes, "verify left the node count unchanged");
     assert_eq!(before.files, after.files, "verify left the file count unchanged");
     assert_eq!(before.edges, after.edges, "verify left the edge count unchanged");
 
     // Repeatable: the shadow store was torn down cleanly (no leftover lock or
     // corruption), so a second run yields the same verdict.
-    let again = engine.verify().expect("verify runs again");
+    let again = engine.quality().verify().expect("verify runs again");
     assert!(
         !again.ok && again.node_delta == report.node_delta,
         "verify is repeatable after shadow teardown"
@@ -597,12 +597,12 @@ fn verify_detects_a_new_unindexed_file_as_orphaned_reindex_only_symbols() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/first.rs", "pub fn first() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Add a new file on disk; no sync, so the live store never learns of it.
     write(tmp.path(), "src/added.rs", "pub fn added_symbol() {}\n");
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(
         !report.ok,
         "an unindexed new file is drift: {}",
@@ -641,11 +641,11 @@ fn verify_fails_on_embedded_structural_drift_even_when_counts_match() {
     // the `structural.is_ok()` conjunct of `ok` and the structural message branch.
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     inject_orphan_shingle(tmp.path());
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(
         !report.ok,
         "embedded structural drift fails verify: {}",
@@ -694,7 +694,7 @@ fn node_named(conn: &rusqlite::Connection, name: &str) -> i64 {
 fn verify_lists_a_lost_edge_with_its_kind_symbols_and_files() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Drop the `api -> helper` call from the live graph only — the CR-236 shape:
     // an edge a fresh reindex has and the live graph lost.
@@ -708,7 +708,7 @@ fn verify_lists_a_lost_edge_with_its_kind_symbols_and_files() {
         .unwrap();
     assert_eq!(dropped, 1, "the fixture binds exactly one api -> helper Calls edge");
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(!report.ok, "a lost edge is drift: {}", report.message);
     assert_eq!(
         (report.node_delta, report.file_delta, report.edge_delta),
@@ -741,7 +741,7 @@ fn verify_names_a_swapped_edge_pair_though_the_edge_counts_match() {
     // it — parity with the symbol sets, which already fail `ok` on a same-size swap.
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let conn = live_db(tmp.path());
     let (api, helper) = (node_named(&conn, "api"), node_named(&conn, "helper"));
@@ -757,7 +757,7 @@ fn verify_names_a_swapped_edge_pair_though_the_edge_counts_match() {
     )
     .unwrap();
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert_eq!(report.edge_delta, 0, "the edge counts match");
     assert!(!report.ok, "a swapped edge is drift: {}", report.message);
     assert_eq!(report.lost_edges_total, 1);
@@ -779,7 +779,7 @@ fn verify_names_a_kind_only_drift_between_the_same_endpoints() {
     // must carry the kind, or the extra list reads empty while `edge_delta` is 1.
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let conn = live_db(tmp.path());
     let (api, helper) = (node_named(&conn, "api"), node_named(&conn, "helper"));
@@ -789,7 +789,7 @@ fn verify_names_a_kind_only_drift_between_the_same_endpoints() {
     )
     .unwrap();
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert_eq!(report.edge_delta, 1, "{}", report.message);
     assert_eq!(report.extra_edges_total, 1, "{:?}", report.extra_edges);
     assert_eq!(report.extra_edges[0].kind, EdgeKind::References);
@@ -815,7 +815,7 @@ fn verify_attributes_a_cross_file_edge_to_its_source_and_target_files() {
     );
     write(tmp.path(), "src/b.rs", "pub fn callee() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let conn = live_db(tmp.path());
     let (id, kind, source_file, target_file): (i64, i64, String, String) = conn
@@ -830,7 +830,7 @@ fn verify_attributes_a_cross_file_edge_to_its_source_and_target_files() {
         .expect("the fixture binds at least one cross-file edge");
     conn.execute("DELETE FROM edges WHERE id = ?1", [id]).unwrap();
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert_eq!(report.lost_edges_total, 1, "{:?}", report.lost_edges);
     let lost = &report.lost_edges[0];
     assert_eq!(lost.source_file.as_deref(), Some(source_file.as_str()));
@@ -848,10 +848,10 @@ fn verify_lists_the_extra_edges_of_an_orphan_file_leak() {
     write(tmp.path(), "src/keep.rs", "pub fn keep() {}\n");
     write(tmp.path(), "src/gone.rs", "pub fn gone() {}\npub fn also_gone() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     fs::remove_file(tmp.path().join("src/gone.rs")).unwrap();
 
-    let leak = engine.verify().expect("verify runs");
+    let leak = engine.quality().verify().expect("verify runs");
     assert!(leak.extra_edges_total >= 1, "{}", leak.message);
     assert_eq!(leak.lost_edges_total, 0, "a pure leak loses no edge");
     assert!(
@@ -872,10 +872,10 @@ fn verify_lists_the_lost_edges_of_a_file_added_without_a_sync() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/first.rs", "pub fn first() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     write(tmp.path(), "src/added.rs", "pub fn added() {}\n");
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(report.lost_edges_total >= 1, "{}", report.message);
     assert!(
         report.lost_edges.iter().all(|e| e.source_file.as_deref() == Some("src/added.rs")
@@ -897,13 +897,13 @@ fn verify_caps_the_edge_lists_but_keeps_exact_totals_and_a_stable_order() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", &src);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let dropped = live_db(tmp.path())
         .execute("DELETE FROM edges WHERE kind = 2", [])
         .unwrap();
     assert_eq!(dropped, 60, "the fixture binds one Calls edge per caller");
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert_eq!(report.lost_edges_total, 60, "the total is exact");
     assert_eq!(report.lost_edges.len(), 50, "the list is capped like the symbol lists");
     let sources: Vec<&str> = report.lost_edges.iter().map(|e| e.source_symbol.as_str()).collect();
@@ -914,7 +914,7 @@ fn verify_caps_the_edge_lists_but_keeps_exact_totals_and_a_stable_order() {
     assert_eq!(report.extra_edges_total, 0);
 
     // The same drift reads the same twice (the shadow store tears down cleanly).
-    let again = engine.verify().expect("verify runs again");
+    let again = engine.quality().verify().expect("verify runs again");
     assert_eq!(again.lost_edges, report.lost_edges);
 }
 
@@ -926,7 +926,7 @@ fn gate_saves_a_baseline_then_fails_on_a_deliberate_regression() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // No baseline yet → informational pass (FR-GV-05).
-    let informational = engine.gate(None, false, true).expect("gate runs");
+    let informational = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(informational.passed, "no baseline → informational pass");
     assert!(
         informational.message.contains("no baseline"),
@@ -935,13 +935,13 @@ fn gate_saves_a_baseline_then_fails_on_a_deliberate_regression() {
     );
 
     // Save the baseline (FR-GV-04).
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.passed && saved.saved);
     assert!(saved.signal.is_some(), "a non-empty fixture has a signal");
 
     // UAT-GV-04: an unchanged repo re-gates within epsilon — identical
     // signal, no regression, pass.
-    let unchanged = engine.gate(None, false, true).expect("gate runs");
+    let unchanged = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         unchanged.passed,
         "identical code must hold the baseline: {}",
@@ -969,7 +969,7 @@ fn tangle_b() {
 }
 ",
     );
-    let regressed = engine.gate(None, false, true).expect("gate runs");
+    let regressed = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         !regressed.passed,
         "a deliberate regression must fail the gate (UAT-GV-03): {}",
@@ -990,12 +990,12 @@ fn tangle_b() {
 
     // FR-GV-04 "re-running overwrites it": saving again anchors the gate to
     // the NEW (lower) baseline — the next bare gate passes against it.
-    let resaved = engine.gate(None, true, true).expect("gate --save again");
+    let resaved = engine.quality().gate(None, true, true).expect("gate --save again");
     assert_eq!(
         resaved.signal, regressed.signal,
         "the re-save records the degraded signal"
     );
-    let against_new = engine.gate(None, false, true).expect("gate runs");
+    let against_new = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         against_new.passed,
         "the baseline was overwritten, not duplicated: {}",
@@ -1020,7 +1020,7 @@ fn gate_threshold_floor_fails_a_low_signal() {
         "pub fn api(x: i32) -> i32 {\n    if x > 0 { helper() } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\nfn helper() -> i32 {\n    1\n}\n",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.gate(Some(10_000), false, true).expect("gate runs");
+    let result = engine.quality().gate(Some(10_000), false, true).expect("gate runs");
     assert!(
         !result.passed,
         "no real project scores a perfect 10000: {}",
@@ -1038,7 +1038,7 @@ fn session_start_saves_the_baseline_session_end_compares() {
 
     // First run: no baseline yet, so the session's snapshot becomes it.
     assert_eq!(baseline_row(tmp.path()), None, "a fresh project has no baseline");
-    let session = engine.session_start().expect("session_start runs");
+    let session = engine.quality().session_start().expect("session_start runs");
     assert!(!session.session_id.is_empty());
     assert!(session.started_at > 0);
     assert!(session.signal.is_some());
@@ -1048,7 +1048,7 @@ fn session_start_saves_the_baseline_session_end_compares() {
     assert!(session.message.contains("baseline saved"), "{}", session.message);
 
     // An unchanged session passes its end gate.
-    let end = engine.session_end().expect("session_end runs");
+    let end = engine.quality().session_end().expect("session_end runs");
     assert!(end.passed, "{}", end.message);
     assert_eq!(end.baseline_signal, session.signal);
 }
@@ -1065,7 +1065,7 @@ fn session_start_leaves_an_existing_gate_baseline_byte_identical() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let saved = engine
-        .gate_with_reason(None, true, true, Some("fixture: accepted"))
+        .quality().gate_with_reason(None, true, true, Some("fixture: accepted"))
         .expect("gate --save runs");
     // Backdated, so a rewrite within the same second still shows.
     live_db(tmp.path()).execute("UPDATE baseline SET created_at = 1", []).unwrap();
@@ -1077,7 +1077,7 @@ fn session_start_leaves_an_existing_gate_baseline_byte_identical() {
         "src/branchy.rs",
         "pub fn branchy(x: i32) -> i32 {\n    if x > 0 { 1 } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\n",
     );
-    let session = engine.session_start().expect("session_start runs");
+    let session = engine.quality().session_start().expect("session_start runs");
     assert_ne!(session.signal, saved.signal, "the fixture moved the signal");
     assert_eq!(baseline_row(tmp.path()), Some(blessed.clone()), "the baseline is untouched");
     assert!(session.message.contains("baseline kept"), "{}", session.message);
@@ -1090,7 +1090,7 @@ fn session_start_leaves_an_existing_gate_baseline_byte_identical() {
     assert_eq!(recorded, 1, "session snapshot #{id} is recorded");
     assert_ne!(rusqlite::types::Value::Integer(id), blessed[1]);
 
-    let end = engine.session_end().expect("session_end runs");
+    let end = engine.quality().session_end().expect("session_end runs");
     assert_eq!(end.baseline_signal, saved.signal, "session_end compares against the blessed baseline");
     assert_eq!(end.baseline_reason.as_deref(), Some("fixture: accepted"), "{end:#?}");
 }
@@ -1113,10 +1113,10 @@ fn session_start_resets_an_incomparable_baseline_before_the_edits() {
             write(root, ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n")
         }),
     ] {
-        engine.gate(None, true, true).expect("gate --save runs");
+        engine.quality().gate(None, true, true).expect("gate --save runs");
         make_incomparable(tmp.path());
 
-        let session = engine.session_start().expect("session_start runs");
+        let session = engine.quality().session_start().expect("session_start runs");
         assert!(session.message.contains(&format!("baseline reset: {why}")), "{why}: {}", session.message);
         let id: i64 = session.session_id.parse().expect("the session handle is a snapshot id");
         let row = baseline_row(tmp.path()).expect("a baseline row");
@@ -1128,7 +1128,7 @@ fn session_start_resets_an_incomparable_baseline_before_the_edits() {
             "src/branchy.rs",
             "pub fn branchy(x: i32) -> i32 {\n    if x > 0 { 1 } else if x < 0 { 2 } else if x == 9 { 3 } else { 4 }\n}\n",
         );
-        let end = engine.session_end().expect("session_end runs");
+        let end = engine.quality().session_end().expect("session_end runs");
         assert!(!end.saved && !end.message.contains("baseline reset"), "{why}: {}", end.message);
         assert_eq!(end.baseline_signal, session.signal, "{why}");
         assert_eq!(baseline_row(tmp.path()).map(|r| r[1].clone()), Some(rusqlite::types::Value::Integer(id)), "{why}");
@@ -1161,17 +1161,17 @@ fn baseline_row(root: &Path) -> Option<Vec<rusqlite::types::Value>> {
 fn first_gate_after_a_semantics_change_auto_re_baselines_then_compares() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
     // Save a baseline, then rewrite the snapshot it points at to the OLD (v1)
     // metrics-semantics version — exactly the on-disk state an upgraded binary
     // inherits from a pre-CR-001 `.logos` database (the migration-7 DEFAULT 1).
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
     downgrade_all_snapshots_to(tmp.path(), 1);
 
     // First post-upgrade gate: auto-re-baseline, informational pass, the notice.
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         first.passed,
         "an incomparable baseline must never fail the gate (FR-GV-10): {}",
@@ -1191,7 +1191,7 @@ fn first_gate_after_a_semantics_change_auto_re_baselines_then_compares() {
 
     // Second gate: the fresh baseline is the current version, so it compares
     // normally — no notice, a real signal-vs-baseline message.
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(second.passed, "{}", second.message);
     assert!(
         !second.saved,
@@ -1254,15 +1254,15 @@ fn move_the_signal(root: &Path) {
 fn a_semantics_reset_names_both_versions_and_values_and_keeps_its_exit_code() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
     let old = now - 1;
     downgrade_all_snapshots_to(tmp.path(), old);
     move_the_signal(tmp.path());
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(first.signal.is_some() && saved.signal.is_some(), "the fixture scores: {first:#?}");
     assert_ne!(saved.signal, first.signal, "the two ends differ, so a swap shows");
     let (from, to) = ((old, saved.signal), (now, first.signal));
@@ -1276,7 +1276,7 @@ fn a_semantics_reset_names_both_versions_and_values_and_keeps_its_exit_code() {
     assert_eq!(first.exit_code(), 0, "the exit code is unchanged by the richer notice");
     assert_eq!(first.baseline_signal, first.signal, "`baseline_signal` still names the baseline now held");
 
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     let json = serde_json::to_value(&second).expect("the verdict serialises");
     assert!(json.get("baseline_reset").is_none(), "a compare carries no reset: {json:#}");
 }
@@ -1288,11 +1288,11 @@ fn a_semantics_reset_names_both_versions_and_values_and_keeps_its_exit_code() {
 fn a_thresholds_reset_names_both_versions_and_values() {
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     write(tmp.path(), ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n");
     move_the_signal(tmp.path());
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert_ne!(saved.signal, first.signal, "the two ends differ, so a swap shows");
     let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
     let (from, to) = ((now, saved.signal), (now, first.signal));
@@ -1313,14 +1313,14 @@ fn a_thresholds_reset_names_both_versions_and_values() {
 fn a_reset_for_both_causes_names_the_semantics_change() {
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
     let old = now - 1;
     downgrade_all_snapshots_to(tmp.path(), old);
     write(tmp.path(), ".logos/rules.toml", "[metric_thresholds]\nnesting_depth = 5\n");
     move_the_signal(tmp.path());
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     let (from, to) = ((old, saved.signal), (now, first.signal));
     assert_eq!(
         first.message,
@@ -1338,13 +1338,13 @@ fn a_reset_with_no_signal_on_either_side_names_the_versions_alone() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "NOTES.md", "nothing to score here\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert_eq!(saved.signal, None, "the fixture scores no signal: {saved:#?}");
     let now = logos_core::metrics::METRIC_SEMANTICS_VERSION;
     let old = now - 1;
     downgrade_all_snapshots_to(tmp.path(), old);
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert_eq!(first.message, format!("baseline reset: metric semantics changed (v{old} → v{now})"));
     let json = serde_json::to_value(&first).expect("the verdict serialises");
     assert_eq!(
@@ -1365,11 +1365,11 @@ fn a_reset_with_no_signal_on_either_side_names_the_versions_alone() {
 fn session_start_reset_names_both_versions_and_values() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let first_run = engine.session_start().expect("session_start runs");
+    let first_run = engine.quality().session_start().expect("session_start runs");
     let json = serde_json::to_value(&first_run).expect("the session serialises");
     assert!(json.get("baseline_reset").is_none(), "a first run replaces nothing: {json:#}");
 
-    let kept = engine.session_start().expect("session_start runs");
+    let kept = engine.quality().session_start().expect("session_start runs");
     let json = serde_json::to_value(&kept).expect("the session serialises");
     assert!(json.get("baseline_reset").is_none(), "a kept baseline is not a reset: {json:#}");
 
@@ -1377,7 +1377,7 @@ fn session_start_reset_names_both_versions_and_values() {
     let old = now - 1;
     downgrade_all_snapshots_to(tmp.path(), old);
     move_the_signal(tmp.path());
-    let session = engine.session_start().expect("session_start runs");
+    let session = engine.quality().session_start().expect("session_start runs");
     assert!(session.signal.is_some() && first_run.signal.is_some(), "the fixture scores");
     assert_ne!(first_run.signal, session.signal, "the two ends differ, so a swap shows");
     let (from, to) = ((old, first_run.signal), (now, session.signal));
@@ -1409,31 +1409,31 @@ fn downgrade_all_snapshots_to(root: &Path, version: i64) {
     .expect("downgrade the recorded semantics version");
 }
 
-/// The CR-252 upgrade boundary (S-816, [FR-GV-10]; S-523 pinned the v7 → v8
-/// one the same way): a baseline saved by a v8 build (before Cohesion linked
-/// inherited members and needed `cohesion_min_classes` classes) is
-/// incomparable to a v9 run. The first gate after the upgrade passes
+/// The CR-257 upgrade boundary (S-826, [FR-GV-10]; S-816 pinned the v8 → v9
+/// one and S-523 the v7 → v8 one the same way): a baseline saved by a v9 build
+/// (before a Rust trait impl's methods stopped counting toward their type) is
+/// incomparable to a v10 run. The first gate after the upgrade passes
 /// informationally with the re-baseline notice; the second compares normally
 /// against the snapshot the first re-based to. One bump, one re-baseline,
 /// nothing re-blessed by hand.
 ///
 /// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
 #[test]
-fn a_v8_baseline_re_baselines_once_under_semantics_v9() {
+fn a_v9_baseline_re_baselines_once_under_semantics_v10() {
     assert_eq!(
         logos_core::metrics::METRIC_SEMANTICS_VERSION,
-        9,
-        "CR-252 is semantics v9"
+        10,
+        "CR-257 is semantics v10"
     );
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    assert!(engine.gate(None, true, true).expect("gate --save runs").saved);
-    downgrade_all_snapshots_to(tmp.path(), 8);
+    assert!(engine.pipeline().index().warnings.is_empty());
+    assert!(engine.quality().gate(None, true, true).expect("gate --save runs").saved);
+    downgrade_all_snapshots_to(tmp.path(), 9);
 
-    let first = engine.gate(None, false, true).expect("gate runs");
-    assert!(first.passed, "a v8 baseline never fails a v9 gate: {}", first.message);
-    assert!(first.saved, "the first v9 gate re-baselines");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
+    assert!(first.passed, "a v9 baseline never fails a v10 gate: {}", first.message);
+    assert!(first.saved, "the first v10 gate re-baselines");
     assert!(
         first
             .message
@@ -1442,7 +1442,7 @@ fn a_v8_baseline_re_baselines_once_under_semantics_v9() {
         first.message
     );
 
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(second.passed, "{}", second.message);
     assert!(!second.saved, "the second gate compares, it does not re-baseline");
     assert!(
@@ -1484,14 +1484,14 @@ fn editing_a_threshold_re_baselines_once_then_compares() {
     // Start with the documented defaults (an empty table is all-defaults).
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
     // Save a v3 baseline under the default thresholds.
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
 
     // A bare gate with the SAME thresholds compares normally — no reset.
-    let unchanged = engine.gate(None, false, true).expect("gate runs");
+    let unchanged = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         unchanged.passed && !unchanged.saved,
         "{}",
@@ -1514,7 +1514,7 @@ fn editing_a_threshold_re_baselines_once_then_compares() {
 
     // First gate after the edit: auto-re-baseline, informational pass, the
     // CR-005 notice — never a regression failure against the incomparable anchor.
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         first.passed,
         "an incomparable (re-tuned) baseline must never fail the gate: {}",
@@ -1534,7 +1534,7 @@ fn editing_a_threshold_re_baselines_once_then_compares() {
 
     // Second gate: the fresh baseline carries the new hash, so it compares
     // normally — no second reset.
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(second.passed, "{}", second.message);
     assert!(
         !second.saved,
@@ -1562,13 +1562,13 @@ fn editing_a_clone_threshold_re_baselines_once_then_compares() {
     // Start with the documented defaults (an empty table is all-defaults).
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
     // Save a baseline, then confirm a bare gate under the SAME (default) clone
     // params compares normally — defaults never re-baseline.
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
-    let unchanged = engine.gate(None, false, true).expect("gate runs");
+    let unchanged = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         unchanged.passed && !unchanged.saved && !unchanged.message.contains("baseline reset"),
         "the default clone params must not re-baseline: {}",
@@ -1584,7 +1584,7 @@ fn editing_a_clone_threshold_re_baselines_once_then_compares() {
     );
 
     // First gate after the edit: announced auto-re-baseline, informational pass.
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         first.passed && first.saved,
         "an incomparable (re-tuned) clone threshold re-baselines, never fails: {}",
@@ -1599,7 +1599,7 @@ fn editing_a_clone_threshold_re_baselines_once_then_compares() {
     );
 
     // Second gate: the fresh baseline carries the new hash, so it compares.
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         second.passed && !second.saved && !second.message.contains("baseline reset"),
         "no second reset — the hashes now match: {}",
@@ -1616,9 +1616,9 @@ fn editing_a_clone_threshold_re_baselines_once_then_compares() {
 fn editing_clone_min_tokens_re_baselines_once_then_compares() {
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
 
     // Edit `clone_min_tokens` away from its default of 50.
@@ -1628,7 +1628,7 @@ fn editing_clone_min_tokens_re_baselines_once_then_compares() {
         "[metric_thresholds]\nclone_min_tokens = 80\n",
     );
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         first.passed && first.saved,
         "a re-tuned clone_min_tokens re-baselines, never fails: {}",
@@ -1642,7 +1642,7 @@ fn editing_clone_min_tokens_re_baselines_once_then_compares() {
         first.message
     );
 
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         second.passed && !second.saved && !second.message.contains("baseline reset"),
         "no second reset — the hashes now match: {}",
@@ -1657,9 +1657,9 @@ fn editing_clone_min_tokens_re_baselines_once_then_compares() {
 fn editing_duplicate_min_tokens_re_baselines_once_then_compares() {
     let tmp = thresholds_project("[metric_thresholds]\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed);
 
     // Edit `duplicate_min_tokens` away from its default of 50.
@@ -1669,7 +1669,7 @@ fn editing_duplicate_min_tokens_re_baselines_once_then_compares() {
         "[metric_thresholds]\nduplicate_min_tokens = 5\n",
     );
 
-    let first = engine.gate(None, false, true).expect("gate runs");
+    let first = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         first.passed && first.saved,
         "a re-tuned duplicate_min_tokens re-baselines, never fails: {}",
@@ -1683,7 +1683,7 @@ fn editing_duplicate_min_tokens_re_baselines_once_then_compares() {
         first.message
     );
 
-    let second = engine.gate(None, false, true).expect("gate runs");
+    let second = engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         second.passed && !second.saved && !second.message.contains("baseline reset"),
         "no second reset — the hashes now match: {}",
@@ -1701,10 +1701,10 @@ fn editing_duplicate_min_tokens_re_baselines_once_then_compares() {
 fn scan_emits_deterministic_worst_offenders() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let first = engine.scan(true).expect("scan runs");
-    let second = engine.scan(true).expect("scan runs");
+    let first = engine.quality().scan(true).expect("scan runs");
+    let second = engine.quality().scan(true).expect("scan runs");
 
     let to_json =
         |s: &logos_core::models::quality::WorstOffenders| serde_json::to_string(s).unwrap();
@@ -1764,7 +1764,7 @@ fn check_rules_enforces_a_structural_budget_and_relaxing_passes() {
     let tmp = deeply_nested_project(Some("[constraints]\nmax_nesting_depth = 4\n"));
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -1786,7 +1786,7 @@ fn check_rules_enforces_a_structural_budget_and_relaxing_passes() {
         ".logos/rules.toml",
         "[constraints]\nmax_nesting_depth = 10\n",
     );
-    let relaxed = engine.check_rules(None, true).expect("check_rules runs");
+    let relaxed = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         relaxed.passed,
         Some(true),
@@ -1803,9 +1803,9 @@ fn check_rules_enforces_a_structural_budget_and_relaxing_passes() {
 fn scan_populates_worst_offenders_for_a_deeply_nested_fixture() {
     let tmp = deeply_nested_project(None);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let result = engine.scan(true).expect("scan runs");
+    let result = engine.quality().scan(true).expect("scan runs");
     assert!(
         !result.worst_offenders.nesting.is_empty(),
         "a depth-5 function surfaces as a nesting offender"
@@ -1825,10 +1825,10 @@ fn scan_populates_worst_offenders_for_a_deeply_nested_fixture() {
 fn scan_reflects_an_out_of_band_edit_via_reconcile() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
-    let before = engine.scan(true).expect("scan runs");
+    let before = engine.quality().scan(true).expect("scan runs");
     assert!(
         before.freshness.contains("reconciled 0 files"),
         "nothing changed since the index: {}",
@@ -1856,7 +1856,7 @@ fn tangle_b() {
 }
 ",
     );
-    let after = engine.scan(true).expect("scan runs");
+    let after = engine.quality().scan(true).expect("scan runs");
     assert!(
         after.freshness.contains("reconciled 1 files"),
         "O(changed): exactly the edited file re-entered (UAT-RC-01): {}",
@@ -1880,18 +1880,18 @@ fn tangle_b() {
 fn rescan_replays_the_last_scan_parameters() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    engine.scan(false).expect("scan --no-reconcile");
-    let replayed = engine.rescan().expect("rescan runs");
+    engine.quality().scan(false).expect("scan --no-reconcile");
+    let replayed = engine.quality().rescan().expect("rescan runs");
     assert!(
         replayed.freshness.contains("assumed-fresh"),
         "rescan replays the no-reconcile parameter: {}",
         replayed.freshness
     );
 
-    engine.scan(true).expect("scan");
-    let replayed = engine.rescan().expect("rescan runs");
+    engine.quality().scan(true).expect("scan");
+    let replayed = engine.quality().rescan().expect("rescan runs");
     assert!(
         replayed.freshness.contains("reconciled"),
         "rescan replays the reconciling parameter: {}",
@@ -1903,9 +1903,9 @@ fn rescan_replays_the_last_scan_parameters() {
 fn no_reconcile_skips_the_edit_and_marks_assumed_fresh() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    let before = engine.scan(true).expect("scan runs");
+    let before = engine.quality().scan(true).expect("scan runs");
 
     // Out-of-band edit, then an assumed-fresh scan (UAT-RC-03).
     write(
@@ -1924,7 +1924,7 @@ fn tangle_b() {
 }
 ",
     );
-    let stale = engine.scan(false).expect("scan --no-reconcile runs");
+    let stale = engine.quality().scan(false).expect("scan --no-reconcile runs");
     assert!(
         stale.freshness.contains("assumed-fresh (--no-reconcile)"),
         "the freshness line says so (FR-RC-04): {}",
@@ -1936,7 +1936,7 @@ fn tangle_b() {
     );
 
     // The next reconciling scan picks the edit up.
-    let fresh = engine.scan(true).expect("scan runs");
+    let fresh = engine.quality().scan(true).expect("scan runs");
     assert!(fresh.signal < before.signal, "reconcile is the backstop");
 }
 
@@ -1947,7 +1947,7 @@ fn a_never_indexed_tree_degrades_to_a_full_index() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let result = engine.scan(true).expect("scan runs");
+    let result = engine.quality().scan(true).expect("scan runs");
     assert!(
         result.freshness.contains("reconciled 1 files"),
         "the full-index degrade reconciled the whole (1-file) tree: {}",
@@ -1962,13 +1962,13 @@ fn a_never_indexed_tree_degrades_to_a_full_index() {
 fn a_partial_reconcile_failure_stamps_incomplete() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // An unreadable (non-UTF-8) source file the reconcile discovers but
     // cannot enter into the graph.
     fs::write(tmp.path().join("src/bad.rs"), [0xFF, 0xFE, 0x00, 0x9F]).unwrap();
 
-    let result = engine.scan(true).expect("scan still emits a signal");
+    let result = engine.quality().scan(true).expect("scan still emits a signal");
     assert!(
         result.freshness.starts_with("INCOMPLETE"),
         "the degradation is prominent, never silent (NFR-RA-11): {}",
@@ -1998,17 +1998,17 @@ fn every_scan_and_gate_appends_a_snapshot_and_evolution_windows_them() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
 
-    engine.scan(true).expect("scan 1");
-    engine.scan(true).expect("scan 2");
-    engine.gate(None, true, true).expect("gate --save");
-    engine.gate(None, false, true).expect("gate");
+    engine.quality().scan(true).expect("scan 1");
+    engine.quality().scan(true).expect("scan 2");
+    engine.quality().gate(None, true, true).expect("gate --save");
+    engine.quality().gate(None, false, true).expect("gate");
     assert_eq!(
         snapshot_count(rt),
         4,
         "every scan/gate writes a snapshot (FR-GV-09)"
     );
 
-    let evolution = engine.evolution(None).expect("evolution runs");
+    let evolution = engine.quality().readouts().evolution(None).expect("evolution runs");
     assert_eq!(evolution.limit, 30, "default window (FR-GV-06)");
     assert_eq!(evolution.snapshots.len(), 4);
     assert!(
@@ -2022,7 +2022,7 @@ fn every_scan_and_gate_appends_a_snapshot_and_evolution_windows_them() {
     assert_eq!(evolution.snapshots[1].metric_deltas.len(), 5);
 
     // The window cut respects --limit and keeps the most recent points.
-    let windowed = engine.evolution(Some(2)).expect("evolution --limit 2");
+    let windowed = engine.quality().readouts().evolution(Some(2)).expect("evolution --limit 2");
     assert_eq!(windowed.snapshots.len(), 2);
     assert_eq!(
         windowed.snapshots[1].snapshot_id, evolution.snapshots[3].snapshot_id,
@@ -2042,7 +2042,7 @@ fn dsm_returns_a_square_layer_ordered_matrix() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let report = engine
-        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .quality().readouts().dsm(Some(logos_core::governance::DsmGranularity::File), true)
         .expect("dsm runs");
     assert_eq!(report.granularity, "file");
     let n = report.rows.len();
@@ -2076,7 +2076,7 @@ fn dsm_returns_a_square_layer_ordered_matrix() {
     );
 
     // Default granularity is the module rollup.
-    let default = engine.dsm(None, false).expect("dsm runs");
+    let default = engine.quality().readouts().dsm(None, false).expect("dsm runs");
     assert_eq!(default.granularity, "module");
 }
 
@@ -2122,7 +2122,7 @@ fn go_dsm_has_one_row_per_package_not_per_file() {
     let tmp = go_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.dsm(None, true).expect("dsm runs");
+    let report = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     assert_eq!(report.granularity, "module");
     let rows = module_rows(&report);
     assert_eq!(
@@ -2141,7 +2141,7 @@ fn go_dsm_has_one_row_per_package_not_per_file() {
     // assertions below prove nothing: at file grain `store/a.go` depends on
     // `store/b.go`, and `api/c.go` on both.
     let files = engine
-        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .quality().readouts().dsm(Some(logos_core::governance::DsmGranularity::File), true)
         .expect("file dsm runs");
     let fcell = |from: &str, to: &str| files.matrix[row_of(&files, from)][row_of(&files, to)];
     assert!(fcell("store/a.go", "store/b.go") >= 1, "{:?}", files.matrix);
@@ -2165,7 +2165,7 @@ fn go_dsm_keeps_an_external_test_package_apart_from_its_directory() {
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.dsm(None, true).expect("dsm runs");
+    let report = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     let rows = module_rows(&report);
     assert_eq!(
         rows,
@@ -2188,7 +2188,7 @@ fn go_dsm_tells_same_named_packages_apart_and_folds_in_package_tests_in() {
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.dsm(None, true).expect("dsm runs");
+    let report = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     assert_eq!(
         module_rows(&report),
         ["go:a/util:util", "go:b/util:util"],
@@ -2212,7 +2212,7 @@ fn go_dsm_leaves_the_rows_of_every_other_language_as_they_were() {
     let only_rust = TempDir::new().unwrap();
     rust(only_rust.path());
     let engine = Engine::start(only_rust.path()).expect("engine starts");
-    let before = engine.dsm(None, true).expect("dsm runs");
+    let before = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     let rust_rows: Vec<String> = before.rows.iter().map(|r| r.name.clone()).collect();
     assert!(
         rust_rows.len() >= 2 && rust_rows.iter().all(|r| r.starts_with("module:")),
@@ -2227,7 +2227,7 @@ fn go_dsm_leaves_the_rows_of_every_other_language_as_they_were() {
     let mixed = go_project();
     rust(mixed.path());
     let engine = Engine::start(mixed.path()).expect("engine starts");
-    let after = engine.dsm(None, true).expect("dsm runs");
+    let after = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     let kept: Vec<usize> = (0..after.rows.len())
         .filter(|&i| after.rows[i].name.starts_with("module:"))
         .collect();
@@ -2257,7 +2257,7 @@ fn go_dsm_says_when_a_file_without_a_clause_falls_back_to_its_directory() {
     write(tmp.path(), "store/empty.go", "// no clause here\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.dsm(None, true).expect("dsm runs");
+    let report = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     let rows = module_rows(&report);
     assert!(
         rows.contains(&"go:store") && rows.contains(&"go:store:store"),
@@ -2274,7 +2274,7 @@ fn go_dsm_says_when_a_file_without_a_clause_falls_back_to_its_directory() {
 
     let clean = go_project();
     let engine = Engine::start(clean.path()).expect("engine starts");
-    let report = engine.dsm(None, true).expect("dsm runs");
+    let report = engine.quality().readouts().dsm(None, true).expect("dsm runs");
     assert!(
         report.notes.iter().all(|n| !n.contains("package` clause")),
         "a project whose files all carry a clause notes nothing: {:?}",
@@ -2314,7 +2314,7 @@ mod tests {
     );
     write(tmp.path(), "tests/api.rs", "fn exercise() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     let rt = engine.runtime().unwrap();
@@ -2338,9 +2338,9 @@ mod tests {
 fn health_reports_store_integrity_and_counts() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    let health = engine.health(true).expect("health runs");
+    let health = engine.quality().health(true).expect("health runs");
     assert!(health.ok, "{}", health.message);
     assert!(health.fts_ok);
     assert!(
@@ -2349,12 +2349,13 @@ fn health_reports_store_integrity_and_counts() {
     );
     // Migration 27 (S-513, CR-168) added the persist-failure record, after
     // migration 26 (S-498, CR-162) added the snapshot offender lists.
-    // This assertion tracks the latest applied migration — the store reports 44
-    // (S-571, the parse damage) once fully migrated (`federation::broker`'s
+    // This assertion tracks the latest applied migration — the store reports 47
+    // (S-832, a file's declared facade, after 46 — S-830, a Go callable's
+    // signature re-extracted) once fully migrated (`federation::broker`'s
     // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 44, "migration 44 applied");
+    assert_eq!(health.schema_version, 47, "migration 47 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);
@@ -2374,7 +2375,7 @@ fn an_invalid_rules_contract_fails_loud_as_a_config_error() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let err = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect_err("an invalid contract is a structural failure");
     assert!(
         err.downcast_ref::<logos_core::config::ConfigError>()
@@ -2387,10 +2388,10 @@ fn an_invalid_rules_contract_fails_loud_as_a_config_error() {
 fn quality_methods_on_a_transient_engine_fail_loud() {
     let engine = Engine::open("/tmp");
     assert!(
-        engine.scan(true).is_err(),
+        engine.quality().scan(true).is_err(),
         "no runtime → structural failure, never a fabricated signal"
     );
-    assert!(engine.evolution(None).is_err());
+    assert!(engine.quality().readouts().evolution(None).is_err());
 }
 
 // ── FR-GV-11 / CR-002: coupling & redundancy constraint budgets ─────────────
@@ -2438,7 +2439,7 @@ fn coupling_budget_flags_an_over_coupled_hub_and_rerun_is_identical() {
     let tmp = hub_project("[constraints]\nmax_fan_in = 2\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -2471,7 +2472,7 @@ fn coupling_budget_flags_an_over_coupled_hub_and_rerun_is_identical() {
     );
 
     // NFR-RA-06: a re-run yields the identical violation list.
-    let again = engine.check_rules(None, true).expect("re-run");
+    let again = engine.quality().check_rules(None, true).expect("re-run");
     assert_eq!(again.violations, report.violations);
 }
 
@@ -2495,7 +2496,7 @@ fn orphan_two() {}
 ",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
 
     assert_eq!(report.passed, Some(false), "two dead functions over max_dead = 1 fails");
     let dead = report
@@ -2519,16 +2520,16 @@ fn budgets_are_orthogonal_to_the_metrics_gate() {
     let without = hub_project("");
     let signal_without = Engine::start(without.path())
         .expect("engine starts")
-        .gate(None, false, true)
+        .quality().gate(None, false, true)
         .expect("gate runs")
         .signal;
 
     let with = hub_project("[constraints]\nmax_fan_in = 2\nmax_dead = 0\n");
     let engine = Engine::start(with.path()).expect("engine starts");
     // The budgets fire here — but the metric signal must not move.
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(report.passed, Some(false), "the budgets are active and flag the hub");
-    let signal_with = engine.gate(None, false, true).expect("gate runs").signal;
+    let signal_with = engine.quality().gate(None, false, true).expect("gate runs").signal;
 
     assert_eq!(
         signal_without, signal_with,
@@ -2575,7 +2576,7 @@ fn check_rules_flags_a_forbidden_import_and_materialises_one_edge() {
     let tmp = forbidden_import_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -2628,7 +2629,7 @@ fn check_rules_flags_a_forbidden_import_and_materialises_one_edge() {
 
     // FR-GV-12 / NFR-RA-06: a re-run yields identical violations and no
     // duplicate derived edges.
-    let again = engine.check_rules(None, true).expect("re-run");
+    let again = engine.quality().check_rules(None, true).expect("re-run");
     assert_eq!(
         again.violations, report.violations,
         "violations are byte-identical"
@@ -2661,7 +2662,7 @@ to   = \"src/db_*.rs\"
     write(tmp.path(), "src/util_helpers.rs", "pub fn run() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         report
             .violations
@@ -2691,7 +2692,7 @@ fn an_invalid_forbidden_import_glob_fails_to_load() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let err = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect_err("an invalid glob must fail the load");
     let msg = format!("{err:#}");
     assert!(
@@ -2746,7 +2747,7 @@ fn check_rules_flags_an_uncovered_exported_symbol_with_its_reason_and_caveat() {
     let tmp = require_tested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -2816,8 +2817,8 @@ fn require_tested_check_rules_is_byte_identical_across_runs() {
     let tmp = require_tested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let first = engine.check_rules(None, true).expect("first run");
-    let second = engine.check_rules(None, true).expect("second run");
+    let first = engine.quality().check_rules(None, true).expect("first run");
+    let second = engine.quality().check_rules(None, true).expect("second run");
     assert_eq!(
         first.violations, second.violations,
         "require_tested violations are byte-identical across runs"
@@ -2881,7 +2882,7 @@ fn doc_gaps_lists_the_undocumented_exported_functions_with_the_caveat() {
     let tmp = documented_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.doc_gaps(None, true).expect("doc_gaps runs");
+    let report = engine.quality().readouts().doc_gaps(None, true).expect("doc_gaps runs");
     assert_eq!(report.limit, 50, "default cap (FR-GV-14)");
     assert!(
         report.caveat.contains("reference presence"),
@@ -2929,7 +2930,7 @@ fn doc_gaps_honours_the_limit_and_reports_truncation() {
     let tmp = documented_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.doc_gaps(Some(1), true).expect("doc_gaps runs");
+    let report = engine.quality().readouts().doc_gaps(Some(1), true).expect("doc_gaps runs");
     assert_eq!(report.limit, 1);
     assert!(report.truncated, "two gaps exist but only one is listed");
     assert_eq!(
@@ -2954,8 +2955,8 @@ fn doc_gaps_is_byte_identical_across_runs() {
     let tmp = documented_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let first = engine.doc_gaps(None, true).expect("first run");
-    let second = engine.doc_gaps(None, true).expect("second run");
+    let first = engine.quality().readouts().doc_gaps(None, true).expect("first run");
+    let second = engine.quality().readouts().doc_gaps(None, true).expect("second run");
     let names = |r: &logos_core::models::quality::DocGapsReport| {
         r.undocumented
             .iter()
@@ -2973,7 +2974,7 @@ fn check_rules_flags_an_undocumented_exported_symbol_with_its_reason() {
     let tmp = documented_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert_eq!(
         report.passed,
         Some(false),
@@ -3034,8 +3035,8 @@ fn require_documented_check_rules_is_byte_identical_across_runs() {
     let tmp = documented_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let first = engine.check_rules(None, true).expect("first run");
-    let second = engine.check_rules(None, true).expect("second run");
+    let first = engine.quality().check_rules(None, true).expect("first run");
+    let second = engine.quality().check_rules(None, true).expect("second run");
     assert_eq!(
         first.violations, second.violations,
         "require_documented violations are byte-identical across runs"
@@ -3051,7 +3052,7 @@ fn absent_require_documented_contract_enforces_nothing() {
     fs::remove_file(tmp.path().join(".logos/rules.toml")).unwrap();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         report
             .violations
@@ -3061,7 +3062,7 @@ fn absent_require_documented_contract_enforces_nothing() {
         report.violations
     );
     // doc_gaps stays a read-only report regardless of any contract.
-    let gaps = engine.doc_gaps(None, true).expect("doc_gaps runs");
+    let gaps = engine.quality().readouts().doc_gaps(None, true).expect("doc_gaps runs");
     assert_eq!(
         gaps.undocumented.len(),
         2,
@@ -3118,7 +3119,7 @@ pub fn walk() {
 
     // The metric: exactly one cycle — the cross-directory `ping`/`pong` SCC. The
     // intra-directory `foo`/`bar` SCC and `walk`'s self-loop both contribute 0.
-    let scan = engine.scan(true).expect("scan runs");
+    let scan = engine.quality().scan(true).expect("scan runs");
     let metric_cycles = scan.metrics.acyclicity.raw;
     assert_eq!(
         metric_cycles, 1.0,
@@ -3127,7 +3128,7 @@ pub fn walk() {
     );
 
     // The rule reads the same `acyclicity.raw`, so it reports the same count.
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     let violation = report
         .violations
         .iter()
@@ -3149,13 +3150,13 @@ pub fn walk() {
         "src/beta/mod.rs",
         "pub fn pong() {}\n",
     );
-    let scan = engine.scan(true).expect("scan runs");
+    let scan = engine.quality().scan(true).expect("scan runs");
     assert_eq!(
         scan.metrics.acyclicity.raw, 0.0,
         "no cross-module cycle remains; intra-module recursion and \
          self-recursion are not counted (v5)"
     );
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         !report.violations.iter().any(|v| v.rule == "max_cycles"),
         "max_cycles = 0 passes when only intra-module/self recursion remains: {:?}",
@@ -3193,7 +3194,7 @@ fn persisted_violations(engine: &Engine) -> Vec<ViolationRow> {
 fn a_store_never_checked_has_no_marker() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         persisted_violations(&engine).is_empty(),
@@ -3213,7 +3214,7 @@ fn a_clean_check_records_a_marker_with_zero_violations() {
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         report.violations.is_empty(),
         "the clean fixture must find nothing: {:?}",
@@ -3245,7 +3246,7 @@ fn n_runs_leave_one_marker_whose_count_and_time_match_the_rows() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     for run in 1..=3 {
-        let report = engine.check_rules(None, true).expect("check_rules runs");
+        let report = engine.quality().check_rules(None, true).expect("check_rules runs");
         let rows = persisted_violations(&engine);
         let marker = check_run(&engine).expect("every run records a marker");
 
@@ -3286,7 +3287,7 @@ fn a_tree_with_no_resolvable_head_records_a_null_commit_sha() {
         "the fixture must genuinely have no repo for this to mean anything"
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
 
     let marker = check_run(&engine).expect("a marker is still recorded without git");
     assert_eq!(
@@ -3309,7 +3310,7 @@ fn commit_sha_is_head_at_write_time_and_does_not_follow_the_tree() {
     let head_at_run = git_head(repo);
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let marker = check_run(&engine).expect("a marker is recorded");
     assert_eq!(
         marker.commit_sha.as_deref(),
@@ -3338,7 +3339,7 @@ fn an_interrupted_run_leaves_neither_the_marker_nor_the_rows() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // A first, successful run gives the store a known good state to roll back to.
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let good_rows = persisted_violations(&engine);
     let good_marker = check_run(&engine).expect("the good run recorded a marker");
     assert!(!good_rows.is_empty(), "the fixture violates its contract");
@@ -3394,11 +3395,11 @@ fn scan_records_a_marker_describing_its_own_run_not_the_last_check() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // A `check` first, so the store carries a marker from a DIFFERENT run.
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let after_check = check_run(&engine).expect("the check recorded a marker");
 
     // Now a `scan`, which rewrites the same violations table.
-    engine.scan(true).expect("scan runs");
+    engine.quality().scan(true).expect("scan runs");
     let after_scan = check_run(&engine).expect("scan records a marker too");
     let rows = persisted_violations(&engine);
 
@@ -3512,7 +3513,7 @@ fn a_check_records_the_rule_count_it_evaluated_and_names_its_operation() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     let marker = check_run(&engine).expect("a run records a marker");
 
     assert!(
@@ -3556,7 +3557,7 @@ fn a_breaching_run_records_a_denominator_larger_than_its_violation_count() {
     let tmp = present_contract_breaching_fewer_than_it_evaluates();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         !report.violations.is_empty(),
         "the fixture must genuinely breach, or this is just the clean case again"
@@ -3607,7 +3608,7 @@ fn a_run_with_no_contract_records_an_empty_evaluated_set_and_no_contract() {
         "the fixture must genuinely have no contract for this to mean anything"
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
 
     let marker = check_run(&engine).expect("even a vacuous run records a marker");
     assert_eq!(
@@ -3638,12 +3639,12 @@ fn a_run_with_no_contract_records_an_empty_evaluated_set_and_no_contract() {
 fn a_present_contract_authoring_zero_rules_is_distinguishable_from_no_contract() {
     let no_contract = clean_project();
     let engine = Engine::start(no_contract.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let absent = check_run(&engine).expect("a marker is recorded");
 
     let zero_rules = present_contract_authoring_zero_rules();
     let engine = Engine::start(zero_rules.path()).expect("engine starts");
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     let present = check_run(&engine).expect("a marker is recorded");
 
     assert!(
@@ -3674,7 +3675,7 @@ fn a_clean_run_over_n_rules_records_n_as_its_denominator() {
     let tmp = present_contract_authoring_two_rules();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("check_rules runs");
     assert!(
         report.violations.is_empty(),
         "the fixture must pass its own contract: {:?}",
@@ -3703,7 +3704,7 @@ fn scan_records_its_own_operation_not_the_check_that_preceded_it() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let after_check = check_run(&engine).expect("the check recorded a marker");
     assert_eq!(
         after_check.operation.as_deref(),
@@ -3711,7 +3712,7 @@ fn scan_records_its_own_operation_not_the_check_that_preceded_it() {
         "the check names itself"
     );
 
-    engine.scan(true).expect("scan runs");
+    engine.quality().scan(true).expect("scan runs");
     let after_scan = check_run(&engine).expect("scan records a marker too");
     assert_eq!(
         after_scan.operation.as_deref(),
@@ -3741,7 +3742,7 @@ fn an_interrupted_run_leaves_no_partially_populated_evaluated_set() {
     let tmp = present_contract_authoring_two_rules();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.check_rules(None, true).expect("check_rules runs");
+    engine.quality().check_rules(None, true).expect("check_rules runs");
     let good = check_run(&engine).expect("the good run recorded a marker");
     assert_eq!(
         good.checked_rules,
@@ -3786,7 +3787,7 @@ fn a_run_finding_fewer_violations_lowers_the_marker_count() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.check_rules(None, true).expect("first check_rules runs");
+    engine.quality().check_rules(None, true).expect("first check_rules runs");
     let before = check_run(&engine).expect("the first run recorded a marker");
     assert!(
         before.violation_count > 0,
@@ -3797,7 +3798,7 @@ fn a_run_finding_fewer_violations_lowers_the_marker_count() {
     // firing. The contract is unchanged — only the code it judges.
     write(tmp.path(), "src/domain_core.rs", "pub fn compute() {}\n");
 
-    let report = engine.check_rules(None, true).expect("second check_rules runs");
+    let report = engine.quality().check_rules(None, true).expect("second check_rules runs");
     let rows = persisted_violations(&engine);
     let after = check_run(&engine).expect("the second run recorded a marker");
 
@@ -3840,9 +3841,9 @@ fn a_not_applicable_graph_dimension_is_never_a_gate_regression_or_an_evolution_d
     write(tmp.path(), "src/core.rs", "pub fn base() {}\n");
     write(tmp.path(), "src/sub/mid.rs", "pub fn mid() {\n    let _ = 1;\n}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    engine.gate(None, true, true).expect("gate --save");
-    let before = engine.latest_metrics().unwrap().expect("a snapshot");
+    engine.pipeline().index();
+    engine.quality().gate(None, true, true).expect("gate --save");
+    let before = engine.quality().readouts().latest_metrics().unwrap().expect("a snapshot");
     assert!(before.modularity_not_applicable.is_some(), "{:?} < 5", before.cross_module_edge_count);
 
     std::thread::sleep(std::time::Duration::from_millis(1100));
@@ -3851,8 +3852,8 @@ fn a_not_applicable_graph_dimension_is_never_a_gate_regression_or_an_evolution_d
         "src/sub/mid.rs",
         "use crate::core::base;\npub fn mid() {\n    base();\n}\n",
     );
-    let gate = engine.gate(None, false, true).expect("gate");
-    let after = engine.latest_metrics().unwrap().expect("a snapshot");
+    let gate = engine.quality().gate(None, false, true).expect("gate");
+    let after = engine.quality().readouts().latest_metrics().unwrap().expect("a snapshot");
     let na = after.modularity_not_applicable.clone().expect("still fewer than 5 cross-module edges");
     let crossing = after.cross_module_edge_count.expect("a v8 snapshot counts them");
     assert!((1..5).contains(&crossing), "the new call and its import cross src/sub → src: {crossing}");
@@ -3869,7 +3870,7 @@ fn a_not_applicable_graph_dimension_is_never_a_gate_regression_or_an_evolution_d
         gate.regressions
     );
 
-    let evolution = engine.evolution(None).expect("evolution");
+    let evolution = engine.quality().readouts().evolution(None).expect("evolution");
     let last = evolution.snapshots.last().expect("a point");
     for (delta, metric) in last.metric_deltas[..3].iter().zip(["modularity", "acyclicity", "depth"]) {
         assert_eq!(delta.metric, metric);

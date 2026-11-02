@@ -43,7 +43,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -217,7 +217,7 @@ fn a_synced_edit_matches_a_fresh_reindex() {
         .replace("    free(1, 2, 3);\n", "    free(1);\n");
     write(tmp.path(), "src/lib.rs", &edited);
     let changed: Vec<PathBuf> = vec!["src/lib.rs".into()];
-    engine.sync(&changed);
+    engine.pipeline().sync(&changed);
     assert_eq!(
         arities(rt)["src/lib.rs:by_ref@3"],
         (range(2, Some(2)), Some(false)),

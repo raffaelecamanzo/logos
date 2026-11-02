@@ -44,7 +44,7 @@ fn index(files: &[(&str, &str)]) -> (IndexResult, Vec<NodeRow>) {
         write(tmp.path(), rel, src);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     let nodes = engine
         .runtime()
         .unwrap()

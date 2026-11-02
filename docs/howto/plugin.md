@@ -24,7 +24,7 @@ only in a repository that holds a `.logos/` directory.
 |---|---|---|---|
 | MCP server `logos` | session start | `logos serve --mcp`, with every `logos:*` tool. In a directory with no `.logos/` it is an empty server: no tools, no `logos` process, no store created. | disable the plugin |
 | Session-start readout | `SessionStart` (`startup`, `resume`, `clear`) | The signal, the baseline and the recorded violations, from [`logos quality-report --hook-json`](commands.md#quality-report---hook-json). An older binary gets a one-line handshake naming both versions instead. | `LOGOS_QUALITY_REPORT_DISABLE=1` |
-| Guardrail | `PreToolUse` | Returns `ask` when an agent would relax the quality contract. See [The guardrail](#the-guardrail). | none, by design |
+| Guardrail | `PreToolUse` | Returns `ask` when an agent would relax the quality contract, `deny` in an unattended session. See [The guardrail](#the-guardrail). | none, by design |
 | Stop check | `Stop` | Runs `logos check` and `logos review` within a budget, scans the files the turn changed for secrets when scan consent is recorded, and blocks the stop once on a regression. See [The Stop check](#the-stop-check). | `LOGOS_STOP_HOOK_DISABLE=1` |
 | `/logos:review` | slash command | Starts the `logos-reviewer` subagent, which runs the `logos-review` skill. See [The review skill](#the-review-skill). | do not invoke it |
 | `/logos:sec-review` | slash command | Runs the `logos-sec-review` skill: one verdict per security finding the branch introduced (with `--backlog`, per stored finding no one has judged), and a fix only by re-scan. See [The security review skill](#the-security-review-skill) and [the backlog](#triaging-the-backlog---backlog). | do not invoke it |
@@ -455,7 +455,7 @@ the file or command, when an agent tool call would:
 
 - write, edit or delete `.logos/rules.toml`, `.logos/rules-baseline.json`,
   `.logos/security-ignore.toml` or `.logos/security-baseline.json` (under any
-  `.logos/`, so a workspace member's contract is guarded too); or
+  `.logos/` of the project, so a workspace member's contract is guarded too); or
 - run `logos gate --save` or `logos check --bless`, as a shell command, or through
   `check --bless`'s MCP twin `bless_rules` (under the plugin's or a project
   `.mcp.json`'s prefix); or
@@ -508,11 +508,98 @@ brace is read by its shape and never expanded, quotes are already gone when the
 guard looks (a quoted `"{a,b}"` asks as well), and an expansion more than eight
 words after `logos` is not seen.
 
+Four spellings pass, as the shell reads them. `rtk` is a prefix, as `env` is, and
+so are `proxy`, `bypass`, `run`, `err`, `test` and `summary` right after it:
+`rtk grep -n x .logos/rules-baseline.json` and `rtk read .logos/rules.toml` pass,
+`rtk rm .logos/rules.toml` asks. A heredoc body is data to the command that reads
+it: a `python3 - <<'EOF'` or `cat > notes.md <<'EOF'` body naming
+`logos check --bless` passes, and the heredoc's own line is read as ever
+(`cat > .logos/rules.toml <<'EOF'` asks). Every body is read as commands when the
+command line names a shell, `eval`, `source` or a patch tool, or runs an
+expansion as a command (`bash <<'EOF'`, `cat <<'EOF' | sh`, `$SHELL <<EOF`,
+`git apply <<'EOF'`); so is a body the shell expands (an unquoted delimiter) that
+holds a command substitution, and so is the whole line when a `<<` sits where the
+guard cannot show it opens a heredoc (inside quotes, a comment, `${…}` or
+arithmetic). A glob character quoted or escaped is literal:
+`sqlite3 x/.logos/logos.db "select count(*) from t"` passes and `rm .logos/*`
+asks. It is read as a glob again on a line that may read its quoted text a second
+time (a shell, `eval`, a command or process substitution: `bash -c "rm .logos/*"`
+asks), on one whose command matches globs itself (git, `find`:
+`git rm '.logos/*.toml'` asks), on one holding `$'…'` or a comment, and under
+`.logos/`. And an expansion glued to literal text, as the value of an option of
+logos's that takes one (`--project`, `--rules`, `--threshold`, `--label`,
+`--reason`, `--evidence`), is that value: `logos check --project $L/before`
+passes, while a bare `--rules $F` asks as above.
+
+The guarded files are the project's, its root `CLAUDE_PROJECT_DIR`, so a target the
+guard can place outside the project passes. That is an absolute or `~` path, or a
+relative one read from the shell's directory (the payload's `cwd`) or after a
+leading `cd /DIR &&`, whose directory is outside the project or inside a
+repository of its own below the root (a `.git` directory, as a scratch fixture
+has, in a project that is no `logos.workspace.toml` workspace):
+`rm -rf /tmp/r/.logos` and `cd ~/scratch/r && rm -rf .logos` pass. A linked
+worktree's main checkout, and the worktrees it holds, are the project too. A
+guarded `logos` command passes the same way when its `--project`, or the shell's
+directory, is such a place (`logos check --bless --project /tmp/r`): logos works
+on the git top level holding it. What the guard cannot place is judged as before:
+an expansion (`cd $D`, or one beside the `logos` command), `cd -`, any `cd` but a
+leading one followed by `&&`, a `cd` on a line with quotes, a subshell, pipe,
+background job or another shell, a `..` from the shell's directory, a leading
+`cd` or `pushd` whose directory holds a `..` (`cd /path/to/project/ext/.. && …`:
+`cd` reads `..` as text, so that is the project wherever `ext` leads), a file
+tool's path or a command's operand whose `..` lands in the project read either as
+text or through a symlink (`Edit /path/to/project/ext/../.logos/rules.toml` or
+`git checkout -- /path/to/project/ext/../.logos/rules.toml`, `ext` linking
+outside: the host, or git, may read it as text), a relative
+operand of a command given its own directory (`git -C`), a target that is itself
+a symlink, any target on a line that runs `ln` or `mv`, a directory that does not
+exist yet, and every target when the host names no project. The project's own file
+asks wherever the shell stands
+(`cd /tmp && rm /path/to/project/.logos/rules.toml`), and a symlink into the
+project is the project.
+
 It is a guardrail against loosening the contract by habit or by mistake, not a
 sandbox: a command that assembles the path at run time (an interpreter one-liner,
 a path piped into `xargs`, a variable set by an earlier Bash call) is not seen. There is no environment variable that
 turns it off. The way to stop it asking is to disable the plugin, which is the
 decision it exists to put in your hands.
+
+### In an unattended session
+
+In a session no human watches, such as an auto-mode session left to run on its
+own, an `ask` is a prompt nobody answers, and the session waits on it. Start
+Claude Code with `LOGOS_GUARD_MODE=unattended` in its environment and the
+guardrail answers `deny` wherever it would answer `ask`, a payload it cannot read
+included. The host refuses the call without a prompt and shows the agent the
+reason: the one it would have asked with, followed by
+
+> This session runs unattended, so a guarded action is refused rather than asked. Record what you needed in your notes; the owner decides at review.
+
+The session goes on, and the quality contract is still not relaxed: what the agent
+needed waits for you at review.
+
+`LOGOS_GUARD_ALLOW` names the contract files such a session may still write, for a
+session whose assignment is that edit: a colon-separated list of paths relative to
+the project (`LOGOS_GUARD_ALLOW=.logos/security-ignore.toml`). A Write, Edit,
+MultiEdit or NotebookEdit of a listed file passes. Each entry is compared exactly
+with the file's path inside the project, once both are normalised: no glob, no case
+folding, and an entry that is absolute or climbs out of the project with `..`
+admits nothing. A workspace member's file is listed by its own path
+(`member/.logos/security-ignore.toml`). The list never admits a shell command that
+names a listed file, since the guard cannot tell which directory the shell resolves
+it against, nor any guarded command (`logos check --bless`, `logos gate --save`,
+`logos security bless`, `logos security ingest`, `logos security reconfirm` and
+their MCP twins): whatever the list holds, each is denied wherever the interactive
+guard would ask, and passes where it would pass, as for a target placed outside the
+project.
+
+Any other value of `LOGOS_GUARD_MODE` (`off`, an empty value, `Unattended`) keeps
+the interactive answer, `ask`, and `LOGOS_GUARD_ALLOW` is then not read. No value of
+either variable turns the guardrail off. Both are read from the environment the
+host runs its hooks in, so an `export` in an agent's shell command does not reach
+them. The guardrail does not hold Claude Code's own settings files, whose `env`
+block can set them too: like the rest of the guard, the list is no defence against
+an agent that edits those.
 
 ## Trust labels
 
@@ -543,9 +630,12 @@ runs `logos sync` on the files it edits before it re-measures.
 | `LOGOS_STOP_HOOK_DISABLE=1` | the Stop check | the hook exits 0 with no output, every leg included (the security leg too) |
 | `LOGOS_STOP_HOOK_BUDGET_MS=<ms>` | the Stop check | the shared budget of its legs; default `15000`, a non-number reads as the default |
 | `LOGOS_PROJECT_DIR=<dir>` | the review skill's scripts | the project to review when `--project` is not given; default the working directory |
+| `LOGOS_GUARD_MODE=unattended` | the guardrail | answers `deny` wherever it would answer `ask`, its reason followed by the unattended sentence; any other value, or none, asks. See [In an unattended session](#in-an-unattended-session) |
+| `LOGOS_GUARD_ALLOW=<path>[:<path>…]` | the guardrail, in an unattended session | the project-relative contract files a Write, Edit, MultiEdit or NotebookEdit may still write; never a shell command, never a guarded command |
 | `LOGOS_INVOKER` | `logos` itself; set by the plugin, not by you | each hook exports its own (`hook:stop`, `hook:pre-tool-use`, `hook:session-start`) and each skill's scripts theirs (`skill:logos-review`, `skill:logos-sec-review`; a value already set is kept, so a `logos-review` script run by `logos-sec-review` stays the latter). Every `logos` call they make records it, and `logos stats --json` counts calls by it in `calls_by_tool_invoker` |
 
-The guardrail has no switch. To turn the whole plugin off, run
+The guardrail has no off switch: `LOGOS_GUARD_MODE` turns its `ask` into `deny`,
+never into a pass. To turn the whole plugin off, run
 `claude plugin disable logos@logos`; `logos init --uninstall` removes the
 enrolment from the project.
 

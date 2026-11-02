@@ -320,9 +320,9 @@ pub(crate) fn branch_delta(engine: &Engine, base: Option<&str>) -> Result<Branch
     // a `rules.toml` edit since may have changed; `check` re-materialises for
     // the same reason, and so does the shadow below, so both sides are
     // measured under one contract.
-    let (_, registry, config) = engine.pipeline_ctx()?;
+    let (_, registry, config) = engine.pipeline().ctx()?;
     rematerialise(runtime, registry, &config, &contract.declared.rules)?;
-    engine.advance_sync_stamp();
+    engine.graph().advance_sync_stamp();
     let (mut after, after_checked) = measure(runtime, &contract)?;
     let policy = contract.declared.rules.review.clone();
     let recorded = if policy.is_some() {
@@ -1423,7 +1423,7 @@ fn shadow_before(
     merge_base: &str,
     contract: &Contract,
 ) -> Result<(Measured, BeforeStateCache)> {
-    let (_, _, config) = engine.pipeline_ctx()?;
+    let (_, _, config) = engine.pipeline().ctx()?;
     let key = cache_key(contract, &config);
     let dir = engine.root().join(CACHE_DIR_REL);
     let path = cache_path(&dir, merge_base, contract.projection);
@@ -1524,7 +1524,7 @@ fn prune_cache(dir: &Path, keep: &[PathBuf], projection: bool) {
 
 /// Shadow-index the merge-base tree and measure it under the contract.
 fn measure_tree(engine: &Engine, merge_base: &str, contract: &Contract) -> Result<Measured> {
-    let (_, registry, config) = engine.pipeline_ctx()?;
+    let (_, registry, config) = engine.pipeline().ctx()?;
     let tree = TreeExport::create(engine.root(), merge_base)?;
     let shadow = crate::pipeline::ShadowStore::create()?;
     let shadow_rt = crate::pipeline::shadow_reindex(registry, tree.path(), &config, &shadow)?;

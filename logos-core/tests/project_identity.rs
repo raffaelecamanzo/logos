@@ -54,13 +54,13 @@ fn a_full_index_records_the_coordinate_and_status_reports_it() {
     let tmp = TempDir::new().unwrap();
     fixture(tmp.path(), "example.org/team/app");
     let engine = Engine::start(tmp.path()).unwrap();
-    assert_eq!(engine.status().project_id, None, "nothing recorded before an index");
+    assert_eq!(engine.graph().status().project_id, None, "nothing recorded before an index");
     assert!(
-        !serde_json::to_string(&engine.status()).unwrap().contains("project_id"),
+        !serde_json::to_string(&engine.graph().status()).unwrap().contains("project_id"),
         "an unrecorded coordinate is elided, so a never-indexed status is unchanged"
     );
-    engine.index();
-    assert_eq!(engine.status().project_id.as_deref(), Some("example.org/team/app"));
+    engine.pipeline().index();
+    assert_eq!(engine.graph().status().project_id.as_deref(), Some("example.org/team/app"));
 }
 
 /// **A changed coordinate re-renders every symbol and moves nothing else**
@@ -74,7 +74,7 @@ fn a_changed_coordinate_re_renders_every_symbol_and_moves_nothing_else() {
     fixture(tmp.path(), "example.org/team/app");
     {
         let engine = Engine::start(tmp.path()).unwrap();
-        engine.index();
+        engine.pipeline().index();
     }
     let before = node_and_edge_rows(tmp.path());
     assert!(before.iter().any(|r| r.starts_with("edge ")), "the fixture has edges: {before:#?}");
@@ -85,9 +85,9 @@ fn a_changed_coordinate_re_renders_every_symbol_and_moves_nothing_else() {
 
     write(tmp.path(), ".logos/config.toml", "[project]\nid = \"example.org/team/renamed\"\n");
     let engine = Engine::start(tmp.path()).unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(
-        engine.status().project_id.as_deref(),
+        engine.graph().status().project_id.as_deref(),
         Some("example.org/team/renamed"),
         "the next full index records the coordinate now in force"
     );

@@ -137,7 +137,7 @@ fn worktree_telemetry_writes_through_to_primary_and_survives_teardown() {
     // only the worktree's events, cleanly attributed to its branch.
     {
         let engine = Engine::start(&main).expect("primary engine starts");
-        let indexed = engine.index();
+        let indexed = engine.pipeline().index();
         assert!(indexed.files_indexed >= 1, "the primary index ran");
     }
     let primary_store = main.join(".logos").join("telemetry.db");
@@ -158,13 +158,13 @@ fn worktree_telemetry_writes_through_to_primary_and_survives_teardown() {
         let engine = Engine::start(&wt).expect("worktree engine starts (seeded from primary)");
         // A couple of navigation calls from inside the worktree — each funnels
         // through the single traced emission point and records one event.
-        let found = engine.search("seeded_fn", None, None);
+        let found = engine.navigation().search("seeded_fn", None, None);
         assert!(
             found.warnings.is_empty(),
             "the seeded worktree serves navigation: {:?}",
             found.warnings
         );
-        let _ = engine.search("nonexistent_symbol", None, None);
+        let _ = engine.navigation().search("nonexistent_symbol", None, None);
         // Drop the worktree engine (end of scope) so its own `logos.db` is
         // released — leaving the worktree clean (only the gitignored `.logos/*.db*`
         // it wrote) for the plain `git worktree remove` below.
@@ -213,7 +213,7 @@ fn worktree_telemetry_writes_through_to_primary_and_survives_teardown() {
     // counts the survived events — the `logos stats` path of [UAT-OB-03] step 5.
     // (The guard is already dropped, so this call's own traced event is a
     // best-effort no-op against the shut-down writer.)
-    let stats = Engine::open(&main).stats(None);
+    let stats = Engine::open(&main).graph().stats(None);
     assert_eq!(
         stats.calls_total, events_before as u64,
         "the primary read path counts EXACTLY the survived worktree events after teardown — \

@@ -50,17 +50,17 @@ fn engine_hydrates_and_caches_a_view() {
     seed_cycle(&engine);
 
     let first = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("first hydrate");
     let second = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("second hydrate");
 
     assert!(
         Arc::ptr_eq(&first, &second),
         "a repeated aggregate run at the same last_sync_at hits the cache (NFR-PE-07)"
     );
-    let stats = engine.hydration_stats();
+    let stats = engine.graph().hydration_stats();
     assert_eq!((stats.hits, stats.misses), (1, 1));
 }
 
@@ -69,10 +69,10 @@ fn advancing_the_sync_stamp_forces_rehydration() {
     let (engine, _dir) = engine();
     seed_cycle(&engine);
 
-    let before = engine.hydrate(Granularity::ExcludeContains).unwrap();
-    let stamp = engine.advance_sync_stamp();
-    assert_eq!(stamp, engine.sync_stamp(), "advance returns the new stamp");
-    let after = engine.hydrate(Granularity::ExcludeContains).unwrap();
+    let before = engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
+    let stamp = engine.graph().advance_sync_stamp();
+    assert_eq!(stamp, engine.graph().sync_stamp(), "advance returns the new stamp");
+    let after = engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
 
     assert!(
         !Arc::ptr_eq(&before, &after),
@@ -85,7 +85,7 @@ fn tarjan_scc_over_a_hydrated_engine_view_finds_the_cycle() {
     let (engine, _dir) = engine();
     seed_cycle(&engine);
 
-    let view = engine.hydrate(Granularity::ExcludeContains).unwrap();
+    let view = engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
     let sccs = tarjan_scc(view.graph());
     assert_eq!(
         sccs.len(),
@@ -106,11 +106,11 @@ fn all_four_granularities_hydrate_through_the_engine() {
         Granularity::File,
         Granularity::Module,
     ] {
-        let view = engine.hydrate(g).expect("granularity hydrates on demand");
+        let view = engine.graph().hydrate(g).expect("granularity hydrates on demand");
         assert!(view.node_count() > 0, "{g:?} produced a non-empty view");
     }
     assert_eq!(
-        engine.hydration_stats().entries,
+        engine.graph().hydration_stats().entries,
         4,
         "the four per-granularity views cache independently (FR-DB-06)"
     );
@@ -122,26 +122,26 @@ fn start_with_hydration_config_wires_a_tight_bound_through_the_engine() {
     // cache. A 1-entry bound means hydrating a second granularity evicts the
     // first, observable through hydration_stats.
     let dir = TempDir::new().expect("temp dir");
-    let engine = Engine::start_with_hydration_config(
+    let engine = Engine::start_with(
         dir.path(),
-        HydrationConfig {
+        logos_core::StartOptions::hydration(HydrationConfig {
             max_entries: Some(1),
             max_bytes: None,
-        },
+        }),
     )
     .expect("engine starts with a custom hydration config");
     seed_cycle(&engine);
 
-    engine.hydrate(Granularity::ExcludeContains).unwrap();
-    engine.hydrate(Granularity::Symbol).unwrap();
+    engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
+    engine.graph().hydrate(Granularity::Symbol).unwrap();
     assert_eq!(
-        engine.hydration_stats().entries,
+        engine.graph().hydration_stats().entries,
         1,
         "the tight entry bound configured at start is honoured through the Engine"
     );
 }
 
-/// Cross-story integration test (S-009 × S-010): `Engine::index` must advance
+/// Cross-story integration test (S-009 × S-010): `Pipeline::index` must advance
 /// the sync stamp so that a hydrate() call following an index reflects the newly
 /// persisted graph rather than a stale cached view ([ADR-04], [ADR-05]).
 ///
@@ -160,8 +160,8 @@ fn index_advances_the_sync_stamp_so_hydration_reflects_new_graph_data() {
     let engine = Engine::start(dir.path()).expect("engine starts");
 
     // Hydrate before indexing: the graph is empty, so the view has no vertices.
-    let stamp_before = engine.sync_stamp();
-    let empty_view = engine.hydrate(Granularity::ExcludeContains).unwrap();
+    let stamp_before = engine.graph().sync_stamp();
+    let empty_view = engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
     assert_eq!(
         empty_view.node_count(),
         0,
@@ -169,17 +169,17 @@ fn index_advances_the_sync_stamp_so_hydration_reflects_new_graph_data() {
     );
 
     // Index: populates the graph.
-    let idx = engine.index();
+    let idx = engine.pipeline().index();
     assert!(idx.nodes_created > 0, "index produced nodes");
 
     // The stamp must have advanced — the cache is now invalid.
     assert!(
-        engine.sync_stamp() > stamp_before,
+        engine.graph().sync_stamp() > stamp_before,
         "index() must advance the sync stamp so the cache invalidates (ADR-04)"
     );
 
     // A hydrate() after the index must reflect the new data.
-    let populated_view = engine.hydrate(Granularity::ExcludeContains).unwrap();
+    let populated_view = engine.graph().hydrate(Granularity::ExcludeContains).unwrap();
     assert!(
         populated_view.node_count() > 0,
         "post-index hydration must reflect the indexed nodes; got 0 — the sync stamp \
@@ -197,7 +197,7 @@ fn a_transient_engine_cannot_hydrate() {
     // Engine::open is the store-free transient path — no RO pool to hydrate from.
     let engine = Engine::open(dir.path());
     let err = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect_err("a transient engine has no runtime");
     assert!(
         err.to_string().contains("long-lived engine"),

@@ -54,7 +54,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -313,7 +313,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         }
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -414,7 +414,7 @@ fn a_directory_holding_a_file_with_no_recorded_clause_binds_nothing_through_the_
         write(tmp.path(), rel, text);
         changed.push(root.join(rel));
     }
-    engine.sync(&changed);
+    engine.pipeline().sync(&changed);
     let rt = engine.runtime().unwrap();
     assert!(calls_to_name(rt, "isTerminal").is_empty(), "{:?}", calls_to_name(rt, "isTerminal"));
     assert!(unbound_call_in(rt, "term/term.go", "isTerminal"));

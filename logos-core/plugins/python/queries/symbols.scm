@@ -76,11 +76,12 @@
 ; A class's Fields: the assignments of its body — a plain `x = …`, an annotated
 ; `x: int = …` and a bare annotation `x: int`, which is how a dataclass, attrs,
 ; Django or pydantic model declares its fields — and its methods' `self.x = …`
-; writes, annotated or not. `@symbol.attribute` marks each an attribute an
-; assignment declares (`extract::ATTRIBUTE_CAPTURE`): taken at its name, so the
-; assignment's initialiser calls stay the class's and a method's `self.x` write
-; stays that method's access; owned by the class, the write's method's class;
-; and declared once per class, a class-body one ahead of the first write. Each
+; writes, annotated or not. `@symbol.at_name` marks each a field declared at
+; its name (`extract::at_name`): taken at its name, so the assignment's
+; initialiser calls stay the class's and a method's `self.x` write stays that
+; method's access; owned by the class, the write's method's class
+; (`symbol.field_owner "scope"`); and declared once per class, a class-body one
+; ahead of the first write (`symbol.field_order "body-first"`). Each
 ; name of a tuple target is one (`a, b = …`, `self.a, self.b = …`). A
 ; `self.x = …` outside a method of a class declares nothing. Not captured: the
 ; names after the first of a chained assignment (`a = b = 0`), augmented
@@ -90,22 +91,26 @@
   body: (block
     (expression_statement
       (assignment
-        left: [(identifier) @symbol.field @symbol.attribute
-               (pattern_list (identifier) @symbol.field @symbol.attribute)
-               (tuple_pattern (identifier) @symbol.field @symbol.attribute)]))))
+        left: [(identifier) @symbol.field @symbol.at_name
+               (pattern_list (identifier) @symbol.field @symbol.at_name)
+               (tuple_pattern (identifier) @symbol.field @symbol.at_name)])))
+  (#set! symbol.field_owner "scope")
+  (#set! symbol.field_order "body-first"))
 ((assignment
   left: [(attribute
            object: (identifier) @_self
-           attribute: (identifier) @symbol.field @symbol.attribute)
+           attribute: (identifier) @symbol.field @symbol.at_name)
          (pattern_list
            (attribute
              object: (identifier) @_self
-             attribute: (identifier) @symbol.field @symbol.attribute))
+             attribute: (identifier) @symbol.field @symbol.at_name))
          (tuple_pattern
            (attribute
              object: (identifier) @_self
-             attribute: (identifier) @symbol.field @symbol.attribute))])
-  (#eq? @_self "self"))
+             attribute: (identifier) @symbol.field @symbol.at_name))])
+  (#eq? @_self "self")
+  (#set! symbol.field_owner "scope")
+  (#set! symbol.field_order "body-first"))
 
 ; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
 ; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a

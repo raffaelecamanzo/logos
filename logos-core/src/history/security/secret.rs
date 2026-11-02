@@ -244,6 +244,25 @@ fn is_project_relative(path: &str) -> bool {
     !path.is_empty() && Path::new(path).components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+/// The text of `path` in `commit`, read from git in memory and never written
+/// anywhere: what a historical finding's code scope reads its anchor commit's
+/// version of the file from ([FR-SC-28], `security::historical`). `None` when
+/// `commit` is not a commit id, `path` could leave the project, or git cannot
+/// read the blob (the commit is not in this clone, the path is not in it).
+///
+/// [FR-SC-28]: ../../../../docs/specs/requirements/FR-SC-28.md
+pub(crate) fn commit_source(root: &Path, commit: &str, path: &str) -> Option<Vec<u8>> {
+    let commit_id = !commit.is_empty() && commit.bytes().all(|b| b.is_ascii_hexdigit());
+    (commit_id && is_project_relative(path)).then(|| read_source(root, Some(commit), path)).flatten()
+}
+
+/// The text of `path` in the working tree under `root`: [`commit_source`]'s
+/// twin for today's version of the file. `None` when `path` could leave the
+/// project or the file cannot be read.
+pub(crate) fn tree_source(root: &Path, path: &str) -> Option<Vec<u8>> {
+    is_project_relative(path).then(|| read_source(root, None, path)).flatten()
+}
+
 /// The text of `path` in `commit`, or in the working tree when `commit` is
 /// `None`.
 fn read_source(root: &Path, commit: Option<&str>, path: &str) -> Option<Vec<u8>> {
@@ -391,6 +410,50 @@ mod tests {
     }
 
     /// A path that could leave the project is never read; a project path is.
+    /// A commit's blob is read only by a commit id and a path inside the
+    /// project: a revision name git would resolve, a path leaving the
+    /// project and a commit this clone does not hold read nothing.
+    #[test]
+    fn a_commits_version_is_read_only_by_its_id_and_a_path_inside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&root)
+                .env("GIT_CEILING_DIRECTORIES", root.parent().unwrap())
+                .args(["-c", "user.email=t@logos", "-c", "user.name=t", "-c", "maintenance.auto=false", "-c", "gc.auto=0"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "a"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        assert_eq!(commit_source(&root, &sha, "a.rs").as_deref(), Some(&b"fn a() {}\n"[..]));
+        assert_eq!(commit_source(&root, "HEAD", "a.rs"), None, "a revision name, not a commit id");
+        assert_eq!(commit_source(&root, "", "a.rs"), None, "no commit");
+        assert_eq!(commit_source(&root, &sha, "../a.rs"), None, "a path leaving the project");
+        assert_eq!(commit_source(&root, &sha, "/a.rs"), None, "an absolute path");
+        assert_eq!(commit_source(&root, &"0".repeat(40), "a.rs"), None, "a commit this clone does not hold");
+        assert_eq!(commit_source(&root, &sha, "gone.rs"), None, "a path not in the commit");
+    }
+
+    /// Only a path inside the project is read from today's tree.
+    #[test]
+    fn only_a_path_inside_the_project_is_read_from_the_working_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "x").unwrap();
+        assert_eq!(tree_source(dir.path(), "a.rs").as_deref(), Some(&b"x"[..]));
+        for outside in ["../a.rs", "/etc/hosts", "", "./a.rs/../../a.rs"] {
+            assert_eq!(tree_source(dir.path(), outside), None, "{outside}");
+        }
+        assert_eq!(tree_source(dir.path(), "gone.rs"), None, "a file that is gone");
+    }
+
     #[test]
     fn only_a_project_relative_path_is_read() {
         assert!(is_project_relative("tests/fixtures/settings.py"));

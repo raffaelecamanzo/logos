@@ -8,7 +8,7 @@
 //! `tests/worktree.rs` (S-021/[ADR-15]) proves the seed/diff-reconcile
 //! substrate in isolation; `tests/admission_convergence.rs` (S-214) proves
 //! the admission gate on synthetic boundary/gitignore fixtures fed through
-//! `Engine::sync`. This suite composes both into the single lifecycle S-216
+//! `Pipeline::sync`. This suite composes both into the single lifecycle S-216
 //! is chartered to confirm end to end:
 //!
 //! 1. opening an engine in a linked worktree serves correct navigation via
@@ -25,7 +25,7 @@
 //! 4. merging the worktree's branch back into the primary and reconciling
 //!    (`scan(true)`) makes the primary's graph population equal a fresh
 //!    `index` of the same tree — **reconcile-to-source**, no cross-DB graph
-//!    copy — and `Engine::verify()` reports `ok`
+//!    copy — and `Quality::verify()` reports `ok`
 //!    ([NFR-RA-06](../../docs/specs/requirements/NFR-RA-06.md)).
 //!
 //! Gated on `lang-rust`: integration tests share the crate's feature set and
@@ -67,7 +67,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 /// The absolute path of `<root>/<rel>` — the shape the watcher/hook hand to
-/// `Engine::sync` (OS events carry absolute paths).
+/// `Pipeline::sync` (OS events carry absolute paths).
 fn abs(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
 }
@@ -80,7 +80,7 @@ const PRIMARY_INDEX_STAMP: &str = "1000000000";
 /// Does a function named `name` exist in this engine's graph?
 fn has_fn(engine: &Engine, name: &str) -> bool {
     engine
-        .search(name, Some(logos_core::model::NodeKind::Function), Some(16))
+        .navigation().search(name, Some(logos_core::model::NodeKind::Function), Some(16))
         .hits
         .iter()
         .any(|h| h.name == name)
@@ -199,7 +199,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
     // so the worktree bootstrap below can seed from its on-disk DB.
     {
         let engine = Engine::start(&main).expect("primary engine starts");
-        let indexed = engine.index();
+        let indexed = engine.pipeline().index();
         assert!(indexed.files_indexed >= 1, "primary index ran");
         // Plant a last-full-index stamp the clock cannot currently produce. The
         // stamp is a durable `project_metadata` row (CR-130), so it travels with
@@ -229,7 +229,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
         wt.join(".logos/logos.db").exists(),
         "the worktree owns its own DB after first use (FR-WT-01)"
     );
-    let status = engine_wt.status();
+    let status = engine_wt.graph().status();
     assert!(
         status.indexed,
         "the graph is populated from the seed before any navigation call \
@@ -247,7 +247,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
     );
 
     // ── (3a) session_start baselines the WORKTREE's own graph ────────────────
-    let baseline = engine_wt.session_start().expect("session_start runs");
+    let baseline = engine_wt.quality().session_start().expect("session_start runs");
 
     // ── (2) admission wiring on the REAL worktree substrate ──────────────────
     // A gitignored file created in the worktree...
@@ -255,7 +255,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
     write(&wt, "scratch/generated.rs", "pub fn generated_fn() {}\n");
     // ...alongside the worktree's own genuine increment: a new admitted file.
     write(&wt, "src/feature.rs", "pub fn feature_fn() {}\n");
-    engine_wt.sync(&[
+    engine_wt.pipeline().sync(&[
         abs(&wt, "scratch/generated.rs"),
         abs(&wt, "src/feature.rs"),
     ]);
@@ -269,7 +269,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
     );
 
     // ── (3b) session_end measures the worktree's OWN increment ───────────────
-    let ended = engine_wt.session_end().expect("session_end runs");
+    let ended = engine_wt.quality().session_end().expect("session_end runs");
     assert_eq!(
         ended.baseline_signal, baseline.signal,
         "session_end compares against the SAME baseline session_start recorded, \
@@ -310,7 +310,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
     sh_git(&main, &["merge", "-q", "feature"]);
     let main_engine = Engine::start(&main).expect("primary engine reopens after merge");
     main_engine
-        .scan(true)
+        .quality().scan(true)
         .expect("full-walk reconcile after merge-back");
     assert!(
         has_fn(&main_engine, "feature_fn"),
@@ -331,7 +331,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
         &["clone", "-q", main.to_str().unwrap(), fresh.to_str().unwrap()],
     );
     let fresh_engine = Engine::start(&fresh).expect("fresh clone engine starts");
-    let fresh_indexed = fresh_engine.index();
+    let fresh_indexed = fresh_engine.pipeline().index();
     assert!(fresh_indexed.files_indexed >= 1, "fresh index ran");
 
     assert_eq!(
@@ -341,7 +341,7 @@ fn worktree_lifecycle_end_to_end_seed_diff_reconcile_session_and_merge_back_pari
          fresh index — no cross-DB graph copy (FR-WT-05, NFR-RA-06)"
     );
 
-    let report = main_engine.verify().expect("verify runs");
+    let report = main_engine.quality().verify().expect("verify runs");
     assert!(
         report.ok,
         "verify must report ok after the merge-back reconcile: {report:?}"
@@ -362,7 +362,7 @@ fn a_worktree_nested_under_the_primary_root_is_not_folded_into_the_primary_graph
     // boundary/ignored_dirs admission rules under test.
     let main = main.canonicalize().expect("canonicalize main root");
     let engine = Engine::start(&main).expect("primary engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert!(indexed.files_indexed >= 1, "primary index ran");
     assert!(has_fn(&engine, "seeded_fn"), "the control source is indexed");
 
@@ -386,7 +386,7 @@ fn a_worktree_nested_under_the_primary_root_is_not_folded_into_the_primary_graph
 
     // A partial sync naming the nested worktree's file directly (the
     // watcher's spelling if a filesystem event ever fired for it)...
-    engine.sync(&[abs(&inner, "src/nested_only.rs")]);
+    engine.pipeline().sync(&[abs(&inner, "src/nested_only.rs")]);
     assert!(
         !has_fn(&engine, "nested_only_fn"),
         "a partial sync of a path under a nested worktree creates no nodes"
@@ -394,7 +394,7 @@ fn a_worktree_nested_under_the_primary_root_is_not_folded_into_the_primary_graph
 
     // ...and a full-walk reconcile of the primary confirms the same
     // exclusion holds for the load-bearing path, not just the pre-filter.
-    engine.scan(true).expect("full-walk reconcile of the primary");
+    engine.quality().scan(true).expect("full-walk reconcile of the primary");
     assert!(
         !has_fn(&engine, "nested_only_fn"),
         "a nested worktree under the primary root is never folded into the \
@@ -405,7 +405,7 @@ fn a_worktree_nested_under_the_primary_root_is_not_folded_into_the_primary_graph
         "no node carries the nested worktree's file path"
     );
 
-    let report = engine.verify().expect("verify runs");
+    let report = engine.quality().verify().expect("verify runs");
     assert!(
         report.ok,
         "the primary graph stays sound with a nested worktree present: {report:?}"

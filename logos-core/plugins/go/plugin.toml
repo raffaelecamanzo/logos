@@ -26,8 +26,10 @@ implicit_receiver = "none"
 # Go writes no `implements` clause: a type implements an interface when its method
 # set covers every method the interface declares (S-529, CR-172, FR-RS-18). The
 # resolution pass records that `Implements` itself, matching methods by name and
-# parameter count with embedded fields' methods promoted and embedded interfaces
-# expanded; a generic interface is reported not computed.
+# by parameter and result types (S-830, CR-260), within a package that is a
+# directory plus its `package` clause, with embedded fields' methods promoted and
+# embedded interfaces expanded; a generic interface is reported not computed, on
+# the `interfaces` figures of `status`'s Go row.
 method_set_implements = true
 
 # `brokers` captures message-broker publish/subscribe sites (S-408, FR-WS-10,

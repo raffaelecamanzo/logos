@@ -149,7 +149,7 @@ fn indexed(fixture: Fixture) -> (TempDir, Engine) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -251,7 +251,7 @@ fn cold(fixture: Fixture, tmp: &TempDir) -> (Vec<(String, String, String)>, Vec<
     }
     coordinate::pin(fresh.path());
     let engine = Engine::start(fresh.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     binding_facts(engine.runtime().unwrap())
 }
 
@@ -415,7 +415,7 @@ fn a_type_reached_through_a_barrel_an_alias_and_type_arguments_binds() {
 #[test]
 fn precedent_lists_the_sibling_repository() {
     let (_tmp, engine) = indexed(NEST);
-    let result = engine.precedent("UsersRelationalRepository", None);
+    let result = engine.navigation().precedent("UsersRelationalRepository", None);
     let names: Vec<&str> = result.precedents.iter().map(|p| p.symbol.name.as_str()).collect();
     assert!(names.contains(&"UsersDocumentRepository"), "{names:?}");
 }
@@ -566,7 +566,7 @@ fn sync_equals_a_full_reindex_when_an_imported_type_moves() {
         (config, original(config)),
     ] {
         write(tmp.path(), rel, &edit);
-        engine.sync(&[rel.into()]);
+        engine.pipeline().sync(&[rel.into()]);
         assert_eq!(binding_facts(rt), cold(fixture, &tmp), "after writing {rel}:\n{edit}");
     }
 }

@@ -65,7 +65,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -306,7 +306,7 @@ fn sync_equals_reindex_as_generic_and_plain_types_come_and_go() {
     // A generic `A.Result<T>` binds `Result<int>` and leaves `Result` alone.
     let generic = "src/A/Result.cs";
     write(tmp.path(), generic, "namespace A\n{\n    public class Result<T> { }\n}\n");
-    engine.sync(&[generic.into()]);
+    engine.pipeline().sync(&[generic.into()]);
     assert_eq!(bound(rt, "Plain", EdgeKind::Extends), strings(&["src/X/Result.cs:Result"]));
     assert_eq!(bound(rt, "Gen", EdgeKind::Extends), strings(&["src/A/Result.cs:Result"]));
     assert_eq!(graph_fingerprint(rt), cold(&tmp));
@@ -314,14 +314,14 @@ fn sync_equals_reindex_as_generic_and_plain_types_come_and_go() {
     // A plain `A.Result` is nearer than the `using`'s.
     let plain = "src/A/Plain.cs";
     write(tmp.path(), plain, "namespace A\n{\n    public class Result { }\n}\n");
-    engine.sync(&[plain.into()]);
+    engine.pipeline().sync(&[plain.into()]);
     assert_eq!(bound(rt, "Plain", EdgeKind::Extends), strings(&["src/A/Plain.cs:Result"]));
     assert_eq!(bound(rt, "Gen", EdgeKind::Extends), strings(&["src/A/Result.cs:Result"]));
     assert_eq!(graph_fingerprint(rt), cold(&tmp));
 
     // The generic type turning plain makes two plain `A.Result`s.
     write(tmp.path(), generic, "namespace A\n{\n    public class Result { }\n}\n");
-    engine.sync(&[generic.into()]);
+    engine.pipeline().sync(&[generic.into()]);
     assert!(bound(rt, "Plain", EdgeKind::Extends).is_empty(), "two plain `A.Result`s bind nothing");
     assert!(bound(rt, "Gen", EdgeKind::Extends).is_empty(), "no `Result<T>` is declared");
     assert_eq!(graph_fingerprint(rt), cold(&tmp));
@@ -329,7 +329,7 @@ fn sync_equals_reindex_as_generic_and_plain_types_come_and_go() {
     // Removing both returns `Result` to the `using`'s.
     for path in [generic, plain] {
         fs::remove_file(tmp.path().join(path)).unwrap();
-        engine.sync(&[path.into()]);
+        engine.pipeline().sync(&[path.into()]);
     }
     assert_eq!(bound(rt, "Plain", EdgeKind::Extends), strings(&["src/X/Result.cs:Result"]));
     assert!(bound(rt, "Gen", EdgeKind::Extends).is_empty());

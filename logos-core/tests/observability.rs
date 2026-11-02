@@ -3,7 +3,7 @@
 //!
 //! These drive the story's acceptance criteria through the public surface
 //! exactly as the CLI/MCP adapters wire it — `observability::init` →
-//! instrumented `Engine` calls → `telemetry.db` → `Engine::stats`:
+//! instrumented `Engine` calls → `telemetry.db` → `Graph::stats`:
 //! - telemetry-tagged events persist to `.logos/telemetry.db`
 //!   ([FR-OB-03](../../docs/specs/requirements/FR-OB-03.md),
 //!   [UAT-OB-01](../../docs/specs/requirements/UAT-OB-01.md));
@@ -37,7 +37,7 @@ use logos_core::Engine;
 fn telemetry_persists_survives_reindex_and_feeds_stats() {
     // ── stats degrades when telemetry never ran (no .logos at all) ──────────
     let bare = TempDir::new().expect("temp dir");
-    let info = Engine::open(bare.path()).stats(None);
+    let info = Engine::open(bare.path()).graph().stats(None);
     assert_eq!(info.window_days, 7, "FR-OB-04 default window");
     assert_eq!(info.calls_total, 0);
     assert!(
@@ -61,9 +61,9 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
 
     {
         let engine = Engine::start(root).expect("engine starts");
-        let indexed = engine.index();
+        let indexed = engine.pipeline().index();
         assert_eq!(indexed.files_indexed, 1, "the fixture file indexed");
-        let found = engine.search("alpha", None, None);
+        let found = engine.navigation().search("alpha", None, None);
         assert!(
             found.warnings.is_empty(),
             "search served: {:?}",
@@ -71,15 +71,15 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
         );
         // Two classified calls through the real chokepoint (FR-OB-14): one that
         // answers — `alpha` calls `beta` — and one naming nothing in the graph.
-        let answered = engine.callers("beta", None);
+        let answered = engine.navigation().callers("beta", None);
         assert_eq!(answered.total, 1, "alpha calls beta: {answered:?}");
-        let unresolved = engine.callers("no_such_symbol_anywhere", None);
+        let unresolved = engine.navigation().callers("no_such_symbol_anywhere", None);
         assert!(unresolved.resolved.is_none(), "{unresolved:?}");
         // The other three classified chokepoints, once each: whatever each one
         // answers here, it must be recorded WITH an outcome.
-        let _ = engine.impact("beta", None);
-        let _ = engine.precedent("lib.rs", None);
-        let _ = engine.affected(&["lib.rs".to_string()], false);
+        let _ = engine.navigation().impact("beta", None);
+        let _ = engine.navigation().precedent("lib.rs", None);
+        let _ = engine.navigation().affected(&["lib.rs".to_string()], false);
     }
     // Flush the last telemetry batch exactly as a process exit would.
     drop(guard);
@@ -88,7 +88,7 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
     assert!(telemetry_db.is_file(), "telemetry.db created (FR-OB-03)");
 
     // ── stats reports what was recorded (FR-OB-04, NFR-OO-03) ──────────────
-    let stats = Engine::open(root).stats(None);
+    let stats = Engine::open(root).graph().stats(None);
     assert!(stats.calls_total > 0, "usage recorded");
     let tools: Vec<&str> = stats
         .calls_by_tool
@@ -168,7 +168,7 @@ fn telemetry_persists_survives_reindex_and_feeds_stats() {
     }
     {
         let engine = Engine::start(root).expect("engine restarts on a fresh logos.db");
-        let reindexed = engine.index();
+        let reindexed = engine.pipeline().index();
         assert_eq!(reindexed.files_indexed, 1, "full reindex rebuilt the graph");
     }
 

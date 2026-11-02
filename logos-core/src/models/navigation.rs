@@ -1164,6 +1164,55 @@ pub struct LanguageResolution {
     /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_damage: Option<ParseDamage>,
+    /// The method-set pass's figures over this language's interfaces (S-830,
+    /// [FR-RS-18], [CR-260] G3) — present on the `status` row of a language
+    /// whose plugin declares `method_set_implements` (Go), once a resolution
+    /// run has stored them; absent from every other row, and from the rows a
+    /// relational answer attaches, which state its denominator and nothing
+    /// more.
+    ///
+    /// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+    /// [CR-260]: ../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interfaces: Option<InterfaceFigures>,
+}
+
+/// What one resolution run's method-set pass found over one language's
+/// interfaces (S-830, [FR-RS-18], [CR-260] G3): the row's `interfaces` object.
+/// Stored with the graph by the run that computed it, so `status` reads it and
+/// writes nothing, and a sync and a fresh index of one tree state the same
+/// figures ([NFR-RA-06]).
+///
+/// `in_scope = computed + not_computed.generic +
+/// not_computed.unresolved_embedding + empty`.
+///
+/// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+/// [CR-260]: ../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct InterfaceFigures {
+    /// The language's interfaces.
+    pub in_scope: u64,
+    /// Those whose method set was computed and holds at least one method.
+    pub computed: u64,
+    /// The `Implements` relations recorded to them.
+    pub implements: u64,
+    /// Those whose method set was not computed, by why.
+    pub not_computed: NotComputedInterfaces,
+    /// Those declaring no method a type could be matched on: the empty
+    /// interface and type-set constraints.
+    pub empty: u64,
+}
+
+/// The interfaces [`InterfaceFigures`] counts as not computed, by why.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct NotComputedInterfaces {
+    /// A generic interface, with method specs of its own or none: its methods'
+    /// types wait on its type arguments.
+    pub generic: u64,
+    /// An embedding that resolves to no in-repository interface (the standard
+    /// library's `io.Writer`): its method set is never guessed.
+    pub unresolved_embedding: u64,
 }
 
 /// One language's **parse damage** (S-571, [FR-IX-14], [CR-181]): the files

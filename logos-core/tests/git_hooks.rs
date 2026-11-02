@@ -61,7 +61,7 @@ impl HookedRepo {
 
         // Through the Engine facade — the seam S-023's `init -i` consumes —
         // so the e2e suite covers the public contract, not just the module.
-        logos_core::Engine::install_hooks(repo.root.path()).expect("hooks install");
+        logos_core::Setup::install_hooks(repo.root.path()).expect("hooks install");
         repo
     }
 
@@ -640,7 +640,7 @@ impl PushRepo {
 
         // Install the managed hooks (incl. the pre-push gate) through the same
         // Engine seam `init -i` consumes.
-        logos_core::Engine::install_hooks(repo.root.path()).expect("hooks install");
+        logos_core::Setup::install_hooks(repo.root.path()).expect("hooks install");
 
         // A commit to push; post-commit fires and calls the stub's `sync` no-op.
         repo.write("f.rs", "pub fn f() {}\n");

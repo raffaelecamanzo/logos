@@ -49,7 +49,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
+use crate::plugin::registry::{claim_key, claimed_name_keys, is_name_claim_key, normalize_claim_key};
 use crate::plugin::{BareSpecifiers, CallTargets, LanguagePlugin, LanguageRegistry, ModuleModelKind, PathModelDecl};
+
+mod file_facade;
+pub use file_facade::FileFacades;
 
 /// A module identity: `(crate name, module path segments)` — the binder's
 /// `ModKey`.
@@ -57,6 +61,10 @@ pub type ModuleKey = (String, Vec<String>);
 
 /// Which file extensions are package-shaped, and under which source roots;
 /// which take the namespace they declare, and what each such file declares.
+///
+/// Every "extension" key below is a **claim key** ([`claim_key`]): the
+/// extension, or `/Name` for an extension-less file its language claims by exact
+/// name (Ruby's `Gemfile`, S-840).
 ///
 /// Empty ([`Default`]) is the default module model for every file, which is
 /// what a synthetic graph with no registry behind it is resolved with.
@@ -151,10 +159,11 @@ pub struct PackageLayout {
     /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
     extension_function_exts: HashSet<String>,
     /// Normalised extension → the suffix of the class another language reaches
-    /// a file's top-level functions through (S-560, [FR-RS-31]).
+    /// a file's top-level functions through (S-560, [FR-RS-31]), and the name a
+    /// file's own annotation gives that class, by path (S-832).
     ///
     /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
-    file_facades: HashMap<String, String>,
+    file_facades: FileFacades,
     /// Normalised extension → the name its language gives a type's anonymous
     /// companion object (I4-INT, [FR-RS-31]).
     ///
@@ -273,7 +282,7 @@ impl PackageLayout {
                             .collect()
                     })
                     .collect();
-                (ext.to_ascii_lowercase(), split)
+                (normalize_claim_key(&ext), split)
             })
             .collect();
         Self {
@@ -349,7 +358,7 @@ impl PackageLayout {
         self.implicit_root_members.extend(
             declared
                 .into_iter()
-                .map(|(ext, names)| (ext.trim_start_matches('.').to_ascii_lowercase(), names.into_iter().collect())),
+                .map(|(ext, names)| (normalize_claim_key(&ext), names.into_iter().collect())),
         );
         self
     }
@@ -451,9 +460,11 @@ impl PackageLayout {
     }
 
     /// This layout, with each extension's file-facade suffix (S-560; the map
-    /// [`LanguageRegistry::file_facades`] returns).
-    pub fn with_file_facades(mut self, facades: HashMap<String, String>) -> Self {
-        extend_normalised_map(&mut self.file_facades, facades);
+    /// [`LanguageRegistry::file_facades`] returns) or the facades its files
+    /// declare (S-832, [`FileFacades::declared`] over
+    /// [`GraphStore::file_facades`](crate::graph_store::GraphStore::file_facades)).
+    pub fn with_file_facades(mut self, facades: impl Into<FileFacades>) -> Self {
+        self.file_facades.merge(facades.into());
         self
     }
 
@@ -506,7 +517,7 @@ impl PackageLayout {
                 }
             });
             self.path_models.insert(
-                ext.trim_start_matches('.').to_ascii_lowercase(),
+                normalize_claim_key(&ext),
                 PathModel {
                     stems: decl.package_stems,
                     roots,
@@ -691,10 +702,15 @@ impl PackageLayout {
     /// its plugin declares, else the plugin's own name. A file of no loaded
     /// language (a synthetic graph's, under a layout told no families) is the
     /// family of its extension, so two extensions never share one by default.
-    /// `None` only for a path with no extension.
+    /// `None` for a path with no extension that no language claims by name.
     pub fn family(&self, path: &str) -> Option<String> {
         let ext = extension(path)?;
-        Some(self.families.get(&ext).cloned().unwrap_or(ext))
+        match self.families.get(&ext) {
+            Some(family) => Some(family.clone()),
+            // A name no language claims (`Makefile`) is no extension either.
+            None if is_name_claim_key(&ext) => None,
+            None => Some(ext),
+        }
     }
 
     /// Whether a type name written in the file at `path` is also looked up in
@@ -774,7 +790,9 @@ impl PackageLayout {
 
     /// Whether the functions the file at `path` declares at its top level are
     /// members of the namespace it declares (S-573, [FR-RS-36]): its
-    /// language's declaration.
+    /// language's declaration. So are its top-level properties, a `Variable` or
+    /// a `Constant`, where it declares any (S-831: Kotlin's `val`, `var` and
+    /// `const val`) — names an import reaches and a call never does.
     ///
     /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
     pub fn declares_top_level_callables(&self, path: &str) -> bool {
@@ -811,23 +829,20 @@ impl PackageLayout {
     ///
     /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
     pub fn declares_file_facades(&self, path: &str) -> bool {
-        extension(path).is_some_and(|ext| self.file_facades.contains_key(&ext))
+        self.file_facades.declares(path)
     }
 
     /// The class another language of the family reaches the top-level
     /// functions of the file at `path` through (S-560, [FR-RS-31]), `None`
-    /// when its language declares no facade: the file's stem, every character
-    /// that cannot spell a class name replaced by `_` and the first letter
-    /// upper-cased, then the declared suffix — `src/util/Utils.kt` →
-    /// `UtilsKt`, `date-utils.kt` → `Date_utilsKt`.
+    /// when its language declares no facade: the name the file's own
+    /// annotation declares (S-832, `@file:JvmName("Slugs")`), else the file's
+    /// stem, every character that cannot spell a class name replaced by `_`
+    /// and the first letter upper-cased, then the declared suffix —
+    /// `src/util/Utils.kt` → `UtilsKt`, `date-utils.kt` → `Date_utilsKt`.
     ///
     /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
     pub fn file_facade(&self, path: &str) -> Option<String> {
-        let suffix = self.file_facades.get(&extension(path)?)?;
-        let stem = Path::new(path).file_stem()?.to_str()?;
-        let mut chars = stem.chars().map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' });
-        let first = chars.next()?;
-        Some(first.to_uppercase().chain(chars).chain(suffix.chars()).collect())
+        self.file_facades.of(path)
     }
 
     /// The name the language of the file at `path` gives a type's anonymous
@@ -1047,6 +1062,7 @@ impl PackageLayout {
                 .extensions()
                 .iter()
                 .map(|ext| ext.trim_start_matches('.').to_string())
+                .chain(claimed_name_keys(plugin))
         };
         let layout = match (semantics.module_model, semantics.package_modules.as_ref()) {
             (ModuleModelKind::Package, Some(pm)) => {
@@ -1081,7 +1097,7 @@ impl PackageLayout {
             .with_file_facades(
                 exts()
                     .filter_map(|ext| Some((ext, semantics.file_facade.clone()?)))
-                    .collect(),
+                    .collect::<HashMap<_, _>>(),
             )
             .with_companion_names(
                 exts()
@@ -1264,11 +1280,12 @@ fn under_import_root(path: &str, roots: &ImportRoots) -> (String, Vec<String>, O
     (roots.crate_name.clone(), mods, Some(file_stem(file)))
 }
 
-/// Add `exts` to `set`, each normalised as every extension key here is —
-/// without a leading dot, lower-cased — the one body of the per-key `with_*`
-/// set builders (S-592: written once, not once per key).
+/// Add `exts` to `set`, each normalised as every claim key here is
+/// ([`normalize_claim_key`]: an extension without a leading dot, lower-cased; a
+/// claimed name as it is) — the one body of the per-key `with_*` set builders
+/// (S-592: written once, not once per key).
 fn extend_normalised(set: &mut HashSet<String>, exts: impl IntoIterator<Item = String>) {
-    set.extend(exts.into_iter().map(|e| e.trim_start_matches('.').to_ascii_lowercase()));
+    set.extend(exts.into_iter().map(|e| normalize_claim_key(&e)));
 }
 
 /// [`extend_normalised`] for a map keyed by extension: each key normalised the
@@ -1277,13 +1294,16 @@ fn extend_normalised_map<V>(map: &mut HashMap<String, V>, entries: HashMap<Strin
     map.extend(
         entries
             .into_iter()
-            .map(|(ext, value)| (ext.trim_start_matches('.').to_ascii_lowercase(), value)),
+            .map(|(ext, value)| (normalize_claim_key(&ext), value)),
     );
 }
 
-/// `path`'s extension, lower-cased — the key both models are declared under.
+/// `path`'s claim key — its extension, lower-cased, else the exact basename a
+/// code plugin claims (S-840) — the key both models are declared under. The
+/// registry's [`claim_key`], so a `Rakefile` finds the entries a `.rake` file
+/// does.
 fn extension(path: &str) -> Option<String> {
-    Some(Path::new(path).extension()?.to_str()?.to_ascii_lowercase())
+    claim_key(path)
 }
 
 /// A declared namespace's segments from its recorded text (`"Shop.Domain"` →
@@ -1824,6 +1844,21 @@ mod path_model_tests {
         // Rust declares no import roots: no family crate, no directory modules.
         assert!(!l.has_import_roots("cli/src/cmd/mod.rs"));
         assert!(!l.is_family_crate("cli"));
+    }
+
+    /// A claimed name's key (S-840) keeps its case through the roots builder as
+    /// it does through every other: `src/Tool` finds the roots filed under
+    /// `/Tool`, and an extension key is still lower-cased (fixture tokens: this
+    /// directory spells no language id, the `jvm_parity` guard).
+    #[test]
+    fn a_claimed_name_key_keeps_its_case_in_the_roots_builder() {
+        let l = PackageLayout::new(HashMap::from([
+            ("/Tool".to_string(), vec!["src".to_string()]),
+            ("XY".to_string(), vec!["lib".to_string()]),
+        ]));
+        assert_eq!(l.source_root("src/Tool"), Some(&["src".to_string()][..]));
+        assert_eq!(l.source_root("lib/a/B.xy"), Some(&["lib".to_string()][..]));
+        assert_eq!(l.source_root("src/tool"), None, "a name is matched exactly");
     }
 
     #[test]

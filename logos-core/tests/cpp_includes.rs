@@ -47,7 +47,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -213,8 +213,10 @@ fn a_static_member_call_binds_the_class_member_and_an_out_of_line_one_its_defini
     ]);
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
-    // Another file reaches the declaration its include makes visible.
-    assert_eq!(from_file(rt, EdgeKind::Calls, "src/main.cpp"), [edge("src/main.cpp:main", "src/widget.hpp:make")]);
+    // Another file reaches the declaration its include makes visible — a
+    // prototype paired with `widget.cpp`'s definition, which the call binds
+    // (S-820).
+    assert_eq!(from_file(rt, EdgeKind::Calls, "src/main.cpp"), [edge("src/main.cpp:main", "src/widget.cpp:make")]);
     let widget = from_file(rt, EdgeKind::Calls, "src/widget.cpp");
     // Inside an out-of-line member, a bare name is the class's member first —
     // its definition in this file, never the free `reset` `free.hpp` declares.
@@ -274,6 +276,85 @@ fn a_definition_beside_its_own_header_prototype_binds_as_before() {
         from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/hash.cpp"),
         [edge("src/hash.cpp:twice", "src/hash.cpp:digest")]
     );
+}
+
+/// The `to_text` case (S-820, [CR-254] P5): an own-file definition and an
+/// included prototype of the name whose parameter types differ are two
+/// overloads, read as one candidate set — and the binder reads no argument
+/// types, so two survivors leave the call unbound. Of equal parameter types
+/// they are one function, and the definition binds once.
+///
+/// [CR-254]: ../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+#[test]
+fn an_own_file_overload_beside_an_included_one_of_other_parameters_binds_neither() {
+    let conv_cpp = "#include \"conv.h\"\nnamespace conv {\nconst char* to_text(int v) { return \"\"; }\nvoid show() { conv::to_text(1.5); }\n}\n";
+    let tmp = tree(&[("src/conv.h", "namespace conv {\nconst char* to_text(double d);\n}\n"), ("src/conv.cpp", conv_cpp)]);
+    let engine = index(tmp.path());
+    assert_eq!(from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/conv.cpp"), []);
+
+    let conv_cpp = "#include \"conv.h\"\nnamespace conv {\nconst char* to_text(int v) { return \"\"; }\nvoid show() { conv::to_text(1); }\n}\n";
+    let tmp = tree(&[("src/conv.h", "namespace conv {\nconst char* to_text(int d);\n}\n"), ("src/conv.cpp", conv_cpp)]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/conv.cpp"),
+        [edge("src/conv.cpp:show", "src/conv.cpp:to_text")]
+    );
+}
+
+/// The rule reads an included *prototype* alone: an included inline
+/// definition of other parameters stays hidden by the own file's, as before
+/// (S-820 review).
+#[test]
+fn an_included_inline_definition_of_other_parameters_stays_hidden() {
+    let conv_cpp = "#include \"conv.h\"\nnamespace conv {\nconst char* to_text(int v) { return \"\"; }\nvoid show() { conv::to_text(1); }\n}\n";
+    let tmp = tree(&[
+        ("src/conv.h", "namespace conv {\ninline const char* to_text(double d) { return \"\"; }\n}\n"),
+        ("src/conv.cpp", conv_cpp),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/conv.cpp"),
+        [edge("src/conv.cpp:show", "src/conv.cpp:to_text")]
+    );
+}
+
+/// One type spelled two ways is no overload (S-820): ccache's header declares
+/// `hash_inode(const std::filesystem::path&)` and its source defines
+/// `hash_inode(const fs::path&)`, and nlohmann's `core::Statistic` is the
+/// source's `Statistic`. The own file's definition binds, as before.
+#[test]
+fn an_included_prototype_spelling_one_type_another_way_is_no_overload() {
+    let tmp = tree(&[
+        ("src/norm.h", "namespace app {\nstruct Path {};\nint norm(const app::Path& p);\n}\n"),
+        ("src/norm.cpp", "#include \"norm.h\"\nnamespace app {\nint norm(const Path& p) { return 0; }\nint use() { return norm(Path()); }\n}\n"),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/norm.cpp"),
+        [edge("src/norm.cpp:use", "src/norm.cpp:norm")]
+    );
+}
+
+/// Nor is any other spelling of one parameter list (S-820 review): an
+/// attribute, an east `const`, `unsigned` for `unsigned int`, an array for a
+/// pointer. The own file's definition binds, as before.
+#[test]
+fn an_included_prototype_spelling_its_parameters_another_way_is_no_overload() {
+    let cases = [
+        ("void handle(int code);\n", "void handle([[maybe_unused]] int code) {}\nvoid run() { handle(1); }\n", "handle"),
+        ("struct Foo {};\nvoid put(const Foo& f);\n", "void put(Foo const& f) {}\nvoid run() { put(Foo()); }\n", "put"),
+        ("void take(unsigned n);\n", "void take(unsigned int n) {}\nvoid run() { take(1); }\n", "take"),
+        ("void fill(char* buf);\n", "void fill(char buf[]) {}\nvoid run() { fill(0); }\n", "fill"),
+    ];
+    for (header, source, name) in cases {
+        let tmp = tree(&[("src/h.h", header), ("src/a.cpp", &format!("#include \"h.h\"\n{source}"))]);
+        let engine = index(tmp.path());
+        assert_eq!(
+            from_file(engine.runtime().unwrap(), EdgeKind::Calls, "src/a.cpp"),
+            [edge("src/a.cpp:run", &format!("src/a.cpp:{name}"))],
+            "{source}"
+        );
+    }
 }
 
 /// What the file's own scope walk bound before includes were read, measured
@@ -455,7 +536,7 @@ fn a_nested_out_of_line_member_reads_every_class_of_its_path() {
 fn a_base_clause_error_recovery_leaves_outside_a_class_records_nothing() {
     let tmp = tree(&[("src/b.hpp", "class Base {};\nclass B : public Base\n")]);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
     assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Extends), []);
 }
 
@@ -536,7 +617,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         write(tmp_a.path(), rel, text);
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let mut final_state: std::collections::BTreeMap<&str, &str> = initial.iter().copied().collect();
     final_state.extend(edits.iter().copied());
@@ -608,7 +689,7 @@ fn a_base_a_header_between_brings_in_records_extends_on_sync_as_on_reindex() {
     let engine = index(tmp.path());
     let root = tmp.path().canonicalize().expect("canonicalize root");
     write(tmp.path(), "src/core/mid.hpp", "#include \"base.hpp\"\n");
-    engine.sync(&[root.join("src/core/mid.hpp")]);
+    engine.pipeline().sync(&[root.join("src/core/mid.hpp")]);
     assert_eq!(
         from_file(engine.runtime().unwrap(), EdgeKind::Extends, "src/core/derived.hpp"),
         [edge("src/core/derived.hpp:Derived", "src/core/base.hpp:Base")]

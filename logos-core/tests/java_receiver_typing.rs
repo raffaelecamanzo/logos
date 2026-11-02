@@ -9,7 +9,9 @@
 //! field, parameter, local, `this.x`, `this`, a bare call, `super`, a static
 //! type name — and each refusal shape to the bare Method-form row it recorded
 //! before: a chained call, an untyped lambda parameter, a generic type
-//! variable, a name the file declares with two disagreeing types.
+//! variable. Since S-825 a name's type is its one binding in scope at the
+//! call (CR-256): a parameter or local hides the field of its name, and each
+//! re-pinned expectation below names the binding now in or out of scope.
 //!
 //! `T` is written as the file names it; its scope — the file's single-type
 //! imports, then the same package — is the binder's package rung (S-465). The
@@ -26,6 +28,7 @@ use std::fs;
 use std::path::Path;
 
 use logos_core::model::{EdgeKind, NodeId, RefForm};
+use logos_core::models::CallResidueReason;
 use logos_core::Engine;
 use logos_core::Runtime;
 use tempfile::TempDir;
@@ -42,7 +45,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -215,7 +218,9 @@ const REFUSE_FILE: &str = "src/main/java/com/x/svc/Refuse.java";
 ///   is what a scope-blind reading would answer with.
 /// * `generic` — `item` is declared `T`, the class's type parameter, beside a
 ///   same-package class named `T`.
-/// * `disagree` — `twice` is a `Mailer` field and an `Audit` parameter.
+/// * `disagree` — `twice` is a `Mailer` field and an `Audit` parameter. Not
+///   a refusal since S-825: the parameter is the one binding in scope at the
+///   call, hiding the field, so the call is `Audit::send` (re-pinned).
 /// * `array` — `many` is a `Mailer[]`: an array has no `send`.
 /// * `inferred` — `var v`: `var` names no type.
 const REFUSE: &str = "package com.x.svc;\n\
@@ -253,19 +258,23 @@ fn an_unprovable_receiver_keeps_the_bare_method_form_row() {
             row("array", "clone", RefForm::Method),
             row("chained", "Refuse::make", RefForm::Path),
             row("chained", "send", RefForm::Method),
-            row("disagree", "send", RefForm::Method),
+            row("disagree", "Audit::send", RefForm::Path),
             row("generic", "send", RefForm::Method),
             row("inferred", "send", RefForm::Method),
             row("lambda", "List::forEach", RefForm::Path),
             row("lambda", "send", RefForm::Method),
         ]
     );
-    // The near miss, bound: no refused site reaches `T.send` or `Mailer.send`.
+    // The near miss, bound: no refused site reaches `T.send` or `Mailer.send`;
+    // `disagree`'s parameter binds its own `Audit.send`.
     let edges = call_edges(rt);
     assert!(
-        !edges.iter().any(|(s, _)| s.starts_with(REFUSE_FILE) && !s.ends_with(":chained")),
+        !edges
+            .iter()
+            .any(|(s, _)| s.starts_with(REFUSE_FILE) && !s.ends_with(":chained") && !s.ends_with(":disagree")),
         "{edges:?}"
     );
+    assert!(edges.contains(&(format!("{REFUSE_FILE}:disagree"), format!("{AUDIT_FILE}:send"))), "{edges:?}");
 }
 
 /// The enclosing class is `this` only where the file can name it, and a bare
@@ -429,9 +438,10 @@ fn no_java_row_reaches_the_method_form_dyn_dispatch_branch() {
 /// * `wildcard` — `now()` is what `import static Clock.*` supplies; the class
 ///   declares no `now`.
 /// * `own` — the class's own `tick()` shadows the static wildcard.
-/// * `obscuredA` / `obscuredB` — a variable named `Clock`, declared with two
-///   disagreeing types, still obscures the imported type `Clock`: a poisoned
-///   variable is a variable, not a type name.
+/// * `obscuredA` / `obscuredB` — a parameter named `Clock` obscures the
+///   imported type `Clock`: a variable is a variable, not a type name. Since
+///   S-825 each is typed by its own parameter, the one binding in scope at its
+///   call (`Mailer::send`, `Audit::send`; re-pinned) — never `Clock::send`.
 const EDGE_FILE: &str = "src/main/java/com/x/svc/Edge.java";
 const EDGE: &str = "package com.x.svc;\n\
 \n\
@@ -458,8 +468,8 @@ fn a_field_a_wildcard_import_an_own_member_and_an_obscuring_variable_each_decide
     assert_eq!(
         calls_from(rt, EDGE_FILE),
         [
-            row("obscuredA", "send", RefForm::Method),
-            row("obscuredB", "send", RefForm::Method),
+            row("obscuredA", "Mailer::send", RefForm::Path),
+            row("obscuredB", "Audit::send", RefForm::Path),
             row("own", "Edge::tick", RefForm::Path),
             row("shadowed", "Mailer::send", RefForm::Path),
             row("wildcard", "now", RefForm::Path),
@@ -538,7 +548,7 @@ fn sync_equals_a_full_reindex_after_editing_the_calling_file() {
         &SVC.replace("import com.x.mail.Mailer;\n", "")
             .replace(" extends Base", ""),
     );
-    engine.sync(&[SVC_FILE.into()]);
+    engine.pipeline().sync(&[SVC_FILE.into()]);
     assert!(calls_from(rt, SVC_FILE).contains(&row("viaSuper", "start", RefForm::Method)));
     assert!(call_edges(rt).contains(&(
         format!("{SVC_FILE}:viaField"),
@@ -565,7 +575,7 @@ fn sync_equals_a_full_reindex_after_the_receivers_type_gains_the_method() {
         "precondition: nothing binds into Mailer yet"
     );
     write(tmp.path(), MAILER_FILE, MAILER);
-    engine.sync(&[MAILER_FILE.into()]);
+    engine.pipeline().sync(&[MAILER_FILE.into()]);
     let into_mailer = call_edges(rt)
         .into_iter()
         .filter(|(_, t)| *t == format!("{MAILER_FILE}:send"))
@@ -633,10 +643,12 @@ fn a_variable_is_typed_only_where_it_is_declared_in_scope_and_readably() {
     let engine = index(&tmp);
     let rt = engine.runtime().unwrap();
     let rows = |file: &str| calls_from(rt, &format!("src/main/java/com/x/svc/{file}.java"));
-    // The near misses still type: a local, an own field. (`Loop.one`'s `m` does
-    // not: a for-each `m` poisons the name for the whole file, like a
-    // disagreeing declaration — the refusing direction.)
-    assert!(rows("Loop").contains(&row("one", "send", RefForm::Method)));
+    // The near misses still type: a local, an own field — and, since S-825, a
+    // parameter whose name a for-each or varargs variable in another method
+    // also binds (`Loop.one`, `Varargs.one`; re-pinned): that variable is in
+    // scope in its own construct only, no longer poisoning the whole file.
+    assert!(rows("Loop").contains(&row("one", "Mailer::send", RefForm::Path)));
+    assert!(rows("Varargs").contains(&row("one", "Mailer::send", RefForm::Path)));
     assert!(rows("Inherit").contains(&row("one", "Mailer::send", RefForm::Path)));
     assert!(rows("InheritF").contains(&row("one", "Mailer::send", RefForm::Path)));
     // The refusals keep the bare row.
@@ -902,4 +914,444 @@ fn an_outer_classs_field_is_in_scope_through_inner_classes_that_inherit_nothing(
     let from_go: Vec<_> = edges.iter().filter(|(s, _)| s.starts_with(NESTED_FILE)).collect();
     assert_eq!(from_go.len(), 1, "{from_go:?}");
     assert_eq!(from_go[0].1, format!("{MAILER_FILE}:send"));
+}
+
+// ── S-825 (CR-256, FR-RS-10): a binding types only the calls in its scope ────
+
+const LOGGER_FILE: &str = "src/main/java/com/x/base/Logger.java";
+const LOGGER: &str = "package com.x.base;\n\npublic class Logger {\n    public void send() {}\n}\n";
+/// A base class in another file: its `svc` is a field the subclasses below
+/// inherit and cannot see, so a call on it after a closed block proves
+/// nothing.
+const SCOPED_BASE_FILE: &str = "src/main/java/com/x/base/Base3.java";
+const SCOPED_BASE: &str = "package com.x.base;\n\npublic class Base3 {\n    protected Logger svc;\n    protected Logger p;\n    protected Logger e;\n    protected Logger r;\n    protected Logger before;\n}\n";
+
+/// The Java row of the call residue readout: every unresolved-call reason
+/// with a count, sorted.
+fn java_residue(engine: &Engine) -> Vec<(CallResidueReason, u64)> {
+    let residue = engine
+        .graph().status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .and_then(|row| row.call_residue)
+        .expect("the java row states its call residue");
+    let mut reasons: Vec<(CallResidueReason, u64)> = residue.reasons.into_iter().filter(|(_, n)| *n > 0).collect();
+    reasons.sort();
+    reasons
+}
+
+/// The D1 fixture of CR-256: `m`'s `svc` is the inherited `Logger` field,
+/// because the local's block closed before the call; `n` calls inside it.
+const CLOSED_FILE: &str = "src/main/java/com/x/svc/C.java";
+const CLOSED: &str = "package com.x.svc;\n\
+\n\
+import com.x.base.Base3;\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class C extends Base3 {\n\
+    void m(boolean f) { if (f) { Mailer svc = new Mailer(); } svc.send(); }\n\
+    void n(boolean f) { if (f) { Mailer svc = new Mailer(); svc.send(); } }\n\
+}\n";
+
+fn closed_block_fixture() -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    for (rel, text) in [
+        (MAILER_FILE, MAILER),
+        (LOGGER_FILE, LOGGER),
+        (SCOPED_BASE_FILE, SCOPED_BASE),
+        (CLOSED_FILE, CLOSED),
+    ] {
+        write(tmp.path(), rel, text);
+    }
+    tmp
+}
+
+#[test]
+fn a_local_in_a_closed_block_types_no_call_after_it() {
+    let tmp = closed_block_fixture();
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, CLOSED_FILE),
+        [row("m", "send", RefForm::Method), row("n", "Mailer::send", RefForm::Path)]
+    );
+    let from_c: Vec<_> = call_edges(rt).into_iter().filter(|(s, _)| s.starts_with(CLOSED_FILE)).collect();
+    assert_eq!(from_c, [(format!("{CLOSED_FILE}:n"), format!("{MAILER_FILE}:send"))]);
+    assert_eq!(java_residue(&engine), [(CallResidueReason::NoReceiverEvidence, 1)]);
+}
+
+/// Each typed binding is called once inside its scope and once outside it,
+/// where only the inherited `Logger` field of its name is in scope: a typed
+/// lambda parameter, a `for` variable, a resource, a local before its
+/// declaration. Before S-825 every outside call was typed `Mailer::send`.
+const OUT_OF_SCOPE_FILE: &str = "src/main/java/com/x/svc/D.java";
+const OUT_OF_SCOPE: &str = "package com.x.svc;\n\
+\n\
+import com.x.base.Base3;\n\
+import com.x.mail.Mailer;\n\
+import java.util.List;\n\
+\n\
+public class D extends Base3 {\n\
+    void lambda(List<Mailer> ms) { ms.forEach((Mailer p) -> p.send()); p.send(); }\n\
+    void loop() { for (Mailer e = new Mailer(); ; ) { e.send(); break; } e.send(); }\n\
+    void resource() { try (Mailer r = new Mailer()) { r.send(); } r.send(); }\n\
+    void early() { before.send(); Mailer before = new Mailer(); before.send(); }\n\
+}\n";
+
+#[test]
+fn a_binding_outside_its_construct_or_before_its_declaration_types_no_call() {
+    let tmp = closed_block_fixture();
+    write(tmp.path(), OUT_OF_SCOPE_FILE, OUT_OF_SCOPE);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    let mut expected = vec![row("lambda", "List::forEach", RefForm::Path)];
+    for source in ["early", "lambda", "loop", "resource"] {
+        expected.push(row(source, "Mailer::send", RefForm::Path));
+        expected.push(row(source, "send", RefForm::Method));
+    }
+    expected.sort_by(|a, b| (&a.0, &a.1, a.2.as_i32()).cmp(&(&b.0, &b.1, b.2.as_i32())));
+    assert_eq!(calls_from(rt, OUT_OF_SCOPE_FILE), expected);
+}
+
+/// A parameter or local hides the field of its name, whatever their types —
+/// the scope-blind table refused every one of these, two disagreeing
+/// declarations of one name — and an inner class's field shadows its outer
+/// class's. The near miss: with no parameter or local, the field types.
+const HIDES_FILE: &str = "src/main/java/com/x/svc/Hides.java";
+const HIDES: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+import java.util.List;\n\
+\n\
+public class Hides {\n\
+    private Mailer svc;\n\
+    void param(Audit svc) { svc.send(); }\n\
+    void local() { Audit svc = new Audit(); svc.send(); }\n\
+    void field() { svc.send(); }\n\
+    void untyped(List<Audit> all) { all.forEach(svc -> svc.send()); }\n\
+    class Inner {\n\
+        private Audit svc;\n\
+        void inner() { svc.send(); }\n\
+    }\n\
+}\n";
+
+#[test]
+fn a_parameter_or_local_hides_a_field_and_a_nearer_class_shadows_an_outer_one() {
+    let tmp = fixture();
+    write(tmp.path(), HIDES_FILE, HIDES);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, HIDES_FILE),
+        [
+            row("field", "Mailer::send", RefForm::Path),
+            row("inner", "Audit::send", RefForm::Path),
+            row("local", "Audit::send", RefForm::Path),
+            row("param", "Audit::send", RefForm::Path),
+            // An untyped lambda parameter hides the field and proves nothing.
+            row("untyped", "List::forEach", RefForm::Path),
+            row("untyped", "send", RefForm::Method),
+        ]
+    );
+}
+
+#[test]
+fn sync_equals_a_full_reindex_after_a_call_moves_out_of_its_block() {
+    let tmp = closed_block_fixture();
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    write(tmp.path(), CLOSED_FILE, &CLOSED.replace("svc.send(); } }", "} svc.send(); }"));
+    engine.pipeline().sync(&[CLOSED_FILE.into()]);
+    assert_eq!(
+        calls_from(rt, CLOSED_FILE),
+        [row("m", "send", RefForm::Method), row("n", "send", RefForm::Method)]
+    );
+    let cold = TempDir::new().unwrap();
+    for rel in [MAILER_FILE, LOGGER_FILE, SCOPED_BASE_FILE, CLOSED_FILE] {
+        write(cold.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+    }
+    let cold_engine = index(&cold);
+    assert_eq!(binding_facts(rt), binding_facts(cold_engine.runtime().unwrap()));
+}
+
+/// A local or record class's own field hides the parameter, local or record
+/// component of its name declared outside it — Java's nearest declaration —
+/// so the call is typed by the field (S-825 review: the outer binding used to
+/// win, a wrong edge). The near miss: a local class with no field of the name
+/// still reads the enclosing method's local.
+const NEAREST_FILE: &str = "src/main/java/com/x/svc/Nearest.java";
+const NEAREST: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class Nearest {\n\
+    void param(Mailer x) { class L { Audit x; void run() { x.send(); } } }\n\
+    void local() { Mailer y = new Mailer(); class M { Audit y; void go() { y.send(); } } }\n\
+    void captured() { Mailer z = new Mailer(); class N { void use() { z.send(); } } }\n\
+}\n";
+const NEAREST_RECORD_FILE: &str = "src/main/java/com/x/svc/Rec.java";
+const NEAREST_RECORD: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public record Rec(Mailer x) {\n\
+    class Inner { Audit x; void inner() { x.send(); } }\n\
+    void outer() { x.send(); }\n\
+}\n";
+
+#[test]
+fn a_nearer_classs_field_hides_a_binding_declared_outside_its_class() {
+    let tmp = fixture();
+    write(tmp.path(), NEAREST_FILE, NEAREST);
+    write(tmp.path(), NEAREST_RECORD_FILE, NEAREST_RECORD);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, NEAREST_FILE),
+        [
+            row("go", "Audit::send", RefForm::Path),
+            row("run", "Audit::send", RefForm::Path),
+            row("use", "Mailer::send", RefForm::Path),
+        ]
+    );
+    assert_eq!(
+        calls_from(rt, NEAREST_RECORD_FILE),
+        [row("inner", "Audit::send", RefForm::Path), row("outer", "Mailer::send", RefForm::Path)]
+    );
+}
+
+/// A local is in scope from where it is written — its own and every later
+/// declarator's initializer included — never before it: a case group's
+/// local types no call in an earlier group, where the field of its name is
+/// in scope (S-825 review: both used to be typed the wrong way round).
+const LOCALS_FILE: &str = "src/main/java/com/x/svc/Locals.java";
+const LOCALS: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class Locals {\n\
+    Mailer x;\n\
+    Mailer a;\n\
+    void early(int k) {\n\
+        switch (k) {\n\
+            case 1: x.self(); break;\n\
+            default: Audit x = new Audit(); x.send();\n\
+        }\n\
+    }\n\
+    void init() { Audit a = new Audit(), b = a.copy(); }\n\
+    void loop() { for (Audit x = new Audit(); ; ) { x.send(); break; } x.self(); }\n\
+}\n";
+
+#[test]
+fn a_local_is_in_scope_from_where_it_is_written_and_never_before() {
+    let tmp = fixture();
+    write(tmp.path(), LOCALS_FILE, LOCALS);
+    let engine = index(&tmp);
+    assert_eq!(
+        calls_from(engine.runtime().unwrap(), LOCALS_FILE),
+        [
+            row("early", "Audit::send", RefForm::Path),
+            row("early", "Mailer::self", RefForm::Path),
+            row("init", "Audit::copy", RefForm::Path),
+            row("loop", "Audit::send", RefForm::Path),
+            row("loop", "Mailer::self", RefForm::Path),
+        ]
+    );
+}
+
+/// A resource is in scope in the rest of its resource list and its `try`
+/// block, never in the statement's `catch` or `finally`, where the field of
+/// its name is (S-825 review: the resource used to type those calls).
+const RESOURCE_FILE: &str = "src/main/java/com/x/svc/Res.java";
+const RESOURCE: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class Res {\n\
+    Mailer x;\n\
+    void fin() { try (Audit x = new Audit()) { } finally { x.self(); } }\n\
+    void cat() { try (Audit x = new Audit()) { } catch (RuntimeException e) { x.self(); } }\n\
+    void body() { try (Audit x = new Audit(); Audit y = x.copy()) { x.send(); } }\n\
+}\n";
+
+#[test]
+fn a_resource_types_its_try_block_and_never_its_catch_or_finally() {
+    let tmp = fixture();
+    write(tmp.path(), RESOURCE_FILE, RESOURCE);
+    let engine = index(&tmp);
+    assert_eq!(
+        calls_from(engine.runtime().unwrap(), RESOURCE_FILE),
+        [
+            row("body", "Audit::copy", RefForm::Path),
+            row("body", "Audit::send", RefForm::Path),
+            row("cat", "Mailer::self", RefForm::Path),
+            row("fin", "Mailer::self", RefForm::Path),
+        ]
+    );
+}
+
+/// An interface constant is in scope across its interface's body: a class
+/// nested in the interface never reads the outer class's field of the
+/// constant's name, which the constant hides — and a constant proves
+/// nothing (S-825 review: the walk used to pass the interface and reach the
+/// outer field). The near miss: outside the interface the field types.
+const IFACE_FILE: &str = "src/main/java/com/x/svc/Iface.java";
+const IFACE: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public class Iface {\n\
+    Mailer X;\n\
+    void outside() { X.send(); }\n\
+    interface I { Audit X = null; class N { void inside() { X.send(); } } }\n\
+}\n";
+
+#[test]
+fn an_interface_constant_hides_an_outer_field_in_its_nested_classes() {
+    let tmp = fixture();
+    write(tmp.path(), IFACE_FILE, IFACE);
+    let engine = index(&tmp);
+    assert_eq!(
+        calls_from(engine.runtime().unwrap(), IFACE_FILE),
+        [row("inside", "send", RefForm::Method), row("outside", "Mailer::send", RefForm::Path)]
+    );
+}
+
+/// An enum constant's body is an anonymous class: its field is in scope in
+/// that body and hides the enum's own field of its name there, and the enum's
+/// field is in scope in the enum's other members (S-825 review: the body's
+/// field used to be bound to no class, so the enum's field typed its call).
+const ENUM_FILE: &str = "src/main/java/com/x/svc/Kinds.java";
+const ENUM: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public enum Kinds {\n\
+    A { Audit s; void body() { s.send(); } };\n\
+    Mailer s;\n\
+    void own() { s.send(); }\n\
+}\n";
+
+#[test]
+fn an_enum_constants_body_field_is_in_scope_in_that_body_only() {
+    let tmp = fixture();
+    write(tmp.path(), ENUM_FILE, ENUM);
+    let engine = index(&tmp);
+    assert_eq!(
+        calls_from(engine.runtime().unwrap(), ENUM_FILE),
+        [row("body", "Audit::send", RefForm::Path), row("own", "Mailer::send", RefForm::Path)]
+    );
+}
+
+/// An enum constant is a variable of its enum: one named like the imported
+/// type `Mailer` obscures it in the enum's body, so `Mailer.send()` there is
+/// no static call on `Mailer` (S-825 review: it was typed `Mailer::send`).
+const OBSCURE_FILE: &str = "src/main/java/com/x/svc/Obscure.java";
+const OBSCURE: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+\n\
+public enum Obscure {\n\
+    Mailer;\n\
+    void obscured() { Mailer.send(); }\n\
+    void send() {}\n\
+}\n";
+
+#[test]
+fn an_enum_constant_obscures_a_type_of_its_name() {
+    let tmp = fixture();
+    write(tmp.path(), OBSCURE_FILE, OBSCURE);
+    let engine = index(&tmp);
+    assert_eq!(calls_from(engine.runtime().unwrap(), OBSCURE_FILE), [row("obscured", "send", RefForm::Method)]);
+}
+
+/// A variable that proves nothing still obscures a type of its name: an
+/// untyped lambda parameter or a pattern variable named `Clock` is never the
+/// imported class `Clock` (S-825 review: no test guarded the static-type
+/// reading's "declared nowhere in the file" condition once the obscuring
+/// parameters above became typed). A C-style array (`Mailer f[]`) is no
+/// `Mailer`, and a switch or record pattern variable hides the field of its
+/// name in its own scope.
+const OBSCURED_FILE: &str = "src/main/java/com/x/svc/Obs.java";
+const OBSCURED: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+import com.x.util.Clock;\n\
+import java.util.List;\n\
+\n\
+public class Obs {\n\
+    private Mailer m;\n\
+    private Mailer f[];\n\
+    void lambda(List<Mailer> l) { l.forEach(Clock -> Clock.now()); }\n\
+    void pattern(Object o) { if (o instanceof Mailer Clock) { Clock.now(); } }\n\
+    void field() { f.send(); }\n\
+    void param(Mailer p[]) { p.send(); }\n\
+    void local() { Mailer l[] = null; l.send(); }\n\
+    void rec(Object o) { if (o instanceof Box(Audit m)) { m.send(); } }\n\
+    void sw(Object o) { switch (o) { case Audit m -> m.send(); default -> {} } }\n\
+}\n";
+const BOX_FILE: &str = "src/main/java/com/x/svc/Box.java";
+const BOX: &str = "package com.x.svc;\n\npublic record Box(Audit m) {}\n";
+
+#[test]
+fn an_unproven_variable_array_or_pattern_types_no_call() {
+    let tmp = fixture();
+    write(tmp.path(), OBSCURED_FILE, OBSCURED);
+    write(tmp.path(), BOX_FILE, BOX);
+    let engine = index(&tmp);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        calls_from(rt, OBSCURED_FILE),
+        [
+            row("field", "send", RefForm::Method),
+            row("lambda", "List::forEach", RefForm::Path),
+            row("lambda", "now", RefForm::Method),
+            row("local", "send", RefForm::Method),
+            row("param", "send", RefForm::Method),
+            row("pattern", "now", RefForm::Method),
+            row("rec", "send", RefForm::Method),
+            row("sw", "send", RefForm::Method),
+        ]
+    );
+    let wrong: Vec<_> = call_edges(rt)
+        .into_iter()
+        .filter(|(s, t)| s.starts_with(OBSCURED_FILE) && (t.starts_with(CLOCK_FILE) || t.starts_with(MAILER_FILE)))
+        .collect();
+    assert!(wrong.is_empty(), "{wrong:?}");
+}
+
+/// Every remaining binding form types the calls in its own scope and leaves
+/// the field of its name to the calls outside it (S-825 review: a deleted
+/// pattern for any of these passed every test). A constructor's local and an
+/// anonymous class's field type their calls; after an enhanced `for`, a
+/// `catch`, a nested block holding a pattern variable, or a switch rule's
+/// pattern, the field types the call.
+const FORMS_FILE: &str = "src/main/java/com/x/svc/Forms.java";
+const FORMS: &str = "package com.x.svc;\n\
+\n\
+import com.x.mail.Mailer;\n\
+import java.util.List;\n\
+\n\
+public class Forms {\n\
+    private Mailer m;\n\
+    private Mailer e;\n\
+    Forms() { Mailer c = new Mailer(); c.send(); }\n\
+    void anon() { new Runnable() { private Mailer a; public void run() { a.send(); } }; }\n\
+    void loop(List<Audit> l) { for (Audit m : l) { } m.send(); }\n\
+    void caught() { try { } catch (RuntimeException e) { } e.send(); }\n\
+    void block(Object o) { { if (o instanceof Audit m) { } } m.send(); }\n\
+    void rule(Object o) { switch (o) { case Audit m -> { } default -> { } } m.send(); }\n\
+}\n";
+
+#[test]
+fn each_binding_form_types_its_own_scope_and_leaves_the_field_outside_it() {
+    let tmp = fixture();
+    write(tmp.path(), FORMS_FILE, FORMS);
+    let engine = index(&tmp);
+    let rows = calls_from(engine.runtime().unwrap(), FORMS_FILE);
+    for source in ["Forms", "run", "loop", "caught", "block", "rule"] {
+        assert!(rows.contains(&row(source, "Mailer::send", RefForm::Path)), "{source}: {rows:?}");
+    }
+    assert!(!rows.iter().any(|(_, t, _)| t.starts_with("Audit::")), "{rows:?}");
 }

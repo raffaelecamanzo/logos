@@ -63,10 +63,10 @@ async fn status_and_scan_payloads_carry_the_failed_and_stale_counts() {
     // has one writer at a time.
     {
         let engine = Engine::start(&root).expect("engine");
-        engine.index();
+        engine.pipeline().index();
         write(&root, "src/b.rs", "pub fn beta_edited() {}\n");
         engine.runtime().unwrap().inject_persist_fault("src/b.rs");
-        let synced = engine.sync(&[root.join("src/b.rs")]);
+        let synced = engine.pipeline().sync(&[root.join("src/b.rs")]);
         assert_eq!(synced.files_failed, ["src/b.rs"], "the fault fired");
     }
 

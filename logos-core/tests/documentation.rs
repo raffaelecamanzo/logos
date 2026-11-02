@@ -42,7 +42,7 @@ fn markdown_grammar_loads_and_is_listed_by_languages() {
     // Listed through the same `languages` read-model `logos languages` prints
     // (FR-PL-06): a transient engine loads the registry on demand.
     let tmp = tempfile::tempdir().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
     let md = info
         .languages
         .iter()
@@ -192,7 +192,7 @@ fn index_admits_only_markdown_under_the_default_doc_globs() {
     write(root, "notes/scratch.md", "# Scratch\n\n## Secret\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let files = indexed_paths(rt);
@@ -239,12 +239,12 @@ fn editing_one_doc_and_syncing_updates_only_that_files_nodes() {
     write(root, "README.md", "# Readme\n\n## Install\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     // Edit only docs/guide.md (rename its section); README.md is untouched.
     write(root, "docs/guide.md", "# Guide\n\n## Configuration\n");
-    let result = engine.sync(&[std::path::PathBuf::from("docs/guide.md")]);
+    let result = engine.pipeline().sync(&[std::path::PathBuf::from("docs/guide.md")]);
     assert_eq!(
         result.files_modified, 1,
         "exactly the edited doc re-extracted"
@@ -267,7 +267,7 @@ fn editing_one_doc_and_syncing_updates_only_that_files_nodes() {
     // Re-sync BOTH docs with no further edits: blake3 dirty-detection skips both
     // (the unchanged README is submitted explicitly, not merely omitted), proving
     // docs ride the same hash-compare skip path as code — no re-extraction.
-    let resync = engine.sync(&[
+    let resync = engine.pipeline().sync(&[
         std::path::PathBuf::from("docs/guide.md"),
         std::path::PathBuf::from("README.md"),
     ]);
@@ -296,7 +296,7 @@ fn disabling_documentation_in_config_produces_no_doc_nodes() {
     write(root, "src/lib.rs", "pub fn helper() {}\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     assert!(
@@ -332,7 +332,7 @@ fn deleting_a_doc_removes_its_nodes_even_when_no_longer_admitted() {
 
     // Index with documentation on (default) — the doc nodes are created.
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
     assert!(
         indexed_paths(rt).contains(&"docs/guide.md".to_string()),
@@ -346,7 +346,7 @@ fn deleting_a_doc_removes_its_nodes_even_when_no_longer_admitted() {
         "[documentation]\nenabled = false\n",
     );
     fs::remove_file(root.join("docs/guide.md")).expect("remove the doc");
-    let result = engine.sync(&[std::path::PathBuf::from("docs/guide.md")]);
+    let result = engine.pipeline().sync(&[std::path::PathBuf::from("docs/guide.md")]);
 
     assert_eq!(result.files_removed, 1, "the deleted doc is reconciled out");
     assert!(
@@ -375,7 +375,7 @@ fn overriding_the_doc_globs_is_honoured() {
     write(root, "README.md", "# Readme\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let files = indexed_paths(rt);
@@ -428,7 +428,7 @@ fn docs_behind_a_sanctioned_external_symlink_are_indexed_and_source_is_not() {
     symlink(sanctioned.join("specs"), root.join("docs/specs")).unwrap();
 
     let engine = Engine::start(&root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     // The doc behind the sanctioned symlink is indexed under its in-tree path.
@@ -461,7 +461,7 @@ fn docs_behind_a_sanctioned_external_symlink_are_indexed_and_source_is_not() {
 
     // Idempotent: re-syncing the unchanged doc re-extracts nothing (FR-DG-01
     // blake3 dirty-detection rides the followed path exactly as a real path).
-    let resync = engine.sync(&[std::path::PathBuf::from("docs/specs/ADR-46.md")]);
+    let resync = engine.pipeline().sync(&[std::path::PathBuf::from("docs/specs/ADR-46.md")]);
     assert_eq!(
         resync.files_modified, 0,
         "an unchanged doc behind the symlink is not re-extracted on re-sync"

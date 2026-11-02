@@ -184,10 +184,13 @@ by each relation's payload token), read live from the graph.
 >   has one), a `super` call only through a proven base class, and a call on
 >   any other receiver binds **nowhere** unless the receiver's type is proven
 >   (Java's typed receivers, [FR-RS-10](../specs/requirements/FR-RS-10.md);
->   C#'s, [FR-RS-30](../specs/requirements/FR-RS-30.md) — a field, parameter or
->   local declared `T` or `T?`, a property read through `this.` or named in
->   lowercase, `var x = new T()`, a typed `foreach` variable, or a
->   primary-constructor parameter of a type with no base list;
+>   C#'s, [FR-RS-30](../specs/requirements/FR-RS-30.md) — the one parameter,
+>   local, `var x = new T()`, typed lambda, `foreach`, `using`, `catch`, `case`,
+>   pattern or `out` variable, or field or lowercase-named property of the
+>   caller's own type, declared `T` or `T?` and in scope at the call (a local
+>   only from its declaration to the end of its block), a property read through
+>   `this.`, or a primary-constructor parameter of a type with no base list that
+>   no member, parameter or local of its name hides;
 >   TypeScript's, [FR-RS-21](../specs/requirements/FR-RS-21.md) — a constructor
 >   parameter property or annotated field read through `this.`, or the one
 >   annotated parameter or variable, or `const x = new T()`, in scope at the call;
@@ -205,10 +208,13 @@ by each relation's payload token), read live from the graph.
 >   may have its own receiver (anything but `let`, `forEach`, `map`, …); it
 >   binds among `T`'s own members, never its companion's, and a call no member
 >   of `T` answers still reaches the one extension of its name in scope;
->   Scala's, [FR-RS-37](../specs/requirements/FR-RS-37.md) — a class
->   parameter or member `val`/`var` declared `T`, read bare or through
->   `this.`, a parameter or local `val` declared `T`, or `val x = new T(…)`,
->   for a call with an argument list (a parameterless `x.m` may read a field);
+>   Scala's, [FR-RS-37](../specs/requirements/FR-RS-37.md) — the one class
+>   parameter or member `val`/`var` of the caller's own class, object, trait
+>   or enum, parameter, typed lambda parameter or local `val`/`var` declared
+>   `T`, or `val x = new T` / `new T(…)`, in scope at the call (a local only
+>   from its definition to the end of its block), or a class parameter or member
+>   `val`/`var` read through `this.`, for a call with an argument list (a
+>   parameterless `x.m` may read a field);
 >   it binds among `T`'s own methods, never its companion `object`'s, which
 >   only a call written on the name (`T.m()`) reaches;
 >   C++'s, [FR-RS-39](../specs/requirements/FR-RS-39.md) — the one parameter,
@@ -251,6 +257,16 @@ by each relation's payload token), read live from the graph.
 >   `Type::foo` definition whose class another file declares — it is a plain
 >   call, bound by the file's scope. An out-of-line definition in its class's
 >   own file is that class's member, so its calls are inside the type.
+>   A C or C++ prototype in a header and its definition in another file stay
+>   two nodes, and are paired
+>   ([FR-EX-29](../specs/requirements/FR-EX-29.md)) when the definition's file
+>   includes the header, directly or through another header, and the two
+>   share their namespace or class path, name and parameter types — the
+>   definition the only such one, not `static` and not in an anonymous
+>   namespace. The prototype then records a `References` edge to the
+>   definition, a call that reaches the prototype binds the definition, so
+>   `callers` of the definition names it, and `node` on the bare name lands on
+>   the definition whichever file sorts first.
 >   `base.foo()` / `super.foo()` stay unbound (these plugins record no proven
 >   base class), and so does C++'s `Base::foo()`, which reads like any other
 >   qualified call. In a Kotlin chain `a.b.c()` only `c` is a call. One receiver
@@ -294,6 +310,23 @@ by each relation's payload token), read live from the graph.
 >   reach a free `func Work` (a name the method itself rebinds —
 >   `for _, s := range …` — is still read as the receiver)
 >   ([CR-169](../requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md)).
+>   A Go type writes no `implements` clause, so Logos records `implements` to
+>   each in-repository interface whose methods the type's method set holds
+>   ([FR-RS-18](../specs/requirements/FR-RS-18.md)): its own methods and those
+>   its embedded fields promote, against the interface's methods with its
+>   embedded interfaces expanded. A method matches by its name and its
+>   parameter and result types, names ignored: `Read(s string) bool` is no
+>   `Read(p []byte) (int, error)`, and neither is `Read(p []byte) int`. Two
+>   spellings of one type are one type — a package's own `Entry` and another
+>   package's `zapcore.Entry` or `zc.Entry`, and `context.Context` under any
+>   alias — while a spelling Logos cannot reduce to one declaration (a type
+>   parameter, a type outside the repository it does not name by import
+>   path) matches nothing. A package is a directory plus its `package`
+>   clause, so `package foo_test` beside `foo` is a package of its own, and an
+>   unexported method (`seal()`) matches only within its package. A generic
+>   interface, and one embedding an interface outside the repository
+>   (`io.Writer`), are never computed; `status` counts them on the Go row's
+>   `interfaces` object ([commands.md](commands.md) § `status`).
 >   A bare-path call (`foo()`, single segment) is complementary: when a free
 >   function and same-named associated methods both exist at the call scope, the
 >   free function wins the tie
@@ -330,7 +363,12 @@ by each relation's payload token), read live from the graph.
 >   — and a callable whose parameters it cannot count (a C++ definition
 >   outside a class body, whose defaults may sit on a separate declaration —
 >   except an out-of-line member merged into its in-class declaration, which
->   carries that declaration's range) filter nothing. So an
+>   carries that declaration's range) filter nothing. In C and C++, a
+>   prototype an included header declares is another overload of a
+>   same-named function in the caller's own file when their parameter types
+>   differ, so `to_text(1.5)` beside a local `to_text(int)` and a header's
+>   `to_text(double)` binds neither: no argument type is read
+>   ([FR-RS-38](../specs/requirements/FR-RS-38.md)). So an
 >   own-class `inh(a)` no longer takes `inh(1, 2)`: the call binds the base
 >   class's `inh(a, b)` when the language records its classes' bases (Java,
 >   Kotlin, C#, Python, PHP, Scala), and stays unbound in C++ and TypeScript,
@@ -1420,7 +1458,7 @@ gets the same response as before.
 
 `GET /api/v1/impact?seed=<symbol>` returns the **Decisions & docs** read-model as
 JSON — the symbol's traced requirements, ADRs, and stories plus its doc-reference
-table, read from `Engine::impact()`. The SPA's Decisions panel renders it
+table, read from `Navigation::impact()`. The SPA's Decisions panel renders it
 client-side. An omitted or empty `seed` returns the opening-prompt state; an
 unknown or untraced seed returns an honest empty result at `200` (never a
 `4xx`/`5xx`).
@@ -1616,7 +1654,7 @@ the same local telemetry the `logos stats` CLI reports, now visualized
 ([CR-058](../requests/CR-058-durable-worktree-telemetry-and-statistics-tab.md),
 [FR-UI-27](../specs/requirements/FR-UI-27.md)). It reads the enriched read-model
 over `GET /api/v1/statistics[?window=<days>]` — a thin, read-only pass-through of
-`Engine::stats(window)` — and renders five widgets, each stating what it shows
+`Graph::stats(window)` — and renders five widgets, each stating what it shows
 and why it matters (CR-203):
 
 1. An **Estimated value** widget leading with the reads/tokens-saved figures (the

@@ -94,7 +94,7 @@ repository may set there ([configuration.md](configuration.md#security_scan--whi
 | `trivy` | 0.74 | 0.74.0 | Vulnerable dependencies, secrets, misconfiguration | whole manifest only |
 | `gitleaks` | 8.18 | 8.18.4 | Secrets, in files and in git history | yes, in content mode |
 | `osv-scanner` | 1.9 | 2.7.0 | Known-vulnerable dependencies | whole manifest only |
-| `bandit` | 1.7.10 | 1.7.10 | Insecure Python code | yes |
+| `bandit` | 1.7.10 | 1.7.10 | Insecure Python code; runs with `--skip B404,B603,B607` and your `.bandit` skips (see below) | yes |
 | `gosec` | 2.21 | 2.29.0 | Insecure Go code | yes |
 | `checkov` | 3.2 | 3.2.533 | Infrastructure-as-code misconfiguration | yes |
 | `codeql` | 2.19 | 2.27.2, opt-in | Semantic code analysis | whole project only |
@@ -113,6 +113,31 @@ runs only on JavaScript/TypeScript, Python and Ruby and never builds your
 project; for every other language ingest a report from CI ([configuration.md](configuration.md#security_scan--which-scanners-may-run)
 has the fixed command lines and the config files Logos refuses to let a repository
 use to run code).
+
+Bandit runs with `--skip B404,B603,B607`: an `import subprocess`, a `subprocess`
+call made without a shell and a program started by name describe no flow, so
+they are not reported; B602 (`shell=True`) and every other check still run.
+
+Your project's own `.bandit` skips are merged into that list. Bandit takes a
+`--skip` on its command line instead of the `skips` list in `.bandit` rather than
+adding the two, so Logos reads the `.bandit` at the project root itself and
+appends each id its `[bandit]` section skips that the list lacks: with
+`skips = B101, B105` Bandit runs with `--skip B404,B603,B607,B101,B105`, in a
+whole-project scan and a scan of named paths alike. Only the INI form Bandit
+reads is understood (a YAML or TOML `.bandit` carries no skips for Bandit
+either), and ids are separated by commas and may have spaces around them. Logos
+merges only the project root's `.bandit`: Bandit itself also finds a single
+`.bandit` in a subdirectory, but the skips of that one are still replaced by the
+`--skip`, so keep the file at the root. A missing `.bandit` adds
+nothing; one Logos cannot read, a symbolic link, or one that does not parse or
+names anything but a test Bandit 1.7.10 ships (a retired id such as `B322`
+included, which Bandit itself would stop on) adds nothing either, with a warning
+in the log, and Bandit runs with Logos's own list.
+
+The `extra_args` of a user-level config are placed after `--skip`, so a test
+selection there reaches Bandit after the merged list and Bandit decides between
+them, and a `--skip` of your own there replaces the merged list, because Bandit
+keeps the last one ([configuration.md](configuration.md#security_scan--which-scanners-may-run)).
 
 osv-scanner is pinned at 2.7.0 while its *Tested* version stays 1.9, the last
 one the harness ran. Its command line now uses the 2.x spelling of the scanner's
@@ -534,10 +559,20 @@ never stored:
   directories mark test code for security only: metrics and hotspots still count
   `src/fixtures/x.rs` as production code.
 
-A finding with no location, or one outside the project, is production. A secret
-found only in an earlier commit, and a finding whose file changed since the scan,
-has no current symbol, so only its path decides: a secret that sat in a test
-module inside `src/` reads `production`.
+A finding with no location, or one outside the project, is production. A finding
+whose file changed since the scan has no current symbol, so only its path decides.
+
+A secret found only in an earlier commit (`binding: "historical"`) takes the scope
+of the code it was found in. Its line at that commit is looked up in today's file,
+compared exactly after trimming whitespace; when every copy sits in a symbol and
+all of those symbols are test code, or all are not, that decides. When the file or
+the line is gone, or the copies disagree, Logos reads the file as it was at that
+commit, in memory, and the symbol around the line there decides. When neither
+can decide (the commit is not in the clone, or no language plugin reads the file),
+its path decides. So an old copy of a fake key in a `src/` file's test module
+reads `test`, while a real key committed in production code and deleted later
+reads `production`, still listed as historical. The compared line is never stored,
+logged or shown.
 
 **Lists and counts leave test code out and say so.** `security findings` and the
 MCP `security_findings` list production code unless you pass `--scope test` or

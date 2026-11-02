@@ -3,7 +3,7 @@
 //!
 //! Drives the **real** router in-process over a **real** telemetry install —
 //! `observability::init` → `/api/v1` requests → `telemetry.db` →
-//! `Engine::stats` — because that whole chain is the claim. The unit tests
+//! `Graph::stats` — because that whole chain is the claim. The unit tests
 //! prove the pieces (the surface is classified, the bridge enters the scope);
 //! only this proves the shipped endpoint's reads actually land outside the
 //! figures.
@@ -188,7 +188,7 @@ async fn the_shells_status_reads_never_enter_the_usage_figures() {
     );
 
     // ── …only attributed out of the figures ([FR-OB-09], [FR-UI-27]) ────────
-    let stats = Engine::open(root).stats(None);
+    let stats = Engine::open(root).graph().stats(None);
     let counted: Vec<(&str, &str)> = stats
         .calls_by_tool
         .iter()

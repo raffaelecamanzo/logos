@@ -49,9 +49,9 @@ fn scan(root: &Path) -> RecordedSnapshot {
 /// Index `root` and record one snapshot under `thresholds`.
 fn scan_with(root: &Path, thresholds: metrics::Thresholds) -> RecordedSnapshot {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     metrics::snapshot(rt, &view, None, thresholds, &engine.registry().expect("a started engine holds its registry").member_access_extensions()).expect("snapshot runs")
@@ -175,7 +175,7 @@ fn a_null_has_body_in_the_store_reads_as_bodied() {
         &mapstruct_mapper(),
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let conn = rusqlite::Connection::open(tmp.path().join(".logos/logos.db"))
         .expect("open the store directly");
     conn.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
@@ -194,7 +194,7 @@ fn a_null_has_body_in_the_store_reads_as_bodied() {
         "a NULL column decodes to None, never Some(false)"
     );
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let s = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs");

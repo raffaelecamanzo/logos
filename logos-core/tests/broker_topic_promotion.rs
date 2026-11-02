@@ -1,5 +1,5 @@
 //! Integration tests for the broker-topic promotion pass (S-256, [FR-WS-11],
-//! [ADR-55]), exercised end-to-end through [`Engine::index`]/[`Engine::sync`]
+//! [ADR-55]), exercised end-to-end through [`Pipeline::index`](crate::Pipeline::index)/[`Pipeline::sync`](crate::Pipeline::sync)
 //! against real temp-directory fixtures.
 //!
 //! Coverage by acceptance criterion:
@@ -144,7 +144,7 @@ fn broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // A topic per distinct static topic key — and NOT one for the dynamic send,
     // whose topic was refused at capture and can never reach the pass (NFR-RA-05).
@@ -215,7 +215,7 @@ fn broker_coupling_is_promoted_to_topic_producer_and_consumer_nodes() {
 /// the real 84-member `pec-services` workspace, which reported `topics: []` while 34
 /// files declared Kafka wiring.
 ///
-/// Asserted through a real `Engine::index`, not at the capture seam, because the
+/// Asserted through a real `Pipeline::index`, not at the capture seam, because the
 /// defect spanned capture (`ArtifactRelation::classify_target`'s `$`/`{` character
 /// rule dropped the reference) and everything downstream of it: with no reference
 /// there was nothing for the promotion pass to promote, so a unit test of either
@@ -258,7 +258,7 @@ class ArchiveListeners {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),
@@ -336,7 +336,7 @@ class DynamicListeners {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Only the literal listener promotes. Nothing named `TOPIC` or
     // `never-promoted` exists — the refusal fabricates no identity.
@@ -419,7 +419,7 @@ class Listener {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(names_of(rt, NodeKind::Topic), ["orders"]);
     assert_eq!(names_of(rt, NodeKind::Consumer), ["orders"]);
@@ -430,7 +430,7 @@ class Listener {
 
     // The edit: the topic moves into a constant, so the site is refused.
     write(tmp.path(), "src/Listener.java", REFUSED);
-    engine.sync(&[PathBuf::from("src/Listener.java")]);
+    engine.pipeline().sync(&[PathBuf::from("src/Listener.java")]);
 
     assert!(
         names_of(rt, NodeKind::Topic).is_empty(),
@@ -446,7 +446,7 @@ class Listener {
 
     // And back: the literal returns, the topic is promoted again, no residue.
     write(tmp.path(), "src/Listener.java", LITERAL);
-    engine.sync(&[PathBuf::from("src/Listener.java")]);
+    engine.pipeline().sync(&[PathBuf::from("src/Listener.java")]);
 
     assert_eq!(names_of(rt, NodeKind::Topic), ["orders"]);
     assert_eq!(names_of(rt, NodeKind::Consumer), ["orders"]);
@@ -489,7 +489,7 @@ class Plain {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     for kind in [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer] {
         assert!(
@@ -535,7 +535,7 @@ class Plain {
         .expect("read runs")
     };
     let before = identity(rt);
-    engine.sync(&[PathBuf::from("src/Plain.java")]);
+    engine.pipeline().sync(&[PathBuf::from("src/Plain.java")]);
     assert_eq!(
         identity(rt),
         before,
@@ -562,7 +562,7 @@ fn a_deleted_publish_is_demoted_on_sync_and_the_topic_keeps_its_id() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(names_of(rt, NodeKind::Topic), ["orders", "shipments"]);
     let shipments_before = nodes_of(rt, NodeKind::Topic)
@@ -583,7 +583,7 @@ class OrderService {
 }
 "#,
     );
-    engine.sync(&[PathBuf::from("src/OrderService.java")]);
+    engine.pipeline().sync(&[PathBuf::from("src/OrderService.java")]);
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),
@@ -670,7 +670,7 @@ class Relay {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Extraction emits BOTH refs (S-254 proves it), and with migration 18's
     // relation-aware key BOTH now survive to the ledger — the relay is no longer
@@ -746,7 +746,7 @@ class Hub {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Both topic identities exist, and the single relaying declaration is a
     // consumer of the inbound topic AND a producer of the outbound one.
@@ -805,7 +805,7 @@ class {class} {{
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(
         nodes_of(rt, NodeKind::Topic).len(),
@@ -852,7 +852,7 @@ class OrderService {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // The repo starts genuinely topic-free — so the sync below takes the gate's ledger
     // branch (no promoted node exists to force the reconcile).
@@ -864,7 +864,7 @@ class OrderService {
 
     // Now add a real publish and sync just that file.
     write(tmp.path(), "src/OrderService.java", ORDER_SERVICE);
-    engine.sync(&[PathBuf::from("src/OrderService.java")]);
+    engine.pipeline().sync(&[PathBuf::from("src/OrderService.java")]);
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),
@@ -933,7 +933,7 @@ class KafkaProducer {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // The literal half: a `Topic` and a `Producer` node, and nothing named after an
     // operand — no `topic`, no `kafkaTopics.getArchiveCommands()`.
@@ -1029,7 +1029,7 @@ class KafkaProducer {
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // No broker NODE is promoted from a refusal — the kinds above stay unused here.
     for kind in [NodeKind::Topic, NodeKind::Producer, NodeKind::Consumer] {
@@ -1086,7 +1086,7 @@ class ArchiveWiring {
 /// The member's own committed configuration for that property.
 const ARCHIVE_YML: &str = "spring:\n  kafka:\n    topics:\n      archive-commands: archive-commands\n";
 
-/// **[FR-WS-27] AC2 / AC4, end to end through a real `Engine::index`.**
+/// **[FR-WS-27] AC2 / AC4, end to end through a real `Pipeline::index`.**
 ///
 /// The publish and the subscribe promote **one** `Topic` named by the committed
 /// value, with one `Producer` and one `Consumer` hanging off it — the coupling
@@ -1110,7 +1110,7 @@ fn two_spellings_of_one_committed_property_promote_one_topic_read_from_the_membe
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),
@@ -1173,7 +1173,7 @@ fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() 
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // The pre-change graph: two topics, one per spelling, and the coupling split
     // across them. This is what every store indexed before this story holds.
@@ -1198,7 +1198,7 @@ fn a_store_indexed_before_the_committed_value_rule_converges_on_the_next_sync() 
     // rather than about re-extraction, and it is what would fail if the pass
     // were ever gated on the dirty set containing a broker-relevant file.
     write(tmp.path(), "src/main/resources/application.yml", ARCHIVE_YML);
-    engine.sync(&[PathBuf::from("src/main/resources/application.yml")]);
+    engine.pipeline().sync(&[PathBuf::from("src/main/resources/application.yml")]);
 
     assert_eq!(
         names_of(rt, NodeKind::Topic),

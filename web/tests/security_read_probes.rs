@@ -72,7 +72,7 @@ impl Fixture {
             nvd_api_key: None,
         };
         let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-        engine.index();
+        engine.pipeline().index();
         let router = web::router(Arc::new(engine));
         Self { _tmp: tmp, repo, bin, user, rec, router }
     }

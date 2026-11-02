@@ -301,7 +301,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -567,7 +567,7 @@ module Rack
 end
 ",
     );
-    engine.sync(&[shadow.into()]);
+    engine.pipeline().sync(&[shadow.into()]);
     files.push(shadow);
     assert!(
         edges(rt, EdgeKind::Calls).contains(
@@ -591,12 +591,12 @@ module Rack
 end
 ",
     );
-    engine.sync(&[utils.into()]);
+    engine.pipeline().sync(&[utils.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 
     let request = "lib/rack/request.rb";
     fs::remove_file(tmp.path().join(request)).unwrap();
-    engine.sync(&[request.into()]);
+    engine.pipeline().sync(&[request.into()]);
     assert!(edges(rt, EdgeKind::Instantiates).is_empty(), "the constant is gone");
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }

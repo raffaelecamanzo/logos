@@ -523,7 +523,7 @@ fn slim_build_serve_help_has_no_ui() {
 #[test]
 fn a_malformed_config_makes_index_and_sync_fail_loud_with_exit_two() {
     // FR-CF-03 / configuration.md: a typo in config.toml must fail loud with
-    // exit 2, not degrade to a silent empty index. `Engine::index` is an
+    // exit 2, not degrade to a silent empty index. `Pipeline::index` is an
     // infallible surface (ADR-14), so the CLI validates config up front — the
     // same loud-failure contract `check`/`gate` honour for rules.toml.
     let tmp = fixture();
@@ -552,7 +552,7 @@ fn a_malformed_config_makes_index_and_sync_fail_loud_with_exit_two() {
         "a valid config.toml indexes cleanly"
     );
     // `sync` over that index validates the same way (S-513): without the guard
-    // the fault would reach `Engine::sync`, which reports it as a failed run —
+    // the fault would reach `Pipeline::sync`, which reports it as a failed run —
     // exit 1, not 2.
     write(
         tmp.path(),
@@ -2302,7 +2302,7 @@ fn branch_overlap_without_git_on_path_still_exits_zero() {
 /// This is the assertion behind the sentence [FR-IN-02]'s managed `CLAUDE.md`
 /// block now ships into every initialised project — *"a failing gate exits 1"*.
 /// Modelled on [`gate_exits_one_on_regression`], because the pair IS the gate:
-/// `Engine::session_end` is `governance::gate(.., None, false, true)`.
+/// `Quality::session_end` is `governance::gate(.., None, false, true)`.
 ///
 /// [FR-IN-02]: ../../docs/specs/requirements/FR-IN-02.md
 #[test]

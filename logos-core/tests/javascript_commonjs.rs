@@ -51,7 +51,7 @@ fn index(files: &[(&str, &str)]) -> (TempDir, Engine) {
         write(tmp.path(), rel, contents);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -437,11 +437,11 @@ fn an_export_object_edit_rebinds_on_sync_and_matches_a_full_index() {
     write(live.path(), "src/main.js", caller);
     coordinate::pin(live.path());
     let engine = Engine::start(live.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(callers_of(rt, "src/user.js:exists"), ["src/main.js:run"]);
     write(live.path(), "src/user.js", edited);
-    engine.sync(&["src/user.js".into()]);
+    engine.pipeline().sync(&["src/user.js".into()]);
     let bound: Vec<(String, String)> =
         edges_of(rt, EdgeKind::Calls).into_iter().filter(|(s, _)| s == "src/main.js:run").collect();
     assert_eq!(bound.len(), 1, "the call binds the one top-level `exists`: {bound:?}");
@@ -451,7 +451,7 @@ fn an_export_object_edit_rebinds_on_sync_and_matches_a_full_index() {
     write(fresh.path(), "src/main.js", caller);
     coordinate::pin(fresh.path());
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
     assert_eq!(graph_fingerprint(rt), graph_fingerprint(cold.runtime().unwrap()));
 }
 
@@ -472,11 +472,11 @@ fn a_re_exported_definition_renamed_behind_a_module_rebinds_on_sync_and_matches_
     write(live.path(), "src/main.js", caller);
     coordinate::pin(live.path());
     let engine = Engine::start(live.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(callers_of(rt, "src/impl.js:exists"), ["src/main.js:run"]);
     write(live.path(), "src/impl.js", edited);
-    engine.sync(&["src/impl.js".into()]);
+    engine.pipeline().sync(&["src/impl.js".into()]);
     assert!(callers_of(rt, "src/impl.js:check").is_empty(), "nothing exports `check` as `has`");
 
     let fresh = TempDir::new().unwrap();
@@ -485,7 +485,7 @@ fn a_re_exported_definition_renamed_behind_a_module_rebinds_on_sync_and_matches_
     write(fresh.path(), "src/main.js", caller);
     coordinate::pin(fresh.path());
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
     assert_eq!(graph_fingerprint(rt), graph_fingerprint(cold.runtime().unwrap()));
 }
 

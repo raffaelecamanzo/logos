@@ -112,7 +112,7 @@ fn indexed(files: &[(&str, &str)]) -> TempDir {
     let tmp = TempDir::new().unwrap();
     write_tree(tmp.path(), files);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.files_indexed > 0, "the fixture indexed: {result:?}");
     tmp
 }
@@ -184,7 +184,7 @@ fn non_call_relational_edges(
 fn descriptor(name: &str) -> LanguageDescriptor {
     let tmp = TempDir::new().unwrap();
     Engine::open(tmp.path())
-        .languages()
+        .graph().languages()
         .languages
         .into_iter()
         .find(|d| d.name == name)
@@ -450,7 +450,7 @@ fn a_symbols_declaration_is_refused_when_a_relation_binds() {
 #[test]
 fn every_code_language_declares_a_reach_and_nothing_else_does() {
     let tmp = TempDir::new().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
     assert!(info.load_error.is_none(), "{:?}", info.load_error);
 
     let mut declared: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
@@ -518,7 +518,7 @@ fn every_code_language_declares_a_reach_and_nothing_else_does() {
 #[test]
 fn the_languages_payload_carries_reach_as_level_and_cross_file() {
     let tmp = TempDir::new().unwrap();
-    let json = serde_json::to_value(Engine::open(tmp.path()).languages()).unwrap();
+    let json = serde_json::to_value(Engine::open(tmp.path()).graph().languages()).unwrap();
     let rows = json["languages"].as_array().unwrap();
     let row = |name: &str| {
         rows.iter()

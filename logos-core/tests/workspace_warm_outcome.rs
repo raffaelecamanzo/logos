@@ -68,7 +68,7 @@ fn workspace(members: &[(&str, bool)]) -> (tempfile::TempDir, PathBuf, Vec<Membe
                 // `start`, not `open`: it is the constructor that actually creates
                 // the member store, and a graph holding real files is the whole
                 // point of the `indexed` members here.
-                Engine::start(&member_root).expect("member engine").index();
+                Engine::start(&member_root).expect("member engine").pipeline().index();
             }
             Member {
                 name: (*name).to_string(),

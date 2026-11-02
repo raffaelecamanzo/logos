@@ -32,7 +32,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -297,7 +297,7 @@ fn a_gemspec_edit_and_an_added_file_rebind_requires_on_sync_as_a_cold_index_does
 
     // A gemspec carries no node: only the descriptor moves the binding.
     write(tmp.path(), "tool.gemspec", "Gem::Specification.new do |s|\n  s.require_paths = ['src']\nend\n");
-    engine.sync(&["tool.gemspec".into()]);
+    engine.pipeline().sync(&["tool.gemspec".into()]);
     assert_eq!(imported_files(rt, "script/run.rb"), ["src/tool.rb"]);
     let files = ["tool.gemspec", "lib/tool.rb", "src/tool.rb", "script/run.rb"];
     assert_eq!((import_edges(rt), import_rows(rt)), cold(&tmp, &files));
@@ -305,7 +305,7 @@ fn a_gemspec_edit_and_an_added_file_rebind_requires_on_sync_as_a_cold_index_does
     // Adding the files two requires name binds them, with nothing else changed.
     write(tmp.path(), "src/tool/extra.rb", "module Tool\nend\n");
     write(tmp.path(), "script/helper.rb", "module Helper\nend\n");
-    engine.sync(&["src/tool/extra.rb".into(), "script/helper.rb".into()]);
+    engine.pipeline().sync(&["src/tool/extra.rb".into(), "script/helper.rb".into()]);
     assert_eq!(imported_files(rt, "script/run.rb"), ["script/helper.rb", "src/tool.rb", "src/tool/extra.rb"]);
     let files = ["tool.gemspec", "lib/tool.rb", "src/tool.rb", "script/run.rb", "src/tool/extra.rb", "script/helper.rb"];
     assert_eq!((import_edges(rt), import_rows(rt)), cold(&tmp, &files));
@@ -329,14 +329,14 @@ fn a_nested_gemspec_edit_and_a_gemspec_deletion_rebind_on_sync_as_a_cold_index_d
         "gems/tool/tool.gemspec",
         "Gem::Specification.new do |s|\n  s.require_paths = ['src']\nend\n",
     );
-    engine.sync(&["gems/tool/tool.gemspec".into()]);
+    engine.pipeline().sync(&["gems/tool/tool.gemspec".into()]);
     assert_eq!(imported_files(rt, "script/run.rb"), ["gems/tool/src/tool.rb"]);
     let files = ["gems/tool/tool.gemspec", "gems/tool/lib/tool.rb", "gems/tool/src/tool.rb", "script/run.rb"];
     assert_eq!((import_edges(rt), import_rows(rt)), cold(&tmp, &files));
 
     // No gem left: `lib/` and `src/` are no load roots, the require binds nothing.
     fs::remove_file(tmp.path().join("gems/tool/tool.gemspec")).unwrap();
-    engine.sync(&["gems/tool/tool.gemspec".into()]);
+    engine.pipeline().sync(&["gems/tool/tool.gemspec".into()]);
     assert!(imported_files(rt, "script/run.rb").is_empty(), "no gem: no load root");
     let files = ["gems/tool/lib/tool.rb", "gems/tool/src/tool.rb", "script/run.rb"];
     assert_eq!((import_edges(rt), import_rows(rt)), cold(&tmp, &files));

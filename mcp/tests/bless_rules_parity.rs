@@ -1,7 +1,7 @@
 //! CLI-vs-MCP parity for the ratchet's bless command (S-507, [FR-GV-23]):
 //! `logos check --bless` and the `bless_rules` tool.
 //!
-//! Both surfaces delegate to the one `Engine::bless_rules` entrypoint
+//! Both surfaces delegate to the one `Quality::bless_rules` entrypoint
 //! ([NFR-CC-01]). This test proves the two write the **same bytes** to
 //! `.logos/rules-baseline.json` and return the same report, so an agent and a
 //! human blessing the same tree produce the same reviewable diff.
@@ -56,7 +56,7 @@ fn fixture() -> tempfile::TempDir {
         format!("pub fn {name}(x: i32) -> i32 {{\n    let mut y = 0;\n{ifs}    y\n}}\n")
     };
     write(root, "src/lib.rs", &format!("{}{}", branchy("f", 3), branchy("g", 4)));
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -97,7 +97,7 @@ async fn cli_bless_and_mcp_bless_rules_write_the_same_bytes_and_report_the_same_
     // The CLI arm: `logos check --bless --json` serialises this report.
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        let report = engine.bless_rules(None, true).expect("bless runs");
+        let report = engine.quality().bless_rules(None, true).expect("bless runs");
         serde_json::to_value(&report).expect("serialize")
     };
     let cli_bytes = fs::read(blessed_file(root)).expect("the CLI bless wrote the file");

@@ -55,11 +55,11 @@ fn each_security_method_traces_under_its_own_tool() {
     let tools = Tools::default();
     tracing::subscriber::with_default(tracing_subscriber::registry().with(tools.clone()), || {
         // Each call may fail (no store, no report); the event is written either way.
-        let _ = engine.security_status();
-        let _ = engine.security_findings(&FindingsFilter::default());
-        let _ = engine.security_ingest(&absent);
-        let _ = engine.security_ingest_auto(&absent);
-        let _ = engine.security_scan(false);
+        let _ = engine.security().status();
+        let _ = engine.security().findings().list(&FindingsFilter::default());
+        let _ = engine.security().ingest(&absent);
+        let _ = engine.security().ingest_auto(&absent);
+        let _ = engine.security().scan(false);
     });
     assert_eq!(
         *tools.0.lock().unwrap(),

@@ -86,7 +86,7 @@ impl World {
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
-        Engine::start(w.root()).expect("engine").index();
+        Engine::start(w.root()).expect("engine").pipeline().index();
         w
     }
 
@@ -299,7 +299,7 @@ impl Page {
 
     /// The scanner's status row.
     fn row(&self, scanner: &str) -> Value {
-        let status = serde_json::to_value(self.engine.security_status().unwrap()).unwrap();
+        let status = serde_json::to_value(self.engine.security().status().unwrap()).unwrap();
         status["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == scanner).unwrap().clone()
     }
 }
@@ -624,7 +624,7 @@ async fn beside_a_web_install_mcp_and_cli_scans_and_installs_are_refused_naming_
         let engine = Arc::clone(&page.engine);
         let mcp = tokio::task::spawn_blocking(move || {
             logos_core::observability::in_surface(logos_core::observability::Surface::Mcp, || {
-                engine.security_scan_selected(false, &logos_core::security::ScanRequest::full(), |_| {})
+                engine.security().scan_selected(false, &logos_core::security::ScanRequest::full(), |_| {})
             })
         })
         .await
@@ -635,7 +635,7 @@ async fn beside_a_web_install_mcp_and_cli_scans_and_installs_are_refused_naming_
         let cli = w.page(&manifest).engine;
         let (scan, install) = tokio::task::spawn_blocking(move || {
             logos_core::observability::in_surface(logos_core::observability::Surface::Cli, || {
-                (cli.security_scan(false).map(|_| ()), cli.security_scan_install(true).map(|_| ()))
+                (cli.security().scan(false).map(|_| ()), cli.security().scan_install(true).map(|_| ()))
             })
         })
         .await

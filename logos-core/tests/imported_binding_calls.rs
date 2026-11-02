@@ -34,7 +34,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -462,7 +462,7 @@ fn a_cross_file_call_binds_on_the_sync_that_indexes_its_target_and_matches_a_ful
         "internal/admin/audit.go",
         "package admin\n\nfunc Audit() {}\n",
     );
-    engine.sync(&["web/src/nav.ts".into(), "internal/admin/audit.go".into()]);
+    engine.pipeline().sync(&["web/src/nav.ts".into(), "internal/admin/audit.go".into()]);
     let synced = edges_of(rt, EdgeKind::Calls);
     assert!(synced.contains(&("web/src/App.tsx:App".into(), "web/src/nav.ts:navItemsFor".into())));
     assert!(synced.contains(&(
@@ -512,7 +512,7 @@ fn a_go_mod_edit_rebinds_the_calls_through_its_imports_on_sync() {
     assert_eq!(callers_of(rt, "internal/admin/admin.go:Register"), ["cmd/server/main.go:main"]);
     assert!(!call_row_unresolved(rt, "Register"));
     write(tmp.path(), "go.mod", "module github.com/acme/renamed\n\ngo 1.22\n");
-    engine.sync(&["go.mod".into()]);
+    engine.pipeline().sync(&["go.mod".into()]);
     assert!(
         call_row_unresolved(rt, "Register"),
         "the call through an import that no longer binds must flip to unresolved"
@@ -536,7 +536,7 @@ fn a_removed_definition_unbinds_the_cross_file_call_on_sync() {
         "src/nav.ts",
         "export function isAppLevelPath(p: string): boolean { return p === '/'; }\n",
     );
-    engine.sync(&["src/nav.ts".into()]);
+    engine.pipeline().sync(&["src/nav.ts".into()]);
     assert!(call_row_unresolved(rt, "navItemsFor"), "the ledger never lies");
 }
 

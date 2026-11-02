@@ -1,6 +1,6 @@
 //! Integration tests for binder-coverage Phase 2 — calls nested in macro /
 //! format-string arguments (S-162, [CR-043], FR-RS-03 / FR-AN-01), exercised
-//! end-to-end through [`Engine::index`] / [`Engine::sync`] against real
+//! end-to-end through [`Pipeline::index`](crate::Pipeline::index) / [`Pipeline::sync`](crate::Pipeline::sync) against real
 //! temp-directory fixtures.
 //!
 //! tree-sitter parses a macro's argument list as a `token_tree`, not as
@@ -100,7 +100,7 @@ fn macro_arg_path_and_method_calls_bind_and_flip_live() {
     write(tmp.path(), "src/lib.rs", SRC);
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let snap = snapshot(engine.runtime().unwrap());
 
@@ -148,7 +148,7 @@ fn an_unresolvable_macro_arg_call_creates_no_edge() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", SRC);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     // No node was fabricated for the missing target.
@@ -205,15 +205,15 @@ fn truly_dead() {}
     let synced_tmp = TempDir::new().unwrap();
     write(synced_tmp.path(), "src/lib.rs", SRC);
     let synced_engine = Engine::start(synced_tmp.path()).expect("engine starts");
-    synced_engine.index();
+    synced_engine.pipeline().index();
     write(synced_tmp.path(), "src/lib.rs", EDITED);
-    synced_engine.sync(&["src/lib.rs".into()]);
+    synced_engine.pipeline().sync(&["src/lib.rs".into()]);
     let synced_snap = snapshot(synced_engine.runtime().unwrap());
 
     let fresh_tmp = TempDir::new().unwrap();
     write(fresh_tmp.path(), "src/lib.rs", EDITED);
     let fresh_engine = Engine::start(fresh_tmp.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     let fresh_snap = snapshot(fresh_engine.runtime().unwrap());
 
     for name in ["noscript_twin", "cap_notice", "truly_dead"] {

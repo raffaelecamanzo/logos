@@ -58,7 +58,7 @@ fn module() -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -125,7 +125,7 @@ fn plant_awaiting_capture(engine: &Engine) {
 
 fn go_row(engine: &Engine) -> LanguageResolution {
     engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "go")
@@ -150,7 +150,7 @@ fn capture_rows(engine: &Engine) -> (usize, usize) {
 
 /// The global ratio's figures as `status` reports them.
 fn global(engine: &Engine) -> (u64, u64) {
-    let status = engine.status();
+    let status = engine.graph().status();
     (status.refs_total, status.refs_resolved)
 }
 
@@ -169,14 +169,14 @@ fn the_two_file_go_module_reads_the_same_before_and_after_a_sync_and_after_a_rei
     // Touch `a/a.go`: `b`'s inbound call and import are captured and rebound —
     // and, spent, deleted by the same sync (CR-187).
     write(tmp.path(), A_FILE, &format!("// touched\n{A_GO}"));
-    let touched = engine.sync(&[A_FILE.into()]);
+    let touched = engine.pipeline().sync(&[A_FILE.into()]);
     assert_eq!(touched.files_modified, 1);
     assert_eq!(capture_rows(&engine), (0, 0), "the sync spent the captures it wrote");
     assert_eq!(global(&engine), before_global);
 
     // The capture a sync keeps, then a sync over it: the row stays, unbound.
     plant_awaiting_capture(&engine);
-    let result = engine.sync(&[]);
+    let result = engine.pipeline().sync(&[]);
     assert_eq!(
         capture_rows(&engine),
         (1, 1),
@@ -261,7 +261,7 @@ fn an_unbound_capture_row_awaiting_a_renamed_target_moves_no_figure() {
         .expect("plant the edge no ledger row produces");
 
     write(tmp.path(), A_FILE, "package a\n\nfunc Renamed() {}\n");
-    let result = engine.sync(&[A_FILE.into()]);
+    let result = engine.pipeline().sync(&[A_FILE.into()]);
     assert_eq!(
         capture_rows(&engine),
         (1, 1),
@@ -326,7 +326,7 @@ fn a_syncs_per_relation_coverage_leaves_out_capture_rows() {
         })
         .expect("rows planted");
 
-    let result = engine.sync(&[]);
+    let result = engine.pipeline().sync(&[]);
     assert_eq!(
         capture_rows(&engine),
         (1, 1),

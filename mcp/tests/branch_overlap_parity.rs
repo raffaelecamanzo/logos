@@ -1,7 +1,7 @@
 //! CLI-vs-MCP payload-equality for the branch/merge symbol-overlap query
 //! (S-360 / [FR-NV-13], CR-114).
 //!
-//! Both surfaces delegate to the **one** `Engine::branch_overlap` entrypoint
+//! Both surfaces delegate to the **one** `Navigation::branch_overlap` entrypoint
 //! ([NFR-CC-01]) and serialise its read-model — the CLI via `serde_json` in
 //! `--json` mode, the MCP twin via `Content::json`. This test proves the wire
 //! payloads are byte-identical for the same repository state **and the same
@@ -102,7 +102,7 @@ fn fixture() -> tempfile::TempDir {
 
     // The merge result takes `left` only: `right`'s edit to `solo` is lost.
     git(root, &["checkout", "-q", "-b", "merged", "left"]);
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -126,7 +126,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 fn cli_payload(root: &Path, refs: &[&str], base: Option<&str>, merge: Option<&str>) -> Value {
     let names: Vec<String> = refs.iter().map(|s| (*s).to_string()).collect();
     let engine = Engine::start(root).expect("engine");
-    let result = engine.branch_overlap(&names, base, merge);
+    let result = engine.navigation().branch_overlap(&names, base, merge);
     serde_json::to_value(&result).expect("serialize")
 }
 

@@ -55,7 +55,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -131,7 +131,7 @@ fn a_direct_call_unmarks_its_edge_in_a_sync_and_a_fresh_index_and_its_removal_ma
     let rt = engine.runtime().unwrap();
 
     write(tmp.path(), "a/src/lib.rs", A_LIB_DIRECT);
-    let synced = engine.sync(&[PathBuf::from("a/src/lib.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("a/src/lib.rs")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     // The direct `b::B::m(..)` binds the edge the fan-out marked: it is a
     // dependency now, and the target set is the one it was.
@@ -144,7 +144,7 @@ fn a_direct_call_unmarks_its_edge_in_a_sync_and_a_fresh_index_and_its_removal_ma
     assert_eq!(graph_fingerprint(rt), graph_fingerprint(cold.runtime().unwrap()), "sync ≡ reindex");
 
     write(tmp.path(), "a/src/lib.rs", A_LIB);
-    let reverted = engine.sync(&[PathBuf::from("a/src/lib.rs")]);
+    let reverted = engine.pipeline().sync(&[PathBuf::from("a/src/lib.rs")]);
     assert!(reverted.warnings.is_empty(), "{:?}", reverted.warnings);
     assert_eq!(calls_from(rt, BY_IMPL), marked_fan_outs()[1].1, "the direct call gone, the edge is dispatch again");
 }
@@ -160,7 +160,7 @@ fn an_edit_to_the_implementation_keeps_its_inbound_edges_marked() {
     let rt = engine.runtime().unwrap();
     let edited = B_LIB.replace("fn m(&self) {}", "fn m(&self) { let _ = 1; }");
     write(tmp.path(), "b/src/lib.rs", &edited);
-    let synced = engine.sync(&[PathBuf::from("b/src/lib.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("b/src/lib.rs")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     for (caller, want) in marked_fan_outs() {
         assert_eq!(calls_from(rt, caller), want, "{caller} after the sync");
@@ -185,7 +185,7 @@ fn a_capture_of_an_unmarked_edge_never_outlives_the_direct_call_that_left_it() {
     let edited = B_LIB.replace("fn m(&self) {}", "fn m(&self) { let _ = 1; }");
     write(tmp.path(), "a/src/lib.rs", A_LIB);
     write(tmp.path(), "b/src/lib.rs", &edited);
-    let synced = engine.sync(&[PathBuf::from("b/src/lib.rs"), PathBuf::from("a/src/lib.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("b/src/lib.rs"), PathBuf::from("a/src/lib.rs")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(calls_from(rt, BY_IMPL), marked_fan_outs()[1].1);
 
@@ -204,7 +204,7 @@ fn a_re_index_is_byte_identical_across_runs() {
     assert!(fingerprint.contains("\nD "), "the fingerprint holds the markers: {fingerprint}");
     assert_eq!(fingerprint, graph_fingerprint(second.runtime().unwrap()));
     // And re-indexing the same store over itself moves nothing.
-    let again = first.index();
+    let again = first.pipeline().index();
     assert!(again.warnings.is_empty(), "{:?}", again.warnings);
     assert_eq!(graph_fingerprint(first.runtime().unwrap()), fingerprint);
 }
@@ -230,14 +230,19 @@ fn a_pre_change_store_carries_no_unmarked_implementor_edge_after_its_migration_a
     drop(engine);
 
     // Back to what the release before S-712 left on disk: the same edges,
-    // none of them marked, migrations 43 and 44 (S-571, the
+    // none of them marked, migrations 43, 44 (S-571, the
     // `files.parse_damaged` column and the snapshot entries' `partial_parse`
-    // flags) unrecorded, `user_version` 42.
+    // flags), 45 (S-820, the `nodes.callable_signature` column), 46 (S-830,
+    // the Go signature re-extraction) and 47 (S-832, the `files.facade` column)
+    // unrecorded, `user_version` 42.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     let stripped = conn.execute("UPDATE edges SET payload = NULL WHERE payload GLOB 'dispatch:*'", []).unwrap();
     assert_eq!(stripped, 3, "precondition: the fixture's three implementor edges were marked");
     conn.execute_batch(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
          DELETE FROM schema_versions WHERE version = 43; PRAGMA user_version = 42;",
@@ -251,7 +256,7 @@ fn a_pre_change_store_carries_no_unmarked_implementor_edge_after_its_migration_a
     let unhashed = rt.submit_read(|s| s.indexed_files()).unwrap().iter().filter(|f| f.content_hash.is_none()).count();
     assert!(unhashed >= 2, "every file awaits re-extraction: {unhashed}");
 
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     for (caller, want) in marked_fan_outs() {
         assert_eq!(calls_from(rt, caller), want, "{caller} after the first reconcile");
     }
@@ -271,13 +276,13 @@ fn callers_callees_and_impact_label_a_dispatch_row_via_its_trait_method() {
     };
 
     // `by_dyn` reaches `B::m` only by dispatch; `by_impl` calls it directly too.
-    let callers = engine.callers(&b_m, None);
+    let callers = engine.navigation().callers(&b_m, None);
     assert!(callers.resolved.is_some(), "{callers:?}");
     let want: BTreeMap<String, Option<String>> =
         [("by_dyn".to_string(), Some("Tr::m".to_string())), ("by_impl".to_string(), None)].into();
     assert_eq!(via(&callers.callers), want);
 
-    let callees = engine.callees(&by_dyn, None);
+    let callees = engine.navigation().callees(&by_dyn, None);
     let mut got: Vec<(String, Option<String>)> =
         callees.callees.iter().map(|r| (r.file.clone().unwrap_or_default(), r.via.clone())).collect();
     got.sort();
@@ -291,7 +296,7 @@ fn callers_callees_and_impact_label_a_dispatch_row_via_its_trait_method() {
         "the trait's own default is a dependency, the impls are dispatch"
     );
 
-    let impact = engine.impact(&b_m, None);
+    let impact = engine.navigation().impact(&b_m, None);
     let upstream: BTreeMap<String, (u32, Option<String>)> =
         impact.upstream.iter().map(|e| (e.symbol.name.clone(), (e.distance, e.symbol.via.clone()))).collect();
     assert_eq!(upstream.get("by_dyn"), Some(&(1, Some("Tr::m".to_string()))), "{upstream:?}");
@@ -299,7 +304,7 @@ fn callers_callees_and_impact_label_a_dispatch_row_via_its_trait_method() {
 
     // Downstream, the callee rows of the same walk: the impls by dispatch, the
     // trait's own default as a dependency.
-    let impact = engine.impact(&by_dyn, Some(1));
+    let impact = engine.navigation().impact(&by_dyn, Some(1));
     let mut downstream: Vec<(String, u32, Option<String>)> = impact
         .downstream
         .iter()
@@ -395,7 +400,7 @@ fn sync_is_reindex(before: &[(&str, &str)], after: &[(&str, &str)]) {
         write(tmp.path(), rel, text);
     }
     let paths: Vec<PathBuf> = after.iter().map(|(rel, _)| PathBuf::from(rel)).collect();
-    let synced = engine.sync(&paths);
+    let synced = engine.pipeline().sync(&paths);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     let mut edited: BTreeMap<&str, &str> = before.iter().copied().collect();
     edited.extend(after.iter().copied());
@@ -500,7 +505,7 @@ pub fn e(a: &dyn T1, b: &dyn T2) { a.m(); b.n(); }
     let (_, by_symbol) = labels(engine.runtime().unwrap());
     let s = by_symbol.iter().find(|(_, l)| *l == "src/lib.rs:s@3").map(|(s, _)| s.clone()).unwrap();
     let upstream: BTreeMap<String, (u32, Option<String>)> = engine
-        .impact(&s, Some(2))
+        .navigation().impact(&s, Some(2))
         .upstream
         .iter()
         .map(|e| (e.symbol.name.clone(), (e.distance, e.symbol.via.clone())))

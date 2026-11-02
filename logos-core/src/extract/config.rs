@@ -227,6 +227,7 @@ pub(super) fn emit_anchored_node(
         uninherited: false,
         alias: false,
         type_arity: None,
+        callable_signature: None,
     });
     facts.edges.push(EdgeFact {
         source: parent_symbol.clone(),
@@ -257,22 +258,7 @@ pub(super) fn extract_one_config(
     plugin: &dyn LanguagePlugin,
     ctx: &SymbolContext,
 ) -> Facts {
-    let mut facts = Facts {
-        path: input.path.clone(),
-        language: plugin.name().to_string(),
-        partial: false,
-        parse_damaged: false,
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        refs: Vec::new(),
-        warnings: Vec::new(),
-        config_source: None,
-        forwarding: Vec::new(),
-        declared_types: Vec::new(),
-        namespace: None,
-        impl_blocks: Vec::new(),
-        local_bindings: Vec::new(),
-    };
+    let mut facts = Facts::empty(input.path.clone(), plugin.name().to_string());
 
     // The committed-configuration corpus (S-380, [CR-121], [FR-WS-19]): flatten
     // this file to canonical key → value facts if — and only if — its basename
@@ -351,6 +337,7 @@ pub(super) fn extract_one_config(
         uninherited: false,
         alias: false,
         type_arity: None,
+        callable_signature: None,
     });
 
     // The generic, depth-bounded section walk runs only when the descriptor
@@ -522,6 +509,7 @@ fn walk_sections(
             uninherited: false,
             alias: false,
             type_arity: None,
+            callable_signature: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),
@@ -670,6 +658,7 @@ fn walk_anchors(
             uninherited: false,
             alias: false,
             type_arity: None,
+            callable_signature: None,
         });
         facts.edges.push(EdgeFact {
             source: config_file_symbol.clone(),

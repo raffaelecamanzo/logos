@@ -1,5 +1,5 @@
 //! `review --headroom` (S-798, [FR-GV-29], [UAT-GV-19]), end-to-end through
-//! `Engine::review_headroom` over real git fixtures.
+//! `Review::headroom` over real git fixtures.
 //!
 //! Coverage by acceptance criterion:
 //! - a module at `max_fan_out − 2` on the base reads headroom 2: `--near 2`
@@ -97,7 +97,7 @@ fn repo(rules: &str) -> TempDir {
 fn headroom(root: &Path, subjects: &[&str], near: Option<u64>) -> HeadroomReport {
     let engine = Engine::start(root).expect("engine starts");
     let subjects: Vec<String> = subjects.iter().map(|s| s.to_string()).collect();
-    engine.review_headroom(Some("main"), &subjects, near).expect("the headroom runs")
+    engine.quality().review().headroom(Some("main"), &subjects, near).expect("the headroom runs")
 }
 
 fn rule<'a>(report: &'a HeadroomReport, name: &str) -> &'a HeadroomRule {
@@ -344,12 +344,12 @@ fn not_projected_is_what_branches_lists_and_the_drift_has_a_margin_or_a_reason()
     let tmp = repo("[constraints]\nmax_fan_out = 4\nmax_clone_ratio = 0.5\n[review]\ndrift_budget = 5\n");
     let root = tmp.path();
     let engine = Engine::start(root).expect("engine starts");
-    let headroom = engine.review_headroom(Some("main"), &[], None).unwrap();
+    let headroom = engine.quality().review().headroom(Some("main"), &[], None).unwrap();
     git(root, &["checkout", "-q", "-b", "b1"]);
     write(root, "src/engine.rs", &engine_calling(&["a", "b", "c"]));
     commit(root, "one more edge");
     git(root, &["checkout", "-q", "main"]);
-    let projection = engine.review_branches(Some("main"), &["b1".to_string()]).unwrap();
+    let projection = engine.quality().review().branches(Some("main"), &["b1".to_string()]).unwrap();
     assert_eq!(headroom.not_projected, projection.not_projected, "{headroom:#?}");
     let rules: Vec<&str> = headroom.not_projected.iter().map(|l| l.rule.as_str()).collect();
     assert_eq!(rules, ["max_clone_ratio"]);
@@ -362,14 +362,14 @@ fn not_projected_is_what_branches_lists_and_the_drift_has_a_margin_or_a_reason()
     assert!(reference.reason.as_deref().is_some_and(|r| r.contains("no gate baseline")), "{reference:#?}");
 
     write(root, ".logos/rules.toml", "[constraints]\nmax_fan_out = 4\n[review]\ndrift_budget = \"report\"\n");
-    let report = Engine::start(root).unwrap().review_headroom(Some("main"), &[], None).unwrap();
+    let report = Engine::start(root).unwrap().quality().review().headroom(Some("main"), &[], None).unwrap();
     let drift = report.drift.expect("drift is answered");
     assert!(!drift.applicable && drift.headroom.is_none(), "{drift:#?}");
     assert!(drift.reason.as_deref().is_some_and(|r| r.contains("never fails")), "{drift:#?}");
     assert_eq!(report.not_projected[0].rule, "drift_budget");
 
     write(root, ".logos/rules.toml", "[constraints]\nmax_fan_out = 4\n");
-    let report = Engine::start(root).unwrap().review_headroom(Some("main"), &[], None).unwrap();
+    let report = Engine::start(root).unwrap().quality().review().headroom(Some("main"), &[], None).unwrap();
     let drift = report.drift.expect("drift is answered");
     assert!(!drift.applicable, "{drift:#?}");
     assert!(drift.reason.as_deref().is_some_and(|r| r.contains("no [review] drift_budget")), "{drift:#?}");
@@ -381,13 +381,13 @@ fn an_unresolvable_base_is_not_measured_and_no_budget_is_an_answer_not_a_failure
     let tmp = repo("[constraints]\nmax_fan_out = 4\n");
     let root = tmp.path();
     let engine = Engine::start(root).expect("engine starts");
-    let missing = engine.review_headroom(Some("no-such-ref"), &[], None).unwrap();
+    let missing = engine.quality().review().headroom(Some("no-such-ref"), &[], None).unwrap();
     assert!(!missing.measured && missing.rules.is_empty() && missing.drift.is_none(), "{missing:#?}");
     assert!(missing.not_measured_because.as_deref().is_some_and(|w| w.contains("does not resolve")), "{missing:#?}");
     assert_eq!(missing.base_commit, None);
 
     write(root, ".logos/rules.toml", "[constraints]\nmax_clone_ratio = 0.5\n");
-    let none = Engine::start(root).unwrap().review_headroom(Some("main"), &[], None).unwrap();
+    let none = Engine::start(root).unwrap().quality().review().headroom(Some("main"), &[], None).unwrap();
     assert!(none.measured && none.rules.is_empty(), "{none:#?}");
     assert!(none.notes.iter().any(|n| n.contains("no limit to list")), "{none:#?}");
     assert_eq!(none.not_projected[0].rule, "max_clone_ratio");
@@ -418,7 +418,7 @@ fn headroom_and_branches_share_one_cached_base_measurement() {
     let mtime = fs::metadata(&base_entry).unwrap().modified().unwrap();
 
     let engine = Engine::start(root).unwrap();
-    let projection = engine.review_branches(Some("main"), &["b1".to_string()]).unwrap();
+    let projection = engine.quality().review().branches(Some("main"), &["b1".to_string()]).unwrap();
     assert!(projection.measured, "{projection:#?}");
     assert_eq!(
         fs::metadata(&base_entry).unwrap().modified().unwrap(),
@@ -519,9 +519,9 @@ fn a_gate_baseline_saved_in_this_checkout_is_the_drifts_named_reference() {
     let tmp = repo("[constraints]\nmax_fan_out = 4\n[review]\ndrift_budget = 5\n");
     let root = tmp.path();
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    engine.gate(None, true, false).expect("a baseline is saved");
-    let report = engine.review_headroom(Some("main"), &[], None).unwrap();
+    engine.pipeline().index();
+    engine.quality().gate(None, true, false).expect("a baseline is saved");
+    let report = engine.quality().review().headroom(Some("main"), &[], None).unwrap();
     let drift = report.drift.as_ref().expect("the drift is answered");
     let reference = drift.reference.as_ref().expect("the reference is named");
     assert_eq!(reference.kind, "baseline", "a comparable baseline is the reference: {reference:#?}");
@@ -546,7 +546,7 @@ fn a_blessed_set_the_base_commit_cannot_use_is_not_measured_and_an_empty_one_say
     ] {
         write(root, ".logos/rules-baseline.json", text);
         commit(root, "a blessed set that cannot be used");
-        let report = engine(root).review_headroom(Some("main"), &[], None).unwrap();
+        let report = engine(root).quality().review().headroom(Some("main"), &[], None).unwrap();
         assert!(!report.measured && report.rules.is_empty(), "{text}: {report:#?}");
         let reason = report.not_measured_because.as_deref().unwrap_or_default();
         assert!(reason.contains("is unusable") && reason.contains(why), "{text}: {reason}");
@@ -555,7 +555,7 @@ fn a_blessed_set_the_base_commit_cannot_use_is_not_measured_and_an_empty_one_say
 
     write(root, ".logos/rules-baseline.json", "{\"version\":1,\"entries\":[]}\n");
     commit(root, "an empty blessed set");
-    let empty = engine(root).review_headroom(Some("main"), &[], None).unwrap();
+    let empty = engine(root).quality().review().headroom(Some("main"), &[], None).unwrap();
     assert!(empty.measured, "{empty:#?}");
     assert!(empty.notes.iter().any(|n| n.contains("blesses nothing")), "{empty:#?}");
     let plain = repo("[constraints]\nmax_cc = 15\n");

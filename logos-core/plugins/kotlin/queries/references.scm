@@ -193,7 +193,13 @@
 ;                            stored) except the trailing lambda of a standard
 ;                            function that takes none (`let`, `forEach`, `map`,
 ;                            … — listed below) and a bare `run { }` /
-;                            `apply { }`, whose receiver is that instance.
+;                            `apply { }`, whose receiver is that instance. A
+;                            bare call inside one reads its receiver first
+;                            (S-834): `.receiver` names the value that receiver
+;                            is (`x` of `x.apply { }`, `x.run { }`,
+;                            `with(x) { }`), whose proven type's member binds
+;                            first; with none named or proven, the call binds
+;                            no top-level function.
 ;   @ref.receiver.unproven — `it`, whose implicit binding no pattern names, and
 ;                            a `vararg` parameter, an array of its declared
 ;                            type: never typed, anywhere in the file.
@@ -335,6 +341,27 @@
     "associateBy" "associateWith" "partition" "fold" "reduce" "sumOf"
     "maxByOrNull" "minByOrNull" "takeWhile" "dropWhile" "distinctBy" "use"
     "repeat" "lazy" "getOrElse" "getOrPut"))
+; Where the call names the value the lambda's `this` is — `x.apply { }`,
+; `x.run { }`, `with(x) { }`, `x` one plain name — that name rides on the
+; marker (`@ref.receiver.rebinds.receiver`, S-834): a bare call inside reads the
+; members of its type first, when S-563's markers prove one.
+((call_expression
+  (navigation_expression
+    .
+    (identifier) @ref.receiver.rebinds.receiver
+    (identifier) @_scope .)
+  (annotated_lambda (lambda_literal) @ref.receiver.rebinds))
+  (#any-of? @_scope "apply" "run")
+  (#not-match? @ref.receiver.rebinds.receiver "^[A-Z][A-Za-z0-9_]*$"))
+((call_expression
+  .
+  (call_expression
+    .
+    (identifier) @_scope
+    (value_arguments . (value_argument . (identifier) @ref.receiver.rebinds.receiver .) .))
+  (annotated_lambda (lambda_literal) @ref.receiver.rebinds))
+  (#eq? @_scope "with")
+  (#not-match? @ref.receiver.rebinds.receiver "^[A-Z][A-Za-z0-9_]*$"))
 (value_argument (lambda_literal) @ref.receiver.rebinds)
 (property_declaration (lambda_literal) @ref.receiver.rebinds)
 (assignment (lambda_literal) @ref.receiver.rebinds)

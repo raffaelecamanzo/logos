@@ -131,7 +131,7 @@ pub(crate) fn search(
     kind: Option<NodeKind>,
     limit: Option<usize>,
 ) -> Result<SearchResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     // Saturating: a pathological huge `limit` must never wrap into SQLite's
     // "negative LIMIT = unbounded".
     let limit = i64::try_from(limit.unwrap_or(DEFAULT_SEARCH_LIMIT)).unwrap_or(i64::MAX);
@@ -176,7 +176,7 @@ pub(crate) fn context(
     max_nodes: Option<usize>,
     include_code: bool,
 ) -> Result<ContextBundle> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let max_nodes = max_nodes.unwrap_or(DEFAULT_MAX_NODES);
 
     // A task is prose, not a symbol: FTS5's default AND semantics would
@@ -233,7 +233,7 @@ pub(crate) fn context(
     // The full lexical-plus-dependency view: FR-NV-02 expands along
     // calls/imports/contains, and `Symbol` is the one granularity in which
     // `contains` appears as an edge.
-    let view = engine.hydrate(Granularity::Symbol)?;
+    let view = engine.graph().hydrate(Granularity::Symbol)?;
     let graph = view.graph();
 
     // Seed scores decay by FTS rank position: 1, 1/2, 1/3, …
@@ -420,7 +420,7 @@ pub(crate) fn explore(
     query: &str,
     max_files: Option<usize>,
 ) -> Result<ExploreResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let max_files = max_files.unwrap_or(DEFAULT_MAX_FILES);
 
     // Anchor resolution is forgiving (explore is the fuzzy tool): exact
@@ -445,7 +445,7 @@ pub(crate) fn explore(
     };
 
     // 1-hop undirected neighbourhood on the full lexical view, anchor included.
-    let view = engine.hydrate(Granularity::Symbol)?;
+    let view = engine.graph().hydrate(Granularity::Symbol)?;
     let graph = view.graph();
     let mut ids: Vec<NodeId> = vec![anchor.id];
     if let Some(idx) = view.index_of(anchor.symbol.as_str()) {
@@ -516,7 +516,7 @@ pub(crate) fn explore(
 /// `node` — everything about one symbol: metadata, immediate edges, code
 /// opt-in ([FR-NV-04]).
 pub(crate) fn node(engine: &Engine, symbol: &str, include_code: bool) -> Result<NodeInfo> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let resolved = runtime.submit_read(|store| {
         let Some((row, passed_over, note)) = resolve_preferring_code(store, symbol)? else {
             return Ok(Err(store.suggest(symbol, SUGGEST_LIMIT)?));
@@ -648,7 +648,7 @@ pub(crate) fn callers(
     let page = adjacency(engine, symbol, limit, AdjacencyKind::Callers)?;
     let mut warnings: Vec<String> = page.note.into_iter().collect();
     let resolution_denominator =
-        symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
+        symbol_denominator(engine.navigation().runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CallersResult {
         query: symbol.to_string(),
         resolved: page.resolved,
@@ -670,7 +670,7 @@ pub(crate) fn callees(
     let page = adjacency(engine, symbol, limit, AdjacencyKind::Callees)?;
     let mut warnings: Vec<String> = page.note.into_iter().collect();
     let resolution_denominator =
-        symbol_denominator(engine.nav_runtime()?, page.resolved.as_ref(), &mut warnings);
+        symbol_denominator(engine.navigation().runtime()?, page.resolved.as_ref(), &mut warnings);
     Ok(CalleesResult {
         query: symbol.to_string(),
         resolved: page.resolved,
@@ -688,7 +688,7 @@ pub(crate) fn callees(
 /// downstream transitive callees ("depends on"), on the dependency view
 /// (`ExcludeContains` — lexical nesting is not impact).
 pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Result<ImpactResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let depth = depth.unwrap_or(DEFAULT_IMPACT_DEPTH);
 
     // The same pooled read resolves the symbol AND collects the doc sections
@@ -724,7 +724,7 @@ pub(crate) fn impact(engine: &Engine, symbol: &str, depth: Option<usize>) -> Res
     };
     let resolution_denominator = symbol_denominator(runtime, Some(&symbol_ref(&row)), &mut warnings);
 
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     let (upstream, downstream) = impact_sets(engine, &view, &row, depth)?;
 
     Ok(ImpactResult {
@@ -839,7 +839,7 @@ pub(crate) fn impact_intersection(
     specs: &[String],
     depth: Option<usize>,
 ) -> Result<ImpactIntersectionResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let depth = depth.unwrap_or(DEFAULT_IMPACT_DEPTH);
     // The `<id>=<symbol>,...` spelling is parsed HERE, once, for every surface:
     // the CLI, the MCP tool and the `/api/v1` route each hand over the strings
@@ -877,7 +877,7 @@ pub(crate) fn impact_intersection(
         Ok(out)
     })?;
 
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     let mut rows: Vec<WorkItemImpact> = items
         .iter()
         .map(|item| WorkItemImpact {
@@ -1303,7 +1303,7 @@ pub(crate) fn precedent(
     target: &str,
     limit: Option<usize>,
 ) -> Result<PrecedentResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     // Clamped to at least 1, not just at most 100: `limit = 0` would otherwise
     // ship an empty `precedents` with no `empty_reason`, and an empty answer
     // that does not say why is exactly what [FR-NV-12] AC 4 forbids.
@@ -1378,7 +1378,7 @@ pub(crate) fn precedent(
     // shared-supertype facet is made of. Nothing lexical leaks in as a result:
     // `Contains` and `Accesses` are admitted to the view but match no facet
     // below, because sharing a parent module is not an analogy.
-    let view = engine.hydrate(Granularity::Symbol)?;
+    let view = engine.graph().hydrate(Granularity::Symbol)?;
     if view.node_count() == 0 {
         result.empty_reason = Some(EmptyPrecedent {
             code: EmptyPrecedentCode::GraphEmpty,
@@ -1872,7 +1872,7 @@ fn precedent_explanation(facet: PrecedentFacet, via: &[SymbolRef], total: u32) -
 ///
 /// [FR-NV-10]: ../../../docs/specs/requirements/FR-NV-10.md
 pub(crate) fn implements(engine: &Engine, doc: &str) -> Result<ImplementorsResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let resolved = runtime.submit_read(|store| {
         let Some((row, note)) = resolve_symbol(store, doc)? else {
             return Ok(Err(store.suggest(doc, SUGGEST_LIMIT)?));
@@ -1907,7 +1907,7 @@ pub(crate) fn implements(engine: &Engine, doc: &str) -> Result<ImplementorsResul
 ///
 /// [FR-NV-10]: ../../../docs/specs/requirements/FR-NV-10.md
 pub(crate) fn referencing_docs(engine: &Engine, symbol: &str) -> Result<ReferencingDocsResult> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let resolved = runtime.submit_read(|store| {
         let Some((row, note)) = resolve_symbol(store, symbol)? else {
             return Ok(Err(store.suggest(symbol, SUGGEST_LIMIT)?));
@@ -1954,7 +1954,7 @@ fn status_keeping(
     engine: &Engine,
     keep_facts: bool,
 ) -> Result<(StatusInfo, Option<crate::resolve::reference_classes::MemberReferenceFacts>)> {
-    let runtime = engine.nav_runtime_no_prologue()?;
+    let runtime = engine.navigation().runtime_no_prologue()?;
     let counts = runtime.submit_read(|store| store.counts())?;
     let indexed = counts.files > 0 || counts.nodes > 0;
 
@@ -2025,7 +2025,7 @@ fn status_keeping(
     // the file count THIS surface reports, so `index`, `status` and `doctor` render
     // one identical line at the same root. Advisory only: it rides the existing
     // ADR-14 degradation channel and moves nothing else.
-    if let Some(diagnostic) = engine.zero_admission_diagnostic(counts.files) {
+    if let Some(diagnostic) = engine.graph().zero_admission_diagnostic(counts.files) {
         warnings.push(diagnostic.to_string());
     }
 
@@ -2133,7 +2133,7 @@ fn status_keeping(
             .map_err(|err| format!("the configuration could not be read ({err})"))
             .and_then(|config| {
                 engine
-                    .call_residue(&config.resolution)
+                    .graph().call_residue(&config.resolution)
                     .map_err(|err| format!("the graph could not be read ({err})"))
             });
         match residues {
@@ -2147,6 +2147,10 @@ fn status_keeping(
             }
         }
     }
+
+    // The method-set pass's figures (S-830, FR-RS-18), as the last resolution
+    // run stored them: read, never computed here.
+    interface_figures(runtime, &mut resolution_by_language, &mut warnings)?;
 
     let crate::resolve::reference_classes::ClassifiedPopulation { classes, facts } =
         reference_classes(engine, &mut resolution_by_language, keep_facts)?;
@@ -2179,6 +2183,30 @@ fn status_keeping(
     Ok((status, facts))
 }
 
+/// Each method-set language's row given the figures the last resolution run
+/// stored for it ([`METHOD_SET_FIGURES_KEY`](crate::graph_store::METHOD_SET_FIGURES_KEY),
+/// S-830, [FR-RS-18]). One point read on the RO pool. A store no run has
+/// written them to states none; unreadable figures state none and say so
+/// (ADR-14), never figures of another run.
+///
+/// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+fn interface_figures(runtime: &Runtime, rows: &mut [LanguageResolution], warnings: &mut Vec<String>) -> Result<()> {
+    let Some(stored) =
+        runtime.submit_read(|store| store.project_metadata(crate::graph_store::METHOD_SET_FIGURES_KEY))?
+    else {
+        return Ok(());
+    };
+    match serde_json::from_str::<BTreeMap<String, crate::models::navigation::InterfaceFigures>>(&stored) {
+        Ok(mut by_language) => {
+            for row in rows.iter_mut() {
+                row.interfaces = by_language.remove(&row.language);
+            }
+        }
+        Err(err) => warnings.push(format!("the interface figures are not stated: the stored figures do not read ({err})")),
+    }
+    Ok(())
+}
+
 /// The reference classes of `status` ([FR-RS-49], S-635): every reported
 /// ledger row a doc reference, a provably external code reference or an
 /// internal candidate, with each of `rows`' classes given its provably-external
@@ -2200,7 +2228,7 @@ fn reference_classes(
         .registry()
         .map(crate::resolve::package_key::PackageLayout::from_registry)
         .unwrap_or_default();
-    let (population, universe) = engine.nav_runtime_no_prologue()?.submit_read(move |store| {
+    let (population, universe) = engine.navigation().runtime_no_prologue()?.submit_read(move |store| {
         crate::resolve::reference_classes::read_population(store, &layout)
     })?;
     let residues = rows.iter().filter_map(|row| {
@@ -2232,7 +2260,7 @@ fn reference_classes(
 /// than silently truncating ([NFR-CC-04]).
 ///
 /// A **pure reader** over the cached hydrated view: it only calls
-/// [`Engine::hydrate`], which reads through the RO pool and the
+/// [`Graph::hydrate`](crate::Graph::hydrate), which reads through the RO pool and the
 /// `(scope, last_sync_at)` cache — there is no compute-and-persist path, so a
 /// call mutates no store ([ADR-28], [ADR-29]). It hydrates the presentation-only
 /// [`Granularity::Visualization`](crate::Granularity::Visualization) view
@@ -2316,7 +2344,7 @@ pub(crate) fn graph_elements(
         GraphGranularity::File => Granularity::File,
         GraphGranularity::Symbol => Granularity::Visualization,
     };
-    let view = engine.hydrate(view_granularity)?;
+    let view = engine.graph().hydrate(view_granularity)?;
     let graph = view.graph();
 
     // The re-budgeting filter predicates (S-122, FR-UI-15). `None` ⇒ everything
@@ -2664,7 +2692,7 @@ fn seed_vertex(
         return Ok(None);
     };
     let Some(canonical) = engine
-        .nav_runtime()?
+        .navigation().runtime()?
         .submit_read(|store| under_store_coordinate(store, &symbol))?
     else {
         return Ok(None);
@@ -2735,8 +2763,8 @@ pub(crate) fn affected(
     tests_only: bool,
 ) -> Result<AffectedResult> {
     // Same prologue contract as the other navigation queries (FR-IX-07).
-    let runtime = engine.nav_runtime()?;
-    let view = engine.hydrate(Granularity::File)?;
+    let runtime = engine.navigation().runtime()?;
+    let view = engine.graph().hydrate(Granularity::File)?;
     let graph = view.graph();
 
     // Resolve each changed path to its file vertex; "./" prefixes normalise
@@ -3033,7 +3061,7 @@ fn adjacency(
     limit: Option<usize>,
     kind: AdjacencyKind,
 ) -> Result<AdjacencyPage> {
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let limit = limit.unwrap_or(DEFAULT_ADJACENCY_LIMIT);
     runtime.submit_read(|store| {
         let Some((row, passed_over, note)) = resolve_preferring_code(store, symbol)? else {
@@ -3309,7 +3337,42 @@ fn resolve_preferring_code(
     if let Some((row, note)) = resolve_exact_or_identity(store, text)? {
         return Ok(Some((row, Vec::new(), note)));
     }
-    Ok(prefer_code(store.nodes_by_name(text)?).map(|(row, passed_over)| (row, passed_over, None)))
+    let Some(preferred) = prefer_code(store.nodes_by_name(text)?) else {
+        return Ok(None);
+    };
+    let (row, passed_over) = prefer_paired_definition(store, preferred)?;
+    Ok(Some((row, passed_over, None)))
+}
+
+/// A bare name's winner passed over for its definition when it is a C/C++
+/// prototype paired with one of the other matches (S-820, [FR-NV-15]), in one
+/// file or two — whatever the files' order. The pair link is the winner's
+/// `References` edge to a passed-over callable of its name: no other edge of
+/// the graph joins two same-named callables that way (a framework's
+/// `References` leaves a route). The prototype then heads what was passed
+/// over. Every other winner stands.
+///
+/// [FR-NV-15]: ../../../docs/specs/requirements/FR-NV-15.md
+fn prefer_paired_definition(
+    store: &dyn GraphStore,
+    (chosen, mut passed_over): (NodeRow, Vec<NodeRow>),
+) -> Result<(NodeRow, Vec<NodeRow>)> {
+    let callable = |kind: NodeKind| matches!(kind, NodeKind::Function | NodeKind::Method);
+    if !callable(chosen.kind) {
+        return Ok((chosen, passed_over));
+    }
+    let linked: HashSet<NodeId> = store
+        .neighbours_out(chosen.id)?
+        .into_iter()
+        .filter(|(kind, target)| *kind == EdgeKind::References && callable(target.kind) && target.name == chosen.name)
+        .map(|(_, target)| target.id)
+        .collect();
+    let Some(at) = passed_over.iter().position(|row| linked.contains(&row.id)) else {
+        return Ok((chosen, passed_over));
+    };
+    let definition = passed_over.remove(at);
+    passed_over.insert(0, chosen);
+    Ok((definition, passed_over))
 }
 
 /// [`resolve_symbol`] that also reports HOW MANY nodes the name matched.
@@ -3483,7 +3546,7 @@ fn dispatch_reached(
     if wanted.is_empty() {
         return Ok(HashMap::new());
     }
-    let marked = engine.nav_runtime()?.submit_read(move |store| store.dispatched_via(&wanted))?;
+    let marked = engine.navigation().runtime()?.submit_read(move |store| store.dispatched_via(&wanted))?;
     Ok(hops
         .into_iter()
         .filter_map(|(vertex, pairs)| {
@@ -3545,7 +3608,7 @@ fn doc_seed_code_targets(engine: &Engine, doc_ids: &[NodeId]) -> Result<Vec<Stri
         return Ok(Vec::new());
     }
     let doc_ids = doc_ids.to_vec();
-    let runtime = engine.nav_runtime_no_prologue()?;
+    let runtime = engine.navigation().runtime_no_prologue()?;
     let symbols: BTreeSet<String> = runtime.submit_read(move |store| {
         let mut symbols: BTreeSet<String> = BTreeSet::new();
         for id in &doc_ids {
@@ -3585,7 +3648,7 @@ fn doc_neighbours(
         return Ok(Vec::new());
     }
     let code_ids = code_ids.to_vec();
-    let runtime = engine.nav_runtime_no_prologue()?;
+    let runtime = engine.navigation().runtime_no_prologue()?;
     // doc id -> (row, how many distinct candidate code symbols it documents)
     let docs: BTreeMap<NodeId, (NodeRow, usize)> = runtime.submit_read(move |store| {
         let mut docs: BTreeMap<NodeId, (NodeRow, usize)> = BTreeMap::new();
@@ -3666,7 +3729,7 @@ fn artifact_neighbours(
         return Ok(Vec::new());
     }
     let code_ids = code_ids.to_vec();
-    let runtime = engine.nav_runtime_no_prologue()?;
+    let runtime = engine.navigation().runtime_no_prologue()?;
     // artifact node id -> (row, the distinct candidate code symbols it reached
     // through). The set's size is the centrality degree; the BTreeMap fixes order.
     let reached: BTreeMap<NodeId, (NodeRow, BTreeSet<NodeId>)> =
@@ -3740,7 +3803,7 @@ fn fetch_rows(engine: &Engine, ids: &[NodeId]) -> Result<HashMap<NodeId, NodeRow
         return Ok(HashMap::new());
     }
     let ids = ids.to_vec();
-    let runtime = engine.nav_runtime_no_prologue()?;
+    let runtime = engine.navigation().runtime_no_prologue()?;
     runtime.submit_read(move |store| {
         let mut rows = HashMap::with_capacity(ids.len());
         for id in ids {

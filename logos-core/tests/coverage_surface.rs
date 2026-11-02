@@ -61,7 +61,7 @@ fn ingest(engine: &Engine, root: &Path, report: &str) -> logos_core::history::In
     let path = root.join("coverage.info");
     std::fs::write(&path, report).unwrap();
     engine
-        .coverage_ingest(&path, None)
+        .coverage().ingest(&path, None)
         .expect("coverage ingest succeeds")
 }
 
@@ -76,7 +76,7 @@ fn editing_a_covered_file_flips_it_to_stale_and_drops_the_freshness_fraction() {
     commit(repo, "src/b.rs", "pub fn b() -> i64 { 0 }\n", "add b");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Both files covered → both fresh, fraction 100% (10000 bp).
     ingest(
@@ -85,7 +85,7 @@ fn editing_a_covered_file_flips_it_to_stale_and_drops_the_freshness_fraction() {
         "TN:suite\nSF:src/a.rs\nDA:1,1\nend_of_record\n\
          SF:src/b.rs\nDA:1,1\nend_of_record\n",
     );
-    let status = engine.coverage_status().expect("coverage status");
+    let status = engine.coverage().status().expect("coverage status");
     assert_eq!(status.total_files, 2);
     assert_eq!(status.fresh_files, 2);
     assert_eq!(status.stale_files, 0);
@@ -114,7 +114,7 @@ fn editing_a_covered_file_flips_it_to_stale_and_drops_the_freshness_fraction() {
     // Edit a.rs on disk → its content hash no longer matches the anchor.
     std::fs::write(repo.join("src/a.rs"), "pub fn a() -> i64 { 1 }\n").unwrap();
     let status = engine
-        .coverage_status()
+        .coverage().status()
         .expect("coverage status after edit");
     let a = status.files.iter().find(|f| f.path == "src/a.rs").unwrap();
     assert_eq!(a.freshness, "stale", "the edited file flips to stale");
@@ -150,7 +150,7 @@ fn overall_coverage_aggregate_is_the_raw_fresh_ratio() {
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // 4 instrumented lines, 1 covered → 1/4 = 25.00% (2500 bp), raw and ungraded.
     ingest(
@@ -158,7 +158,7 @@ fn overall_coverage_aggregate_is_the_raw_fresh_ratio() {
         repo,
         "TN:suite\nSF:src/a.rs\nDA:1,1\nDA:2,0\nDA:3,0\nDA:4,0\nend_of_record\n",
     );
-    let status = engine.coverage_status().expect("coverage status");
+    let status = engine.coverage().status().expect("coverage status");
     assert_eq!(
         status.overall_coverage_bp,
         Some(2_500),
@@ -192,7 +192,7 @@ fn reading_coverage_status_appends_no_snapshot() {
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     ingest(&engine, repo, "TN:suite\nSF:src/a.rs\nDA:1,1\nend_of_record\n");
 
     let before = coverage_snapshot_count(repo);
@@ -200,7 +200,7 @@ fn reading_coverage_status_appends_no_snapshot() {
 
     // The aggregate is derived on read; repeated status reads append nothing.
     for _ in 0..3 {
-        let status = engine.coverage_status().expect("coverage status");
+        let status = engine.coverage().status().expect("coverage status");
         assert_eq!(status.overall_coverage_bp, Some(10_000));
     }
     assert_eq!(
@@ -216,9 +216,9 @@ fn coverage_status_reports_na_with_a_notice_when_nothing_is_ingested() {
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
     std::fs::write(tmp.path().join("src/lib.rs"), "pub fn a() {}\n").unwrap();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    let status = engine.coverage_status().expect("status succeeds (exit 0)");
+    let status = engine.coverage().status().expect("status succeeds (exit 0)");
     assert!(status.head_sha.is_none() && status.total_files == 0);
     assert_eq!(
         status.overall_coverage_bp, None,
@@ -257,7 +257,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
         );
     }
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Cover every instrumented line of tested.rs with hits → fresh & positive.
     let tested_lines: String = (1..=9).map(|n| format!("DA:{n},1\n")).collect();
@@ -268,7 +268,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
     );
 
     // The coverage column rides every hotspot row (FR-CV-05/07).
-    let all = engine.hotspots(None, false, false).expect("hotspots");
+    let all = engine.history().hotspots(None, false, false).expect("hotspots");
     assert_eq!(all.coverage_basis, "coverage", "a snapshot exists");
     assert_eq!(
         all.coverage_label, None,
@@ -286,7 +286,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
 
     // --untested: tested.rs (fresh-covered) is excluded; the uncovered hottest
     // file ranks first (FR-CV-07).
-    let untested = engine.hotspots(None, true, false).expect("hotspots --untested");
+    let untested = engine.history().hotspots(None, true, false).expect("hotspots --untested");
     assert!(untested.untested);
     let paths: Vec<&str> = untested.files.iter().map(|h| h.path.as_str()).collect();
     assert_eq!(
@@ -308,7 +308,7 @@ fn untested_filter_ranks_uncovered_hotspots_first_and_excludes_covered() {
         format!("{}// edited\n", branchy("tested", 6)),
     )
     .unwrap();
-    let after_edit = engine.hotspots(None, true, false).expect("hotspots --untested");
+    let after_edit = engine.history().hotspots(None, true, false).expect("hotspots --untested");
     let stale = after_edit
         .files
         .iter()
@@ -338,10 +338,10 @@ fn untested_without_coverage_carries_the_static_reachability_fallback_label() {
         );
     }
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // No coverage ingested → the fallback basis + label, and every column n/a.
-    let report = engine.hotspots(None, true, false).expect("hotspots --untested");
+    let report = engine.history().hotspots(None, true, false).expect("hotspots --untested");
     assert_eq!(report.coverage_basis, "static-reachability");
     assert_eq!(
         report.coverage_label,
@@ -383,11 +383,11 @@ fn gate_is_byte_identical_across_coverage_ingest_staleness_and_deletion() {
     commit(repo, "src/other.rs", &branchy("other", 2), "add other");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Baseline on the pristine indexed tree.
-    engine.gate(None, true, true).expect("gate --save");
-    let baseline = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    engine.quality().gate(None, true, true).expect("gate --save");
+    let baseline = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
 
     // (1) After ingest (touches only history.db): byte-identical.
     let lines: String = (1..=6).map(|n| format!("DA:{n},1\n")).collect();
@@ -400,7 +400,7 @@ fn gate_is_byte_identical_across_coverage_ingest_staleness_and_deletion() {
         repo.join(".logos/history.db").exists(),
         "the ingest created history.db"
     );
-    let after_ingest = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_ingest = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_ingest,
         "coverage ingest never moves the gate"
@@ -411,15 +411,15 @@ fn gate_is_byte_identical_across_coverage_ingest_staleness_and_deletion() {
     // coverage — i.e. the coverage tier (stale or absent) never enters the gate.
     std::fs::write(repo.join("src/covered.rs"), branchy("covered", 5)).unwrap();
     // Coverage is now stale (anchor mismatch); confirm via the read surface.
-    let cov = engine.coverage_status().expect("coverage status");
+    let cov = engine.coverage().status().expect("coverage status");
     assert_eq!(
         cov.stale_files, 1,
         "editing the covered file made its coverage stale"
     );
-    let with_stale = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let with_stale = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
 
     std::fs::remove_file(repo.join(".logos/history.db")).expect("delete history.db");
-    let without_coverage = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let without_coverage = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         with_stale, without_coverage,
         "stale coverage vs no coverage on the same tree → identical gate (BR-28)"
@@ -440,17 +440,17 @@ fn auto_ingest_populates_coverage_through_the_shared_path() {
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // Drop a conventional artifact and auto-ingest it (no manual command).
     let artifact = repo.join("lcov.info");
     std::fs::write(&artifact, "TN:suite\nSF:src/a.rs\nDA:1,1\nend_of_record\n").unwrap();
     let summary = engine
-        .coverage_ingest_auto(&artifact)
+        .coverage().ingest_auto(&artifact)
         .expect("auto-ingest succeeds");
     assert_eq!(summary.matched_files, 1, "src/a.rs bound");
 
-    let status = engine.coverage_status().expect("coverage status");
+    let status = engine.coverage().status().expect("coverage status");
     assert_eq!(status.total_files, 1);
     assert_eq!(status.fresh_files, 1);
     assert_eq!(status.overall_coverage_bp, Some(10_000));
@@ -468,13 +468,13 @@ fn auto_ingest_of_a_malformed_artifact_fails_without_writing() {
     sh_git(repo, &["init", "-q", "-b", "main"]);
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // A truncated LCOV (DA with no hit count) is rejected atomically.
     let artifact = repo.join("lcov.info");
     std::fs::write(&artifact, "SF:src/a.rs\nDA:1\nend_of_record\n").unwrap();
     assert!(
-        engine.coverage_ingest_auto(&artifact).is_err(),
+        engine.coverage().ingest_auto(&artifact).is_err(),
         "a malformed artifact is rejected (the watcher degrades this to a warning)"
     );
     assert_eq!(
@@ -507,15 +507,15 @@ fn coverage_refresh_runs_the_command_and_ingests_its_output() {
     // own, never this machine's.
     let user = TempDir::new().expect("user-level dir");
     let engine = Engine::start(repo).expect("engine starts").with_scan_environment(user_env(user.path()));
-    engine.index();
+    engine.pipeline().index();
 
-    let summary = engine.coverage_refresh(true).expect("coverage refresh succeeds");
+    let summary = engine.coverage().refresh(true).expect("coverage refresh succeeds");
     let (reports, matched) = custom_ran(&summary);
     assert_eq!(reports, ["lcov.info"], "the convention artifact was ingested");
     assert_eq!(matched, 1);
     assert_eq!(summary.exit_code(), 0);
 
-    let status = engine.coverage_status().expect("coverage status");
+    let status = engine.coverage().status().expect("coverage status");
     assert_eq!(status.fresh_files, 1);
     assert_eq!(status.overall_coverage_bp, Some(10_000));
 }
@@ -543,9 +543,9 @@ fn coverage_refresh_without_a_configured_command_errs() {
     sh_git(repo, &["init", "-q", "-b", "main"]);
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    let err = engine.coverage_refresh(false).expect_err("no refresh_cmd → error");
+    let err = engine.coverage().refresh(false).expect_err("no refresh_cmd → error");
     assert!(
         err.to_string().contains("refresh_cmd"),
         "the error names the missing config: {err}"
@@ -599,28 +599,28 @@ fn coverage_refresh_spawns_nothing_without_the_consent_that_pins_its_command() {
     let spawned = || std::fs::read_to_string(repo.join("spawned.log")).unwrap_or_default();
 
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(user_env(&user));
-    engine.index();
+    engine.pipeline().index();
 
-    let message = consent_refusal(&engine.coverage_refresh(false).expect_err("no consent yet"));
+    let message = consent_refusal(&engine.coverage().refresh(false).expect_err("no consent yet"));
     assert!(message.contains("`logos coverage refresh --consent`"), "{message}");
     assert!(message.contains(&format!("verbatim:\n{first}\n")), "the command, verbatim: {message}");
     assert_eq!(spawned(), "", "nothing is spawned before consent");
 
-    let granted = engine.coverage_refresh(true).expect("consent given, the command runs");
+    let granted = engine.coverage().refresh(true).expect("consent given, the command runs");
     assert_eq!(granted.consent_recorded, ["custom"]);
     assert_eq!(custom_ran(&granted).1, 1);
-    let again = engine.coverage_refresh(false).expect("consent is not asked twice");
+    let again = engine.coverage().refresh(false).expect("consent is not asked twice");
     assert!(again.consent_recorded.is_empty());
     assert_eq!(spawned(), "aa");
 
     // A changed command — one character — is asked for again, by its new text.
     let changed = tagged_refresh_cmd("b");
     write_refresh_cmd(&repo, &changed);
-    let message = consent_refusal(&engine.coverage_refresh(false).expect_err("the command changed"));
+    let message = consent_refusal(&engine.coverage().refresh(false).expect_err("the command changed"));
     assert!(message.starts_with("the [coverage_ingest].refresh_cmd text changed"), "{message}");
     assert!(message.contains(&format!("verbatim:\n{changed}\n")), "the new text, verbatim: {message}");
     assert_eq!(spawned(), "aa", "the changed command did not run");
-    assert_eq!(engine.coverage_refresh(true).expect("re-consented").consent_recorded, ["custom"]);
+    assert_eq!(engine.coverage().refresh(true).expect("re-consented").consent_recorded, ["custom"]);
     assert_eq!(spawned(), "aab");
 
     // No consent record inside the repository; the security consent unchanged.
@@ -653,18 +653,18 @@ fn coverage_status_flags_artifact_vs_head_staleness() {
     commit(repo, "src/a.rs", "pub fn a() -> i64 { 0 }\n", "add a");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     ingest(&engine, repo, "TN:suite\nSF:src/a.rs\nDA:1,1\nend_of_record\n");
 
     // At the ingest HEAD: not stale, no prompt.
-    let fresh = engine.coverage_status().expect("coverage status");
+    let fresh = engine.coverage().status().expect("coverage status");
     assert!(!fresh.head_stale, "coverage ingested at the current HEAD is not stale");
     assert!(fresh.staleness_prompt.is_none());
     assert!(fresh.current_head.is_some(), "HEAD resolves in a git repo");
 
     // Advance HEAD with an unrelated commit; src/a.rs is untouched on disk.
     commit(repo, "src/b.rs", "pub fn b() -> i64 { 0 }\n", "add b");
-    let stale = engine.coverage_status().expect("coverage status");
+    let stale = engine.coverage().status().expect("coverage status");
     assert!(
         stale.head_stale,
         "the artifact now lags HEAD (ingested at the prior commit)"
@@ -691,9 +691,9 @@ fn gate_is_byte_identical_after_auto_ingest() {
     commit(repo, "src/covered.rs", &branchy("covered", 4), "add covered");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
-    engine.gate(None, true, true).expect("gate --save");
-    let baseline = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    engine.pipeline().index();
+    engine.quality().gate(None, true, true).expect("gate --save");
+    let baseline = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
 
     // Auto-ingest (the watcher path) touches only history.db.
     let artifact = repo.join("lcov.info");
@@ -704,10 +704,10 @@ fn gate_is_byte_identical_after_auto_ingest() {
     )
     .unwrap();
     engine
-        .coverage_ingest_auto(&artifact)
+        .coverage().ingest_auto(&artifact)
         .expect("auto-ingest succeeds");
 
-    let after_auto = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_auto = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_auto,
         "auto coverage ingest never moves the gate (BR-28, UAT-CV-02)"
@@ -740,7 +740,7 @@ fn coverage_status_carries_a_last_runs_duration_and_cause_and_reads_a_record_wit
     .unwrap();
 
     let engine = Engine::start(repo).expect("engine starts");
-    let status = serde_json::to_value(engine.coverage_status().expect("coverage status")).unwrap();
+    let status = serde_json::to_value(engine.coverage().status().expect("coverage status")).unwrap();
     let last_run = |tool: &str| {
         let tools = status["runner"]["tools"].as_array().expect("the runner's tools");
         tools.iter().find(|t| t["tool"] == tool).unwrap_or_else(|| panic!("{tool}: {status}"))["last_run"].clone()

@@ -63,7 +63,7 @@ fn member(dir: &Path) {
     sh_git(dir, &["init", "-q", "-b", "main"]);
     sh_git(dir, &["add", "."]);
     sh_git(dir, &["commit", "-q", "-m", "init"]);
-    Engine::start(dir).expect("engine starts").index();
+    Engine::start(dir).expect("engine starts").pipeline().index();
 }
 
 /// Every file under `<root>/<member>/.logos/` with its size and mtime.

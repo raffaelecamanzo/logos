@@ -223,7 +223,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -275,7 +275,7 @@ fn scan_classes(path: impl Fn(usize) -> String, n: usize) -> (TempDir, RecordedS
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
     let tmp = tree(&refs);
     let engine = index(tmp.path());
-    let view = engine.hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
+    let view = engine.graph().hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     let member_access = engine.registry().expect("a started engine holds its registry").member_access_extensions();
     let snapshot = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &member_access).expect("snapshot runs");
@@ -303,7 +303,7 @@ fn a_constructor_assigning_every_field_links_the_methods_that_read_them() {
     let refs: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
     let tmp = tree(&refs);
     let engine = index(tmp.path());
-    let view = engine.hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
+    let view = engine.graph().hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
     let member_access = engine.registry().expect("a started engine holds its registry").member_access_extensions();
     let s = metrics::snapshot(engine.runtime().expect("runtime"), &view, None, metrics::Thresholds::default(), &member_access)
         .expect("snapshot runs");
@@ -333,7 +333,7 @@ fn a_synced_edit_of_constructor_fields_equals_a_fresh_index() {
     let engine = index(live.path());
     for edited in [after, before] {
         fs::write(live.path().join("src/a.js"), edited).unwrap();
-        engine.sync(&["src/a.js".into()]);
+        engine.pipeline().sync(&["src/a.js".into()]);
 
         let fresh = tree(&[("src/a.js", edited)]);
         let cold = index(fresh.path());

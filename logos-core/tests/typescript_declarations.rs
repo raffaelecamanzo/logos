@@ -40,7 +40,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -129,7 +129,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(tmp_a.path().join(rel), text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
     final_state.extend(edits.iter().copied());

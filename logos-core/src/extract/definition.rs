@@ -2,7 +2,8 @@
 //! member definition merges into the in-class declaration it defines, a
 //! prototype pairs with the definition of its scope, and a callable written in a
 //! class body is a method whatever pattern named it. A class pattern's
-//! declaration may likewise be marked an enumeration (S-559).
+//! declaration may likewise be marked an enumeration (S-559), and a variable
+//! pattern's a constant (S-831).
 //!
 //! Which declarations take part is read off captures a plugin's own `symbols`
 //! query declares ([NFR-MA-01]): a plugin that declares none of them extracts
@@ -33,6 +34,11 @@
 //!   second pattern naming the declaration, because two patterns naming one
 //!   declaration are taken first-wins and which comes first is not the
 //!   query's to say.
+//! - `@decl.constant` — a constant a plugin's variable pattern also names
+//!   (Kotlin's `const val` is a `property_declaration`, written with a `const`
+//!   modifier). A variable-kinded declaration so marked is a
+//!   [`NodeKind::Constant`]; both kinds render a term descriptor, so its symbol
+//!   is unchanged. A marker for the reason `@decl.enum` is one (S-831).
 //! - `@decl.prototype` — a bodiless declaration that a definition elsewhere
 //!   completes: an in-class member prototype, or a free-function prototype.
 //! - `@decl.scope` — the qualified name of an out-of-line definition
@@ -45,9 +51,10 @@
 //!
 //! # What completion does ([`complete`])
 //!
-//! 1. **Members are methods, enumerations enums.** A function-kinded
-//!    declaration marked `@decl.method` becomes a method, and a class-kinded
-//!    one marked `@decl.enum` an enum.
+//! 1. **Members are methods, enumerations enums, constants constants.** A
+//!    function-kinded declaration marked `@decl.method` becomes a method, a
+//!    class-kinded one marked `@decl.enum` an enum, and a variable-kinded one
+//!    marked `@decl.constant` a constant.
 //! 2. **An out-of-line definition finds its container.** Its scope path is
 //!    walked through the file's classes, structs and namespaces, from its own
 //!    lexical scope outwards, as C++ name lookup reads it. Found, the
@@ -60,9 +67,10 @@
 //!    declared in another file, the header-and-source split — the definition
 //!    keeps its lexical scope and renders its scope path into its own symbol
 //!    (`a.cpp/Cls#m().`), a method of a class this file does not declare.
-//!    Merging it into the header's node needs the include map
-//!    ([FR-RS-38]) and a node one file cannot own ([BR-74]), so it is not done
-//!    here.
+//!    Merging it into the header's node would need a node one file cannot own
+//!    ([BR-74]), so it is never done: the two stay two nodes, which the
+//!    binder pairs through the include map ([FR-RS-38]) as step 3 pairs a
+//!    file's own (S-820, `resolve::binder::prototype_pairs`).
 //! 3. **A prototype pairs with its definition.** A prototype and a bodied
 //!    declaration of one scope, name and parameters are a pair. Both keep
 //!    their nodes and symbols. The prototype binds nothing — its node is
@@ -73,6 +81,13 @@
 //!    it takes `self`) are not recorded for a prototype. It records a `References` link to its
 //!    definition, and the definition is emitted first, so the lowest-id rule
 //!    a bare-name lookup ends on ([FR-NV-15]) lands on the body.
+//!
+//! **Every callable records its parameters** ([`parameter_shape`], S-820,
+//! `NodeFact::callable_signature`): the reading the pairing above compares,
+//! stored beside the symbol for prototypes and definitions alike. A prototype
+//! this file leaves unpaired and a definition in a file that includes it are
+//! paired by the binder, which reads that fact; the pair is two nodes and the
+//! same `References` link, recorded at resolution.
 //!
 //! # Identity
 //!
@@ -115,6 +130,8 @@ pub(super) struct DeclDefinitionFacts {
     method: bool,
     /// An enumeration its class pattern also names (`@decl.enum`).
     enumeration: bool,
+    /// A constant its variable pattern also names (`@decl.constant`).
+    constant: bool,
     /// A prototype a definition may complete (`@decl.prototype`).
     prototype: bool,
     /// The scope path of an out-of-line definition (`@decl.scope`).
@@ -154,6 +171,7 @@ fn in_class_body(node: Node<'_>) -> bool {
 pub(super) struct DefinitionCaptures<'tree> {
     methods: HashSet<usize>,
     enums: HashSet<usize>,
+    constants: HashSet<usize>,
     prototypes: HashSet<usize>,
     scopes: Vec<Node<'tree>>,
 }
@@ -180,6 +198,9 @@ impl<'tree> DefinitionCaptures<'tree> {
             "enum" => {
                 self.enums.insert(node.id());
             }
+            "constant" => {
+                self.constants.insert(node.id());
+            }
             "prototype" => {
                 self.prototypes.insert(node.id());
             }
@@ -198,6 +219,7 @@ impl<'tree> DefinitionCaptures<'tree> {
             .map(|d| DeclDefinitionFacts {
                 method: self.methods.contains(&d.node.id()),
                 enumeration: self.enums.contains(&d.node.id()),
+                constant: self.constants.contains(&d.node.id()),
                 prototype: self.prototypes.contains(&d.node.id()),
                 scope: None,
                 paired: false,
@@ -283,6 +305,9 @@ pub(super) fn complete(decls: &mut [Decl<'_>], source: &[u8], body_kinds: &[Stri
         }
         if decl.def.enumeration && decl.kind == NodeKind::Class {
             decl.kind = NodeKind::Enum;
+        }
+        if decl.def.constant && decl.kind == NodeKind::Variable {
+            decl.kind = NodeKind::Constant;
         }
     }
 
@@ -458,18 +483,32 @@ fn only_one(mut items: impl Iterator<Item = usize>) -> Option<usize> {
 
 /// `true` when two callables declare the same parameters and qualifiers.
 fn same_parameters(a: Node<'_>, b: Node<'_>, source: &[u8]) -> bool {
-    match (parameter_shape(a, source), parameter_shape(b, source)) {
+    match (shape_of(a, source, false), shape_of(b, source, false)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
     }
+}
+
+/// The shape a callable records (S-820, `NodeFact::callable_signature`):
+/// [`shape_of`] with the names of the parameters a parameter's own type
+/// declares dropped too — `std::function<void(int n)>` is
+/// `std::function<void(int)>`, which a header and its source may name
+/// differently — and one space kept between two words, so `const fs::path&`
+/// reads as written rather than `constfs::path&`. The comparison a file's own
+/// completion makes ([`same_parameters`]) keeps neither, so every declaration
+/// it merged or paired before is merged or paired the same way.
+pub(super) fn parameter_shape(decl: Node<'_>, source: &[u8]) -> Option<String> {
+    shape_of(decl, source, true)
 }
 
 /// A callable's parameters as types alone — each parameter's text without its
 /// name, its default value, a top-level `const` (not part of the signature:
 /// `f(int)` and `f(const int)`, `f(FILE*)` and `f(FILE* const)` each declare one
 /// function) or whitespace — then the declarator's own `const` and reference
-/// qualifiers. `(void)` declares what `()` does.
-fn parameter_shape(decl: Node<'_>, source: &[u8]) -> Option<String> {
+/// qualifiers. `(void)` declares what `()` does. With `stored`, the names of
+/// the parameters a parameter's type declares are left out as well, and a
+/// blank between two words is one space.
+fn shape_of(decl: Node<'_>, source: &[u8], stored: bool) -> Option<String> {
     let declarator = declarator_of_kind(decl, "function_declarator")?;
     let list = declarator.child_by_field_name("parameters")?;
     let mut shape = String::new();
@@ -483,6 +522,9 @@ fn parameter_shape(decl: Node<'_>, source: &[u8]) -> Option<String> {
         let end = declarator.map_or(default_at.unwrap_or(param.end_byte()), |d| d.end_byte());
         let name = declarator_of_kind(param, "identifier");
         let mut skipped: Vec<std::ops::Range<usize>> = name.map(|n| n.byte_range()).into_iter().collect();
+        if stored {
+            nested_parameter_names(param, &mut skipped);
+        }
         // The qualifiers of the parameter itself: on the declaration for a
         // by-value parameter, named (`const int n`) or not (`const int`), and
         // after the `*` closest to the name for a pointer.
@@ -499,13 +541,8 @@ fn parameter_shape(decl: Node<'_>, source: &[u8]) -> Option<String> {
                     .map(|c| c.byte_range()),
             );
         }
-        let text: String = (param.start_byte()..end)
-            .filter(|b| !skipped.iter().any(|r| r.contains(b)))
-            .map(|b| source[b])
-            .filter(|b| !b.is_ascii_whitespace())
-            .map(char::from)
-            .collect();
-        shape.push_str(&text);
+        let bytes = (param.start_byte()..end).filter(|b| !skipped.iter().any(|r| r.contains(b))).map(|b| source[b]);
+        shape.push_str(&squeeze(bytes, stored));
         shape.push(',');
     }
     if shape == "void," {
@@ -519,6 +556,38 @@ fn parameter_shape(decl: Node<'_>, source: &[u8]) -> Option<String> {
         shape.push_str(qualifier.utf8_text(source).ok()?);
     }
     Some(shape)
+}
+
+/// `bytes` without their blanks — save, when `between_words`, one space where
+/// a blank separates two word characters (`const int`).
+fn squeeze(bytes: impl Iterator<Item = u8>, between_words: bool) -> String {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut out = String::new();
+    let mut blank = false;
+    for c in bytes.map(char::from) {
+        if c.is_ascii_whitespace() {
+            blank = true;
+            continue;
+        }
+        if blank && between_words && word(c) && out.chars().next_back().is_some_and(word) {
+            out.push(' ');
+        }
+        blank = false;
+        out.push(c);
+    }
+    out
+}
+
+/// Push the byte range of each name a parameter declared inside `param` —
+/// one of a function type's parameter list (`void(int n)`) — onto `out`.
+fn nested_parameter_names(param: Node<'_>, out: &mut Vec<std::ops::Range<usize>>) {
+    let mut cursor = param.walk();
+    for child in param.named_children(&mut cursor) {
+        if matches!(child.kind(), "parameter_declaration" | "optional_parameter_declaration") {
+            out.extend(declarator_of_kind(child, "identifier").map(|n| n.byte_range()));
+        }
+        nested_parameter_names(child, out);
+    }
 }
 
 /// The first node of `kind` down a declaration's `declarator` chain, through

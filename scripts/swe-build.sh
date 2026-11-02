@@ -3,8 +3,12 @@
 #
 # Builds the version the human tests at the sprint-review gate: bump the workspace
 # version, build the FULL binary (real UI bundle, default features), commit
-# `release(X.Y.Z)`, install to ~/.logos-bin/X.Y.Z, PATH-promote it, and smoke the
-# INSTALLED binary. Never tags or pushes — releasing stays with the user.
+# `release(X.Y.Z)`, install to ~/.logos-bin/X.Y.Z and smoke the INSTALLED binary.
+# Never tags or pushes — releasing stays with the user. It never touches PATH
+# either: `logos` on PATH is the released one (Homebrew), which the gates, the git
+# hooks and the Claude Code plugin run, so a sprint build is run by its path. Run
+# against this repository it migrates .logos/logos.db under the PATH binary: test it
+# on another project or a fixture.
 #
 # Publishing is a separate, later step: `scripts/publish-public.sh --version X.Y.Z`
 # turns the release(X.Y.Z) tree into one commit over origin/main, gated by
@@ -80,21 +84,16 @@ cargo install --path cli --root "$BIN_ROOT" --locked --force
 git checkout HEAD -- web/ui/dist/index.html
 rm -rf web/ui/dist/assets web/ui/dist/.vite web/ui/dist/vendor
 
-# 8. PATH-promote (the PATH entry is a symlink; .mcp.json points at it unversioned).
-mkdir -p "$HOME/.local/bin"
-ln -sf "$ARTIFACT" "$HOME/.local/bin/logos"
-hash -r
-
-# 9. Smoke the INSTALLED binary over a tiny fixture project (the main repo's graph
+# 8. Smoke the INSTALLED binary over a tiny fixture project (the main repo's graph
 #    needs minutes of reconcile before `serve --ui` binds).
 SMOKE_DIR="$ROOT/target/swe-build-smoke"
 rm -rf "$SMOKE_DIR"; mkdir -p "$SMOKE_DIR/src"
 printf 'pub fn alpha() -> u32 { beta() }\npub fn beta() -> u32 { 1 }\n' > "$SMOKE_DIR/src/lib.rs"
 ( cd "$SMOKE_DIR" && git init -q && git add -A && git -c user.name=smoke -c user.email=smoke@localhost commit -qm fixture )
 SMOKE=pass
-if ! python3 "$ROOT/scripts/swe-build-smoke.py" --bin "$HOME/.local/bin/logos" \
+if ! python3 "$ROOT/scripts/swe-build-smoke.py" --bin "$ARTIFACT" \
       --expect-version "$NEXT" --project "$SMOKE_DIR" --port 4999; then
   SMOKE=fail
 fi
 
-echo "{\"status\":\"built\",\"version\":\"$NEXT\",\"artifact\":\"$ARTIFACT\",\"smoke\":\"$SMOKE\",\"notes\":\"~/.local/bin/logos -> $NEXT; run: logos serve --ui (in your project), then open http://127.0.0.1:4983\"}"
+echo "{\"status\":\"built\",\"version\":\"$NEXT\",\"artifact\":\"$ARTIFACT\",\"smoke\":\"$SMOKE\",\"notes\":\"PATH unchanged (the released logos); run: $ARTIFACT serve --ui (in another project), then open http://127.0.0.1:4983\"}"

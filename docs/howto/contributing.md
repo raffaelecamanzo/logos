@@ -300,3 +300,9 @@ is not made here.
 
 `.github/dependabot.yml` also sets a seven-day `cooldown`, so a release is proposed a
 week after it is published and a hijacked one that is pulled quickly is never offered.
+
+Dependabot watches three ecosystems, each weekly with the same seven-day cooldown:
+`github-actions` (`/`, the action pins above), `cargo` (`/`, `Cargo.lock`) and `npm`
+(`/web/ui`, `package-lock.json`). Only the owner merges its pull requests; an agent
+session never merges or pushes one. `scripts/tests/test-ci-pins.sh` fails if any of
+the three entries, its weekly interval or its cooldown goes missing.

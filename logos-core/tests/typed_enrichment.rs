@@ -1,5 +1,5 @@
 //! Integration tests for the swe-skills typed-node enrichment (S-039 /
-//! FR-DG-07, ADR-19), exercised end-to-end through [`Engine::index`] against
+//! FR-DG-07, ADR-19), exercised end-to-end through [`Pipeline::index`](crate::Pipeline::index) against
 //! real temp-directory fixtures and the Logos dogfood `docs/` tree.
 //!
 //! Coverage by acceptance criterion (FR-DG-07):
@@ -132,7 +132,7 @@ fn swe_skills_artifacts_are_promoted_to_typed_nodes() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // The DocFile roots are promoted by path; the story section by its heading.
     assert!(
@@ -164,7 +164,7 @@ fn typed_nodes_carry_traces_to_edges_between_them() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let traces = edges_of(rt, EdgeKind::TracesTo);
 
@@ -221,7 +221,7 @@ fn plain_markdown_repo_produces_only_generic_doc_nodes() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
     // Nothing errors — graceful degradation, the enrichment is never required.
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(
         result.warnings.is_empty(),
         "a plain markdown repo indexes cleanly: {:?}",
@@ -265,7 +265,7 @@ fn disabling_enrichment_in_config_produces_only_generic_nodes() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     for (name, kind) in nodes(rt) {
         assert!(
@@ -302,7 +302,7 @@ fn forcing_enrichment_enabled_promotes_even_without_strong_layout() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         has_node(rt, "S-001: kickoff", NodeKind::Story),
@@ -319,9 +319,9 @@ fn promotion_is_a_stable_relabel_across_reindex() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     let once = node_symbols(rt);
-    engine.index();
+    engine.pipeline().index();
     let again = node_symbols(rt);
     assert_eq!(
         once, again,
@@ -345,7 +345,7 @@ fn a_broken_typed_link_fabricates_no_trace_edge() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert!(
         has_node(rt, "FR-DG-08.md", NodeKind::Requirement),
@@ -373,7 +373,7 @@ fn doc_to_code_reference_from_a_requirement_stays_a_doc_reference() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let func = node_id(rt, "frobnicate_widget", NodeKind::Function);
     // The doc→code reference binds (S-035), but as a generic DocReference — the
@@ -408,7 +408,7 @@ fn an_intra_artifact_link_produces_no_self_trace() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         edges_of(rt, EdgeKind::TracesTo).iter().all(|(s, t)| s != t),
@@ -463,7 +463,7 @@ fn dogfood_promotes_typed_nodes_on_logos_own_docs() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let all = nodes(rt);
     let count = |k: NodeKind| all.iter().filter(|(_, nk)| *nk == k).count();
@@ -487,7 +487,7 @@ fn dogfood_promotes_typed_nodes_on_logos_own_docs() {
 
     // Determinism: a second index yields a byte-identical (symbol, kind) set.
     let first = node_symbols(rt);
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(
         first,
         node_symbols(rt),

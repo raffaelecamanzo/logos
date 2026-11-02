@@ -52,8 +52,10 @@
 ;   (FR-EX-13, FR-RS-12). The captured node's parent is the invocation — for
 ;   `@ref.receiver.field`, its grandparent.
 ;
-;   @ref.receiver.name     — a simple name (`mailer.send()`, `Clock.now()`): a
-;                            variable the file declares with one type, else a
+;   @ref.receiver.variable — a simple name (`mailer.send()`, `Clock.now()`):
+;                            typed by the one binding of it in scope at the
+;                            call (below, S-825, CR-256) — else, where no
+;                            binding anywhere in the file declares the name, a
 ;                            type its single-type import or own declaration
 ;                            names.
 ;   @ref.receiver.field    — `this.x.send()`: the field `x`, from field
@@ -68,15 +70,6 @@
 ;                            is `Outer`'s superclass, which the `name` marker on
 ;                            the same invocation would read as `Outer` itself.
 ;                            Overrides every other marker.
-;   @ref.receiver.unproven — a name declared where `DeclaredTypes` does not
-;                            read its type: an untyped lambda parameter
-;                            (`x -> x.send()`), a for-each variable, a catch
-;                            parameter, a pattern variable, a varargs
-;                            parameter — or a name declared with a QUALIFIED
-;                            type (`com.b.Mailer other`, `Map.Entry e`), whose
-;                            simple name the file's imports would re-qualify to
-;                            another class. The type the file declares for that
-;                            name elsewhere is not proven to be this one's.
 ;   @ref.receiver.other    — every receiver (S-514): the shape of a call the
 ;                            markers above prove nothing for — a chained call,
 ;                            `a.b.send()`, `Outer.this.send()` — is `other`.
@@ -87,7 +80,7 @@
 ;                            except a `this.m()` to an `m` the body declares,
 ;                            recorded as the free call the lexical scope binds.
 
-(method_invocation object: (identifier) @ref.receiver.name)
+(method_invocation object: (identifier) @ref.receiver.variable)
 (method_invocation object: (this) @ref.receiver.this)
 (method_invocation object: (super) @ref.receiver.super)
 (method_invocation
@@ -96,27 +89,182 @@
 (method_invocation object: (_) (super) @ref.receiver.refused)
 (method_invocation object: (_) @ref.receiver.other)
 (object_creation_expression (class_body) @ref.receiver.anonymous)
-(lambda_expression parameters: (identifier) @ref.receiver.unproven)
+
+; Plain-name receiver typing (S-825, CR-256, FR-RS-10) — the vocabulary Rust,
+; TypeScript, Python, PHP, Kotlin, C++ and C# speak (`extract::receiver`),
+; recording no row of its own. `x.send()` is typed `T::send` when exactly one
+; binding of `x` is in scope at the call and it carries a proof; the row is the
+; Path `T::send` the package rung binds, as S-467's was:
+;
+;   @ref.receiver.binding  — each name a declaration binds, and where:
+;                            `.scope` the method, constructor, lambda or record
+;                            a parameter belongs to (a record component is in
+;                            scope in its whole record), the enhanced `for` or
+;                            `catch` statement whose variable it is, an
+;                            anonymous class or enum constant body its field
+;                            is declared in;
+;                            `.through` a local's block, constructor body,
+;                            `switch` block (a case group's local) or `for`
+;                            statement, and a resource's `try` block, from
+;                            where the name is written;
+;                            `.enclosing` a named class's, enum's or record's
+;                            field, in that class's members and in the classes
+;                            nested in it reached through classes that record
+;                            no supertype — a parameter or local declared
+;                            inside the class hides it, it hides one declared
+;                            outside the class (a local class's field, not the
+;                            enclosing method's local), and a nearer class's
+;                            field of its name shadows it;
+;                            `.scope` an interface constant's whole
+;                            interface body, its nested classes included, and
+;                            an enum constant's whole enum body.
+;   @ref.receiver.proof    — the binding's type: `.type` a declared `T` or
+;                            `T<A>` (read `T`). A binding with no proof — an
+;                            untyped lambda parameter, an enhanced-`for`,
+;                            `catch`, pattern or varargs variable, an interface
+;                            or enum constant, a `var`, an array, a qualified
+;                            (`com.b.Mailer`, `Map.Entry`) or annotated type —
+;                            proves nothing, and hides every binding of its
+;                            name it is nearer than.
+;   @ref.receiver.flows    — a pattern variable (`o instanceof T t`, a type or
+;                            record pattern): in scope from where it is written
+;                            to the end of the innermost
+;                            @ref.receiver.flow_scope around it (a block, a
+;                            constructor body, a switch rule or case group, a
+;                            callable, a field or constant declaration). It has
+;                            no proof, so a scope wider than the language's
+;                            only refuses more.
+;   @ref.receiver.hides    — every name a declaration declares. One no binding
+;                            above states is bound with no proof across the
+;                            innermost @ref.receiver.hiding_scope (a callable,
+;                            an initializer), so an outer binding is never the
+;                            one in scope there.
+;
+; Stated ceilings: a field the class inherits from another file is not in
+; scope; neither is an outer class's field in a class nested through one that
+; records a supertype, nor any named class's field inside an anonymous class
+; body.
+
+; Parameters: of a method, constructor, lambda or record.
+(_
+  parameters: (formal_parameters (formal_parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(_
+  parameters: (formal_parameters
+    (spread_parameter (variable_declarator name: (identifier) @ref.receiver.binding)))) @ref.receiver.binding.scope
+(lambda_expression parameters: (identifier) @ref.receiver.binding) @ref.receiver.binding.scope
 (lambda_expression
-  parameters: (inferred_parameters (identifier) @ref.receiver.unproven))
-(enhanced_for_statement name: (identifier) @ref.receiver.unproven)
-(catch_formal_parameter name: (identifier) @ref.receiver.unproven)
-(instanceof_expression name: (identifier) @ref.receiver.unproven)
-(type_pattern (identifier) @ref.receiver.unproven)
-(record_pattern_component (identifier) @ref.receiver.unproven)
-(spread_parameter (variable_declarator name: (identifier) @ref.receiver.unproven))
+  parameters: (inferred_parameters (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+
+; Fields: of a named class, record or enum, by the nearest declaration; an
+; interface's constants, in its whole body, so a class nested in it never
+; reads an outer class's field of the name; an anonymous class body's or an
+; enum constant body's fields, in that body.
+(class_declaration
+  body: (class_body
+    (field_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding)))) @ref.receiver.binding.enclosing
+(record_declaration
+  body: (class_body
+    (field_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding)))) @ref.receiver.binding.enclosing
+(enum_declaration
+  body: (enum_body
+    (enum_body_declarations
+      (field_declaration
+        declarator: (variable_declarator name: (identifier) @ref.receiver.binding))))) @ref.receiver.binding.enclosing
+(interface_declaration
+  body: (interface_body
+    (constant_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope)
+(object_creation_expression
+  (class_body
+    (field_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope)
+(enum_constant
+  body: (class_body
+    (field_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope)
+
+; Enum constants: variables of their enum, in scope in its whole body. One
+; obscures a type of its name (`Mailer.send()` beside a constant `Mailer`)
+; and proves nothing.
+(enum_declaration
+  body: (enum_body (enum_constant name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope)
+
+; Locals, from where each is written — its own and every later declarator's
+; initializer — to the end of its block, constructor body or `for` statement,
+; and a case group's local to the end of its whole `switch` block, every later
+; group of which it is in scope in. Never before it: the field of its name is
+; in scope there.
+(block
+  (local_variable_declaration
+    declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.through
+(constructor_body
+  (local_variable_declaration
+    declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.through
+(switch_block
+  (switch_block_statement_group
+    (local_variable_declaration
+      declarator: (variable_declarator name: (identifier) @ref.receiver.binding)))) @ref.receiver.binding.through
+(for_statement
+  init: (local_variable_declaration
+    declarator: (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.through
+
+; Enhanced `for` and `catch` variables: their statement. A resource: from
+; where it is written to the end of its `try` block — never in the `catch` or
+; `finally` clauses, where the field of its name is in scope.
+(enhanced_for_statement name: (identifier) @ref.receiver.binding) @ref.receiver.binding.scope
+(catch_clause (catch_formal_parameter name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(try_with_resources_statement
+  resources: (resource_specification (resource name: (identifier) @ref.receiver.binding))
+  body: (block) @ref.receiver.binding.through)
+
+; Pattern variables: from where each is written to the end of the innermost
+; flow scope around it. Java scopes them by flow (`if (!(o instanceof T t))
+; return; t.m();`), never beyond the block holding them.
+(instanceof_expression name: (identifier) @ref.receiver.flows)
+(type_pattern (identifier) @ref.receiver.flows)
+(record_pattern_component (identifier) @ref.receiver.flows)
+(block) @ref.receiver.flow_scope
+(constructor_body) @ref.receiver.flow_scope
+(switch_rule) @ref.receiver.flow_scope
+(switch_block_statement_group) @ref.receiver.flow_scope
+(_ parameters: (_)) @ref.receiver.flow_scope
+(field_declaration) @ref.receiver.flow_scope
+(constant_declaration) @ref.receiver.flow_scope
+
+; A declared simple type `T` or `T<A>`, wherever the declaration sits — never
+; `var`, an array (`T[] x`, `T x[]`), a qualified or an annotated type.
 (field_declaration
-  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
-  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+  type: [(type_identifier) (generic_type (type_identifier))] @ref.receiver.proof.type
+  declarator: (variable_declarator name: (identifier) @ref.receiver.proof !dimensions))
 (local_variable_declaration
-  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
-  declarator: (variable_declarator name: (identifier) @ref.receiver.unproven))
+  type: [(type_identifier) (generic_type (type_identifier))] @ref.receiver.proof.type
+  declarator: (variable_declarator name: (identifier) @ref.receiver.proof !dimensions)
+  (#not-eq? @ref.receiver.proof.type "var"))
 (formal_parameter
-  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
-  name: (identifier) @ref.receiver.unproven)
+  type: [(type_identifier) (generic_type (type_identifier))] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  !dimensions
+  (#not-eq? @ref.receiver.proof.type "var"))
 (resource
-  type: [(scoped_type_identifier) (generic_type (scoped_type_identifier))]
-  name: (identifier) @ref.receiver.unproven)
+  type: [(type_identifier) (generic_type (type_identifier))] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  !dimensions
+  (#not-eq? @ref.receiver.proof.type "var"))
+
+; Every name a declaration declares, and the scopes an unstated one hides its
+; name across.
+(variable_declarator name: (identifier) @ref.receiver.hides)
+(formal_parameter name: (identifier) @ref.receiver.hides)
+(catch_formal_parameter name: (identifier) @ref.receiver.hides)
+(resource name: (identifier) @ref.receiver.hides)
+(enhanced_for_statement name: (identifier) @ref.receiver.hides)
+(inferred_parameters (identifier) @ref.receiver.hides)
+(lambda_expression parameters: (identifier) @ref.receiver.hides)
+(_ parameters: (_)) @ref.receiver.hiding_scope
+(static_initializer) @ref.receiver.hiding_scope
+(class_body (block) @ref.receiver.hiding_scope)
 
 (import_declaration
   "static"? @ref.import.static

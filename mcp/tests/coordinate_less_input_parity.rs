@@ -38,7 +38,7 @@ fn fixture() -> tempfile::TempDir {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, body).unwrap();
     }
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -62,10 +62,10 @@ const TOOLS: [&str; 4] = ["node", "callers", "callees", "impact"];
 fn cli_payload(root: &Path, tool: &str, symbol: &str) -> Value {
     let engine = Engine::start(root).expect("engine");
     match tool {
-        "node" => serde_json::to_value(engine.node(symbol, false)),
-        "callers" => serde_json::to_value(engine.callers(symbol, None)),
-        "callees" => serde_json::to_value(engine.callees(symbol, None)),
-        "impact" => serde_json::to_value(engine.impact(symbol, None)),
+        "node" => serde_json::to_value(engine.navigation().node(symbol, false)),
+        "callers" => serde_json::to_value(engine.navigation().callers(symbol, None)),
+        "callees" => serde_json::to_value(engine.navigation().callees(symbol, None)),
+        "impact" => serde_json::to_value(engine.navigation().impact(symbol, None)),
         other => panic!("not a navigation tool: {other}"),
     }
     .expect("serialize")

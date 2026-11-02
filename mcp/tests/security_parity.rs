@@ -127,7 +127,7 @@ fn fixture() -> Fixture {
         tools_dir: None,
         nvd_api_key: None,
     };
-    Engine::start(&root).expect("engine").index();
+    Engine::start(&root).expect("engine").pipeline().index();
     Fixture { _tmp: tmp, root, env, clean }
 }
 
@@ -193,7 +193,7 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     let f = fixture();
 
     // Before any scan: `never_run`, on both surfaces, with the consent pending.
-    let cli_status = f.direct(|e| e.security_status());
+    let cli_status = f.direct(|e| e.security().status());
     assert_eq!(row(&cli_status, "semgrep")["state"], "never_run");
     assert_eq!(cli_status["consent"]["pending"], json!(["semgrep", "gitleaks", "bandit"]));
     let (client, server) = boot(&f).await;
@@ -212,14 +212,14 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     };
     assert_eq!(self_consent.code, ErrorCode::INVALID_PARAMS, "{}", self_consent.message);
     assert!(self_consent.message.contains("logos security scan --consent"), "{}", self_consent.message);
-    assert_eq!(f.direct(|e| e.security_status())["consent"]["pending"], json!(["semgrep", "gitleaks", "bandit"]), "nothing recorded");
-    assert_eq!(f.direct(|e| e.security_status())["consent"]["consented"], json!([]), "nothing recorded");
+    assert_eq!(f.direct(|e| e.security().status())["consent"]["pending"], json!(["semgrep", "gitleaks", "bandit"]), "nothing recorded");
+    assert_eq!(f.direct(|e| e.security().status())["consent"]["consented"], json!([]), "nothing recorded");
     client.cancel().await.ok();
     server.abort();
 
     // Consent and scan once; then a re-scan on each surface is the same payload.
-    f.direct(|e| e.security_scan(true));
-    let cli_scan = f.direct(|e| e.security_scan(false));
+    f.direct(|e| e.security().scan(true));
+    let cli_scan = f.direct(|e| e.security().scan(false));
     let (client, server) = boot(&f).await;
     let mcp_scan = call(&client, "security_scan", json!({})).await.unwrap();
     assert_eq!(mcp_scan, cli_scan, "security_scan");
@@ -258,15 +258,15 @@ async fn the_four_security_tools_return_the_cli_payload_and_no_secret() {
     client.cancel().await.ok();
     server.abort();
 
-    assert_eq!(f.direct(|e| e.security_status()), mcp_status, "security_status");
+    assert_eq!(f.direct(|e| e.security().status()), mcp_status, "security_status");
     let filter = FindingsFilter::parse(Some("medium"), Some("semgrep"), None, None, None, None, None).unwrap();
-    assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp_findings, "security_findings");
+    assert_eq!(f.direct(|e| e.security().findings().list(&filter)), mcp_findings, "security_findings");
     assert_eq!(mcp_findings["findings"].as_array().unwrap().len(), 2);
     assert_eq!(contexts(&mcp_findings), BOUND_UNRESOLVED, "the graph context rides on the MCP payload");
     let every = FindingsFilter::parse(Some("medium"), Some("semgrep"), Some("A05"), Some("app"), Some("active"), Some("2025"), None).unwrap();
-    assert_eq!(f.direct(|e| e.security_findings(&every)), mcp_every, "every filter, same slots");
+    assert_eq!(f.direct(|e| e.security().findings().list(&every)), mcp_every, "every filter, same slots");
     assert_eq!(mcp_every["findings"].as_array().unwrap().len(), 2, "{mcp_every}");
-    assert_eq!(f.direct(|e| e.security_ingest(&f.clean)), mcp_ingest, "security_ingest");
+    assert_eq!(f.direct(|e| e.security().ingest(&f.clean)), mcp_ingest, "security_ingest");
     assert_eq!(mcp_ingest["already_ingested"], true);
 
     for payload in [&cli_status, &cli_scan, &mcp_scan, &mcp_status, &mcp_findings, &mcp_ingest] {
@@ -293,7 +293,7 @@ async fn no_mcp_tool_installs_and_security_status_names_the_cli_install_command(
         .collect();
     assert!(installers.is_empty(), "an MCP tool installs: {installers:?}");
 
-    let cli_status = f.direct(|e| e.security_status());
+    let cli_status = f.direct(|e| e.security().status());
     let (client, server) = boot(&f).await;
     let mcp_status = call(&client, "security_status", json!({})).await.unwrap();
     client.cancel().await.ok();
@@ -332,11 +332,11 @@ async fn no_mcp_tool_installs_and_security_status_names_the_cli_install_command(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scoped_scan_is_one_payload_on_both_surfaces_and_an_outside_path_is_refused() {
     let f = fixture();
-    f.direct(|e| e.security_scan(true));
+    f.direct(|e| e.security().scan(true));
     let request = ScanRequest::new(vec!["semgrep".into()], vec!["app/db.py".into()]);
     // The second run of the same scoped report is the no-op MCP's run repeats.
-    f.direct(|e| e.security_scan_selected(false, &request, |_| {}));
-    let cli = f.direct(|e| e.security_scan_selected(false, &request, |_| {}));
+    f.direct(|e| e.security().scan_selected(false, &request, |_| {}));
+    let cli = f.direct(|e| e.security().scan_selected(false, &request, |_| {}));
     let (client, server) = boot(&f).await;
     let mcp = call(&client, "security_scan", json!({"scanners": ["semgrep"], "paths": ["app/db.py"]})).await.unwrap();
     assert_eq!(mcp, cli, "security_scan, scoped");
@@ -382,14 +382,14 @@ async fn a_secret_found_only_in_history_is_one_payload_on_both_surfaces() {
     });
     let body = json!({ "version": "2.1.0", "runs": [{ "tool": { "driver": { "name": "gitleaks", "semanticVersion": "v8.18.4" } }, "results": [result] }] });
     fs::write(&report, body.to_string()).unwrap();
-    assert_eq!(f.direct(|e| e.security_ingest(&report))["historical"], 1);
+    assert_eq!(f.direct(|e| e.security().ingest(&report))["historical"], 1);
 
     let (client, server) = boot(&f).await;
     let mcp = call(&client, "security_findings", json!({"scanner": "gitleaks"})).await.unwrap();
     client.cancel().await.ok();
     server.abort();
     let filter = FindingsFilter::parse(None, Some("gitleaks"), None, None, None, None, None).unwrap();
-    assert_eq!(f.direct(|e| e.security_findings(&filter)), mcp, "security_findings");
+    assert_eq!(f.direct(|e| e.security().findings().list(&filter)), mcp, "security_findings");
     let finding = &mcp["findings"][0];
     assert_eq!(finding["binding"], "historical", "{mcp}");
     assert_eq!(finding["anchor"], json!({ "commit": commit, "short_commit": &commit[..7], "path": "app/legacy.py" }));
@@ -413,7 +413,7 @@ async fn the_code_scope_is_one_parameter_and_one_payload_on_both_surfaces() {
     let sarif = json!({"version": "2.1.0", "runs": [{"tool": {"driver": {"name": "Custom SAST", "version": "1", "rules": []}},
         "results": [result("app/db.py", 12), result("tests/test_db.py", 3), result("app/testdata/seed.py", 1)]}]});
     fs::write(&report, sarif.to_string()).unwrap();
-    f.direct(|e| e.security_ingest(&report));
+    f.direct(|e| e.security().ingest(&report));
 
     let (client, server) = boot(&f).await;
     let mut mcp = Vec::new();
@@ -439,7 +439,7 @@ async fn the_code_scope_is_one_parameter_and_one_payload_on_both_surfaces() {
 
     for ((scope, path), mcp) in cases.into_iter().zip(&mcp) {
         let filter = FindingsFilter::parse(None, Some("Custom SAST"), None, path, None, None, scope).unwrap();
-        assert_eq!(&f.direct(|e| e.security_findings(&filter)), mcp, "scope {scope:?}, path {path:?}");
+        assert_eq!(&f.direct(|e| e.security().findings().list(&filter)), mcp, "scope {scope:?}, path {path:?}");
     }
     let listed = |payload: &Value| -> (Vec<(String, String, Value)>, u64) {
         let rows = payload["findings"]
@@ -469,7 +469,7 @@ async fn the_nvd_api_key_state_is_one_payload_on_both_surfaces_and_never_the_key
     let mut f = fixture();
     for (key, state) in [(None, "not_set"), (NvdApiKey::new(PLANTED), "set")] {
         f.env.nvd_api_key = key;
-        let cli_status = f.direct(|e| e.security_status());
+        let cli_status = f.direct(|e| e.security().status());
         assert_eq!(row(&cli_status, "dependency-check")["nvd_api_key"], state, "{cli_status}");
         let carrying: Vec<&str> = cli_status["scanners"]
             .as_array()
@@ -513,7 +513,7 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
     let f = fixture();
     // A test symbol outside a test path: only the graph classifies it.
     fs::write(f.root.join("app/checks.py"), "def test_lookup():\n    return 1\n").unwrap();
-    Engine::start(&f.root).expect("engine").index();
+    Engine::start(&f.root).expect("engine").pipeline().index();
 
     let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
     let mut sarif: Value = serde_json::from_str(&fs::read_to_string(semgrep).unwrap()).unwrap();
@@ -531,11 +531,11 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
     }
     let report = f.root.parent().unwrap().join("production-count.sarif");
     fs::write(&report, sarif.to_string()).unwrap();
-    f.direct(|e| e.security_ingest(&report));
+    f.direct(|e| e.security().ingest(&report));
 
     // Suppress the finding at db.py:18, a production one.
     let all = FindingsFilter::parse(None, None, None, None, None, None, Some("all")).unwrap();
-    let before = f.direct(|e| e.security_findings(&all));
+    let before = f.direct(|e| e.security().findings().list(&all));
     let listed = before["findings"].as_array().unwrap();
     assert_eq!(listed.len(), 5, "{before}");
     let scopes: Vec<(&str, &str)> =
@@ -552,8 +552,8 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
     let mcp = call(&client, "security_findings", json!({})).await.unwrap();
     client.cancel().await.ok();
     server.abort();
-    let cli = f.direct(|e| e.security_findings(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()));
-    let page = f.direct(|e| e.security_page());
+    let cli = f.direct(|e| e.security().findings().list(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()));
+    let page = f.direct(|e| e.security().findings().page());
 
     // The fixture holds a suppressed production finding: the page counts it apart, and the
     // production figure below still includes it.
@@ -562,7 +562,7 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
     // The figures are over every stored finding, whatever the other filters keep.
     for (severity, suppression) in [(Some("critical"), None), (None, Some("active")), (None, Some("suppressed"))] {
         let filter = FindingsFilter::parse(severity, None, None, None, suppression, None, None).unwrap();
-        let filtered = f.direct(|e| e.security_findings(&filter));
+        let filtered = f.direct(|e| e.security().findings().list(&filter));
         assert_eq!(filtered["categories"], cli["categories"], "severity {severity:?}, suppression {suppression:?}");
     }
 
@@ -600,8 +600,8 @@ async fn the_production_count_per_category_is_one_figure_on_the_cli_mcp_and_web_
 async fn security_reconfirm_records_the_named_evidence_and_re_records_without_it() {
     let f = fixture();
     let semgrep = Path::new(env!("CARGO_MANIFEST_DIR")).join("../logos-core/tests/fixtures/sarif/semgrep.sarif");
-    f.direct(|e| e.security_ingest(&semgrep));
-    let findings = f.direct(|e| e.security_findings(&FindingsFilter::default()));
+    f.direct(|e| e.security().ingest(&semgrep));
+    let findings = f.direct(|e| e.security().findings().list(&FindingsFilter::default()));
     let fingerprint = findings["findings"]
         .as_array()
         .unwrap()

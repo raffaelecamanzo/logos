@@ -108,7 +108,7 @@ fn proto_imports_and_cross_file_types_bind_vendored_is_no_candidate() {
     write(root, "src/models.rs", MODELS_RS);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     // The workspace import bound ConfigFile → ConfigFile; the cross-file field
@@ -169,7 +169,7 @@ fn declared_name_binds_to_one_code_symbol_duplicate_stays_unresolved() {
     write(root, "src/dup_b.rs", "pub struct Dup { pub b: String }\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let bindings = artifact_edges(rt, EdgeKind::ArtifactBinding);
@@ -222,7 +222,7 @@ fn graphql_field_types_bind_in_schema_scope() {
     write(root, "schema.graphql", SCHEMA_GRAPHQL);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let refs = artifact_edges(rt, EdgeKind::ArtifactRef);
@@ -275,7 +275,7 @@ fn graphql_declared_names_bind_to_code_and_duplicates_stay_unresolved() {
     write(root, "src/dup_b.rs", "pub struct Dup { pub b: String }\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
 
     let bindings = artifact_edges(rt, EdgeKind::ArtifactBinding);
@@ -310,9 +310,9 @@ pub fn unused() -> i64 { 1 }
 
 fn aggregate_signal(root: &Path) -> Option<u32> {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let rt = engine.runtime().expect("runtime present");
     let model = metrics::snapshot(rt, &view, Some("sha"), metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
@@ -345,7 +345,7 @@ fn schema_reference_edges_are_metric_neutral() {
 
     // Sanity: the schema project really did create artifact edges.
     let engine = Engine::start(withschema.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime present");
     assert!(
         !artifact_edges(rt, EdgeKind::ArtifactRef).is_empty()

@@ -20,7 +20,7 @@
 //!    [`SyncStamp`].
 //!
 //! Hydration is reached through the long-lived [`Engine`](crate::Engine):
-//! [`Engine::hydrate`](crate::Engine::hydrate) reads through the RO pool
+//! [`Graph::hydrate`](crate::Graph::hydrate) reads through the RO pool
 //! ([ADR-02]) so it is never blocked by an in-flight write, and the cache lives
 //! for the Engine's lifetime ([ADR-04]).
 //!

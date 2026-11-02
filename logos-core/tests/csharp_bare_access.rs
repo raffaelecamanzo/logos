@@ -55,7 +55,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -428,7 +428,7 @@ fn scan_classes(n: usize) -> (TempDir, RecordedSnapshot) {
     let tmp = tree(&refs);
     let engine = index(tmp.path());
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     let member_access = engine
@@ -479,7 +479,7 @@ fn a_synced_edit_matches_a_fresh_reindex() {
     let engine_a = index(tmp_a.path());
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     fs::write(tmp_a.path().join("src/A.cs"), AFTER).unwrap();
-    engine_a.sync(&[root_a.join("src/A.cs")] as &[PathBuf]);
+    engine_a.pipeline().sync(&[root_a.join("src/A.cs")] as &[PathBuf]);
     let rt_a = engine_a.runtime().unwrap();
 
     let tmp_b = tree(&[("src/A.cs", AFTER)]);

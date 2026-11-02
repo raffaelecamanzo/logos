@@ -97,7 +97,7 @@ fn client_calls_raw(source: &str) -> Vec<String> {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime");
-    engine.index();
+    engine.pipeline().index();
 
     let mut targets: Vec<String> = rt
         .submit_read(|store| {

@@ -244,6 +244,7 @@ mod tests {
             call_residue: None,
             header_ownership: None,
             parse_damage: None,
+            interfaces: None,
         }
     }
 

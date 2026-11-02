@@ -83,7 +83,7 @@ fn fixture() -> TempDir {
 
 fn indexed(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -204,7 +204,7 @@ fn a_zero_cross_file_count_never_serialises_as_a_figure() {
 fn a_same_file_only_language_reads_differently_from_one_resolving_across_files() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let rows = engine.status().resolution_by_language;
+    let rows = engine.graph().status().resolution_by_language;
 
     let rust = row(&rows, "rust");
     let rust_cross = rust
@@ -272,7 +272,7 @@ fn a_same_file_only_language_reads_differently_from_one_resolving_across_files()
 fn every_indexed_language_is_a_row_in_name_order() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let status = engine.status();
+    let status = engine.graph().status();
     let rows: Vec<(String, u64)> = status
         .resolution_by_language
         .iter()
@@ -333,12 +333,12 @@ fn the_readout_is_deterministic_and_persists_nothing() {
         )
     };
     let before = snapshot();
-    let revision = engine.status().graph_revision;
+    let revision = engine.graph().status().graph_revision;
 
-    let first = engine.status().resolution_by_language;
+    let first = engine.graph().status().resolution_by_language;
     for _ in 0..3 {
         assert_eq!(
-            engine.status().resolution_by_language,
+            engine.graph().status().resolution_by_language,
             first,
             "the same graph reads the same rows (NFR-RA-06)"
         );
@@ -350,7 +350,7 @@ fn the_readout_is_deterministic_and_persists_nothing() {
         "the readout wrote nothing to the graph store"
     );
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         revision,
         "no status call advanced the graph revision"
     );
@@ -365,7 +365,7 @@ fn the_readout_is_deterministic_and_persists_nothing() {
 fn the_readout_is_on_the_serialised_status() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let json = serde_json::to_value(engine.status()).expect("status serialises");
+    let json = serde_json::to_value(engine.graph().status()).expect("status serialises");
     let rows = json["resolution_by_language"]
         .as_array()
         .unwrap_or_else(|| panic!("`resolution_by_language` is an array: {json:#}"));

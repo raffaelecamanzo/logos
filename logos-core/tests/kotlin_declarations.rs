@@ -239,6 +239,50 @@ fn a_primary_constructor_val_or_var_is_a_field_and_a_plain_parameter_is_not() {
     assert_eq!(symbol_of(&facts, "secret"), "`a.kt`/Talk#secret.");
 }
 
+/// A top-level `val`/`var` is a Variable and a `const val` a Constant, never a
+/// Field (S-831, FR-EX-24): a Field is a member of a class and holds cohesion's
+/// shared-field input, which a file-level property is not. A function-local
+/// `val`, a destructuring declaration and a class member declare no Variable.
+#[test]
+fn a_top_level_property_is_a_variable_or_constant_and_never_a_field() {
+    let facts = extract_kt(
+        "package app.util\n\n\
+         val DEFAULT_NAME = \"x\"\n\
+         var counter = 0\n\
+         const val LIMIT = 10\n\
+         private const val SECRET = 1\n\
+         @Volatile internal var flag: Boolean = false\n\
+         @get:Rule val rule = 1\n\
+         val String.shout: String get() = this\n\
+         val (left, right) = pair()\n\
+         class C {\n    val member = 1\n    companion object {\n        const val INSIDE = 2\n    }\n}\n\
+         object O {\n    val held = 3\n}\n\
+         fun f() {\n    val local = 1\n    var also = 2\n}\n",
+    );
+    assert_eq!(
+        declared(&facts),
+        strings(&[
+            "DEFAULT_NAME:variable",
+            "counter:variable",
+            "LIMIT:constant",
+            "SECRET:constant",
+            "flag:variable",
+            "rule:variable",
+            "shout:variable",
+            "C:class",
+            "member:field",
+            "Companion:class",
+            "INSIDE:field",
+            "O:class",
+            "held:field",
+            "f:function",
+        ])
+    );
+    // The same shape as Go's and TypeScript's: a term of the file's module.
+    assert_eq!(symbol_of(&facts, "DEFAULT_NAME"), "`a.kt`/DEFAULT_NAME.");
+    assert_eq!(symbol_of(&facts, "LIMIT"), "`a.kt`/LIMIT.");
+}
+
 // The fixtures below pin defects of `tree-sitter-kotlin-ng` 1.1. If one fails
 // after a grammar bump, the defect is fixed: drop its fixture and re-measure.
 
@@ -281,7 +325,7 @@ fn an_indexed_misparse_reaches_the_index_warnings_and_a_clean_file_adds_none() {
     write(tmp.path(), "src/Misread.kt", MISREAD_CLASS);
     write(tmp.path(), "src/Clean.kt", "class Clean {\n    fun ok() {}\n}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     for (id, _) in MISPARSED {
         let path = format!("src/{id}.kt");
         assert!(
@@ -345,6 +389,39 @@ fn a_multiply_annotated_type_read_as_an_expression_carries_a_partial_extraction_
     }
 }
 
+/// `@JvmField const val K = 5` is read as an assignment to an infix call
+/// (`const` is a soft keyword), so no property is declared; the loss is counted
+/// into the file's warning like the other misreads (S-831, FR-EX-24). The same
+/// property without `const`, or with it before the annotation, is read whole.
+#[test]
+fn an_annotated_const_val_the_grammar_reads_as_an_assignment_carries_a_warning() {
+    for source in [
+        "@JvmField const val K = 5\nval after = 1\n",
+        "@Suppress(\"X\") const val K = 5\nval after = 1\n",
+        "@A @B(1) const val K = 5\nval after = 1\n",
+        "@A\n@B(1)\nconst val K = 5\nval after = 1\n",
+    ] {
+        let facts = extract_kt(source);
+        assert_eq!(declared(&facts), strings(&["after:variable"]), "{source:?}");
+        assert!(facts.partial, "{source:?}");
+        assert_eq!(
+            facts.warnings,
+            strings(&[&format!("partial extraction (no syntax error reported){MISREAD_CLAUSE}")]),
+            "{source:?}"
+        );
+    }
+    for source in [
+        "@Suppress(\"X\") val K = 5\nval after = 1\n",
+        "@A @B val K = 5\nval after = 1\n",
+        "const val K = 5\nval after = 1\n",
+        "const @JvmField val K = 5\nval after = 1\n",
+    ] {
+        let facts = extract_kt(source);
+        assert!(!facts.partial && facts.warnings.is_empty(), "{source:?}: {:?}", facts.warnings);
+        assert_eq!(declared(&facts).len(), 2, "{source:?}: {:?}", declared(&facts));
+    }
+}
+
 #[test]
 fn a_declaration_the_grammar_reads_whole_carries_no_misread_warning() {
     for (what, source) in [
@@ -395,7 +472,7 @@ fn sync_equals_a_full_reindex_as_declarations_change_kind() {
     }
     coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine starts");
-    engine_a.index();
+    engine_a.pipeline().index();
     let root = tmp_a.path().canonicalize().expect("canonical root");
     let changed: Vec<_> = edits
         .iter()
@@ -404,7 +481,7 @@ fn sync_equals_a_full_reindex_as_declarations_change_kind() {
             root.join(rel)
         })
         .collect();
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let tmp_b = tempfile::tempdir().unwrap();
     for (rel, text) in [initial[1]].into_iter().chain(edits) {
@@ -412,7 +489,44 @@ fn sync_equals_a_full_reindex_as_declarations_change_kind() {
     }
     coordinate::pin(tmp_b.path());
     let engine_b = Engine::start(tmp_b.path()).expect("engine starts");
-    engine_b.index();
+    engine_b.pipeline().index();
+    assert_eq!(
+        graph_fingerprint(engine_a.runtime().unwrap()),
+        graph_fingerprint(engine_b.runtime().unwrap())
+    );
+}
+
+/// Sync ≡ reindex ([NFR-RA-06]) as a top-level property is added, re-kinded to a
+/// `const` and removed: the importer's row re-binds with each, and the synced
+/// graph is the fresh index of the final tree (S-831).
+#[test]
+fn sync_equals_a_full_reindex_as_a_top_level_property_comes_and_goes() {
+    const USER: (&str, &str) =
+        ("src/User.kt", "package app.web\n\nimport app.util.NAME\nimport app.util.LIMIT\n\nclass User\n");
+    let steps = [
+        "package app.util\n\nval NAME = 1\nvar LIMIT = 2\n",
+        "package app.util\n\nval NAME = 1\nconst val LIMIT = 2\n",
+        "package app.util\n\nval LIMIT = 2\n",
+    ];
+    let util = |text: &str| ("src/Util.kt", text.to_string());
+    let tmp_a = tempfile::tempdir().unwrap();
+    write(tmp_a.path(), USER.0, USER.1);
+    write(tmp_a.path(), util("").0, "package app.util\n\nclass Empty\n");
+    coordinate::pin(tmp_a.path());
+    let engine_a = Engine::start(tmp_a.path()).expect("engine starts");
+    engine_a.pipeline().index();
+    let root = tmp_a.path().canonicalize().expect("canonical root");
+    for text in steps {
+        write(&root, util(text).0, text);
+        engine_a.pipeline().sync(&[root.join(util(text).0)]);
+    }
+
+    let tmp_b = tempfile::tempdir().unwrap();
+    write(tmp_b.path(), USER.0, USER.1);
+    write(tmp_b.path(), util("").0, steps[2]);
+    coordinate::pin(tmp_b.path());
+    let engine_b = Engine::start(tmp_b.path()).expect("engine starts");
+    engine_b.pipeline().index();
     assert_eq!(
         graph_fingerprint(engine_a.runtime().unwrap()),
         graph_fingerprint(engine_b.runtime().unwrap())
@@ -436,8 +550,8 @@ fn kotlin_member_funs_count_toward_focus() {
     write(tmp.path(), "src/free.kt", "fun x() {}\nfun y() {}\nfun z() {}\nfun w() {}\nfun v() {}\n");
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    let scanned = engine.scan(false).expect("scan runs");
+    engine.pipeline().index();
+    let scanned = engine.quality().scan(false).expect("scan runs");
     assert_eq!(scanned.metrics.focus.expect("containers exist").raw, 0.5, "Big and Small; Big god");
     let focus: Vec<(&str, &str)> =
         scanned.worst_offenders.focus.iter().map(|o| (o.name.as_str(), o.file.as_str())).collect();

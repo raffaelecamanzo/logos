@@ -7,7 +7,7 @@
 //! 300 ms, the resolved SRS OQ-04 value), then further coalesced by the
 //! sync-worker **cadence** (CR-015, `[watcher] settle_ms`/`min_sync_interval_ms`/
 //! `max_staleness_ms`): a burst of debounced batches collapses into one
-//! incremental [`Engine::sync`] once edits settle — submitted to the
+//! incremental [`Pipeline::sync`](crate::Pipeline::sync) once edits settle — submitted to the
 //! single-writer actor ([ADR-02]) — so navigation stays current as the
 //! developer/agent edits without paying a sync per keystroke.
 //!
@@ -108,7 +108,7 @@ mod tests;
 /// ([`is_security_report`]), which no configuration can widen.
 const INTERNAL_DIRS: &[&str] = &[".logos", ".git"];
 
-/// How the watcher classifies a changed path: drive an incremental [`Engine::sync`]
+/// How the watcher classifies a changed path: drive an incremental [`Pipeline::sync`](crate::Pipeline::sync)
 /// ([`Source`](Admission::Source)), auto-ingest it as a coverage artifact
 /// ([`Coverage`](Admission::Coverage), [FR-CV-10]), or drop it
 /// ([`Ignored`](Admission::Ignored)).
@@ -116,7 +116,7 @@ const INTERNAL_DIRS: &[&str] = &[".logos", ".git"];
 /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admission {
-    /// An indexed source path → coalesce into the next `Engine::sync`.
+    /// An indexed source path → coalesce into the next `Pipeline::sync`.
     Source,
     /// A coverage artifact (convention/configured) → auto-ingest it ([FR-CV-10]).
     Coverage,
@@ -265,7 +265,7 @@ impl Drop for WatchHandle {
 ///
 /// Reads the debounce window from the project's `config.toml`
 /// (`[watcher] debounce_ms`, default 300 ms — the resolved SRS OQ-04 value),
-/// watches the root recursively, and submits one coalesced [`Engine::sync`]
+/// watches the root recursively, and submits one coalesced [`Pipeline::sync`](crate::Pipeline::sync)
 /// per debounce window through the engine's single-writer actor.
 ///
 /// The returned [`WatchHandle`] owns the watcher; drop it to stop watching.
@@ -304,7 +304,7 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // `ignored_dirs` (`target`, `node_modules`, `dist`, `build`, `vendor`, …).
     // Without the union the watcher reacts to build-output churn: a single
     // `cargo build` writes thousands of files under `target/`, each an event
-    // the watcher would accept and feed to `Engine::sync` — a storm that pegs
+    // the watcher would accept and feed to `Pipeline::sync` — a storm that pegs
     // every core (the sync fans out across the rayon pool) for paths the
     // indexer would never ingest anyway (FR-IX-02). The watched set MUST match
     // what indexing admits, so freshness work tracks real source, not artifacts.
@@ -336,7 +336,7 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // watcher start and caches each directory's ignore matchers, which
     // [`on_debounced`] invalidates when a `.gitignore`/`.ignore` changes, so a
     // mid-session ignore edit at any depth applies to the next batch ([CR-210]).
-    // `Engine::sync` rebuilds the authority per batch and is the load-bearing
+    // `Pipeline::sync` rebuilds the authority per batch and is the load-bearing
     // gate that actually enforces admission ([ADR-48]). If the
     // authority cannot be built here (e.g. a bad include/exclude glob), degrade to
     // no pre-filter and lean entirely on `sync` — the watcher is never a
@@ -358,7 +358,7 @@ pub fn spawn(engine: Arc<Engine>) -> Result<WatchHandle> {
     // dirty files, never by event count.
     let pending: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     // A sibling pending set for coverage artifacts: the worker drains it through
-    // the non-load-bearing auto-ingest path, never `Engine::sync` ([FR-CV-10]).
+    // the non-load-bearing auto-ingest path, never `Pipeline::sync` ([FR-CV-10]).
     let pending_artifacts: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
     // And one for SARIF reports, drained through the security auto-ingest.
     let pending_reports: Arc<Mutex<HashSet<PathBuf>>> = Arc::new(Mutex::new(HashSet::new()));
@@ -465,7 +465,7 @@ struct DebounceSink<'a> {
     /// The best-effort walk-level admission pre-filter (CR-054 / FR-SY-11);
     /// `None` when it could not be built at watcher start. `sync` is the gate.
     authority: &'a Option<AdmissionAuthority>,
-    /// Coalesced source paths bound for `Engine::sync`.
+    /// Coalesced source paths bound for `Pipeline::sync`.
     pending_sources: &'a Mutex<HashSet<PathBuf>>,
     /// Coalesced coverage-artifact paths bound for non-load-bearing auto-ingest.
     pending_artifacts: &'a Mutex<HashSet<PathBuf>>,
@@ -567,7 +567,7 @@ fn classify(
     // vendored repo). Guarded on existence: `admits_path` cannot stat a path that
     // is gone, so an unguarded check would swallow a *deletion* event and leave the
     // removed file's nodes resident until the next reconcile. A deletion must reach
-    // `Engine::sync`'s removal arm, so a non-existent path falls through to
+    // `Pipeline::sync`'s removal arm, so a non-existent path falls through to
     // `Source` and `sync` (the load-bearing gate, which re-checks admission)
     // decides — a false *admit* here costs only a wasted hash, never a stale graph.
     if let Some(authority) = authority {
@@ -720,7 +720,7 @@ struct Cadence {
 }
 
 /// Spawn the sync worker: one thread that coalesces edit activity into syncs on
-/// the [`Cadence`] schedule and runs at most one [`Engine::sync`] at a time (the
+/// the [`Cadence`] schedule and runs at most one [`Pipeline::sync`](crate::Pipeline::sync) at a time (the
 /// AR-01 starvation guard).
 ///
 /// The worker parks on the wake channel when idle (~0 % CPU). On a wake it defers
@@ -810,7 +810,7 @@ fn spawn_sync_worker(
                 for artifact in artifacts {
                     counters.coverage_ingests_run.fetch_add(1, Ordering::AcqRel);
                     let ingest_started = Instant::now();
-                    let ingest_outcome = engine.coverage_ingest_auto(&artifact);
+                    let ingest_outcome = engine.coverage().ingest_auto(&artifact);
                     let ingest_ms = ingest_started.elapsed().as_millis() as u64;
                     match ingest_outcome {
                         Ok(summary) => tracing::info!(
@@ -866,7 +866,7 @@ fn spawn_sync_worker(
                     // Infallible surface (ADR-14): a failed sync degrades to a
                     // result carrying warnings; freshness self-heals on the next
                     // window or the reconcile backstop.
-                    let result = engine.sync(&paths);
+                    let result = engine.pipeline().sync(&paths);
                     let duration_ms = started.elapsed().as_millis() as u64;
                     let files = result.files_added + result.files_modified + result.files_removed;
                     counters.syncs_run.fetch_add(1, Ordering::AcqRel);
@@ -874,7 +874,7 @@ fn spawn_sync_worker(
                     last_sync = Some(Instant::now());
                     // The telemetry event for this window (filesystem-watcher
                     // integration: surface=watcher, files synced per window).
-                    // Distinct tool name: the inner Engine::sync already emitted
+                    // Distinct tool name: the inner crate::Pipeline::sync already emitted
                     // its own `tool=sync` event under the process surface —
                     // `watch_sync` attributes the *trigger* without double-
                     // counting the operation.
@@ -911,12 +911,12 @@ fn drain(set: &Mutex<HashSet<PathBuf>>) -> Vec<PathBuf> {
 }
 
 /// Ingest one SARIF report the watcher saw change, through
-/// [`Engine::security_ingest_auto`] — a read, parse and store, never a scanner
+/// [`Security::ingest_auto`](crate::Security::ingest_auto) — a read, parse and store, never a scanner
 /// run. Non-load-bearing: a failure (a report still being written, a malformed
 /// one) is a warning plus a telemetry event, never an error.
 fn auto_ingest_report(engine: &Engine, report: &Path) {
     let started = Instant::now();
-    let ingested = engine.security_ingest_auto(report);
+    let ingested = engine.security().ingest_auto(report);
     let duration_ms = started.elapsed().as_millis() as u64;
     if let Err(e) = &ingested {
         tracing::warn!(
@@ -942,7 +942,7 @@ fn auto_ingest_report(engine: &Engine, report: &Path) {
 /// caller builds in [`spawn`]: the feedback-loop internal dirs (`.logos`,
 /// `.git`) plus the indexer's configured `ignored_dirs` (`target`,
 /// `node_modules`, …), so the watched set matches what indexing admits and
-/// build-output churn never reaches `Engine::sync` (see the module docs).
+/// build-output churn never reaches `Pipeline::sync` (see the module docs).
 ///
 /// A path outside `root` entirely is also ignored-by-default: the watcher
 /// only watches the root, so such a path is an OS-event oddity (rename

@@ -101,7 +101,7 @@ use crate::graph_store::{EdgeRow, FunctionMetricRow, NodeRow};
 use crate::model::{EdgeKind, NodeId, NodeKind};
 use crate::models::quality::{CohesionNotApplicable, MethodAttribution, MetricValue};
 
-use super::attribution::ContainerLinks;
+use super::attribution::{ContainerLinks, MethodOwner};
 
 /// The floor each new dimension normalizes into `[FLOOR, 1]` ([FR-QM-14],
 /// [ADR-21]): a ratio of 1 maps to 0.01, so the dimension drags but never alone
@@ -414,7 +414,8 @@ pub(super) struct ContainerIndex {
     /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
     method_unbound: HashMap<NodeId, Vec<String>>,
     /// How many production methods recording a self type reached a container,
-    /// and how many did not ([`MethodAttribution`], S-510).
+    /// how many did not, and how many were set aside as a trait impl's
+    /// ([`MethodAttribution`], S-510, S-826).
     attribution: MethodAttribution,
 }
 
@@ -603,7 +604,9 @@ impl ContainerIndex {
     /// names (S-510, [`attribute`](super::attribution::attribute)): the method
     /// joins that struct's methods exactly as a `Contains` child would, though
     /// its `Contains` parent stays its module. A production method that reached
-    /// no struct is counted in [`attribution`](Self::attribution).
+    /// no struct is counted in [`attribution`](Self::attribution), and so is one
+    /// of a Rust trait impl, which joins no container (metric semantics v10,
+    /// S-826).
     ///
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
     /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
@@ -675,14 +678,23 @@ impl ContainerIndex {
         }
 
         // S-510: a Rust impl / Go receiver method belongs to the struct its
-        // self type names, though its `Contains` parent is a module.
+        // self type names, though its `Contains` parent is a module; S-826: a
+        // Rust trait impl's method belongs to none and is counted as set aside.
         let mut attribution = MethodAttribution::default();
         for &(method, target) in &links.typed_methods {
             let Some(member) = node_of.get(&method).filter(|_| !test_ids.contains(&method)) else {
                 continue;
             };
             attribution.denominator += 1;
-            match target.and_then(|t| by_id.get(&owner(t))) {
+            let container = match target {
+                MethodOwner::Struct(t) => by_id.get(&owner(t)),
+                MethodOwner::TraitImpl => {
+                    attribution.trait_impl += 1;
+                    continue;
+                }
+                MethodOwner::Unattributed => None,
+            };
+            match container {
                 Some(&ci) => containers[ci].attach(member, false, bodyless.contains(&method)),
                 None => attribution.unattributed += 1,
             }
@@ -799,9 +811,10 @@ impl ContainerIndex {
     /// struct, Go type), and a Scala trait with a bodied method (S-575). Extraction makes the module, not the struct, the
     /// `Contains` parent of a Rust `impl` method or a Go receiver method, so
     /// those count toward their struct by attribution instead (metric-semantics
-    /// v9, [CR-166], S-510): every method of an `impl` of the struct in its
-    /// crate, every receiver method of the type in its package. A method
-    /// naming no one struct counts toward none ([`attribution`](Self::attribution)).
+    /// v9, [CR-166], S-510): every method of an inherent `impl` of the struct in
+    /// its crate, every receiver method of the type in its package. A method
+    /// naming no one struct counts toward none, and so, since v10 (S-826), does
+    /// a method of a Rust trait impl ([`attribution`](Self::attribution)).
     ///
     /// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
     ///

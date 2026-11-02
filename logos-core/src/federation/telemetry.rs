@@ -5,7 +5,7 @@
 //! # The constraint is the whole read-model ([CR-137] CRA-01)
 //! Telemetry lives in `.logos/telemetry.db`, a store separate from the graph
 //! ([ADR-13]) — but its only *public* accessor is
-//! [`Engine::stats`](crate::Engine::stats), so the obvious fan-out would
+//! [`Graph::stats`](crate::Graph::stats), so the obvious fan-out would
 //! construct one engine per member on a single view load and undo the
 //! warm-only-the-default policy the federated serve exists to keep. The
 //! enabling assumption behind this module is that the store is reachable
@@ -42,7 +42,7 @@
 //!   summing or averaging them across members would be a fabricated figure, not
 //!   a coarser one. They are absent rather than wrong ([NFR-CC-04]).
 //! - **Artifact binding counts.** A live-*graph* property that
-//!   [`Engine::stats`](crate::Engine::stats) merges from `logos.db`; reaching it
+//!   [`Graph::stats`](crate::Graph::stats) merges from `logos.db`; reaching it
 //!   is exactly what would need an engine.
 //! - **Any quality signal.** This aggregates usage, not quality: no per-member
 //!   gate verdict, score or violation count is rolled up here ([BR-56],

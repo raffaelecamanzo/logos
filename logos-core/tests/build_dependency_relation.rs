@@ -83,8 +83,8 @@ fn git_init(dir: &Path) {
 
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// The four members, with or without their poms. Every member carries its
@@ -256,14 +256,20 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// the baseline's re-bless record), 40 (S-761, the where-to-start rows'
 /// identity — its rebuilt tables go with migration 36's), 41 (S-593, the
 /// local-binding table), 42 (S-602, the `nodes.type_arity` column), 43
-/// (S-712, the dispatch re-bind) and 44 (S-571, the `files.parse_damaged`
-/// column and the snapshot entries' `partial_parse` flags); the next open re-applies all twenty-three, as a real
+/// (S-712, the dispatch re-bind), 44 (S-571, the `files.parse_damaged`
+/// column and the snapshot entries' `partial_parse` flags), 45 (S-820, the
+/// `nodes.callable_signature` column), 46 (S-830, the Go signature
+/// re-extraction) and 47 (S-832, the `files.facade` column); the next open
+/// re-applies all twenty-six, as a real
 /// upgrade does. Duplicated from
 /// `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
          DELETE FROM schema_versions WHERE version = 43; \
@@ -364,7 +370,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 44, "{name} was opened at the latest version (v44)");
+        assert_eq!(user_version(&root.join(name)), 47, "{name} was opened at the latest version (v47)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");
@@ -377,7 +383,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     // A partial sync sees a subset of the member: facts, but no marker.
     let app = root.join("app");
-    Engine::start(&app).expect("app opens").sync(&[PathBuf::from("pom.xml")]);
+    Engine::start(&app).expect("app opens").pipeline().sync(&[PathBuf::from("pom.xml")]);
     let status = status_over(root, manifest);
     let section = &status["build_dependency"];
     assert_eq!(section["members"]["unread"], serde_json::json!(["lib", "app", "docs"]));
@@ -386,7 +392,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
     for (name, _) in &members {
         Engine::start(root.join(name))
             .expect("member opens")
-            .health(true)
+            .quality().health(true)
             .expect("a full-walk reconcile runs");
     }
     let status = status_over(root, manifest);

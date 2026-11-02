@@ -181,7 +181,7 @@ fn median_of(xs: &[f64]) -> f64 {
 /// One sample, measured in its own process: an uninstrumented [`Engine::start`]
 /// (byte-for-byte what `cold_start_to_ready_engine_is_within_pe05_budget`
 /// measures) and its phase-timed twin
-/// [`Engine::start_with_phase_report`](logos_core::Engine::start_with_phase_report),
+/// [`ColdStartPhases::measure`](logos_core::ColdStartPhases::measure),
 /// each over a fresh root. Printed as one JSON line so the parent
 /// [`cold_start_phase_attribution`] test — which spawns this as a subprocess,
 /// once per sample — can parse it back out.
@@ -210,20 +210,20 @@ fn cold_start_phase_attribution_child_sample() {
     let root = TempDir::new().expect("temp root");
     let t = Instant::now();
     let (engine, phases) =
-        Engine::start_with_phase_report(root.path()).expect("instrumented engine starts");
+        logos_core::ColdStartPhases::measure(root.path()).expect("instrumented engine starts");
     let instrumented = t.elapsed();
     assert!(
         engine.runtime().is_some(),
         "instrumented engine is ready to serve"
     );
-    // `start_with_phase_report` mirrors `Engine::start`'s call sequence by
+    // `ColdStartPhases::measure` mirrors `Engine::start`'s call sequence by
     // hand so it can be timed without touching the production path — this is
     // the cheapest behavioral check that the mirror stayed faithful: both
     // arms must load the identical plugin substrate.
     assert_eq!(
         engine.registry().map(|r| r.len()),
         uninstrumented_registry_len,
-        "Engine::start_with_phase_report loads the same registry as Engine::start"
+        "ColdStartPhases::measure loads the same registry as Engine::start"
     );
 
     // AC1: the per-phase breakdown reconciles with the externally measured
@@ -248,7 +248,7 @@ fn cold_start_phase_attribution_child_sample() {
     let first_use = root_dir.join(FIRST_USE_FILE);
     std::fs::write(&first_use, FIRST_USE_SOURCE).expect("write the first-use file");
     let t = Instant::now();
-    let synced = engine.sync(&[first_use]);
+    let synced = engine.pipeline().sync(&[first_use]);
     let first_use_sync = t.elapsed();
     assert_eq!(
         synced.files_added, 1,

@@ -154,14 +154,20 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// migration 40 (S-761), the where-to-start rows' identity (its rebuilt tables
 /// go with migration 36's), of migration 41 (S-593), the local-binding
 /// table, of migration 42 (S-602), the `nodes.type_arity` column, of
-/// migration 43 (S-712), the dispatch re-bind, and of migration 44 (S-571),
+/// migration 43 (S-712), the dispatch re-bind, of migration 44 (S-571),
 /// the `files.parse_damaged` column and the snapshot entries' `partial_parse`
-/// flags; the next [`Engine::start`] re-applies all twenty-three, as it does
+/// flags, of migration 45 (S-820), the `nodes.callable_signature` column, and
+/// of migration 46 (S-830), the Go signature re-extraction, and of migration
+/// 47 (S-832), the `files.facade` column; the next
+/// [`Engine::start`] re-applies all twenty-six, as it does
 /// on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
          DELETE FROM schema_versions WHERE version = 43; \
@@ -281,7 +287,7 @@ fn indexing_a_member_persists_what_it_produces_and_references_with_kind_and_scop
     member(root);
 
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.files_indexed, 1, "a pom is never a graph file: {:?}", result.warnings);
     let rt = engine.runtime().expect("runtime");
     let rows = manifests(rt);
@@ -343,7 +349,7 @@ fn a_gitignored_manifest_is_not_read_and_an_unreadable_one_stays_in_the_denomina
     fs::write(root.join("latin1/pom.xml"), b"<project><artifactId>caf\xe9</artifactId></project>").unwrap();
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rows = manifests(engine.runtime().unwrap());
     assert_eq!(paths(&rows), vec!["latin1/pom.xml", "pom.xml"], "the gitignored pom is not a manifest found");
     let latin1 = manifest(&rows, "latin1/pom.xml");
@@ -371,7 +377,7 @@ fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_em
 
     for root in [bare.path(), with_pom.path()] {
         let engine = Engine::start(root).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
     }
     // Clock-stamped bookkeeping aside, the two stores differ in the build
     // tables and nowhere else: the manifest reaches no graph table.
@@ -404,8 +410,8 @@ fn a_member_with_no_build_manifest_is_byte_for_byte_unaffected_apart_from_the_em
     // the whole store — graph revision included — is unchanged by a no-op.
     let before = dump(bare.path(), &["schema_versions"]);
     let engine = Engine::start(bare.path()).expect("engine restarts");
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     drop(engine);
     assert_eq!(
         dump(bare.path(), &["schema_versions"]),
@@ -431,7 +437,7 @@ fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
         if with_pom {
             write(root, "pom.xml", ROOT_POM);
         }
-        Engine::start(root).expect("engine starts").index();
+        Engine::start(root).expect("engine starts").pipeline().index();
         downgrade_to_v21(root);
 
         let engine = Engine::start(root).expect("the upgraded store opens at the latest version");
@@ -440,7 +446,7 @@ fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
         assert_eq!(extraction_marker(root), None, "an upgraded store records no extraction");
 
         write(root, "src/lib.rs", "pub fn hello() {}\npub fn more() {}\n");
-        engine.sync(&[PathBuf::from("src/lib.rs"), PathBuf::from("pom.xml")]);
+        engine.pipeline().sync(&[PathBuf::from("src/lib.rs"), PathBuf::from("pom.xml")]);
         assert_eq!(manifests(rt).len(), usize::from(with_pom), "the partial sync read what it named");
         assert_eq!(
             extraction_marker(root),
@@ -449,7 +455,7 @@ fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
         );
 
         let before = revision(root);
-        engine.health(true).expect("a full-walk reconcile runs");
+        engine.quality().health(true).expect("a full-walk reconcile runs");
         assert_eq!(
             extraction_marker(root).as_deref(),
             Some("1"),
@@ -464,7 +470,7 @@ fn only_a_full_walk_marks_an_upgraded_members_build_facts_extracted() {
         assert_eq!(manifests(rt).len(), usize::from(with_pom));
 
         let before = dump(root, &["schema_versions"]);
-        engine.health(true).expect("a second full-walk reconcile runs");
+        engine.quality().health(true).expect("a second full-walk reconcile runs");
         assert_eq!(
             dump(root, &["schema_versions"]),
             before,
@@ -481,7 +487,7 @@ fn a_sync_re_derives_the_facts_only_when_it_names_a_changed_manifest() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     // The parent redefines the property its module inherits.
@@ -491,7 +497,7 @@ fn a_sync_re_derives_the_facts_only_when_it_names_a_changed_manifest() {
     // pass costs an ordinary edit nothing.
     write(root, "src/lib.rs", "pub fn hello() {}\npub fn more() {}\n");
     let before = revision(root);
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     let module = manifest(&manifests(rt), "lifecycle-module/pom.xml").clone();
     assert_eq!(
         module.artifacts[2].group_id.as_deref(),
@@ -503,7 +509,7 @@ fn a_sync_re_derives_the_facts_only_when_it_names_a_changed_manifest() {
     // Naming the changed PARENT re-derives the whole member: the unchanged
     // module's inherited group moves with it.
     let before = revision(root);
-    engine.sync(&[PathBuf::from("pom.xml")]);
+    engine.pipeline().sync(&[PathBuf::from("pom.xml")]);
     let rows = manifests(rt);
     assert_eq!(
         manifest(&rows, "lifecycle-module/pom.xml").artifacts[2].group_id.as_deref(),
@@ -514,7 +520,7 @@ fn a_sync_re_derives_the_facts_only_when_it_names_a_changed_manifest() {
 
     // Naming an UNCHANGED manifest rewrites nothing and advances nothing.
     let before = (revision(root), manifests(rt));
-    engine.sync(&[PathBuf::from("pom.xml")]);
+    engine.pipeline().sync(&[PathBuf::from("pom.xml")]);
     assert_eq!((revision(root), manifests(rt)), before, "an unchanged manifest is a no-op");
 }
 
@@ -524,17 +530,17 @@ fn an_added_or_deleted_manifest_is_reconciled_by_a_partial_sync_and_by_a_full_wa
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     // Partial: a deleted manifest named by the sync leaves the facts.
     fs::remove_file(root.join("lifecycle-module/pom.xml")).unwrap();
-    engine.sync(&[PathBuf::from("lifecycle-module/pom.xml")]);
+    engine.pipeline().sync(&[PathBuf::from("lifecycle-module/pom.xml")]);
     assert_eq!(paths(&manifests(rt)), vec!["pom.xml"]);
 
     // Full walk: a manifest added without being named is found by the walk…
     write(root, "gradle-svc/build.gradle", "group = 'com.example.g'\ndependencies { api 'com.example.james:parent:2.1.0' }\n");
-    engine.health(true).expect("reconcile runs");
+    engine.quality().health(true).expect("reconcile runs");
     let rows = manifests(rt);
     assert_eq!(paths(&rows), vec!["gradle-svc/build.gradle", "pom.xml"]);
     let gradle = manifest(&rows, "gradle-svc/build.gradle");
@@ -542,7 +548,7 @@ fn an_added_or_deleted_manifest_is_reconciled_by_a_partial_sync_and_by_a_full_wa
 
     // …and one deleted without being named is dropped by it.
     fs::remove_file(root.join("pom.xml")).unwrap();
-    engine.health(true).expect("reconcile runs");
+    engine.quality().health(true).expect("reconcile runs");
     assert_eq!(paths(&manifests(rt)), vec!["gradle-svc/build.gradle"]);
 }
 
@@ -552,11 +558,11 @@ fn a_gitignored_manifest_named_by_a_sync_is_treated_as_absent() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     write(root, ".gitignore", "lifecycle-module/\n");
-    engine.sync(&[PathBuf::from("lifecycle-module/pom.xml")]);
+    engine.pipeline().sync(&[PathBuf::from("lifecycle-module/pom.xml")]);
     assert_eq!(
         paths(&manifests(rt)),
         vec!["pom.xml"],
@@ -572,12 +578,12 @@ fn a_re_index_after_every_manifest_is_deleted_clears_the_facts() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(manifests(engine.runtime().unwrap()).len(), 2);
 
     fs::remove_file(root.join("pom.xml")).unwrap();
     fs::remove_file(root.join("lifecycle-module/pom.xml")).unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert!(
         manifests(engine.runtime().unwrap()).is_empty(),
         "a re-index that finds no manifest leaves none recorded"

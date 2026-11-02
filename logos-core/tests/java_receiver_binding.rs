@@ -48,7 +48,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(tmp: &Path) -> Engine {
     coordinate::pin(tmp);
     let engine = Engine::start(tmp).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -117,7 +117,7 @@ fn edge(from_file: &str, from: &str, to_file: &str, to: &str) -> (String, String
 /// The `Calls` residue the Java row of `status` carries.
 fn java_residue(engine: &Engine) -> CallResidue {
     engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "java")
@@ -656,7 +656,7 @@ fn the_workspace_figure_counts_an_external_type_row_another_member_declares_inte
     write(&app, "src/main/java/com/x/app/Notifier.java", NOTIFIER);
     for member in [&lib, &app] {
         let engine = index(member);
-        let _ = engine.sync(&[] as &[PathBuf]);
+        let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     }
     let alone = java_residue(&Engine::start(&app).expect("engine starts"));
     assert_eq!(nonzero(&alone), reasons(&[(R::ExternalType, 1)]), "the binder proves it external alone");
@@ -697,7 +697,7 @@ fn a_type_another_member_declares_is_type_in_another_member_in_a_workspace_only(
     write(&app, "src/main/java/com/x/app/Heir.java", HEIR);
     for member in [&lib, &app] {
         let engine = index(member);
-        let _ = engine.sync(&[] as &[PathBuf]);
+        let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     }
 
     // Alone, `app` cannot tell another member's type from a library's.
@@ -775,7 +775,7 @@ fn another_members_default_package_type_is_not_a_named_package_files_type() {
         "package com.x.app;\n\npublic class Consumer {\n    private Mailer mailer;\n    public void m() { mailer.send(); }\n}\n",
     );
     for member in [&lib, &app] {
-        let _ = index(member).sync(&[] as &[PathBuf]);
+        let _ = index(member).pipeline().sync(&[] as &[PathBuf]);
     }
     let residue = workspace_java_residue(ws.path(), "app");
     assert_eq!(residue.scope, ResidueScope::Workspace);
@@ -838,7 +838,7 @@ fn split_probe(app_files: &[(&str, &str)]) -> (CallResidue, CallResidue) {
         write(&app, rel, text);
     }
     for member in [&lib, &app] {
-        let _ = index(member).sync(&[] as &[PathBuf]);
+        let _ = index(member).pipeline().sync(&[] as &[PathBuf]);
     }
     let alone = java_residue(&Engine::start(&app).expect("engine starts"));
     (alone, workspace_java_residue(ws.path(), "app"))
@@ -910,7 +910,7 @@ fn each_residue_row_counts_its_own_languages_calls_and_it_is_deterministic() {
     let a = index(first.path());
     let b = index(second.path());
 
-    let rows = a.status().resolution_by_language;
+    let rows = a.graph().status().resolution_by_language;
     let rust = rows.iter().find(|r| r.language == "rust").expect("a rust row");
     // `g()` binds; `x.h()` proves no receiver. No Java row reaches Rust's.
     let rust_residue = rust.call_residue.as_ref().expect("the rust row states its own residue");
@@ -935,7 +935,7 @@ fn an_unreadable_config_states_no_residue_and_says_why() {
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
     write(tmp.path(), ".logos/config.toml", "this is [not toml\n");
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.indexed, "the status around the residue still answers");
     let java = status
         .resolution_by_language
@@ -962,7 +962,7 @@ fn an_unreadable_config_states_no_residue_and_says_why() {
 fn the_residue_is_on_the_serialised_status_and_its_internals_are_not() {
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
-    let json = serde_json::to_value(engine.status()).expect("serialises");
+    let json = serde_json::to_value(engine.graph().status()).expect("serialises");
     let java = json["resolution_by_language"]
         .as_array()
         .expect("an array of rows")
@@ -1062,7 +1062,7 @@ fn sync_equals_a_full_reindex_after_a_supertype_gains_the_method() {
         "precondition: `start` is declared nowhere yet"
     );
     write(tmp.path(), BASE_FILE, BASE);
-    engine.sync(&[BASE_FILE.into()]);
+    engine.pipeline().sync(&[BASE_FILE.into()]);
     assert!(call_edges(rt).contains(&edge(LEAF_FILE, "viaInherited", BASE_FILE, "start")));
     assert!(call_edges(rt).contains(&edge(USER_FILE, "run", BASE_FILE, "start")));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
@@ -1086,7 +1086,7 @@ fn sync_equals_a_full_reindex_after_a_mid_chain_type_gains_its_superclass() {
         "precondition: the chain stops at `Mid`"
     );
     write(tmp.path(), MID_FILE, MID);
-    engine.sync(&[MID_FILE.into()]);
+    engine.pipeline().sync(&[MID_FILE.into()]);
     for expected in [
         edge(LEAF_FILE, "viaInherited", BASE_FILE, "start"),
         edge(LEAF_FILE, "viaSuper", BASE_FILE, "start"),
@@ -1108,7 +1108,7 @@ fn sync_equals_a_full_reindex_after_a_supertype_loses_the_method() {
         BASE_FILE,
         "package com.x.base;\n\npublic class Base {\n    public void stop() {}\n}\n",
     );
-    engine.sync(&[BASE_FILE.into()]);
+    engine.pipeline().sync(&[BASE_FILE.into()]);
     assert!(!call_edges(rt).iter().any(|(_, t)| t.ends_with(":start")));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &HIERARCHY_FILES));
 }
@@ -1134,7 +1134,7 @@ fn sync_equals_a_full_reindex_when_a_call_target_gains_an_overload() {
         MAILER_FILE,
         "package com.x.mail;\n\npublic class Mailer {\n    public void send() {}\n    public void send(String... to) {}\n}\n",
     );
-    engine.sync(&[MAILER_FILE.into()]);
+    engine.pipeline().sync(&[MAILER_FILE.into()]);
 
     let cold = TempDir::new().unwrap();
     for rel in files {
@@ -1183,7 +1183,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
     // callers' rows.
     let renamed = "package com.x.mail;\n\npublic class Mailer {\n    public void post() {}\n}\n";
     write(tmp.path(), MAILER_FILE, renamed);
-    engine.sync(&[MAILER_FILE.into()]);
+    engine.pipeline().sync(&[MAILER_FILE.into()]);
     let cold = tree(&[(MAILER_FILE, renamed), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     assert_eq!(java_residue(&engine), java_residue(&index(cold.path())));
 
@@ -1217,7 +1217,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
         })
     })
     .expect("plant the awaiting capture");
-    engine.sync(&[]);
+    engine.pipeline().sync(&[]);
 
     // The fixture now holds exactly that one awaiting capture: the two
     // spent ones were deleted (CR-187).
@@ -1243,7 +1243,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
     );
     assert_eq!(residue.unbound, residue.reasons.values().sum::<u64>() + residue.unclassified);
     let java = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "java")
@@ -1257,7 +1257,7 @@ fn a_capture_before_delete_row_awaiting_its_target_is_not_in_the_residue() {
     }
     let cold_engine = index(cold.path());
     let java_row = |e: &Engine| {
-        e.status()
+        e.graph().status()
             .resolution_by_language
             .into_iter()
             .find(|row| row.language == "java")
@@ -1274,18 +1274,18 @@ fn a_synced_file_with_inbound_calls_reports_the_residue_a_reindex_reports() {
     let tmp = tree(&[(MAILER_FILE, MAILER), (PAGER_FILE, PAGER), (CLIENT_FILE, CLIENT)]);
     let engine = index(tmp.path());
     let before = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "java")
         .expect("a java row");
     // Touch `Mailer.java` so it is re-extracted; `send` keeps its symbol.
     write(tmp.path(), MAILER_FILE, &format!("// touched\n{MAILER}"));
-    let result = engine.sync(&[MAILER_FILE.into()]);
+    let result = engine.pipeline().sync(&[MAILER_FILE.into()]);
     assert_eq!(result.files_modified, 1);
 
     let after = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "java")
@@ -1312,7 +1312,7 @@ fn sync_equals_a_full_reindex_when_a_mid_chain_type_gains_an_override() {
         MID_FILE,
         "package com.x.base;\n\npublic class Mid extends Base {\n    public void start() {}\n    public void stop() {}\n}\n",
     );
-    engine.sync(&[MID_FILE.into()]);
+    engine.pipeline().sync(&[MID_FILE.into()]);
     let new = edge(LEAF_FILE, "viaInherited", MID_FILE, "start");
     let synced = call_edges(rt);
     assert!(synced.contains(&new) && !synced.contains(&old), "{synced:?}");
@@ -1335,7 +1335,7 @@ fn sync_equals_a_full_reindex_when_a_mid_chain_type_drops_its_superclass() {
         MID_FILE,
         "package com.x.base;\n\npublic class Mid {\n    public void stop() {}\n}\n",
     );
-    engine.sync(&[MID_FILE.into()]);
+    engine.pipeline().sync(&[MID_FILE.into()]);
     assert!(
         call_rows(rt, USER_FILE).contains(&(
             "run".to_string(),
@@ -1384,11 +1384,11 @@ fn a_captured_extends_row_never_lends_the_walk_a_superclass_the_subtype_dropped(
     let rt = engine.runtime().unwrap();
     // Editing Base.java captures `Leaf —Extends→ Base` under Base.java.
     write(tmp.path(), BASE, BASE_EDITED);
-    engine.sync(&[BASE.into()]);
+    engine.pipeline().sync(&[BASE.into()]);
     write(tmp.path(), LEAF, LEAF_BARE);
-    engine.sync(&[LEAF.into()]);
+    engine.pipeline().sync(&[LEAF.into()]);
     write(tmp.path(), USER, USER_HALT);
-    engine.sync(&[USER.into()]);
+    engine.pipeline().sync(&[USER.into()]);
     let synced = call_edges(rt);
     assert!(
         !synced.contains(&edge(USER, "halt", BASE, "stop")),
@@ -1423,7 +1423,7 @@ fn sync_equals_a_full_reindex_when_a_supertype_between_is_deleted() {
     let stale = edge(USER, "run", ROOT, "start");
     assert!(call_edges(rt).contains(&stale));
     fs::remove_file(tmp.path().join(BASE)).unwrap();
-    engine.sync(&[BASE.into()]);
+    engine.pipeline().sync(&[BASE.into()]);
     assert!(
         call_rows(rt, USER).contains(&(
             "run".to_string(),

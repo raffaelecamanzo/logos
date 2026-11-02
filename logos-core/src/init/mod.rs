@@ -1,6 +1,6 @@
 //! Project setup — the full `logos init` experience (S-023, FR-IN-01..04).
 //!
-//! Extends the Sprint 4 minimal bootstrap ([`crate::Engine::init`]: `.logos/`
+//! Extends the Sprint 4 minimal bootstrap ([`Setup::init`]: `.logos/`
 //! + store open/migrate) with everything DL-07 mandates to be **idempotent,
 //! non-clobbering, and managed-block based**:
 //!
@@ -92,7 +92,7 @@ pub struct InitOptions {
     pub install_quality_report_hook: bool,
     /// This `init` is running as one member of `logos init --workspace`
     /// ([FR-WS-02], CR-119) — changes only the `message`
-    /// [`Engine::init_with`](crate::Engine::init_with) returns, never what it
+    /// [`Setup::init_with`](crate::Setup::init_with) returns, never what it
     /// does. The single-repo message recommending `logos index` is wrong twice
     /// over in this context: the [FR-WS-14] warm supervisor `init --workspace`
     /// just spawned is already indexing this member, and `logos index` run at
@@ -1114,7 +1114,7 @@ fn stdout_line(output: &Output) -> String {
 ///
 /// Hook scripts and the managed-marker constant are sourced from
 /// [`crate::hooks`] so both code paths (the `init -i` wizard and the
-/// `Engine::install_hooks` API) recognise each other's installations.
+/// `Setup::install_hooks` API) recognise each other's installations.
 fn install_hooks(root: &Path) -> Result<InitStep> {
     const TARGET: &str = HOOKS_RELDIR;
     let in_repo = git(root, &["rev-parse", "--git-dir"]).is_some_and(|o| o.status.success());
@@ -1141,7 +1141,7 @@ fn install_hooks(root: &Path) -> Result<InitStep> {
     let dir = root.join(HOOKS_RELDIR);
     // Whole-install veto: any non-managed hook file blocks the entire install
     // (DL-07). Uses the canonical marker from `crate::hooks` so a file written
-    // by `Engine::install_hooks` is also recognised as managed.
+    // by `Setup::install_hooks` is also recognised as managed.
     for hook in crate::hooks::all_hook_names() {
         if let Some(body) = read_optional(&dir.join(hook))? {
             if !body.contains(crate::hooks::MANAGED_MARKER) {
@@ -1164,7 +1164,7 @@ fn install_hooks(root: &Path) -> Result<InitStep> {
         // Write when absent, or when a managed script (the whole-install veto
         // above already refused any foreign one) differs from the canonical
         // body: a managed script is regenerated to what this version of Logos
-        // generates, exactly as `Engine::install_hooks` rewrites it, so a hook
+        // generates, exactly as `Setup::install_hooks` rewrites it, so a hook
         // written by an older release picks up a fixed body on the next `init`
         // instead of running the old one forever.
         if existing.as_deref() != Some(body.as_str()) {

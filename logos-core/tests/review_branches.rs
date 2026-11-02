@@ -1,5 +1,5 @@
 //! `review --base <ref> --branches …` (S-757, [FR-GV-28], [UAT-GV-18]),
-//! end-to-end through `Engine::review_branches` over real git fixtures.
+//! end-to-end through `Review::branches` over real git fixtures.
 //!
 //! Coverage by acceptance criterion:
 //! - two branches that each add one outgoing module edge to a module at
@@ -101,7 +101,7 @@ fn repo() -> TempDir {
 fn project(root: &Path, branches: &[&str]) -> BranchesProjection {
     let engine = Engine::start(root).expect("engine starts");
     let branches: Vec<String> = branches.iter().map(|b| b.to_string()).collect();
-    engine.review_branches(Some("main"), &branches).expect("the projection runs")
+    engine.quality().review().branches(Some("main"), &branches).expect("the projection runs")
 }
 
 fn share(branch: &str, share: i64) -> BranchShare {
@@ -415,8 +415,8 @@ fn the_drift_is_projected_from_a_comparable_baseline_as_the_merged_gate_judges_i
     let root = tmp.path();
     write(root, ".logos/rules.toml", "[review]\ndrift_budget = 0\n");
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let saved = engine.gate(None, true, true).expect("gate --save");
+    engine.pipeline().index();
+    let saved = engine.quality().gate(None, true, true).expect("gate --save");
     let blessed = saved.signal.expect("a baseline signal");
     write(root, "src/c.rs", "pub fn work_c() {}\n\nfn gone_1() {}\n\nfn gone_2() {}\n\nfn gone_3() {}\n");
     commit(root, "main loses points");
@@ -449,8 +449,8 @@ fn the_drift_is_projected_from_a_comparable_baseline_as_the_merged_gate_judges_i
     assert!(drift.shares.iter().all(|s| s.exceeds_alone), "each share plus the base's own fall: {drift:#?}");
     git(root, &["checkout", "-q", "-b", "merged", "main"]);
     git(root, &["merge", "-q", "--no-edit", "d1", "d2"]);
-    engine.index();
-    let gate = engine.gate(None, false, true).expect("gate over the merged tree");
+    engine.pipeline().index();
+    let gate = engine.quality().gate(None, false, true).expect("gate over the merged tree");
     assert!(gate.drift.is_some_and(|d| d.exceeded), "the merged gate agrees: {:?}", gate.drift);
     git(root, &["checkout", "-q", "main"]);
 
@@ -508,7 +508,7 @@ fn ratchet_repo() -> TempDir {
     git(root, &["branch", "-M", "main"]);
     let engine = Engine::start(root).expect("engine starts");
     let symbol = engine
-        .review_headroom(Some("main"), &["src/hot.rs".to_string()], None)
+        .quality().review().headroom(Some("main"), &["src/hot.rs".to_string()], None)
         .expect("the headroom runs")
         .rules
         .iter()
@@ -576,7 +576,7 @@ fn headroom_and_branches_agree_for_a_ratchet_subject() {
     let tmp = ratchet_repo();
     let root = tmp.path();
     let engine = Engine::start(root).expect("engine starts");
-    let report = engine.review_headroom(Some("main"), &["src/hot.rs".to_string()], None).unwrap();
+    let report = engine.quality().review().headroom(Some("main"), &["src/hot.rs".to_string()], None).unwrap();
     let room = report
         .rules
         .iter()
@@ -628,7 +628,7 @@ fn the_notes_name_the_blessed_values_used() {
     git(root, &["commit", "-q", "-m", "no blessed set"]);
     git(root, &["checkout", "-q", "main"]);
     let engine = Engine::start(root).expect("engine starts");
-    let none = engine.review_branches(Some("empty-set"), &["plus1".to_string()]).unwrap();
+    let none = engine.quality().review().branches(Some("empty-set"), &["plus1".to_string()]).unwrap();
     assert!(none.notes.iter().any(|n| n.contains("blesses nothing above max")), "{:#?}", none.notes);
 }
 
@@ -641,7 +641,7 @@ fn a_blessed_set_the_base_commit_holds_unusable_is_not_projected() {
     commit(root, "a broken blessed set");
     git(root, &["checkout", "-q", "main"]);
     let engine = Engine::start(root).expect("engine starts");
-    let answer = engine.review_branches(Some("broken"), &["plus1".to_string()]).unwrap();
+    let answer = engine.quality().review().branches(Some("broken"), &["plus1".to_string()]).unwrap();
     assert!(!answer.measured, "{answer:#?}");
     assert!(answer.not_measured_because.is_some_and(|w| w.contains("rules-baseline.json")), "named with why");
 }
@@ -656,7 +656,7 @@ fn a_blessed_set_is_consulted_only_by_a_per_subject_ratchet_budget() {
     let root = tmp.path();
     let engine = Engine::start(root).expect("engine starts");
     let symbol = engine
-        .review_headroom(Some("main"), &["src/hot.rs".to_string()], None)
+        .quality().review().headroom(Some("main"), &["src/hot.rs".to_string()], None)
         .unwrap()
         .rules
         .iter()

@@ -17,7 +17,7 @@
 //!
 //! Since S-676 ([FR-QM-19], [CR-218]) every entry also carries its symbol id,
 //! measure, value and threshold, and every snapshot persists its uncapped
-//! lists, which `Engine::offenders` reads back by path and dimension.
+//! lists, which `Readouts::offenders` reads back by path and dimension.
 //!
 //! [FR-QM-19]: ../../docs/specs/requirements/FR-QM-19.md
 //! [CR-218]: ../../docs/requests/CR-218-agent-dev-kit-plugin-and-review.md
@@ -196,9 +196,9 @@ fn nesting_names(w: &WorstOffenders) -> Vec<&str> {
 fn latest_health_returns_the_lists_scan_returned_entry_for_entry() {
     let tmp = nested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scanned = engine.scan(true).expect("scan runs").worst_offenders;
+    let scanned = engine.quality().scan(true).expect("scan runs").worst_offenders;
     assert!(scanned.recorded, "a scan's lists are a recorded set");
     assert_eq!(
         nesting_names(&scanned),
@@ -206,14 +206,14 @@ fn latest_health_returns_the_lists_scan_returned_entry_for_entry() {
         "the fixture's known offenders, deepest first"
     );
 
-    let health = engine.latest_health().expect("read-only health");
+    let health = engine.quality().readouts().latest_health().expect("read-only health");
     assert_eq!(
         health.scan.worst_offenders, scanned,
         "the Health bundle projects exactly the lists the scan persisted"
     );
     assert_eq!(
         engine
-            .latest_scan()
+            .quality().readouts().latest_scan()
             .expect("read-only scan")
             .worst_offenders,
         scanned,
@@ -230,22 +230,22 @@ fn every_snapshot_appending_entry_point_persists_the_lists_it_computed() {
     type EntryPoint = fn(&Engine);
     let entry_points: [(&str, EntryPoint); 4] = [
         ("gate", |e| {
-            e.gate(None, false, true).expect("gate runs");
+            e.quality().gate(None, false, true).expect("gate runs");
         }),
         ("gate --save", |e| {
-            e.gate(None, true, true).expect("gate --save runs");
+            e.quality().gate(None, true, true).expect("gate --save runs");
         }),
         ("session_start", |e| {
-            e.session_start().expect("session_start runs");
+            e.quality().session_start().expect("session_start runs");
         }),
         ("session_end", |e| {
-            e.session_end().expect("session_end runs");
+            e.quality().session_end().expect("session_end runs");
         }),
     ];
     for (name, run) in entry_points {
         let tmp = nested_project();
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        assert!(engine.index().warnings.is_empty());
+        assert!(engine.pipeline().index().warnings.is_empty());
 
         run(&engine);
         assert_eq!(
@@ -253,10 +253,10 @@ fn every_snapshot_appending_entry_point_persists_the_lists_it_computed() {
             1,
             "`{name}` appended exactly the snapshot read below"
         );
-        let health = engine.latest_health().expect("read-only health").scan;
+        let health = engine.quality().readouts().latest_health().expect("read-only health").scan;
         let (projected, projected_ranking) = (health.worst_offenders, health.where_to_start);
 
-        let scan = engine.scan(true).expect("scan runs");
+        let scan = engine.quality().scan(true).expect("scan runs");
         let scanned = scan.worst_offenders;
         assert!(projected_ranking.recorded, "`{name}`'s snapshot recorded its ranking");
         assert!(!projected_ranking.units.is_empty(), "`{name}` ranked the fixture's units");
@@ -284,10 +284,10 @@ fn every_snapshot_appending_entry_point_persists_the_lists_it_computed() {
 fn a_repeated_scan_of_an_unchanged_tree_writes_byte_identical_offender_rows() {
     let tmp = nested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    engine.scan(true).expect("first scan");
-    engine.scan(true).expect("second scan");
+    engine.quality().scan(true).expect("first scan");
+    engine.quality().scan(true).expect("second scan");
     let first = offender_rows(tmp.path(), 1);
     let second = offender_rows(tmp.path(), 2);
     assert_eq!(
@@ -323,8 +323,8 @@ fn a_pre_migration_snapshot_reads_not_recorded_and_never_as_recorded_empty() {
     // upgraded pre-migration row is in.
     let old = nested_project();
     let engine = Engine::start(old.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    engine.scan(true).expect("scan runs");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    engine.quality().scan(true).expect("scan runs");
     Connection::open(old.path().join(".logos/logos.db"))
         .unwrap()
         .execute_batch(
@@ -332,7 +332,7 @@ fn a_pre_migration_snapshot_reads_not_recorded_and_never_as_recorded_empty() {
              UPDATE metric_snapshots SET offenders_recorded = NULL;",
         )
         .unwrap();
-    let not_recorded = engine.latest_health().expect("read-only health");
+    let not_recorded = engine.quality().readouts().latest_health().expect("read-only health");
     assert!(
         !not_recorded.scan.worst_offenders.recorded,
         "a snapshot with no recorded lists reads not recorded"
@@ -346,9 +346,9 @@ fn a_pre_migration_snapshot_reads_not_recorded_and_never_as_recorded_empty() {
     // Recorded-empty: a scan that flagged nothing.
     let clean = clean_project();
     let engine = Engine::start(clean.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    engine.scan(true).expect("scan runs");
-    let recorded_empty = engine.latest_health().expect("read-only health");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    engine.quality().scan(true).expect("scan runs");
+    let recorded_empty = engine.quality().readouts().latest_health().expect("read-only health");
     let w = &recorded_empty.scan.worst_offenders;
     assert!(
         w.recorded,
@@ -392,9 +392,9 @@ fn a_pre_migration_snapshot_reads_not_recorded_and_never_as_recorded_empty() {
 fn a_never_scanned_store_reads_not_recorded() {
     let tmp = nested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     assert_eq!(metric_snapshot_count(tmp.path()), 0, "nothing scanned yet");
-    let health = engine.latest_health().unwrap().scan;
+    let health = engine.quality().readouts().latest_health().unwrap().scan;
     assert!(!health.worst_offenders.recorded);
     assert_eq!(health.where_to_start, WhereToStart::default(), "nor any ranking");
 }
@@ -406,8 +406,8 @@ fn a_never_scanned_store_reads_not_recorded() {
 fn the_health_read_and_the_quality_readout_write_no_offender_rows() {
     let tmp = nested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    engine.scan(true).expect("scan runs");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    engine.quality().scan(true).expect("scan runs");
     let snapshots = metric_snapshot_count(tmp.path());
     let rows = offender_row_count(tmp.path());
     assert_eq!(
@@ -416,9 +416,9 @@ fn the_health_read_and_the_quality_readout_write_no_offender_rows() {
     );
 
     for _ in 0..3 {
-        engine.latest_health().expect("read-only health");
-        engine.latest_scan().expect("read-only scan");
-        engine.quality_readout().expect("readout");
+        engine.quality().readouts().latest_health().expect("read-only health");
+        engine.quality().readouts().latest_scan().expect("read-only scan");
+        engine.quality().readouts().readout().expect("readout");
     }
     assert_eq!(
         metric_snapshot_count(tmp.path()),
@@ -507,9 +507,9 @@ fn persisted_lists_are_capped_at_the_worst_offender_cap_keeping_the_deepest() {
         .collect();
     write(tmp.path(), "src/lib.rs", &source);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scanned = engine.scan(true).expect("scan runs").worst_offenders;
+    let scanned = engine.quality().scan(true).expect("scan runs").worst_offenders;
     let persisted: i64 = read_only(tmp.path())
         .query_row(
             "SELECT count(*) FROM metric_snapshot_offenders WHERE dimension = 'nesting'",
@@ -522,7 +522,7 @@ fn persisted_lists_are_capped_at_the_worst_offender_cap_keeping_the_deepest() {
         "{total} offenders persist exactly the cap's {cap} rows"
     );
     let projected = engine
-        .latest_health()
+        .quality().readouts().latest_health()
         .expect("read-only health")
         .scan
         .worst_offenders;
@@ -552,10 +552,10 @@ fn persisted_lists_follow_the_effective_rules_toml_thresholds() {
     type EntryPoint = fn(&Engine);
     let entry_points: [(&str, EntryPoint); 2] = [
         ("scan", |e| {
-            e.scan(true).expect("scan runs");
+            e.quality().scan(true).expect("scan runs");
         }),
         ("gate", |e| {
-            e.gate(None, false, true).expect("gate runs");
+            e.quality().gate(None, false, true).expect("gate runs");
         }),
     ];
     for (name, run) in entry_points {
@@ -566,11 +566,11 @@ fn persisted_lists_follow_the_effective_rules_toml_thresholds() {
             "[metric_thresholds]\nnesting_depth = 5\n",
         );
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        assert!(engine.index().warnings.is_empty());
+        assert!(engine.pipeline().index().warnings.is_empty());
 
         run(&engine);
         let projected = engine
-            .latest_health()
+            .quality().readouts().latest_health()
             .expect("read-only health")
             .scan
             .worst_offenders;
@@ -603,8 +603,8 @@ fn a_two_directory_cycle_is_recorded_and_a_pre_cr209_snapshot_reads_unrecorded()
         "pub fn pong(n: u32) -> u32 {\n    if n == 0 { 1 } else { crate::alpha::ping(n - 1) }\n}\n",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let scanned = engine.scan(true).expect("scan runs");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let scanned = engine.quality().scan(true).expect("scan runs");
     assert_eq!(scanned.metrics.acyclicity.raw, 1.0, "one cross-directory cycle");
     let cycle: Vec<(&str, &str)> = scanned
         .worst_offenders
@@ -615,7 +615,7 @@ fn a_two_directory_cycle_is_recorded_and_a_pre_cr209_snapshot_reads_unrecorded()
     assert_eq!(cycle.len(), 1, "{cycle:?}");
     assert_eq!(cycle[0].1, "2 symbols across 2 directories: src/alpha, src/beta");
 
-    let read = engine.latest_health().expect("read-only health").scan.worst_offenders;
+    let read = engine.quality().readouts().latest_health().expect("read-only health").scan.worst_offenders;
     assert_eq!(read, scanned.worst_offenders, "Health reads back what scan recorded");
     assert!(read.unrecorded.is_empty());
 
@@ -628,7 +628,7 @@ fn a_two_directory_cycle_is_recorded_and_a_pre_cr209_snapshot_reads_unrecorded()
             [],
         )
         .unwrap();
-    let old = engine.latest_health().expect("read-only health").scan.worst_offenders;
+    let old = engine.quality().readouts().latest_health().expect("read-only health").scan.worst_offenders;
     assert!(old.recorded && old.acyclicity.is_empty());
     assert!(
         old.unrecorded.contains(&"acyclicity"),
@@ -668,9 +668,9 @@ fn insight_project(rules: Option<&str>) -> TempDir {
 fn latest_health_reads_back_the_ranking_and_labels_scan_returned() {
     let tmp = insight_project(None);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scanned = engine.scan(true).expect("scan runs").where_to_start;
+    let scanned = engine.quality().scan(true).expect("scan runs").where_to_start;
     assert!(scanned.recorded);
     let top = &scanned.units[0];
     assert_eq!(
@@ -685,14 +685,14 @@ fn latest_health_reads_back_the_ranking_and_labels_scan_returned() {
     assert_eq!(nesting.labels[0].name, "deep_one");
     assert_eq!(nesting.labels[0].value, 6);
 
-    let health = engine.latest_health().expect("read-only health");
+    let health = engine.quality().readouts().latest_health().expect("read-only health");
     assert_eq!(health.scan.where_to_start, scanned, "field for field");
     assert_eq!(
         serde_json::to_string(&health.scan.where_to_start).unwrap(),
         serde_json::to_string(&scanned).unwrap(),
         "and byte for byte in the payload"
     );
-    assert_eq!(engine.latest_scan().unwrap().where_to_start, scanned);
+    assert_eq!(engine.quality().readouts().latest_scan().unwrap().where_to_start, scanned);
     // FR-QM-17: the payload labels its figures an estimate.
     assert_eq!(
         serde_json::to_value(&health.scan.where_to_start).unwrap()["basis"],
@@ -707,8 +707,8 @@ fn latest_health_reads_back_the_ranking_and_labels_scan_returned() {
 fn a_pre_migration_snapshot_reads_its_ranking_not_recorded() {
     let tmp = insight_project(None);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    engine.scan(true).expect("scan runs");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    engine.quality().scan(true).expect("scan runs");
     Connection::open(tmp.path().join(".logos/logos.db"))
         .unwrap()
         .execute_batch(
@@ -717,7 +717,7 @@ fn a_pre_migration_snapshot_reads_its_ranking_not_recorded() {
              UPDATE metric_snapshots SET insight_recorded = NULL;",
         )
         .unwrap();
-    let health = engine.latest_health().expect("read-only health").scan;
+    let health = engine.quality().readouts().latest_health().expect("read-only health").scan;
     assert_eq!(health.where_to_start, WhereToStart::default());
     assert_eq!(
         serde_json::to_value(&health.where_to_start).unwrap(),
@@ -755,11 +755,11 @@ fn emptying_or_changing_the_ranking_moves_no_signal_gate_or_check_outcome() {
         for (how, sql) in tampers {
             let tmp = insight_project(rules);
             let engine = Engine::start(tmp.path()).expect("engine starts");
-            assert!(engine.index().warnings.is_empty());
-            let saved = engine.gate(None, true, true).expect("gate --save runs");
-            let check_before = engine.check_rules(None, false).expect("check runs");
+            assert!(engine.pipeline().index().warnings.is_empty());
+            let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
+            let check_before = engine.quality().check_rules(None, false).expect("check runs");
             assert_eq!(check_before.passed, check_outcome, "the contract's own outcome");
-            let health_before = engine.latest_health().expect("read-only health");
+            let health_before = engine.quality().readouts().latest_health().expect("read-only health");
             assert!(!health_before.scan.where_to_start.units.is_empty());
 
             Connection::open(tmp.path().join(".logos/logos.db"))
@@ -767,7 +767,7 @@ fn emptying_or_changing_the_ranking_moves_no_signal_gate_or_check_outcome() {
                 .execute_batch(sql)
                 .unwrap();
 
-            let health_after = engine.latest_health().expect("read-only health");
+            let health_after = engine.quality().readouts().latest_health().expect("read-only health");
             assert_ne!(
                 health_after.scan.where_to_start, health_before.scan.where_to_start,
                 "the ranking was {how}"
@@ -778,14 +778,14 @@ fn emptying_or_changing_the_ranking_moves_no_signal_gate_or_check_outcome() {
                 serde_json::to_value(&health_before.gate).unwrap(),
                 "{how}: the read-only gate verdict"
             );
-            let check_after = engine.check_rules(None, false).expect("check runs");
+            let check_after = engine.quality().check_rules(None, false).expect("check runs");
             assert_eq!(check_after.passed, check_before.passed, "{how}: the check exit discriminator");
             assert_eq!(
                 serde_json::to_value(&check_after.violations).unwrap(),
                 serde_json::to_value(&check_before.violations).unwrap(),
                 "{how}: the check findings"
             );
-            let gate = engine.gate(None, false, true).expect("gate runs");
+            let gate = engine.quality().gate(None, false, true).expect("gate runs");
             assert_eq!(
                 (gate.passed, gate.signal, gate.baseline_signal),
                 (saved.passed, saved.signal, saved.signal),
@@ -812,20 +812,20 @@ fn one_members_distribution_never_changes_the_others_labels() {
 
     let engine_a = Engine::start(a.path()).expect("member A starts");
     let engine_b = Engine::start(b.path()).expect("member B starts");
-    assert!(engine_a.index().warnings.is_empty() && engine_b.index().warnings.is_empty());
+    assert!(engine_a.pipeline().index().warnings.is_empty() && engine_b.pipeline().index().warnings.is_empty());
 
     let labels = |w: &WhereToStart| -> Vec<String> {
         let nesting = w.outliers.iter().find(|m| m.measure == "nesting").unwrap();
         nesting.labels.iter().map(|l| l.name.clone()).collect()
     };
-    let first_a = engine_a.scan(true).expect("scan A").where_to_start;
+    let first_a = engine_a.quality().scan(true).expect("scan A").where_to_start;
     assert_eq!(labels(&first_a), ["deep_one"], "A labels its depth-6 function");
-    let scanned_b = engine_b.scan(true).expect("scan B").where_to_start;
+    let scanned_b = engine_b.quality().scan(true).expect("scan B").where_to_start;
     assert!(labels(&scanned_b).is_empty(), "B, uniformly that deep, labels none");
 
     write(b.path(), "src/lib.rs", &format!("{uniform}{}", nested_fn("deeper", 12)));
-    engine_b.scan(true).expect("rescan B");
-    let second_a = engine_a.scan(true).expect("rescan A").where_to_start;
+    engine_b.quality().scan(true).expect("rescan B");
+    let second_a = engine_a.quality().scan(true).expect("rescan A").where_to_start;
     assert_eq!(second_a, first_a, "A's ranking and labels are unchanged");
     assert_eq!(insight_rows(a.path(), 1), insight_rows(a.path(), 2), "byte for byte");
 }
@@ -853,9 +853,9 @@ fn a_real_exact_duplicate_pair_is_ranked_as_one_group_and_read_back() {
     }
     write(tmp.path(), "src/lib.rs", &source);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scanned = engine.scan(true).expect("scan runs");
+    let scanned = engine.quality().scan(true).expect("scan runs");
     assert!(
         scanned.worst_offenders.redundancy.iter().any(|o| o.detail.contains("duplicate")),
         "the fixture's pair is an exact duplicate: {:?}",
@@ -873,7 +873,7 @@ fn a_real_exact_duplicate_pair_is_ranked_as_one_group_and_read_back() {
         ("copy_one", &["redundancy"][..])
     );
     assert!(groups[0].detail.starts_with("duplicate group · 2 members"), "{}", groups[0].detail);
-    assert_eq!(engine.latest_health().unwrap().scan.where_to_start, scanned.where_to_start);
+    assert_eq!(engine.quality().readouts().latest_health().unwrap().scan.where_to_start, scanned.where_to_start);
 }
 
 // ── S-676 / FR-QM-19: offenders carry a value, a threshold and a symbol id ──
@@ -905,9 +905,9 @@ fn fourteen_under_src_a() -> TempDir {
 fn after_scan_every_entry_carries_its_node_id_value_and_threshold() {
     let tmp = fourteen_under_src_a();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scanned = engine.scan(true).expect("scan runs").worst_offenders;
+    let scanned = engine.quality().scan(true).expect("scan runs").worst_offenders;
     assert!(scanned.recorded && scanned.values_recorded);
     let mut entries = 0;
     for (dimension, list) in scanned.lists() {
@@ -935,7 +935,7 @@ fn after_scan_every_entry_carries_its_node_id_value_and_threshold() {
         .query_row("SELECT offender_values_recorded FROM metric_snapshots", [], |r| r.get(0))
         .unwrap();
     assert_eq!(flag, Some(1));
-    assert_eq!(engine.latest_health().unwrap().scan.worst_offenders, scanned);
+    assert_eq!(engine.quality().readouts().latest_health().unwrap().scan.worst_offenders, scanned);
 }
 
 /// [FR-QM-19] AC 2: `offenders --path 'src/a/**' --dimension nesting` returns
@@ -947,11 +947,11 @@ fn after_scan_every_entry_carries_its_node_id_value_and_threshold() {
 fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
     let tmp = fourteen_under_src_a();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let scanned = engine.scan(true).expect("scan runs").worst_offenders;
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let scanned = engine.quality().scan(true).expect("scan runs").worst_offenders;
 
     let filter = OffendersFilter::parse(Some("src/a/**"), Some("nesting")).unwrap();
-    let listing = engine.offenders(&filter).expect("offenders reads");
+    let listing = engine.quality().readouts().offenders(&filter).expect("offenders reads");
     assert!(listing.recorded && listing.not_recorded_because.is_none());
     assert_eq!(listing.offenders.len(), 14, "all 14, uncapped: {listing:#?}");
     let mut names: Vec<&str> = listing.offenders.iter().map(|o| o.offender.name.as_str()).collect();
@@ -967,7 +967,7 @@ fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
     }
 
     let all_nesting = engine
-        .offenders(&OffendersFilter::parse(None, Some("nesting")).unwrap())
+        .quality().readouts().offenders(&OffendersFilter::parse(None, Some("nesting")).unwrap())
         .unwrap()
         .offenders;
     assert_eq!(all_nesting.len(), 14 + 2 + 1 + 1, "src/a, src/ab, src and lib");
@@ -980,7 +980,7 @@ fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
         "the glob keeps the full list's order"
     );
 
-    let everything = engine.offenders(&OffendersFilter::default()).unwrap().offenders;
+    let everything = engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap().offenders;
     let dimensions: Vec<&str> = everything.iter().map(|o| o.dimension).collect();
     let mut canonical = dimensions.clone();
     canonical.sort_by_key(|d| WorstOffenders::DIMENSIONS.iter().position(|x| x == d));
@@ -1000,18 +1000,18 @@ fn offenders_by_path_and_dimension_lists_all_fourteen_and_nothing_outside() {
 fn equality_entries_are_listed_only_when_equality_is_named() {
     let tmp = fourteen_under_src_a();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let scan = engine.scan(true).expect("scan runs");
-    let health_before = engine.latest_health().unwrap();
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let scan = engine.quality().scan(true).expect("scan runs");
+    let health_before = engine.quality().readouts().latest_health().unwrap();
 
-    let everything = engine.offenders(&OffendersFilter::default()).unwrap().offenders;
-    let by_path = engine.offenders(&OffendersFilter::parse(Some("**"), None).unwrap()).unwrap().offenders;
+    let everything = engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap().offenders;
+    let by_path = engine.quality().readouts().offenders(&OffendersFilter::parse(Some("**"), None).unwrap()).unwrap().offenders;
     for (what, listed) in [("unfiltered", &everything), ("--path **", &by_path)] {
         assert!(listed.iter().all(|o| o.dimension != "equality"), "{what} lists no equality entry");
     }
 
     let equality = engine
-        .offenders(&OffendersFilter::parse(None, Some("equality")).unwrap())
+        .quality().readouts().offenders(&OffendersFilter::parse(None, Some("equality")).unwrap())
         .unwrap()
         .offenders;
     assert!(
@@ -1028,11 +1028,11 @@ fn equality_entries_are_listed_only_when_equality_is_named() {
     let named: usize = WorstOffenders::DIMENSIONS
         .iter()
         .filter(|d| **d != "equality")
-        .map(|d| engine.offenders(&OffendersFilter::parse(None, Some(d)).unwrap()).unwrap().offenders.len())
+        .map(|d| engine.quality().readouts().offenders(&OffendersFilter::parse(None, Some(d)).unwrap()).unwrap().offenders.len())
         .sum();
     assert_eq!(everything.len(), named, "the unfiltered total is every dimension's but equality's");
 
-    let health_after = engine.latest_health().unwrap();
+    let health_after = engine.quality().readouts().latest_health().unwrap();
     let scores = |h: &logos_core::models::quality::LatestHealth| {
         (h.scan.signal, serde_json::to_string(&h.scan.metrics).unwrap())
     };
@@ -1051,15 +1051,15 @@ fn equality_entries_are_listed_only_when_equality_is_named() {
 fn the_offender_listing_is_byte_stable_and_writes_nothing() {
     let tmp = fourteen_under_src_a();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    engine.scan(true).expect("scan runs");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    engine.quality().scan(true).expect("scan runs");
     let filter = OffendersFilter::default();
-    let json = || serde_json::to_string(&engine.offenders(&filter).unwrap()).unwrap();
+    let json = || serde_json::to_string(&engine.quality().readouts().offenders(&filter).unwrap()).unwrap();
 
     let first = json();
     assert_eq!(json(), first, "twice-read, byte for byte");
     assert_eq!(metric_snapshot_count(tmp.path()), 1, "reading appended no snapshot");
-    engine.scan(true).expect("re-scan");
+    engine.quality().scan(true).expect("re-scan");
     assert_eq!(json(), first, "a re-scan of the unchanged tree lists the same bytes");
 
     let uncapped = |id: i64| -> Vec<String> {
@@ -1094,14 +1094,14 @@ fn the_offender_listing_is_byte_stable_and_writes_nothing() {
 fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
     let tmp = nested_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let never = engine.offenders(&OffendersFilter::default()).unwrap();
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let never = engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap();
     assert_eq!(
         (never.recorded, never.not_recorded_because),
         (false, Some(OffenderListing::NEVER_SCANNED))
     );
 
-    engine.scan(true).expect("scan runs");
+    engine.quality().scan(true).expect("scan runs");
     Connection::open(tmp.path().join(".logos/logos.db"))
         .unwrap()
         .execute_batch(
@@ -1111,7 +1111,7 @@ fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
         )
         .unwrap();
 
-    let w = engine.latest_health().expect("read-only health").scan.worst_offenders;
+    let w = engine.quality().readouts().latest_health().expect("read-only health").scan.worst_offenders;
     assert!(w.recorded && !w.values_recorded, "the lists are recorded, their values are not");
     assert_eq!(nesting_names(&w), ["beta_depth_six", "gamma_depth_five", "alpha_depth_four"]);
     let entry = serde_json::to_value(&w.nesting[0]).unwrap();
@@ -1120,7 +1120,7 @@ fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
     }
     assert_eq!(serde_json::to_value(&w).unwrap()["values_recorded"], false);
 
-    let old = engine.offenders(&OffendersFilter::default()).unwrap();
+    let old = engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap();
     assert_eq!(
         (old.recorded, old.not_recorded_because, old.offenders.len()),
         (false, Some(OffenderListing::PREDATES_UNCAPPED), 0)
@@ -1136,8 +1136,9 @@ fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
 /// [BR-61]: ../../docs/specs/software-spec.md#311-quality-metrics
 #[test]
 fn offender_values_and_the_uncapped_list_move_no_signal_gate_or_semantics_version() {
-    // S-676 did not move the semantics; S-816 moved them to v9 (FR-QM-11).
-    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 9, "S-676 does not move the semantics");
+    // S-676 did not move the semantics; S-816 moved them to v9 (FR-QM-11) and
+    // S-826 to v10 (FR-QM-12).
+    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 10, "S-676 does not move the semantics");
     let tampers: [(&str, &str); 3] = [
         ("emptied", "DELETE FROM metric_snapshot_offenders_uncapped;"),
         (
@@ -1154,20 +1155,20 @@ fn offender_values_and_the_uncapped_list_move_no_signal_gate_or_semantics_versio
     for (how, sql) in tampers {
         let tmp = fourteen_under_src_a();
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        assert!(engine.index().warnings.is_empty());
-        let saved = engine.gate(None, true, true).expect("gate --save runs");
-        let before = engine.latest_health().expect("read-only health");
-        let listing_before = engine.offenders(&OffendersFilter::default()).unwrap();
+        assert!(engine.pipeline().index().warnings.is_empty());
+        let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
+        let before = engine.quality().readouts().latest_health().expect("read-only health");
+        let listing_before = engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap();
 
         Connection::open(tmp.path().join(".logos/logos.db"))
             .unwrap()
             .execute_batch(sql)
             .unwrap();
 
-        let after = engine.latest_health().expect("read-only health");
+        let after = engine.quality().readouts().latest_health().expect("read-only health");
         assert!(
             after.scan.worst_offenders != before.scan.worst_offenders
-                || engine.offenders(&OffendersFilter::default()).unwrap() != listing_before,
+                || engine.quality().readouts().offenders(&OffendersFilter::default()).unwrap() != listing_before,
             "the offender values were {how}"
         );
         assert_eq!(after.scan.signal, before.scan.signal, "{how}: signal");
@@ -1176,7 +1177,7 @@ fn offender_values_and_the_uncapped_list_move_no_signal_gate_or_semantics_versio
             serde_json::to_value(&before.gate).unwrap(),
             "{how}: the read-only gate verdict"
         );
-        let gate = engine.gate(None, false, true).expect("gate runs");
+        let gate = engine.quality().gate(None, false, true).expect("gate runs");
         assert_eq!(
             (gate.passed, gate.signal, gate.baseline_signal),
             (saved.passed, saved.signal, saved.signal),

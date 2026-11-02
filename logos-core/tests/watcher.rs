@@ -80,7 +80,7 @@ fn indexed_project_with_debounce(debounce_ms: u64) -> (TempDir, PathBuf, Arc<Eng
     );
     write(&root, "src/lib.rs", "pub fn seed_alpha() -> u32 { 1 }\n");
     let engine = Arc::new(Engine::start(&root).expect("engine starts"));
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.files_indexed, 1);
     (tmp, root, engine)
@@ -101,7 +101,7 @@ fn wait_for(what: &str, probe: impl Fn() -> bool) {
 /// `true` once a function named `name` is searchable.
 fn searchable(engine: &Engine, name: &str) -> bool {
     engine
-        .search(name, None, Some(10))
+        .navigation().search(name, None, Some(10))
         .hits
         .iter()
         .any(|h| h.name == name)
@@ -192,7 +192,7 @@ fn watcher_syncs_a_deletion_as_removal() {
         "src/doomed.rs",
         "pub fn doomed_function() -> u32 { 0 }\n",
     );
-    let sync = engine.sync(&[root.join("src/doomed.rs")]);
+    let sync = engine.pipeline().sync(&[root.join("src/doomed.rs")]);
     assert_eq!(sync.files_added, 1, "{sync:?}");
     assert!(searchable(&engine, "doomed_function"));
 
@@ -243,7 +243,7 @@ fn watcher_never_indexes_a_file_a_nested_gitignore_excludes() {
 fn watcher_removes_an_indexed_file_a_new_nested_rule_excludes() {
     let (_tmp, root, engine) = indexed_project();
     write(&root, "src/gen/out.rs", "pub fn generated_then_ignored() -> u32 { 7 }\n");
-    let sync = engine.sync(&[root.join("src/gen/out.rs")]);
+    let sync = engine.pipeline().sync(&[root.join("src/gen/out.rs")]);
     assert_eq!(sync.files_added, 1, "{sync:?}");
     assert!(searchable(&engine, "generated_then_ignored"));
 
@@ -278,7 +278,7 @@ fn a_failing_file_never_stops_the_watcher_persisting_the_others() {
         searchable(&engine, "healthy_from_watcher")
     });
     wait_for("the failing file to be recorded stale", || {
-        engine.status().persistence.stale_files == ["src/lib.rs"]
+        engine.graph().status().persistence.stale_files == ["src/lib.rs"]
     });
     assert!(
         searchable(&engine, "seed_alpha"),
@@ -318,7 +318,7 @@ fn out_of_band_edit_without_watcher_is_reflected_by_the_next_sync() {
     // The backstop: the next explicit sync reflects the edit (FR-SY-06's
     // guarantee that evaluation correctness never depends on a watcher; the
     // scan-level reconcile that calls this lands with S-020).
-    let sync = engine.sync(&[root.join("src/out_of_band.rs")]);
+    let sync = engine.pipeline().sync(&[root.join("src/out_of_band.rs")]);
     assert_eq!(sync.files_added, 1, "{sync:?}");
     assert!(searchable(&engine, "out_of_band_function"));
 }
@@ -337,7 +337,7 @@ fn single_file_sync_meets_the_pe03_budget() {
     );
 
     let start = Instant::now();
-    let sync = engine.sync(&[root.join("src/lib.rs")]);
+    let sync = engine.pipeline().sync(&[root.join("src/lib.rs")]);
     let elapsed = start.elapsed();
 
     assert_eq!(sync.files_modified, 1, "{sync:?}");
@@ -368,7 +368,7 @@ fn navigation_reads_survive_a_continuous_edit_stream() {
         );
         i += 1;
         let t = Instant::now();
-        let result = engine.search("seed_alpha", None, Some(5));
+        let result = engine.navigation().search("seed_alpha", None, Some(5));
         slowest_read = slowest_read.max(t.elapsed());
         assert!(
             result.hits.iter().any(|h| h.name == "seed_alpha"),
@@ -413,7 +413,7 @@ fn edits_defer_until_the_settle_window_then_coalesce() {
     );
     write(&root, "src/lib.rs", "pub fn seed_alpha() -> u32 { 1 }\n");
     let engine = Arc::new(Engine::start(&root).expect("engine starts"));
-    assert_eq!(engine.index().files_indexed, 1);
+    assert_eq!(engine.pipeline().index().files_indexed, 1);
     let handle = engine.watch().expect("watcher starts");
 
     const BURST: usize = 8;

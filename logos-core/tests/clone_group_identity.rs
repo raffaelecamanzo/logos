@@ -82,8 +82,8 @@ fn repo() -> (TempDir, Engine) {
     commit(root, "base");
     git(root, &["branch", "-M", "main"]);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let saved = engine.gate(None, true, true).expect("gate --save");
+    engine.pipeline().index();
+    let saved = engine.quality().gate(None, true, true).expect("gate --save");
     assert!(saved.saved && saved.signal.is_some(), "{saved:?}");
     git(root, &["checkout", "-q", "-b", "copy"]);
     (tmp, engine)
@@ -98,7 +98,7 @@ fn group_driver(a: &SignalAttribution) -> AttributionDriver {
 
 /// The near-clone group unit "where to start" ranks.
 fn group_unit(engine: &Engine) -> FixUnit {
-    let ranking = engine.scan(true).expect("scan runs").where_to_start;
+    let ranking = engine.quality().scan(true).expect("scan runs").where_to_start;
     ranking
         .units
         .into_iter()
@@ -119,9 +119,9 @@ fn a_group_driver_has_its_units_id_and_name_on_every_surface() {
     let (tmp, engine) = repo();
     let root = tmp.path();
     two_copies(root, "copy_zulu", "copy_alpha");
-    engine.index();
+    engine.pipeline().index();
 
-    let review = engine.review(None).expect("review runs").attribution.expect("attributed");
+    let review = engine.quality().review().delta(None).expect("review runs").attribution.expect("attributed");
     let driver = group_driver(&review);
     let unit = group_unit(&engine);
     assert!(driver.node_id.as_deref().is_some_and(|id| id.starts_with("clone_group:")), "{driver:#?}");
@@ -136,9 +136,9 @@ fn a_group_driver_has_its_units_id_and_name_on_every_surface() {
     assert_eq!(members, ["copy_zulu", "copy_alpha"], "every member, by line: {driver:#?}");
 
     // `gate` and the read-only verdict Health reads carry the same driver.
-    let gate = engine.gate(None, false, true).expect("gate runs");
+    let gate = engine.quality().gate(None, false, true).expect("gate runs");
     assert_eq!(gate.attribution.as_ref(), Some(&review), "{gate:#?}");
-    let latest = engine.latest_gate().expect("the read-only verdict");
+    let latest = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert_eq!(latest.attribution.as_ref(), Some(&review), "{latest:#?}");
 }
 
@@ -147,13 +147,13 @@ fn the_id_and_name_survive_a_reorder_and_a_reindex_while_the_members_do() {
     let (tmp, engine) = repo();
     let root = tmp.path();
     two_copies(root, "copy_zulu", "copy_alpha");
-    engine.index();
-    let before = group_driver(&engine.review(None).expect("review runs").attribution.expect("attributed"));
+    engine.pipeline().index();
+    let before = group_driver(&engine.quality().review().delta(None).expect("review runs").attribution.expect("attributed"));
 
     // The same two members, in the other order in the file.
     two_copies(root, "copy_alpha", "copy_zulu");
-    engine.index();
-    let reordered = group_driver(&engine.review(None).expect("review runs").attribution.expect("attributed"));
+    engine.pipeline().index();
+    let reordered = group_driver(&engine.quality().review().delta(None).expect("review runs").attribution.expect("attributed"));
     assert_eq!(reordered.node_id, before.node_id, "the id is a function of the member set");
     assert_eq!(reordered.name, before.name, "so is the naming member");
     assert_eq!(reordered.members.len(), 2, "{reordered:#?}");
@@ -162,8 +162,8 @@ fn the_id_and_name_survive_a_reorder_and_a_reindex_while_the_members_do() {
 
     // A different member set is another group.
     two_copies(root, "copy_alpha", "copy_yankee");
-    engine.index();
-    let renamed = group_driver(&engine.review(None).expect("review runs").attribution.expect("attributed"));
+    engine.pipeline().index();
+    let renamed = group_driver(&engine.quality().review().delta(None).expect("review runs").attribution.expect("attributed"));
     assert_ne!(renamed.node_id, before.node_id, "one member renamed is another group");
     assert_eq!(renamed.node_id, group_unit(&engine).node_id);
 }

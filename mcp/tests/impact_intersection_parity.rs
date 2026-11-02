@@ -1,7 +1,7 @@
 //! CLI-vs-MCP payload-equality for the impact-set intersection query
 //! (S-358 / [FR-NV-11], CR-114).
 //!
-//! Both surfaces delegate to the **one** `Engine::impact_intersection` `api`
+//! Both surfaces delegate to the **one** `Navigation::impact_intersection` `api`
 //! entrypoint ([NFR-CC-01]) and serialise its read-model — the CLI via
 //! `serde_json` in `--json` mode, the MCP twin via `Content::json`. This test
 //! proves the wire payloads are byte-identical for the same repository state
@@ -66,7 +66,7 @@ fn fixture() -> tempfile::TempDir {
         "src/wiki.rs",
         "pub fn wiki_render() {\n    wiki_helper();\n}\npub fn wiki_helper() {}\n",
     );
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -90,7 +90,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 fn cli_payload(root: &Path, items: &[&str], depth: Option<usize>) -> Value {
     let specs: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     let engine = Engine::start(root).expect("engine");
-    let result = engine.impact_intersection(&specs, depth);
+    let result = engine.navigation().impact_intersection(&specs, depth);
     serde_json::to_value(&result).expect("serialize")
 }
 

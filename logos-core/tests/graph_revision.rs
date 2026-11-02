@@ -40,12 +40,12 @@ fn revision_is_zero_before_indexing_and_status_reports_it() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         0,
         "a never-indexed store reports revision 0 on status"
     );
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         0,
         "merely reading status never advances the revision"
     );
@@ -62,38 +62,38 @@ fn revision_advances_on_index_and_a_file_changing_sync_only() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // A completed index advances the revision from 0 to 1.
-    engine.index();
-    let after_index = engine.status().graph_revision;
+    engine.pipeline().index();
+    let after_index = engine.graph().status().graph_revision;
     assert_eq!(after_index, 1, "a completed index advances the revision to 1");
 
     // A sync that genuinely changes a file advances it again.
     write(tmp.path(), "alpha.rs", "fn alpha() { let _x = 1; }\n");
-    let changed = engine.sync(&[PathBuf::from("alpha.rs")]);
+    let changed = engine.pipeline().sync(&[PathBuf::from("alpha.rs")]);
     assert_eq!(changed.files_modified, 1, "the sync re-extracted alpha");
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         2,
         "a file-changing sync strictly increases the revision"
     );
 
     // A no-op sync (alpha unchanged since the last sync) must NOT advance it.
-    let noop = engine.sync(&[PathBuf::from("alpha.rs"), PathBuf::from("beta.rs")]);
+    let noop = engine.pipeline().sync(&[PathBuf::from("alpha.rs"), PathBuf::from("beta.rs")]);
     assert_eq!(
         noop.files_added + noop.files_modified + noop.files_removed,
         0,
         "nothing changed on disk, so the sync is a no-op"
     );
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         2,
         "a no-op sync leaves the revision unchanged"
     );
 
     // A read-only navigation query never advances the revision.
-    let _ = engine.search("alpha", None, None);
-    let _ = engine.callers("alpha", None);
+    let _ = engine.navigation().search("alpha", None, None);
+    let _ = engine.navigation().callers("alpha", None);
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         2,
         "read-only navigation never advances the revision"
     );
@@ -106,25 +106,25 @@ fn revision_advances_on_a_sync_that_adds_or_removes_a_file() {
     write(tmp.path(), "alpha.rs", "fn alpha() {}\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    assert_eq!(engine.status().graph_revision, 1);
+    engine.pipeline().index();
+    assert_eq!(engine.graph().status().graph_revision, 1);
 
     // Adding a file advances it.
     write(tmp.path(), "beta.rs", "fn beta() {}\n");
-    let added = engine.sync(&[PathBuf::from("beta.rs")]);
+    let added = engine.pipeline().sync(&[PathBuf::from("beta.rs")]);
     assert_eq!(added.files_added, 1);
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         2,
         "a sync that adds a file advances the revision"
     );
 
     // Removing a file advances it.
     fs::remove_file(tmp.path().join("beta.rs")).expect("remove fixture");
-    let removed = engine.sync(&[PathBuf::from("beta.rs")]);
+    let removed = engine.pipeline().sync(&[PathBuf::from("beta.rs")]);
     assert_eq!(removed.files_removed, 1);
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         3,
         "a sync that removes a file advances the revision"
     );
@@ -138,11 +138,11 @@ fn re_indexing_advances_the_revision_again() {
     write(tmp.path(), "alpha.rs", "fn alpha() {}\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    assert_eq!(engine.status().graph_revision, 1, "first index -> 1");
-    engine.index();
+    engine.pipeline().index();
+    assert_eq!(engine.graph().status().graph_revision, 1, "first index -> 1");
+    engine.pipeline().index();
     assert_eq!(
-        engine.status().graph_revision,
+        engine.graph().status().graph_revision,
         2,
         "a second index advances the revision again, strictly monotonic"
     );
@@ -156,17 +156,17 @@ fn a_second_process_reads_the_same_revision() {
     write(tmp.path(), "alpha.rs", "fn alpha() {}\n");
 
     let writer = Engine::start(tmp.path()).expect("writer engine starts");
-    writer.index();
+    writer.pipeline().index();
     write(tmp.path(), "alpha.rs", "fn alpha() { let _x = 1; }\n");
-    writer.sync(&[PathBuf::from("alpha.rs")]);
-    let writer_revision = writer.status().graph_revision;
+    writer.pipeline().sync(&[PathBuf::from("alpha.rs")]);
+    let writer_revision = writer.graph().status().graph_revision;
     assert_eq!(writer_revision, 2, "index then a changing sync → revision 2");
     drop(writer);
 
     // A second engine over the same persisted store reads the identical value.
     let reader = Engine::start(tmp.path()).expect("reader engine starts");
     assert_eq!(
-        reader.status().graph_revision,
+        reader.graph().status().graph_revision,
         writer_revision,
         "a second process reads the identical persisted revision (FR-SY-09)"
     );

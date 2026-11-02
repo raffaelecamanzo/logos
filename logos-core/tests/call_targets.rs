@@ -47,7 +47,7 @@ fn indexed(fixture: fixtures::Fixture) -> (TempDir, Engine) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -312,7 +312,7 @@ fn sync_equals_a_full_reindex_when_the_constructed_class_changes() {
         }
         coordinate::pin(fresh.path());
         let engine = Engine::start(fresh.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         binding_facts(engine.runtime().unwrap())
     };
     let original = fixtures::PYTHON[2].1;
@@ -322,7 +322,7 @@ fn sync_equals_a_full_reindex_when_the_constructed_class_changes() {
         original.to_string(),
     ] {
         write(tmp.path(), models, &edit);
-        engine.sync(&[models.into()]);
+        engine.pipeline().sync(&[models.into()]);
         assert_eq!(binding_facts(rt), cold(&tmp), "after writing:\n{edit}");
     }
 }

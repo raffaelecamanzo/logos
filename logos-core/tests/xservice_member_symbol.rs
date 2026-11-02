@@ -173,8 +173,8 @@ fn pom(artifact: &str, dependencies: &[&str]) -> String {
 
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// Write and index the workspace.
@@ -339,9 +339,9 @@ fn the_fixture_binds_only_svc_b_while_both_forks_hold_the_symbols() {
         for (fork, other) in [(FORKS[0], FORKS[1]), (FORKS[1], FORKS[0])] {
             let engine = f.registry.engine_for(fork).unwrap();
             let held = held_by(fork, &symbol);
-            assert_eq!(engine.callers(&symbol, None).resolved.map(|r| r.symbol), Some(held.clone()), "{fork} holds {symbol}");
+            assert_eq!(engine.navigation().callers(&symbol, None).resolved.map(|r| r.symbol), Some(held.clone()), "{fork} holds {symbol}");
             let foreign = held_by(other, &symbol);
-            assert_eq!(engine.callers(&foreign, None).resolved.map(|r| r.symbol), None, "{fork} never holds {foreign}");
+            assert_eq!(engine.navigation().callers(&foreign, None).resolved.map(|r| r.symbol), None, "{fork} never holds {foreign}");
         }
     }
     let owners: Vec<(&str, Option<&str>)> =
@@ -526,7 +526,7 @@ fn a_reference_owned_by_no_member_is_reported_apart_by_both_read_models() {
 fn a_bare_name_resolving_in_both_forks_is_not_a_shared_symbol() {
     let f = fixture();
     for fork in FORKS {
-        let seed = f.registry.engine_for(fork).unwrap().callers("onOrder", None);
+        let seed = f.registry.engine_for(fork).unwrap().navigation().callers("onOrder", None);
         assert_eq!(seed.resolved.map(|r| r.symbol), Some(held_by(fork, &on_order())), "guard: {fork} resolves the bare name");
     }
     for answer in [f.callers("onOrder", None), f.impact("onOrder", None)] {

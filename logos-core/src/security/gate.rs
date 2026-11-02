@@ -260,8 +260,8 @@ impl SecurityGateEvidence<'_> {
     fn gate_status(&self) -> Result<SecurityStatus> {
         super::status(
             self.0.root(),
-            &self.0.scan_environment(),
-            self.0.tools_manifest(),
+            &self.0.security().tools().environment(),
+            self.0.security().tools().manifest(),
             today_utc(),
             super::VersionProbes::Never,
             false,

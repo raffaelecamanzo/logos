@@ -97,8 +97,8 @@ fn git_init(dir: &Path) {
 
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 const MEMBERS: [&str; 9] = ["lib", "models", "app", "stray", "fork-a", "fork-b", "user", "api", "web"];
@@ -288,8 +288,8 @@ fn runtime_build_and_member_figures_are_byte_identical_with_the_overlay_on_and_o
             .iter()
             .map(|m| {
                 let engine = Engine::start(root.join(m)).expect("member opens");
-                let scan = serde_json::to_string(&engine.scan(false).expect("scan runs")).unwrap();
-                let gate = serde_json::to_string(&engine.gate(None, false, false).expect("gate runs")).unwrap();
+                let scan = serde_json::to_string(&engine.quality().scan(false).expect("scan runs")).unwrap();
+                let gate = serde_json::to_string(&engine.quality().gate(None, false, false).expect("gate runs")).unwrap();
                 format!("{m}: {scan} {gate}")
             })
             .collect();

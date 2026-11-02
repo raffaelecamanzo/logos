@@ -2371,7 +2371,7 @@ fn a_wider_window_never_reports_fewer_calls() {
 /// the half that was unpinned: `stats` now delegates to `read_stats`, so the
 /// `?` that propagates a real failure is one edit away from becoming an
 /// `unwrap_or(None)` that swallows it. That edit would report a corrupt store to
-/// every `Engine::stats` caller as "no telemetry recorded yet" — a fault
+/// every `Graph::stats` caller as "no telemetry recorded yet" — a fault
 /// rendered as a routine state, which is the worse direction and exactly what
 /// the empty/absent distinction exists to keep apart ([NFR-CC-04]).
 #[test]
@@ -3208,7 +3208,7 @@ fn the_exclusion_reaches_the_cross_tab_and_the_class_breakdown() {
 
 /// **Both degradations state the same limits.** A missing `telemetry.db` and an
 /// unreadable one reach the read-model by different paths — `stats()`'s early
-/// return and `Engine::stats`'s `unwrap_or_else` — and only the first was
+/// return and `Graph::stats`'s `unwrap_or_else` — and only the first was
 /// wired to `attribution_coverage` at first pass.
 ///
 /// The limits are structural (properties of `daily_rollup`'s schema, not of the
@@ -3225,7 +3225,7 @@ fn a_degraded_read_model_still_states_its_coverage_limits() {
     assert_eq!(coverage.covered_window_days, 30);
     assert_eq!(coverage.notes.len(), 6, "the prose survives degradation");
 
-    // The `Default` backstop: `Engine::stats` builds its fallback with
+    // The `Default` backstop: `Graph::stats` builds its fallback with
     // `..StatsInfo::default()`, so a derived `Default` would answer
     // `raw_events_only: false` — a *claim* about the schema, not an absence,
     // which is the failure NFR-CC-04 names. Zeroed windows are correct there

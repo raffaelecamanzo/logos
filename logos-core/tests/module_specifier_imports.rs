@@ -98,7 +98,7 @@ fn import_row_unresolved(rt: &Runtime, target: &str) -> bool {
 
 fn index(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -378,7 +378,7 @@ fn an_import_binds_on_the_sync_that_indexes_its_target_and_matches_a_full_index(
         "internal/admin/audit.go",
         "package admin\n\nfunc audit() {}\n",
     );
-    engine.sync(&["web/src/nav.ts".into(), "internal/admin/audit.go".into()]);
+    engine.pipeline().sync(&["web/src/nav.ts".into(), "internal/admin/audit.go".into()]);
     let synced_ts = imported_files(rt, "web/src/App.tsx");
     let synced_go = imported_files(rt, "cmd/server/main.go");
     assert_eq!(synced_ts, ["web/src/nav.ts"]);
@@ -517,12 +517,12 @@ fn a_sync_rebinds_imports_no_token_of_theirs_names() {
     assert!(imported_files(rt, "cmd/main.go").is_empty(), "no go.mod yet");
 
     write(tmp.path(), "go.mod", "module github.com/acme/shop\n");
-    engine.sync(&["go.mod".into()]);
+    engine.pipeline().sync(&["go.mod".into()]);
     assert_eq!(imported_files(rt, "cmd/main.go"), ["shop.go"], "go.mod arrived");
 
     write(tmp.path(), "web/src/index.ts", "export const x = 1;\n");
     write(tmp.path(), "util.go", "package shop\n\nfunc helper() {}\n");
-    engine.sync(&["web/src/index.ts".into(), "util.go".into()]);
+    engine.pipeline().sync(&["web/src/index.ts".into(), "util.go".into()]);
     let synced_ts = imported_files(rt, "web/src/App.tsx");
     let synced_go = imported_files(rt, "cmd/main.go");
     assert_eq!(synced_ts, ["web/src/index.ts"]);

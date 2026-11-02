@@ -56,13 +56,13 @@ fn indexed(files: &[(&str, &str)]) -> (TempDir, Engine) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
 /// `status --json`'s per-language rows, as the surface serialises them.
 fn status_rows(engine: &Engine) -> Vec<Value> {
-    let status = serde_json::to_value(engine.status()).expect("status serialises");
+    let status = serde_json::to_value(engine.graph().status()).expect("status serialises");
     status["resolution_by_language"]
         .as_array()
         .expect("rows")
@@ -87,7 +87,7 @@ fn languages(root: &Path) -> BTreeMap<String, String> {
 /// The descriptor `note` of `language`, as `logos languages` lists it.
 fn described_note(root: &Path, language: &str) -> Option<String> {
     Engine::open(root)
-        .languages()
+        .graph().languages()
         .languages
         .into_iter()
         .find(|l| l.name == language)
@@ -101,7 +101,7 @@ const CPP_SOURCE: &str = "int widget() { return 2; }\n";
 #[test]
 fn languages_note_the_dot_h_rule_on_the_c_and_cpp_rows_only() {
     let tmp = TempDir::new().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
     for language in &info.languages {
         let note = language.note.as_deref();
         if language.name == "c" || language.name == "cpp" {
@@ -274,7 +274,7 @@ fn a_relational_answer_over_a_header_carries_no_header_ownership() {
         "the fixture discloses on status: {status:?}"
     );
 
-    let answer = serde_json::to_value(engine.callers("helper", None)).expect("callers serialise");
+    let answer = serde_json::to_value(engine.navigation().callers("helper", None)).expect("callers serialise");
     let rows = answer["resolution_denominator"]["languages"]
         .as_array()
         .unwrap_or_else(|| panic!("a denominator is stated: {answer}"));
@@ -355,7 +355,7 @@ fn sync_equals_reindex_as_a_cpp_source_moves_the_headers() {
         }
         coordinate::pin(copy.path());
         let cold = Engine::start(copy.path()).expect("engine starts");
-        cold.index();
+        cold.pipeline().index();
         let rt = cold.runtime().unwrap();
         (graph_fingerprint(rt), languages(copy.path()))
     };
@@ -363,13 +363,13 @@ fn sync_equals_reindex_as_a_cpp_source_moves_the_headers() {
 
     let cpp = "src/widget.cpp";
     write(tmp.path(), cpp, CPP_SOURCE);
-    let result = engine.sync(&[cpp.into()]);
+    let result = engine.pipeline().sync(&[cpp.into()]);
     assert_eq!(result.files_modified, 2, "both headers are re-read: {result:?}");
     assert_eq!(languages(tmp.path())["include/api.h"], "cpp");
     assert_eq!((graph_fingerprint(rt), languages(tmp.path())), cold(&tmp));
 
     fs::remove_file(tmp.path().join(cpp)).unwrap();
-    engine.sync(&[cpp.into()]);
+    engine.pipeline().sync(&[cpp.into()]);
     assert_eq!(languages(tmp.path())["include/api.h"], "c");
     assert_eq!((graph_fingerprint(rt), languages(tmp.path())), cold(&tmp));
 }
@@ -386,7 +386,7 @@ fn a_modified_source_is_counted_once() {
     ]);
     assert_eq!(languages(tmp.path())["src/util.h"], "cpp");
     write(tmp.path(), "src/main.c", "int run(void) { return 0; }\n");
-    let result = engine.sync(&["src/main.c".into()]);
+    let result = engine.pipeline().sync(&["src/main.c".into()]);
     assert_eq!(result.files_modified, 1, "only the edited file is re-read: {result:?}");
     assert_eq!(languages(tmp.path())["src/util.h"], "cpp");
 }
@@ -403,9 +403,9 @@ fn a_source_that_does_not_load_decides_nothing() {
     fs::write(tmp.path().join("src/latin1.c"), b"int caf\xe9(void) { return 0; }\n").unwrap();
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(languages(tmp.path())["src/util.h"], "cpp");
-    let result = engine.sync(&["src/widget.cpp".into()]);
+    let result = engine.pipeline().sync(&["src/widget.cpp".into()]);
     assert_eq!(result.files_modified, 0, "nothing moved, nothing is re-read: {result:?}");
     assert_eq!(languages(tmp.path())["src/util.h"], "cpp");
 }
@@ -420,7 +420,7 @@ fn a_navigation_read_keeps_reading_headers_as_the_graph_was_built() {
     write(tmp.path(), "src/a.cpp", CPP_SOURCE);
     write(tmp.path(), "src/b.cpp", CPP_SOURCE);
     write(tmp.path(), ".logos/config.toml", "exclude = [\"docs/**\"]\n");
-    let _ = engine.search("helper", None, None);
+    let _ = engine.navigation().search("helper", None, None);
     assert_eq!(
         engine.registry().and_then(|r| r.for_path("src/util.h")).map(|p| p.name().to_string()),
         Some("c".to_string())
@@ -456,7 +456,7 @@ fn a_header_the_new_reader_does_not_admit_leaves_the_graph() {
     ]);
     assert_eq!(languages(tmp.path()).get("src/util.h").map(String::as_str), Some("c"));
     fs::remove_file(tmp.path().join("src/a.c")).unwrap();
-    engine.sync(&["src/a.c".into()]);
+    engine.pipeline().sync(&["src/a.c".into()]);
     let files = languages(tmp.path());
     assert!(files.is_empty(), "{files:?}");
 }

@@ -1,5 +1,5 @@
 //! The branch security delta (S-686, [FR-SC-18], [UAT-SC-06]), end-to-end
-//! through `Engine::review` over real git fixtures and ingested SARIF reports.
+//! through `Review::delta` over real git fixtures and ingested SARIF reports.
 //!
 //! Coverage by acceptance criterion:
 //! - an added secret is `introduced` via `hunk` with no merge-base report, and
@@ -137,14 +137,14 @@ fn project() -> Project {
 impl Project {
     fn engine(&self) -> Engine {
         let engine = Engine::start(&self.root).expect("engine").with_scan_environment(self.env.clone());
-        engine.index();
+        engine.pipeline().index();
         engine
     }
 
     /// Ingest `driver`'s report of `hits` at the current HEAD.
     fn ingest(&self, driver: &str, hits: &[Hit]) {
         let report = self.report(driver, hits);
-        self.engine().security_ingest(&report).expect("the report ingests");
+        self.engine().security().ingest(&report).expect("the report ingests");
     }
 
     /// Ingest `driver`'s report of `hits` as a `--path` re-scan of `paths` at
@@ -186,7 +186,7 @@ impl Project {
 
     /// The `security findings` listing's entry for `fingerprint`.
     fn listed(&self, fingerprint: &str) -> Value {
-        let listing = serde_json::to_value(self.engine().security_findings(&FindingsFilter::default()).unwrap()).unwrap();
+        let listing = serde_json::to_value(self.engine().security().findings().list(&FindingsFilter::default()).unwrap()).unwrap();
         listing["findings"]
             .as_array()
             .unwrap()
@@ -197,7 +197,7 @@ impl Project {
     }
 
     fn review(&self) -> (BranchReview, SecurityDelta, String) {
-        let review = self.engine().review(Some("main")).expect("review runs");
+        let review = self.engine().quality().review().delta(Some("main")).expect("review runs");
         assert!(review.measured, "measured: {:?}", review.not_measured_because);
         let json = serde_json::to_string(&review).unwrap();
         let delta = review.sections.security.clone().expect("a measured review carries the security section");
@@ -421,7 +421,7 @@ fn suppressed_findings_are_listed_apart_and_no_secret_value_is_emitted() {
 fn a_project_never_scanned_carries_an_unmeasured_section() {
     let p = project();
     git(&p.root, &["checkout", "-q", "-b", "feature"]);
-    let review = p.engine().review(Some("main")).expect("review runs");
+    let review = p.engine().quality().review().delta(Some("main")).expect("review runs");
     let delta = review.sections.security.expect("the section is present");
     assert!(!delta.measured);
     assert!(delta.findings.is_empty() && delta.suppressed.is_empty());

@@ -5,7 +5,7 @@
 //! façade exactly as the watcher/CLI/hook surfaces do. The unit-level parity of
 //! the `AdmissionAuthority` predicate itself is proven in
 //! `logos_core::config::admission`; here we prove the *consumers* converge:
-//! - a **partial** `sync` (the `Engine::sync` spelling the watcher/hook/CLI use)
+//! - a **partial** `sync` (the `Pipeline::sync` spelling the watcher/hook/CLI use)
 //!   of a gitignored or nested-`.git`-boundary path creates no nodes for it
 //!   ([FR-SY-11](../../docs/specs/requirements/FR-SY-11.md));
 //! - a still-on-disk file that becomes gitignored is purged on the next
@@ -44,7 +44,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 /// The absolute path of `<root>/<rel>` — the shape the watcher/hook hand to
-/// `Engine::sync` (OS events carry absolute paths).
+/// `Pipeline::sync` (OS events carry absolute paths).
 fn abs(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
 }
@@ -142,7 +142,7 @@ fn write_cross_file_fixture(root: &Path) {
 
 #[test]
 fn partial_sync_of_a_gitignored_or_boundary_path_creates_no_nodes() {
-    // The watcher/hook/CLI spelling is `Engine::sync` (a `SyncScope::Partial`
+    // The watcher/hook/CLI spelling is `Pipeline::sync` (a `SyncScope::Partial`
     // batch). Before CR-054 it applied only `admits_file` — extension/doc/config —
     // so a `.rs` file under a gitignored dir or a nested-`.git` boundary was
     // (re-)extracted, the exact leak that inflated the live `serve --ui` graph.
@@ -165,7 +165,7 @@ fn partial_sync_of_a_gitignored_or_boundary_path_creates_no_nodes() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // The index (full walk) already excluded the scratch — a precondition, not the
     // thing under test.
@@ -178,7 +178,7 @@ fn partial_sync_of_a_gitignored_or_boundary_path_creates_no_nodes() {
     // admitted file as a positive control) — the watcher's behaviour when those
     // files change. The unadmitted ones must create no nodes; the control must.
     write(root, "src/added.rs", "pub fn added() {}\n");
-    engine.sync(&[
+    engine.pipeline().sync(&[
         abs(root, "generated/derived.rs"),
         abs(root, "secret.rs"),
         abs(root, "nested_repo/copy.rs"),
@@ -218,12 +218,12 @@ fn partial_sync_of_a_nested_ignored_path_creates_no_nodes() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(!has_nodes_for_file(rt, "web/e2e/.harness-dist/bundle.rs"), "index excludes it");
 
     write(root, "web/e2e/.harness-dist/bundle.rs", "pub fn bundled_again() {}\n");
     write(root, "web/app.rs", "pub fn app() {}\n");
-    engine.sync(&[abs(root, "web/e2e/.harness-dist/bundle.rs"), abs(root, "web/app.rs")]);
+    engine.pipeline().sync(&[abs(root, "web/e2e/.harness-dist/bundle.rs"), abs(root, "web/app.rs")]);
 
     assert!(has_nodes_for_file(rt, "web/app.rs"), "the admitted sibling is indexed");
     assert!(
@@ -246,13 +246,13 @@ fn partial_sync_of_a_new_nested_rule_removes_the_stored_file_it_excludes() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed before the rule");
     assert!(!has_unresolved_target(rt, "run"), "the cross-file call is resolved first");
 
     // The rule names `util.rs` — the near miss `other/util.rs` is outside `src/`.
     write(root, "src/.gitignore", "util.rs\n");
-    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+    let result = engine.pipeline().sync(&[abs(root, "src/.gitignore")]);
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -267,7 +267,7 @@ fn partial_sync_of_a_new_nested_rule_removes_the_stored_file_it_excludes() {
     // The re-gate is keyed on the batch naming an ignore file: a root rule that
     // excludes `other/`, written but not in the batch, reaches nothing yet.
     write(root, ".gitignore", "other/\n");
-    let unrelated = engine.sync(&[abs(root, "src/sibling.rs")]);
+    let unrelated = engine.pipeline().sync(&[abs(root, "src/sibling.rs")]);
     assert!(
         has_nodes_for_file(rt, "other/util.rs"),
         "a batch naming no ignore file re-gates nothing outside itself: {unrelated:?}"
@@ -289,11 +289,11 @@ fn partial_sync_of_a_deleted_negation_file_removes_the_file_it_re_excluded() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "a/x.rs"), "the negation re-includes a/x.rs at index");
 
     fs::remove_file(root.join("a/.ignore")).expect("delete the negation file");
-    let result = engine.sync(&[abs(root, "a/.ignore")]);
+    let result = engine.pipeline().sync(&[abs(root, "a/.ignore")]);
     assert!(
         !has_nodes_for_file(rt, "a/x.rs"),
         "deleting the negation excludes a/x.rs on this batch: {result:?}"
@@ -314,11 +314,11 @@ fn the_ignore_file_re_gate_never_purges_an_unnamed_file_gone_from_disk() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     fs::remove_file(root.join("src/gone.rs")).expect("delete, with no sync naming it");
     write(root, "src/.gitignore", "util.rs\n");
-    let result = engine.sync(&[abs(root, "src/.gitignore")]);
+    let result = engine.pipeline().sync(&[abs(root, "src/.gitignore")]);
 
     assert_eq!(result.files_removed, 1, "only the newly ignored file: {result:?}");
     assert!(!has_nodes_for_file(rt, "src/util.rs"));
@@ -337,10 +337,10 @@ fn a_batch_with_a_new_rule_and_the_file_it_excludes_removes_it_once() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     write(root, "src/.gitignore", "util.rs\n");
-    let result = engine.sync(&[abs(root, "src/.gitignore"), abs(root, "src/util.rs")]);
+    let result = engine.pipeline().sync(&[abs(root, "src/.gitignore"), abs(root, "src/util.rs")]);
 
     assert!(!has_nodes_for_file(rt, "src/util.rs"));
     assert_eq!(result.files_removed, 1, "one excluded file, one removal: {result:?}");
@@ -362,7 +362,7 @@ fn full_walk_reconcile_purges_a_now_gitignored_on_disk_file_and_rebinds_edges() 
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed before gitignoring");
     assert!(
         !has_unresolved_target(rt, "run"),
@@ -371,7 +371,7 @@ fn full_walk_reconcile_purges_a_now_gitignored_on_disk_file_and_rebinds_edges() 
 
     // Gitignore the callee — but leave it ON DISK (no delete, no config change).
     write(root, ".gitignore", "src/util.rs\n");
-    engine.scan(true).expect("scan reconciles (full walk)");
+    engine.quality().scan(true).expect("scan reconciles (full walk)");
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -403,13 +403,13 @@ fn partial_sync_of_a_deleted_source_file_purges_it_and_rebinds_edges() {
 
     let engine = Engine::start(root).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs indexed before deletion");
     assert!(!has_unresolved_target(rt, "run"), "the cross-file call is resolved before deletion");
 
     // Delete the callee from disk, then drive a PARTIAL sync naming exactly it.
     fs::remove_file(root.join("src/util.rs")).expect("remove util.rs");
-    engine.sync(&[abs(root, "src/util.rs")]);
+    engine.pipeline().sync(&[abs(root, "src/util.rs")]);
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -454,7 +454,7 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
     coordinate::pin(root_a);
     let engine_a = Engine::start(root_a).expect("engine A starts");
     let rt_a = engine_a.runtime().expect("runtime A");
-    engine_a.index();
+    engine_a.pipeline().index();
 
     // The rest of the tree appears (as it would during live editing) and the
     // watcher-style partial sync names every new path, scratch included.
@@ -464,13 +464,13 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
     write(root_a, ".worktrees/wt/copy.rs", "pub fn worktree_copy() {}\n");
     write(root_a, "nested_repo/.git", "gitdir: /elsewhere\n");
     write(root_a, "nested_repo/copy.rs", "pub fn nested_copy() {}\n");
-    engine_a.sync(&[
+    engine_a.pipeline().sync(&[
         abs(root_a, "generated/derived.rs"),
         abs(root_a, ".worktrees/wt/copy.rs"),
         abs(root_a, "nested_repo/copy.rs"),
     ]);
     // The full-walk reconcile is the load-bearing convergence step.
-    engine_a.scan(true).expect("scan reconciles A");
+    engine_a.quality().scan(true).expect("scan reconciles A");
     let graph_a = canonical_graph(rt_a);
 
     // Path B — fresh index of the identical final tree.
@@ -480,7 +480,7 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
     coordinate::pin(root_b);
     let engine_b = Engine::start(root_b).expect("engine B starts");
     let rt_b = engine_b.runtime().expect("runtime B");
-    engine_b.index();
+    engine_b.pipeline().index();
     let graph_b = canonical_graph(rt_b);
 
     // No scratch leaked into the incremental graph.
@@ -495,7 +495,7 @@ fn incremental_sync_converges_byte_identically_with_a_fresh_index() {
         graph_a, graph_b,
         "incremental sync/scan must converge byte-identically to a fresh index (NFR-RA-06)"
     );
-    let report = engine_a.verify().expect("verify runs");
+    let report = engine_a.quality().verify().expect("verify runs");
     assert!(
         report.ok,
         "verify must report ok — the live graph matches a fresh reindex: {report:?}"

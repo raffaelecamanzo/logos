@@ -149,7 +149,7 @@ fn narrowing_a_code_exclude_purges_now_unadmitted_nodes_on_reconcile() {
 
     // Index under the default (wide) config: util.rs is admitted and the
     // cross-file call binds.
-    let idx = engine.index();
+    let idx = engine.pipeline().index();
     assert_eq!(idx.files_indexed, 2, "both source files indexed");
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed");
     assert_eq!(
@@ -159,7 +159,7 @@ fn narrowing_a_code_exclude_purges_now_unadmitted_nodes_on_reconcile() {
 
     // Narrow the config: exclude util.rs, then run a reconciling command.
     write_config(tmp.path(), "exclude = [\"src/util.rs\"]\n");
-    engine.scan(true).expect("scan reconciles");
+    engine.quality().scan(true).expect("scan reconciles");
 
     // util.rs's nodes/edges are gone…
     assert!(
@@ -204,7 +204,7 @@ fn a_languages_allowlist_gates_code_admission_and_narrowing_purges_a_dropped_lan
 
     // Default config (no `languages` key): both code files are admitted — an empty
     // allowlist means "every compiled-in code grammar".
-    engine.index();
+    engine.pipeline().index();
     assert!(
         has_nodes_for_file(rt, "src/lib.rs"),
         "rust is admitted under the empty (all) default"
@@ -217,7 +217,7 @@ fn a_languages_allowlist_gates_code_admission_and_narrowing_purges_a_dropped_lan
     // Narrow to a rust-only allowlist, then reconcile: python is no longer admitted,
     // so its nodes are purged.
     write_config(tmp.path(), "languages = [\"rust\"]\n");
-    engine.scan(true).expect("scan reconciles");
+    engine.quality().scan(true).expect("scan reconciles");
     assert!(
         has_nodes_for_file(rt, "src/lib.rs"),
         "rust stays admitted by the allowlist"
@@ -239,9 +239,9 @@ fn reconciled_graph_is_byte_identical_to_a_fresh_index_under_the_new_config() {
     write_cross_file_fixture(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine A starts");
     let rt_a = engine_a.runtime().expect("runtime A");
-    engine_a.index();
+    engine_a.pipeline().index();
     write_config(tmp_a.path(), narrow);
-    engine_a.scan(true).expect("scan reconciles A");
+    engine_a.quality().scan(true).expect("scan reconciles A");
     let graph_a = canonical_graph(rt_a);
 
     // Path B: fresh index under the narrow config from the start.
@@ -250,7 +250,7 @@ fn reconciled_graph_is_byte_identical_to_a_fresh_index_under_the_new_config() {
     write_config(tmp_b.path(), narrow);
     let engine_b = Engine::start(tmp_b.path()).expect("engine B starts");
     let rt_b = engine_b.runtime().expect("runtime B");
-    engine_b.index();
+    engine_b.pipeline().index();
     let graph_b = canonical_graph(rt_b);
 
     assert_eq!(
@@ -268,12 +268,12 @@ fn re_index_over_an_existing_db_purges_now_unadmitted_nodes() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"));
 
     // Narrow, then re-index (not sync/reconcile) over the existing DB.
     write_config(tmp.path(), "exclude = [\"src/util.rs\"]\n");
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -298,12 +298,12 @@ fn re_index_reconciles_a_file_deleted_from_disk_without_a_config_change() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "the file is indexed first");
 
     // Delete the file on disk (no config change), then re-index (not sync/reconcile).
     fs::remove_file(tmp.path().join("src/util.rs")).expect("remove file");
-    engine.index();
+    engine.pipeline().index();
 
     assert!(
         !has_nodes_for_file(rt, "src/util.rs"),
@@ -320,7 +320,7 @@ fn unchanged_config_does_no_purge_and_no_node_churn() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     let before = canonical_graph(rt);
     let alpha_id = rt
@@ -334,8 +334,8 @@ fn unchanged_config_does_no_purge_and_no_node_churn() {
         .expect("alpha exists");
 
     // Reconcile twice with no config change.
-    engine.scan(true).expect("first scan");
-    engine.scan(true).expect("second scan");
+    engine.quality().scan(true).expect("first scan");
+    engine.quality().scan(true).expect("second scan");
 
     let after = canonical_graph(rt);
     assert_eq!(before, after, "an unchanged config must not churn the graph");
@@ -367,11 +367,11 @@ fn the_purge_runs_at_most_once_per_config_change() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // Narrow + reconcile: the purge fires once.
     write_config(tmp.path(), "exclude = [\"src/util.rs\"]\n");
-    engine.scan(true).expect("first (narrowing) scan");
+    engine.quality().scan(true).expect("first (narrowing) scan");
     assert!(!has_nodes_for_file(rt, "src/util.rs"), "util purged on the first narrowing scan");
 
     // The surviving caller's identity, and the whole graph, after the purge.
@@ -388,7 +388,7 @@ fn the_purge_runs_at_most_once_per_config_change() {
 
     // A second scan under the unchanged (still-narrowed) config: fingerprint now
     // matches, so no purge re-runs and nothing churns.
-    engine.scan(true).expect("second scan, config unchanged");
+    engine.quality().scan(true).expect("second scan, config unchanged");
 
     assert_eq!(
         graph_after_purge,
@@ -424,14 +424,14 @@ fn direct_sync_purges_a_now_unadmitted_stored_file() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // Only assert the purge behaviour if the artifact layer actually indexed the
     // YAML (depends on which artifact grammars this build embeds); otherwise the
     // toggle case is vacuous here and covered by the exclude-based tests above.
     if has_nodes_for_file(rt, "deploy.yaml") {
         write_config(tmp.path(), "[config_artifacts]\nenabled = false\n");
-        let result = engine.sync(&[PathBuf::from("deploy.yaml")]);
+        let result = engine.pipeline().sync(&[PathBuf::from("deploy.yaml")]);
         assert_eq!(
             result.files_removed, 1,
             "a stored, on-disk, now-unadmitted file is removed on a direct sync"
@@ -461,16 +461,16 @@ fn disabling_documentation_purges_doc_nodes_but_keeps_the_signal_byte_identical(
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(
         has_nodes_for_file(rt, "README.md"),
         "the doc file is indexed under the default (docs-on) config"
     );
-    let signal_with_docs = engine.scan(true).expect("scan with docs").signal;
+    let signal_with_docs = engine.quality().scan(true).expect("scan with docs").signal;
 
     // Disable documentation, then reconcile.
     write_config(tmp.path(), "[documentation]\nenabled = false\n");
-    let signal_without_docs = engine.scan(true).expect("scan after disabling docs").signal;
+    let signal_without_docs = engine.quality().scan(true).expect("scan after disabling docs").signal;
 
     assert!(
         !has_nodes_for_file(rt, "README.md"),
@@ -497,11 +497,11 @@ fn direct_sync_removes_a_now_unadmitted_doc_file() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "README.md"), "the doc file is indexed");
 
     write_config(tmp.path(), "[documentation]\nenabled = false\n");
-    let result = engine.sync(&[PathBuf::from("README.md")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("README.md")]);
     assert_eq!(
         result.files_removed, 1,
         "a stored, on-disk, now-unadmitted doc is removed on a direct sync (not skipped)"

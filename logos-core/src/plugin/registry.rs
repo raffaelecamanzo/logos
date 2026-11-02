@@ -277,16 +277,20 @@ impl LanguageRegistry {
         }
     }
 
-    /// The normalised extensions of `plugin` that it reads in this repository
-    /// (S-582): every one it claims, less a shared one the other claimant
-    /// reads. The per-key extension sets and maps below are built from these,
-    /// so a `.h` carries the semantics of the language that parses it.
+    /// The claim keys of `plugin` that it reads in this repository (S-582,
+    /// S-840): every extension it claims, less a shared one the other claimant
+    /// reads, then — for a code plugin — each extension-less basename it claims
+    /// (Ruby's `Gemfile`, as [`claim_key`] spells it). The per-key sets and
+    /// maps below are built from these, so a `.h` carries the semantics of the
+    /// language that parses it and a `Rakefile` those of the `.rake` files
+    /// beside it.
     fn read_extensions<'a>(&'a self, plugin: &'a CompiledPlugin) -> impl Iterator<Item = String> + 'a {
         plugin
             .extensions()
             .iter()
             .map(|e| normalize_ext(e))
             .filter(move |e| self.reader_of(e).is_some_and(|i| std::ptr::eq(&self.plugins[i], plugin)))
+            .chain(claimed_name_keys(plugin))
     }
 
     /// Which shared extensions the repository whose admitted files are
@@ -987,7 +991,7 @@ impl LanguageRegistry {
     /// "`LanguageRegistry` construction"). `load`/`load_from` are untouched, so
     /// this diagnostic path's own cost never lands on the production
     /// cold-start path — used only by
-    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    /// [`ColdStartPhases::measure`](crate::ColdStartPhases::measure).
     ///
     /// # Errors
     /// As [`load`](Self::load).
@@ -1240,22 +1244,80 @@ fn claim_extensions(
     shadowed
 }
 
-/// Whether the file at `file_path` is in a language whose normalised extension
-/// is in `exts` — one of the capability sets the registry builds
+/// Whether the file at `file_path` is in a language whose claim key
+/// ([`claim_key`]: its normalised extension, or its exact claimed basename) is
+/// in `exts` — one of the capability sets the registry builds
 /// ([`LanguageRegistry::reachability_extensions`],
 /// [`LanguageRegistry::member_access_extensions`]). The one membership test
 /// every capability gate reads ([ADR-39]): a node with no file path, or a file
-/// with no extension, is **not** in the set, so an unidentifiable language never
+/// with neither a claimed extension nor a claimed name (`Gemfile.lock`, a bare
+/// `LICENSE`), is **not** in the set, so an unidentifiable language never
 /// earns a capability it cannot be shown to declare ([NFR-CC-04]).
 ///
 /// [ADR-39]: ../../../docs/specs/architecture/decisions/ADR-39.md
 /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
 pub(crate) fn declares_by_extension(file_path: Option<&str>, exts: &HashSet<String>) -> bool {
-    file_path
-        .and_then(|p| Path::new(p).extension())
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|ext| exts.contains(&ext))
+    file_path.and_then(claim_key).is_some_and(|key| exts.contains(&key))
+}
+
+/// The prefix of a claim key that names a file rather than an extension: no
+/// extension is spelled with a `/`, so `"/Gemfile"` can never be one.
+const NAME_CLAIM_PREFIX: char = '/';
+
+/// The claim key of an extension-less basename a code plugin claims by its
+/// exact name (S-564, S-840): `Gemfile` → `/Gemfile`. Case is kept, as
+/// [`LanguageRegistry::for_path`] matches the name exactly.
+fn name_claim_key(name: &str) -> String {
+    format!("{NAME_CLAIM_PREFIX}{name}")
+}
+
+/// The extension-less basenames `plugin` claims by exact name (S-564, S-840)
+/// — none for a documentation or artifact plugin, whose claim also takes the
+/// `Name.*` variants (`Dockerfile.dev`) and is read through `for_path`, never
+/// as a language key. A claim that carries an extension is keyed by it.
+pub(crate) fn claimed_file_names(plugin: &dyn LanguagePlugin) -> impl Iterator<Item = &str> + '_ {
+    let code = !plugin.is_documentation() && !plugin.is_artifact();
+    plugin
+        .filenames()
+        .iter()
+        .map(String::as_str)
+        .filter(move |n| code && Path::new(n).extension().is_none())
+}
+
+/// The [`name_claim_key`] of each name in [`claimed_file_names`].
+pub(crate) fn claimed_name_keys(plugin: &dyn LanguagePlugin) -> impl Iterator<Item = String> + '_ {
+    claimed_file_names(plugin).map(name_claim_key)
+}
+
+/// A claim key as every set and map keyed on one spells it: an extension
+/// without its leading dot and lower-cased, a [`name_claim_key`] unchanged
+/// (a name is matched exactly, case included).
+pub(crate) fn normalize_claim_key(key: &str) -> String {
+    if is_name_claim_key(key) {
+        key.to_string()
+    } else {
+        normalize_ext(key)
+    }
+}
+
+/// Whether `key` is a [`name_claim_key`] and not an extension.
+pub(crate) fn is_name_claim_key(key: &str) -> bool {
+    key.starts_with(NAME_CLAIM_PREFIX)
+}
+
+/// The key a file's language claim is filed under in every per-language set and
+/// map the registry builds (S-840): its lower-cased extension, else — for a
+/// file with none — its basename as [`name_claim_key`] spells it. The one
+/// spelling of what [`LanguageRegistry::for_path`] decides, for a lookup that
+/// holds a set of keys and no registry: a `Rakefile` and a `tasks/x.rake` both
+/// find Ruby's entry, a `Gemfile.lock` (extension `lock`) finds none. `None`
+/// for a path with no file name.
+pub(crate) fn claim_key(path: &str) -> Option<String> {
+    let path = Path::new(path);
+    match path.extension() {
+        Some(ext) => Some(ext.to_str()?.to_ascii_lowercase()),
+        None => Some(name_claim_key(path.file_name()?.to_str()?)),
+    }
 }
 
 /// The file extensions (normalised as in [`declares_by_extension`]) whose code
@@ -1777,7 +1839,8 @@ mod tests {
         }
         let ruby = cfg!(feature = "lang-ruby");
         if ruby {
-            want.extend(["gemspec", "rake", "rb", "ru"]);
+            // Its extensions, and the two names it claims (S-840).
+            want.extend(["gemspec", "rake", "rb", "ru", "/Gemfile", "/Rakefile"]);
         }
         want.sort_unstable();
         assert_eq!(exts, want);
@@ -1793,6 +1856,14 @@ mod tests {
             (Some("hc/api/models.py"), true),
             (Some("src/werkzeug/datastructures/structures.pyi"), false),
             (Some("lib/model.rb"), ruby),
+            // A build file claimed by name reads as an extension-claimed one;
+            // `Gemfile.lock` (extension `lock`) and a near miss are no Ruby.
+            (Some("Gemfile"), ruby),
+            (Some("sub/Rakefile"), ruby),
+            (Some("tasks/x.rake"), ruby),
+            (Some("Gemfile.lock"), false),
+            (Some("gemfile"), false),
+            (Some("Rakefileish"), false),
             (Some("src/widget.cpp"), cpp),
             (Some("include/widget.hpp"), cpp),
             (Some("src/lib.rs"), false),
@@ -1885,7 +1956,10 @@ mod tests {
         let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
         let exts = reg.load_path_extensions();
         #[cfg(feature = "lang-ruby")]
-        assert_eq!(exts, ["rb", "rake", "ru", "gemspec"].map(String::from).into_iter().collect::<HashSet<_>>());
+        assert_eq!(
+            exts,
+            ["rb", "rake", "ru", "gemspec", "/Gemfile", "/Rakefile"].map(String::from).into_iter().collect::<HashSet<_>>()
+        );
         for ext in ["go", "rs", "py", "java", "kt", "cs", "php", "scala", "ts", "js"] {
             assert!(!exts.contains(ext), "`{ext}` does not");
         }
@@ -2248,6 +2322,36 @@ mod tests {
             assert!(reg.for_path(path).is_none_or(|p| p.name() != "ruby"), "{path}");
         }
         assert_eq!(reg.for_path("Dockerfile.dev").map(|p| p.name()), Some("dockerfile"));
+    }
+
+    /// The claim key is `for_path`'s decision spelt as a key (S-840): the
+    /// extension, else the exact claimed name — for every path, the keys a
+    /// plugin's sets are filed under are the keys its files look up.
+    #[cfg(all(feature = "lang-ruby", feature = "lang-dockerfile"))]
+    #[test]
+    fn a_claim_key_finds_the_set_entry_for_path_decides() {
+        assert_eq!(claim_key("tasks/X.RAKE").as_deref(), Some("rake"));
+        assert_eq!(claim_key("Gemfile").as_deref(), Some("/Gemfile"));
+        assert_eq!(claim_key("a/b/Rakefile").as_deref(), Some("/Rakefile"));
+        assert_eq!(claim_key("Gemfile.lock").as_deref(), Some("lock"));
+        // A name is not an extension: a file called `rb`, or `.rb`, has no
+        // extension of its own.
+        assert_eq!(claim_key("rb").as_deref(), Some("/rb"));
+        assert_eq!(claim_key(".rb").as_deref(), Some("/.rb"));
+        assert_eq!(claim_key(""), None);
+        assert_eq!(normalize_claim_key("/Gemfile"), "/Gemfile", "a name keeps its case");
+        assert_eq!(normalize_claim_key(".RB"), "rb");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let reg = LanguageRegistry::load(tmp.path()).expect("embedded grammars load");
+        let ruby = reg.load_path_extensions();
+        for path in ["Gemfile", "sub/Rakefile", "tasks/x.rake", "config.ru", "lib/a.rb", "x.gemspec"] {
+            assert!(reg.for_path(path).is_some_and(|p| p.name() == "ruby"), "{path}");
+            assert!(claim_key(path).is_some_and(|k| ruby.contains(&k)), "{path} is filed under a Ruby key");
+        }
+        for path in ["Gemfile.lock", "Gemfile.dev", "gemfile", "Rakefileish", "rb", "Dockerfile", "Dockerfile.dev"] {
+            assert!(!claim_key(path).is_some_and(|k| ruby.contains(&k)), "{path} is no Ruby key");
+        }
     }
 
     #[test]

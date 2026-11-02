@@ -90,8 +90,8 @@ fn indexed_member(root: &Path, name: &str) -> Member {
     std::fs::create_dir_all(repo.join("src")).expect("src dir");
     std::fs::write(repo.join("src").join("lib.rs"), source(name)).expect("fixture source");
     let engine = Engine::start(&repo).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     Member {
         name: name.to_string(),
         root: repo,
@@ -218,9 +218,9 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
         format!("{}pub fn alpha_added() -> u32 {{ 3 }}\n", source(MEMBERS[0])),
     )
     .expect("append a symbol");
-    engines[0].index();
+    engines[0].pipeline().index();
     let after_index =
-        serde_json::to_string(&engines[0].search("alpha_added", None, None)).expect("json");
+        serde_json::to_string(&engines[0].navigation().search("alpha_added", None, None)).expect("json");
     assert!(
         after_index.contains("alpha_added"),
         "extraction on the shared worker pool did not produce the new symbol: \
@@ -269,7 +269,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
             scope.spawn(move || {
                 let started = Instant::now();
                 let answer =
-                    serde_json::to_string(&engine.search("entry", None, None)).expect("json");
+                    serde_json::to_string(&engine.navigation().search("entry", None, None)).expect("json");
                 let _ = query_tx.send((member, answer, started.elapsed().as_millis()));
             });
         }
@@ -335,7 +335,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
     job.join().expect("the job thread joins");
 
     // ── 3. eviction and reconstruction rejoin the same pool ──────────────
-    let baseline = serde_json::to_string(&engines[0].search("entry", None, None)).expect("json");
+    let baseline = serde_json::to_string(&engines[0].navigation().search("entry", None, None)).expect("json");
     drop(engines); // release the callers' Arcs so LRU may evict
     let before = registry.reconstructions();
     registry.evict_to_capacity(1);
@@ -365,7 +365,7 @@ fn resident_member_engines_share_one_bounded_worker_pool() {
         "the thread count moved when a member was rebuilt"
     );
     assert_eq!(
-        serde_json::to_string(&rebuilt.search("entry", None, None)).expect("json"),
+        serde_json::to_string(&rebuilt.navigation().search("entry", None, None)).expect("json"),
         baseline,
         "the reconstructed engine answered differently on the shared pool"
     );

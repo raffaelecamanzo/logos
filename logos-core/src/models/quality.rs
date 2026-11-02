@@ -27,13 +27,13 @@ use crate::models::pipeline::{PersistenceHealth, RelationCoverage};
 /// - `signal` / `baseline_signal` are computed **fresh** on every readout (the
 ///   deterministic `compute` half of the snapshot path, minus the write).
 /// - `violations` are read from the **persisted** table — the last
-///   [`check_rules`](crate::Engine::check_rules) run's findings. Re-evaluating
+///   [`check_rules`](crate::Quality::check_rules) run's findings. Re-evaluating
 ///   them cannot be done read-only: [FR-GV-02]'s evaluator re-materialises the
 ///   whole derived policy graph on every run (BR-12), which is a write. So the
 ///   readout reports what was last recorded rather than paying a write to look
 ///   current, and the rendering says "last recorded" rather than implying live.
 ///   Since [CR-096] the staleness is **quantified** rather than merely
-///   labelled: [`check`](crate::Engine::check_rules) records a run marker
+///   labelled: [`check`](crate::Quality::check_rules) records a run marker
 ///   ([FR-GV-21]) the readout dates its findings from. Its presence is
 ///   *necessary* to state a *recorded* clean check ([BR-41]) and, since
 ///   [CR-140], no longer sufficient: the marker must also record a **non-empty
@@ -135,7 +135,7 @@ pub struct QualityReadout {
     ///
     /// [CR-096]: ../../../docs/requests/CR-096-recorded-check-marker.md
     pub violation_count: Option<usize>,
-    /// What is known about the [`check`](crate::Engine::check_rules) run those
+    /// What is known about the [`check`](crate::Quality::check_rules) run those
     /// violations came from ([CR-096]); `None` = **no run is known of at all**,
     /// which is what licenses the rendering to say "no rule check has run".
     ///
@@ -486,7 +486,7 @@ impl SignalAbsence {
     }
 }
 
-/// What the readout knows about the [`check`](crate::Engine::check_rules) run
+/// What the readout knows about the [`check`](crate::Quality::check_rules) run
 /// its violations came from ([CR-096], [FR-GV-21]).
 ///
 /// Two things can produce one of these, and they are **not** equally
@@ -634,7 +634,7 @@ pub struct CheckRun {
 /// [FR-IN-07]'s appended criterion is that the rendered line **names no
 /// command**, and the reason is recorded here rather than only at the
 /// rendering: the marker is written by `replace_violations`, which both
-/// [`check_rules`](crate::Engine::check_rules) and [`scan`](crate::Engine::scan)
+/// [`check_rules`](crate::Quality::check_rules) and [`scan`](crate::Quality::scan)
 /// call, so any command name in the sentence is an attribution the record
 /// cannot support. [`NoContract`](Self::NoContract) is the one arm with an
 /// obvious remediation, and it does not name it either — for the reason
@@ -2498,7 +2498,8 @@ pub struct MetricSnapshot {
     pub focus: Option<MetricValue>,
     /// How many production methods recording a self type (a Rust `impl`
     /// method, a Go receiver method) Focus could not count toward a struct
-    /// ([FR-QM-12], [CR-166], metric semantics v9): the figure and its
+    /// ([FR-QM-12], [CR-166], metric semantics v9), and how many it set aside
+    /// as a Rust trait impl's (metric semantics v10): the figures and their
     /// denominator. `None` when no method records a self type, and on a
     /// snapshot read back from the store, whose row does not record it.
     ///
@@ -2623,19 +2624,29 @@ impl GraphDimensionNotApplicable {
 }
 
 /// What Focus's method attribution could not place ([FR-QM-12], [CR-166],
-/// metric semantics v9): of the production methods that record the type they
-/// belong to (a Rust `impl` method, a Go receiver method), those that name no
-/// one `Struct` of their own crate or package — a type alias, an enum, a type
-/// from elsewhere, or a name two structs of that crate/package share. Such a
-/// method counts toward no container; the figure says how many, against how
-/// many were considered, so a reader can weigh the Focus value it qualifies.
+/// metric semantics v9) and what it set aside (metric semantics v10): of the
+/// production methods that record the type they belong to (a Rust `impl`
+/// method, a Go receiver method), those of a Rust trait impl, and of the rest
+/// those that name no one `Struct` of their own crate or package — a type
+/// alias, an enum, a type from elsewhere, or a name two structs of that
+/// crate/package share. Either way the method counts toward no container; the
+/// figures say how many, against how many were considered, so a reader can
+/// weigh the Focus value they qualify.
 ///
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
 /// [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct MethodAttribution {
-    /// Methods that reached no struct.
+    /// Methods that reached no struct, trait impls' aside.
     pub unattributed: u64,
+    /// Methods set aside because they implement a trait: a method of a Rust
+    /// `impl Trait for Type` (its innermost block's trait recorded, [FR-EX-34])
+    /// is the trait's contract, not the type's surface, so it counts toward no
+    /// container and is not `unattributed` ([CR-257], metric semantics v10).
+    ///
+    /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
+    /// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+    pub trait_impl: u64,
     /// Production methods that record a self type — the denominator.
     pub denominator: u64,
 }
@@ -2704,8 +2715,8 @@ pub struct GateResult {
     pub saved: bool,
     /// The 0–10000 signal this verdict gated on; `None` = "n/a", reported as such
     /// and never as a zero (ADR-12). **Which absence it means depends on who built
-    /// the result**: [`gate`](crate::Engine::gate) computes it fresh, so `None` is
-    /// an empty production graph. [`latest_gate`](crate::Engine::latest_gate) reads
+    /// the result**: [`gate`](crate::Quality::gate) computes it fresh, so `None` is
+    /// an empty production graph. [`latest_gate`](crate::Readouts::latest_gate) reads
     /// the last *persisted* snapshot, where `None` has **two** causes it does not
     /// distinguish — no snapshot has been recorded at all (no `scan` has run, the far
     /// commoner case on a freshly indexed project), or a snapshot exists whose

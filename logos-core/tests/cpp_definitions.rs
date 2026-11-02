@@ -82,7 +82,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -580,6 +580,45 @@ int scale(int n) {
     assert!(!facts.edges.iter().any(|e| e.kind == EdgeKind::References));
 }
 
+/// Every callable records its parameter shape next to its symbol (S-820,
+/// [CR-254] P1) — prototypes and bodied definitions alike, an out-of-line
+/// member whose class another file declares included: the types alone, names
+/// (those a function type's own parameters carry too), defaults and a
+/// top-level `const` dropped, words one space apart, then the declarator's
+/// qualifiers. A declaration that is no callable records none.
+///
+/// [CR-254]: ../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+#[test]
+fn every_callable_records_its_parameter_shape() {
+    let facts = facts_for(
+        "src/shapes.cpp",
+        "\
+int scale(double d, int n = 2);
+int scale(const int n) {
+  return n;
+}
+void Remote::run(const char* name) const {}
+void none(void);
+void each(std::function<void(int item, const char* why)> visit, unsigned  long n);
+struct S { int x; };
+",
+    );
+    let shapes = |name: &str| -> Vec<Option<&str>> {
+        named(&facts, name).iter().map(|n| n.callable_signature.as_deref()).collect()
+    };
+    let mut scale = shapes("scale");
+    scale.sort();
+    assert_eq!(scale, [Some("double,int,"), Some("int,")]);
+    assert_eq!(shapes("run"), [Some("const char*,const")], "a member of a class another file declares");
+    assert_eq!(shapes("none"), [Some("")], "`(void)` declares what `()` does");
+    assert_eq!(
+        shapes("each"),
+        [Some("std::function<void(int,const char*)>,unsigned long,")],
+        "a function type's parameter names are no part of it"
+    );
+    assert_eq!(shapes("S"), [None], "a type records none");
+}
+
 #[test]
 fn a_call_binds_the_definition_and_a_lookup_lands_on_it() {
     let tmp = tree(&[("src/main.cpp", PAIRED)]);
@@ -591,13 +630,13 @@ fn a_call_binds_the_definition_and_a_lookup_lands_on_it() {
         call_edges(rt)
     );
 
-    let node = engine.node("compile", false);
+    let node = engine.navigation().node("compile", false);
     assert_eq!(
         node.node.expect("compile resolves").symbol.line,
         Some(12),
         "a bare-name lookup lands on the definition"
     );
-    let callees = engine.callees("compile", None);
+    let callees = engine.navigation().callees("compile", None);
     let names: Vec<&str> = callees.callees.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, ["helper"], "callees of the definition, not of the prototype");
 }
@@ -616,7 +655,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         write(tmp_a.path(), rel, text);
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let mut final_state: std::collections::BTreeMap<&str, &str> = initial.iter().copied().collect();
     final_state.extend(edits.iter().copied());

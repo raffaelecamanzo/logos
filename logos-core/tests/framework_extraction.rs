@@ -1,6 +1,6 @@
 //! Integration tests for the framework-promotion pass (S-012 / FR-FW-01..04,
 //! NFR-RA-05, NFR-PE-02), exercised end-to-end through
-//! [`Engine::index`]/[`Engine::sync`] against real temp-directory fixtures.
+//! [`Pipeline::index`](crate::Pipeline::index)/[`Pipeline::sync`](crate::Pipeline::sync) against real temp-directory fixtures.
 //!
 //! Coverage by acceptance criterion:
 //! - Axum and Actix route registrations yield `route` nodes linked to their
@@ -98,7 +98,7 @@ async fn health() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The minimal Axum router with two registrations (sprint Testing &
     // Verification): every (method, path) pair becomes a route node…
@@ -169,7 +169,7 @@ async fn index() -> &'static str { \"hi\" }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     let mut names: Vec<String> = nodes_of(rt, NodeKind::Route)
         .into_iter()
@@ -215,7 +215,7 @@ pub fn route(s: &str) -> String { s.replace(\"/a\", \"/b\") }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert!(
         nodes_of(rt, NodeKind::Route).is_empty(),
@@ -256,7 +256,7 @@ async fn home(State(state): State<AppState>) {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The wired shared-state type is the Rust face of a framework component.
     let components = nodes_of(rt, NodeKind::Component);
@@ -294,7 +294,7 @@ async fn home(State(state): State<ExternalState>) {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert!(nodes_of(rt, NodeKind::Component).is_empty());
 }
@@ -319,7 +319,7 @@ fn app() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The registration itself is real — the route node is honest data…
     assert_eq!(result.framework.routes, 1);
@@ -349,7 +349,7 @@ async fn drop_me() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert_eq!(first.framework.routes, 2);
     let keep_before = node_id(rt, "GET /keep", NodeKind::Route);
 
@@ -367,7 +367,7 @@ fn app() {
 async fn keep() {}
 ",
     );
-    let synced = engine.sync(&[PathBuf::from("src/main.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/main.rs")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(synced.framework.routes, 1);
 
@@ -406,7 +406,7 @@ async fn handler() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     let before = node_id(rt, "GET /stable", NodeKind::Route);
 
     write(
@@ -414,7 +414,7 @@ async fn handler() {}
         "src/other.rs",
         "pub fn unrelated_changed() {}\n",
     );
-    let synced = engine.sync(&[PathBuf::from("src/other.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/other.rs")]);
     assert_eq!(synced.framework.routes, 1);
 
     let after = node_id(rt, "GET /stable", NodeKind::Route);
@@ -444,11 +444,11 @@ async fn handler() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert_eq!(first.framework.routes, 1);
 
     fs::remove_file(tmp.path().join("src/main.rs")).unwrap();
-    let synced = engine.sync(&[PathBuf::from("src/main.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/main.rs")]);
     assert_eq!(synced.files_removed, 1);
     assert_eq!(synced.framework.routes, 0);
     assert!(
@@ -480,7 +480,7 @@ async fn home(State(s): State<AppState>) {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert_eq!(first.framework.components, 1);
 
     // Drop the extractor but keep the route (the file stays a candidate).
@@ -497,7 +497,7 @@ fn app() {
 async fn home() {}
 ",
     );
-    let synced = engine.sync(&[PathBuf::from("src/main.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/main.rs")]);
     assert_eq!(synced.framework.components, 0);
     assert!(
         nodes_of(rt, NodeKind::Component).is_empty(),
@@ -531,7 +531,7 @@ fn app() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let route_before = node_id(rt, "GET /x", NodeKind::Route);
     assert_eq!(
@@ -543,7 +543,7 @@ fn app() {
     // A second glob target with the same name appears; only IT is synced —
     // the router file (and its route node) stays in place.
     write(tmp.path(), "src/b.rs", "pub fn handler() {}\n");
-    let synced = engine.sync(&[PathBuf::from("src/b.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/b.rs")]);
     assert_eq!(synced.framework.routes, 1, "the route itself survives");
 
     let route_after = node_id(rt, "GET /x", NodeKind::Route);
@@ -579,7 +579,7 @@ async fn handler() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.routes, 1);
     let names: Vec<String> = nodes_of(rt, NodeKind::Route)
@@ -619,7 +619,7 @@ pub async fn create(State(s): State<AppState>) {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.components, 1);
     assert_eq!(nodes_of(rt, NodeKind::Component).len(), 1);
@@ -646,7 +646,7 @@ fn app() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let route = node_id(rt, "GET /list", NodeKind::Route);
     let handler = node_id(rt, "list", NodeKind::Function);
@@ -690,7 +690,7 @@ fn dogfood_measures_framework_cost_against_the_index_budget() {
     copy_rs_tree(&crate_root, &crate_root.join("src"), tmp.path());
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let plain = engine.index();
+    let plain = engine.pipeline().index();
     println!(
         "dogfood framework (plain): files_indexed={} total_ms={} framework_ms={} scanned={}",
         plain.files_indexed,
@@ -730,7 +730,7 @@ fn dogfood_measures_framework_cost_against_the_index_budget() {
     write(tmp.path(), "src/actix_app.rs", &actix_src);
 
     let engine = Engine::start(tmp.path()).expect("engine restarts");
-    let with_fw = engine.index();
+    let with_fw = engine.pipeline().index();
     println!(
         "dogfood framework (with frameworks): files_indexed={} total_ms={} framework_ms={} scanned={} routes={} components={}",
         with_fw.files_indexed,
@@ -766,12 +766,12 @@ fn framework_cost_is_measured_and_surfaced() {
     write(tmp.path(), "src/lib.rs", "pub fn plain() {}\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The stats struct is always present — the duration is the OQ-07
     // evidence channel and must be bounded by the whole run's duration.
     assert!(result.framework.duration_ms <= result.duration_ms);
 
-    let synced = engine.sync(&[PathBuf::from("src/lib.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     assert!(synced.framework.duration_ms <= synced.duration_ms);
 }

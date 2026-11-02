@@ -181,7 +181,7 @@ async fn clean_store_returns_ok_true_json() {
     let dir = TempDir::new().expect("temp dir");
     write(dir.path(), "src/lib.rs", "pub fn api() { helper(); }\nfn helper() {}\n");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
 
     let intent = IntentToken::generate();
     let router = web::router_with_intent(engine, intent.clone());
@@ -221,7 +221,7 @@ async fn drifted_store_returns_deltas_and_leaked_sample() {
     write(dir.path(), "src/keep.rs", "pub fn keep() {}\n");
     write(dir.path(), "src/gone.rs", "pub fn gone() {}\npub fn also_gone() {}\n");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
 
     // Delete a file on disk WITHOUT a sync: the live store retains its nodes, but a
     // fresh shadow reindex sees only the survivor — the drift `verify` must surface.
@@ -281,8 +281,8 @@ async fn verify_runs_off_the_serve_loop_concurrent_reads_still_served() {
     let dir = TempDir::new().expect("temp dir");
     write(dir.path(), "src/lib.rs", "pub fn api() { helper(); }\nfn helper() {}\n");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
-    engine.scan(false).expect("a scan persists a metric snapshot the read endpoints reflect");
+    engine.pipeline().index();
+    engine.quality().scan(false).expect("a scan persists a metric snapshot the read endpoints reflect");
 
     let intent = IntentToken::generate();
     let router = web::router_with_intent(engine, intent.clone());

@@ -538,6 +538,44 @@ fn the_committed_ignore_file_suppresses_the_rmcp_advisories_from_any_checkout() 
     }
 }
 
+/// The planted `Password` in `scripts/verify-scanner-exclusions.sh` ([S-845]):
+/// Gitleaks reports the script line in the working tree and in the one older
+/// version, both under the same path, so one path entry names both copies and
+/// nothing else.
+///
+/// [S-845]: ../../../../docs/planning/journal.md#s-845-this-repository-suppresses-the-password-its-scanner-exclusion-check-plants
+#[test]
+fn the_committed_ignore_file_suppresses_the_planted_password_in_both_copies() {
+    const SCRIPT: &str = "scripts/verify-scanner-exclusions.sh";
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let committed = IgnoreFile::load(repo).unwrap();
+    let selector = Selector::Path { path: SCRIPT.into(), rule: Some("generic-api-key".into()), scanner: Some("gitleaks".into()) };
+    let entry = committed.entries().iter().find(|e| e.selector == selector).expect("no entry for the planted password");
+    assert!(entry.reason.contains("planted") && entry.reason.contains("G101"), "{}", entry.reason);
+    assert_eq!(entry.expires, None);
+    let mut ignore = IgnoreFile::default();
+    ignore.insert(entry.clone()).unwrap();
+
+    let current = at(SCRIPT, "gitleaks", "generic-api-key");
+    let mut historical = at(SCRIPT, "gitleaks", "generic-api-key");
+    historical.fingerprint = format!("{:064x}", 7);
+    historical.commits = vec!["c56a0b8d2".into()];
+    let findings = [
+        current,
+        historical,
+        // Near misses: another rule, another scanner, another script.
+        at(SCRIPT, "gitleaks", "aws-access-token"),
+        at(SCRIPT, "Trivy", "generic-api-key"),
+        at("scripts/verify-scanner-exclusions.sh.bak", "gitleaks", "generic-api-key"),
+        at("scripts/release-tag-guard.sh", "gitleaks", "generic-api-key"),
+    ];
+    let out = label(&findings, &ignore, Path::new(ROOT), today());
+    let held: Vec<_> = out.findings.iter().map(|f| f.is_suppressed()).collect();
+    assert_eq!(held, [true, true, false, false, false, false]);
+    assert_eq!(out.entries[0].suppressed, 2);
+    assert!(!out.entries[0].orphaned);
+}
+
 /// A finding's location relative to the project, as the checked-in security
 /// baseline records it ([FR-SC-25]): the root taken off an absolute path under
 /// it, a relative one normalised, and none for a path outside it — a sibling

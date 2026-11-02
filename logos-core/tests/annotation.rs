@@ -1,6 +1,6 @@
 //! Integration tests for the annotation engine (S-014 / FR-AN-01..04,
-//! ADR-10 Pass 3), exercised end-to-end through [`Engine::index`] /
-//! [`Engine::sync`] against real temp-directory fixtures: real Rust source,
+//! ADR-10 Pass 3), exercised end-to-end through [`Pipeline::index`](crate::Pipeline::index) /
+//! [`Pipeline::sync`](crate::Pipeline::sync) against real temp-directory fixtures: real Rust source,
 //! real extraction, real resolution, then annotation over the resolved graph.
 //!
 //! Coverage by acceptance criterion:
@@ -62,7 +62,7 @@ pub fn unreferenced_export() {}
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -143,7 +143,7 @@ pub fn distinct(items: &[u32]) -> u32 {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let snap = snapshot(engine.runtime().unwrap());
 
@@ -241,7 +241,7 @@ interface Counted {
         write(tmp.path(), "src/main/java/Fixture.java", &java);
         write(tmp.path(), ".logos/rules.toml", thresholds);
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        let result = engine.index();
+        let result = engine.pipeline().index();
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         let snap = snapshot(engine.runtime().unwrap());
         let overrides: Vec<Option<bool>> = snap
@@ -335,7 +335,7 @@ pub fn compute() {
 fn layered_rules_materialise_policy_nodes_and_flag_the_forbidden_call() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -386,7 +386,7 @@ fn layered_rules_materialise_policy_nodes_and_flag_the_forbidden_call() {
 fn sync_reannotates_without_accumulating_policy_artifacts() {
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
 
     // Touch the domain file (content change) and sync it: Pass 3 re-runs over
@@ -406,7 +406,7 @@ pub fn compute() {
 pub fn extra() {}
 ",
     );
-    let synced = engine.sync(&["src/domain_core.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/domain_core.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(synced.files_modified, 1);
 
@@ -451,7 +451,7 @@ fn forbidden_flag_does_not_survive_rule_removal_after_target_file_sync() {
     // clear_derived could never remove — a governance flag outliving its rule.
     let tmp = layered_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert!(first.warnings.is_empty(), "{:?}", first.warnings);
     assert!(first.annotation.forbidden_edges >= 1, "violation flagged");
 
@@ -463,7 +463,7 @@ fn forbidden_flag_does_not_survive_rule_removal_after_target_file_sync() {
         "src/ui_view.rs",
         "pub fn render() {}\n\npub fn helper() {}\n",
     );
-    let synced = engine.sync(&["src/ui_view.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/ui_view.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert!(
         synced.annotation.forbidden_edges >= 1,
@@ -474,7 +474,7 @@ fn forbidden_flag_does_not_survive_rule_removal_after_target_file_sync() {
     // must vanish on the next pass — no zombie edge resurrected from the
     // capture ledger.
     fs::remove_file(tmp.path().join(".logos/rules.toml")).unwrap();
-    let after = engine.sync(&["src/ui_view.rs".into()]);
+    let after = engine.pipeline().sync(&["src/ui_view.rs".into()]);
     assert!(after.warnings.is_empty(), "{:?}", after.warnings);
     assert_eq!(after.annotation.forbidden_edges, 0);
 
@@ -509,7 +509,7 @@ pub fn compute() {
 pub fn extra_two() {}
 ",
     );
-    let resurrection_round = engine.sync(&["src/domain_core.rs".into()]);
+    let resurrection_round = engine.pipeline().sync(&["src/domain_core.rs".into()]);
     assert!(
         resurrection_round.warnings.is_empty(),
         "{:?}",
@@ -563,7 +563,7 @@ fn integration_helper() {}
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -636,7 +636,7 @@ fn index_marks_scala_suites_by_base_class_file_name_and_it_source_set_not_produc
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let snap = snapshot(engine.runtime().unwrap());
 
@@ -717,7 +717,7 @@ pub fn unrelated(name: &str) -> String {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);

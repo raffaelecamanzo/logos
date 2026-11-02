@@ -135,7 +135,7 @@ fn fixture() -> TempDir {
 
 fn indexed(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -147,7 +147,7 @@ fn indexed(tmp: &TempDir) -> Engine {
 /// them (S-442).
 fn status_row(engine: &Engine, language: &str) -> LanguageResolution {
     let mut row = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == language)
@@ -172,14 +172,14 @@ fn six_answers(
     file: &str,
     items: &[&str],
 ) -> Vec<(&'static str, bool, ResolutionDenominator)> {
-    let callers: CallersResult = engine.callers(symbol, None);
-    let callees: CalleesResult = engine.callees(symbol, None);
-    let impact: ImpactResult = engine.impact(symbol, None);
-    let affected: AffectedResult = engine.affected(&strings(&[file]), false);
+    let callers: CallersResult = engine.navigation().callers(symbol, None);
+    let callees: CalleesResult = engine.navigation().callees(symbol, None);
+    let impact: ImpactResult = engine.navigation().impact(symbol, None);
+    let affected: AffectedResult = engine.navigation().affected(&strings(&[file]), false);
     let intersection: ImpactIntersectionResult =
-        engine.impact_intersection(&strings(items), None);
+        engine.navigation().impact_intersection(&strings(items), None);
     let overlap: BranchOverlapResult =
-        engine.branch_overlap(&strings(&["left", "right"]), None, None);
+        engine.navigation().branch_overlap(&strings(&["left", "right"]), None, None);
     vec![
         ("callers", callers.total > 0, callers.resolution_denominator),
         ("callees", callees.total > 0, callees.resolution_denominator),
@@ -213,7 +213,7 @@ fn a_non_empty_rust_answer_carries_its_denominator_on_every_relational_tool() {
     );
     assert!(
         engine
-            .status()
+            .graph().status()
             .resolution_by_language
             .iter()
             .any(|row| row.language == "rust" && row.call_residue.is_some()),
@@ -224,7 +224,7 @@ fn a_non_empty_rust_answer_carries_its_denominator_on_every_relational_tool() {
     // `util.rs` reaches `lib.rs`; A and B collide on `run`; both branches edit
     // `alpha`. Each set is non-empty, and each answer is anchored in Rust.
     let answers = six_answers(&engine, "run", "src/util.rs", &["A=alpha", "B=run"]);
-    let callees = engine.callees("alpha", None);
+    let callees = engine.navigation().callees("alpha", None);
     assert!(callees.total > 0, "alpha calls run and beta");
     assert_eq!(answers.len(), 6, "the six relational tools of FR-NV-14");
     for (tool, non_empty, denominator) in answers {
@@ -254,7 +254,7 @@ fn a_non_empty_rust_answer_carries_its_denominator_on_every_relational_tool() {
 fn the_denominator_is_a_typed_field_on_the_serialised_answer() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let wire = serde_json::to_value(engine.callers("run", None)).expect("serialises");
+    let wire = serde_json::to_value(engine.navigation().callers("run", None)).expect("serialises");
     let denominator = &wire["resolution_denominator"];
     assert_eq!(denominator["absence"], serde_json::Value::Null);
     assert_eq!(denominator["languages"][0]["language"], "rust");
@@ -270,19 +270,19 @@ fn the_denominator_is_a_typed_field_on_the_serialised_answer() {
     // Every answer that carries the field serialises it — a `#[serde(skip)]`
     // on any one of the seven passes every Rust-level assertion in this file.
     let answers = [
-        ("callers", serde_json::to_value(engine.callers("run", None))),
-        ("callees", serde_json::to_value(engine.callees("alpha", None))),
-        ("impact", serde_json::to_value(engine.impact("run", None))),
-        ("affected", serde_json::to_value(engine.affected(&strings(&["src/util.rs"]), true))),
+        ("callers", serde_json::to_value(engine.navigation().callers("run", None))),
+        ("callees", serde_json::to_value(engine.navigation().callees("alpha", None))),
+        ("impact", serde_json::to_value(engine.navigation().impact("run", None))),
+        ("affected", serde_json::to_value(engine.navigation().affected(&strings(&["src/util.rs"]), true))),
         (
             "impact_intersection",
-            serde_json::to_value(engine.impact_intersection(&strings(&["A=alpha", "B=run"]), None)),
+            serde_json::to_value(engine.navigation().impact_intersection(&strings(&["A=alpha", "B=run"]), None)),
         ),
         (
             "branch_overlap",
-            serde_json::to_value(engine.branch_overlap(&strings(&["left", "right"]), None, None)),
+            serde_json::to_value(engine.navigation().branch_overlap(&strings(&["left", "right"]), None, None)),
         ),
-        ("precedent", serde_json::to_value(engine.precedent("alpha", None))),
+        ("precedent", serde_json::to_value(engine.navigation().precedent("alpha", None))),
     ];
     for (tool, answer) in answers {
         let answer = answer.expect("serialises");
@@ -314,11 +314,11 @@ fn an_empty_typescript_answer_states_the_row_status_reports() {
         "the fixture's TypeScript call stays in its file: {typescript:#?}"
     );
 
-    let callers = engine.callers("navItems", None);
+    let callers = engine.navigation().callers("navItems", None);
     assert_eq!(callers.total, 0, "nothing calls navItems");
     assert_eq!(callers.resolution_denominator.languages, vec![typescript.clone()]);
 
-    let impact = engine.impact("navItems", None);
+    let impact = engine.navigation().impact("navItems", None);
     assert!(impact.upstream.is_empty());
     assert_eq!(
         impact.resolution_denominator.languages,
@@ -326,7 +326,7 @@ fn an_empty_typescript_answer_states_the_row_status_reports() {
         "an empty `breaks if changed` set is never unqualified"
     );
 
-    let affected = engine.affected(&strings(&["web/nav.ts"]), true);
+    let affected = engine.navigation().affected(&strings(&["web/nav.ts"]), true);
     assert!(affected.affected.is_empty());
     assert_eq!(
         affected.resolution_denominator.languages,
@@ -341,7 +341,7 @@ fn an_empty_typescript_answer_states_the_row_status_reports() {
 fn anchors_in_two_languages_carry_both_rows_in_name_order() {
     let tmp = fixture();
     let engine = indexed(&tmp);
-    let answer = engine.impact_intersection(&strings(&["A=alpha", "B=navItems"]), None);
+    let answer = engine.navigation().impact_intersection(&strings(&["A=alpha", "B=navItems"]), None);
     let languages: Vec<&str> = answer
         .resolution_denominator
         .languages
@@ -351,7 +351,7 @@ fn anchors_in_two_languages_carry_both_rows_in_name_order() {
     assert_eq!(languages, ["rust", "typescript"]);
     assert_eq!(answer.resolution_denominator.absence, None);
 
-    let affected = engine.affected(&strings(&["web/nav.ts", "src/util.rs"]), false);
+    let affected = engine.navigation().affected(&strings(&["web/nav.ts", "src/util.rs"]), false);
     assert_eq!(
         affected.resolution_denominator.languages,
         vec![status_row(&engine, "rust"), status_row(&engine, "typescript")]
@@ -370,28 +370,28 @@ fn an_anchor_the_index_does_not_hold_reads_unindexed() {
         languages: Vec::new(),
         absence: Some(DenominatorAbsence::Unindexed),
     };
-    let precedent: PrecedentResult = engine.precedent("no_such_symbol", None);
+    let precedent: PrecedentResult = engine.navigation().precedent("no_such_symbol", None);
     for (tool, denominator) in [
-        ("callers", engine.callers("no_such_symbol", None).resolution_denominator),
-        ("callees", engine.callees("no_such_symbol", None).resolution_denominator),
-        ("impact", engine.impact("no_such_symbol", None).resolution_denominator),
+        ("callers", engine.navigation().callers("no_such_symbol", None).resolution_denominator),
+        ("callees", engine.navigation().callees("no_such_symbol", None).resolution_denominator),
+        ("impact", engine.navigation().impact("no_such_symbol", None).resolution_denominator),
         (
             "affected",
             engine
-                .affected(&strings(&["src/absent.rs"]), false)
+                .navigation().affected(&strings(&["src/absent.rs"]), false)
                 .resolution_denominator,
         ),
         (
             "impact_intersection",
             engine
-                .impact_intersection(&strings(&["A=no_such", "B=nor_this"]), None)
+                .navigation().impact_intersection(&strings(&["A=no_such", "B=nor_this"]), None)
                 .resolution_denominator,
         ),
         ("precedent", precedent.resolution_denominator),
         (
             "branch_overlap",
             engine
-                .branch_overlap(&strings(&["notes", "main"]), None, None)
+                .navigation().branch_overlap(&strings(&["notes", "main"]), None, None)
                 .resolution_denominator,
         ),
     ] {
@@ -410,19 +410,19 @@ fn nothing_asked_and_a_degraded_answer_read_n_a() {
     let tmp = fixture();
     let engine = indexed(&tmp);
     let not_available = ResolutionDenominator::not_available();
-    assert_eq!(engine.affected(&[], false).resolution_denominator, not_available);
-    assert_eq!(engine.impact_intersection(&[], None).resolution_denominator, not_available);
-    assert_eq!(engine.branch_overlap(&[], None, None).resolution_denominator, not_available);
+    assert_eq!(engine.navigation().affected(&[], false).resolution_denominator, not_available);
+    assert_eq!(engine.navigation().impact_intersection(&[], None).resolution_denominator, not_available);
+    assert_eq!(engine.navigation().branch_overlap(&[], None, None).resolution_denominator, not_available);
     assert_eq!(
         engine
-            .branch_overlap(&strings(&["main", "main"]), None, None)
+            .navigation().branch_overlap(&strings(&["main", "main"]), None, None)
             .resolution_denominator,
         not_available,
         "refs that changed no file anchor nothing"
     );
 
     let transient = Engine::open(tmp.path());
-    let degraded = transient.callers("run", None);
+    let degraded = transient.navigation().callers("run", None);
     assert!(!degraded.warnings.is_empty(), "the query degraded");
     assert_eq!(degraded.resolution_denominator, not_available);
     assert_eq!(
@@ -448,7 +448,7 @@ fn an_anchor_with_no_recorded_language_reads_no_language_recorded() {
         .expect("the language clears");
     assert_eq!(
         engine
-            .affected(&strings(&["web/labels.ts"]), false)
+            .navigation().affected(&strings(&["web/labels.ts"]), false)
             .resolution_denominator
             .absence,
         no_language,
@@ -457,7 +457,7 @@ fn an_anchor_with_no_recorded_language_reads_no_language_recorded() {
 
     db.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM files WHERE path = 'src/util.rs';")
         .expect("the file row deletes, orphaning its nodes");
-    let callers = engine.callers("run", None);
+    let callers = engine.navigation().callers("run", None);
     assert!(callers.resolved.is_some(), "`run` still resolves, file-less");
     assert_eq!(
         callers.resolution_denominator.absence, no_language,
@@ -480,7 +480,7 @@ fn a_failed_denominator_read_degrades_the_denominator_and_not_the_answer() {
     db.execute_batch("ALTER TABLE files RENAME COLUMN language TO language_moved;")
         .expect("the column renames");
 
-    let answer = engine.callers("run", None);
+    let answer = engine.navigation().callers("run", None);
     assert!(answer.total > 0, "the traversal itself still answers: {answer:?}");
     assert_eq!(answer.resolution_denominator, ResolutionDenominator::not_available());
     let warning = answer
@@ -507,6 +507,7 @@ fn measured_selects_the_anchor_rows_or_names_why_there_are_none() {
         call_residue: None,
         header_ownership: None,
         parse_damage: None,
+        interfaces: None,
     };
     let rows = || vec![row("go"), row("rust"), row("tsx")];
     let some = |l: &str| Some(l.to_string());
@@ -598,7 +599,7 @@ fn an_empty_precedent_over_an_unresolved_language_names_the_denominator() {
         ("web/labels.ts", "no_structural_anchors"),
         ("web/nav.ts", "anchors_are_unshared"),
     ] {
-        let answer = engine.precedent(target, None);
+        let answer = engine.navigation().precedent(target, None);
         let reason = answer
             .empty_reason
             .unwrap_or_else(|| panic!("nothing is analogous to {target} in the fixture"));
@@ -627,7 +628,7 @@ fn precedent_carries_its_denominator_in_symbol_mode_and_on_a_non_empty_answer() 
     let tmp = fixture();
     let engine = indexed(&tmp);
 
-    let analogue = engine.precedent("alpha", None);
+    let analogue = engine.navigation().precedent("alpha", None);
     assert_eq!(analogue.target_kind, PrecedentTargetKind::Symbol);
     assert!(
         analogue.precedents.iter().any(|p| p.symbol.name == "gamma"),
@@ -640,7 +641,7 @@ fn precedent_carries_its_denominator_in_symbol_mode_and_on_a_non_empty_answer() 
         "a non-empty precedent states the row it was computed over"
     );
 
-    let symbol = engine.precedent("navItems", None);
+    let symbol = engine.navigation().precedent("navItems", None);
     assert_eq!(symbol.target_kind, PrecedentTargetKind::Symbol);
     assert_eq!(
         symbol.resolution_denominator.languages,

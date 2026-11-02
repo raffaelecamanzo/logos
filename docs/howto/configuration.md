@@ -999,11 +999,16 @@ command line is fixed in Logos:
 | Trivy | `trivy` | `--version` | `fs --scanners vuln,secret,misconfig --format sarif --output OUT --skip-dirs .logos` *ignored* `--config .logos/security/empty-config.yaml` *extra* `.` |
 | Gitleaks | `gitleaks` | `version` | `detect --redact --no-banner --exit-code 0 --report-format sarif --report-path OUT` *extra* `--source .` |
 | OSV-Scanner | `osv-scanner` | `--version` | `--format sarif --output-file OUT` *extra* `--recursive` *unignored* |
-| Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --exclude ./.logos`(`,`*ignored*) *extra* `.` |
-| gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail -quiet` *ignored* *extra* `./...` (with `GOTOOLCHAIN=local`) |
+| Bandit | `bandit` | `--version` | `--recursive --format sarif --output OUT --exit-zero --quiet --skip B404,B603,B607`(`,`*skips*)` --exclude ./.logos`(`,`*ignored*) *extra* `.` |
+| gosec | `gosec` | `-version` | `-fmt sarif -out OUT -no-fail` *ignored* *extra* `./...` (with `GOTOOLCHAIN=local`) |
 | Checkov | `checkov` | `--version` | `--output sarif --output-file-path OUTDIR --soft-fail --quiet` [`--skip-framework secrets`, with Gitleaks enabled and installed] `--skip-path .logos` *ignored* *extra* `--directory .` |
 | CodeQL | `codeql` | `version --format=terse` | per language: `database create DB --language=L --build-mode=none --source-root=. --overwrite`, then `database analyze DB --format=sarif-latest --output OUT` *extra*, with `OUT` in `.logos/security/codeql/`; Logos then merges every language's runs into one `codeql.sarif`, so a project's languages are one snapshot |
 | Dependency-Check | `dependency-check` (or `dependency-check.sh`) | `--version` | `--scan . --format SARIF --out OUTDIR --exclude **/.logos/**` *ignored* `--disableYarnAudit --disablePnpmAudit --disableBundleAudit --disableGolangMod --disableMixAudit` [`--propertyfile .logos/security/nvd-api-key.properties`, with `NVD_API_KEY` set and no key in *extra*] *extra* |
+
+*skips* is each test id the `skips` list in the `[bandit]` section of the
+project root's `.bandit` names that `B404,B603,B607` lacks, in the file's order,
+in a whole-project run and a run on named paths alike; a missing, unreadable or
+malformed `.bandit` adds none ([security.md](security.md#the-nine-scanners)).
 
 *ignored* is the top-most directories the project's own ignore files exclude
 (`.gitignore` and `.ignore` at any depth, and `.git/info/exclude`), each passed
@@ -1062,7 +1067,12 @@ for the scanner to run. Logos closes the ones it knows:
   run another toolchain.
 
 Config files that only tune findings (`.gitleaks.toml`, `.semgrepignore`,
-`.trivyignore`, `.bandit`) are still read. Scan output goes only to
+`.trivyignore`, `.bandit`) are still read. Bandit takes the `--skip` and
+`--exclude` on its command line instead of the `skips` and `exclude` of
+`.bandit`, so Logos merges the file's `skips` into its own `--skip` (*skips*
+above); the file's `exclude` is not merged, and Bandit reads only the command
+line's ([security.md](security.md#the-nine-scanners)).
+Scan output goes only to
 `.logos/security/`: if `.logos` or `.logos/security` is a symbolic link the scan
 is refused, and a link in place of any report, output directory or CodeQL
 database below it is removed, never written or deleted through.
@@ -1819,7 +1829,7 @@ its baseline.
 
 ## The Claude Code plugin — environment variables
 
-The [plugin](plugin.md) has no configuration file. Its hooks read three
+The [plugin](plugin.md) has no configuration file. Its hooks read five
 environment variables, set in the shell that starts Claude Code (or in the `env`
 block of your Claude Code settings):
 
@@ -1828,10 +1838,16 @@ block of your Claude Code settings):
 | `LOGOS_QUALITY_REPORT_DISABLE` | unset | `1` silences the session-start readout, whether the plugin or the hook `logos init -i` writes prints it. |
 | `LOGOS_STOP_HOOK_DISABLE` | unset | `1` turns the Stop check off: the hook exits 0 with no output. |
 | `LOGOS_STOP_HOOK_BUDGET_MS` | `15000` | The Stop check's budget, in milliseconds, shared by its `check`, `review` and `security` legs. A value that is not a number reads as the default. The plugin declares a 30-second timeout for the hook, so a value above `25000` is held at `25000`, and a leg still running then is reported as not measured. |
+| `LOGOS_GUARD_MODE` | unset | `unattended` makes the guardrail answer `deny` wherever it would answer `ask`, its reason saying the session runs unattended; any other value, or none, asks. |
+| `LOGOS_GUARD_ALLOW` | unset | In an unattended session, a colon-separated list of project-relative contract files a file tool may still write; never a shell command or a guarded command. |
 
 The guardrail that asks before an agent edits `.logos/rules.toml`,
-`.logos/rules-baseline.json` or `.logos/security-ignore.toml` has no variable;
-disabling the plugin is the only way to stop it asking.
+`.logos/rules-baseline.json` or `.logos/security-ignore.toml` has no off switch;
+disabling the plugin is the only way to turn it off. In a session no human
+watches, `LOGOS_GUARD_MODE=unattended` turns each of its asks into a denial, and
+`LOGOS_GUARD_ALLOW` names the contract files such a session may still write: see
+[In an unattended session](plugin.md#in-an-unattended-session). No value of either
+turns it off.
 
 ## Advanced: overriding language queries
 
@@ -2189,18 +2205,23 @@ file_facade = "Kt"           # a bare identifier; refused under any other kind
 
 - With `extension_functions`, a top-level function whose `symbols` query
   captures a receiver type (`@symbol.self_type`) is callable on a value. A call
-  `title.toSlug()` whose receiver's type is not known binds the one such
-  function of its name that the file imports, its namespace declares, or a
-  wildcard brings into view, in that order; an import is final. Two such
-  functions of one name in one of those scopes bind neither
-  (`overload-ambiguous`). A member wins over an extension, and the receiver's
-  type is not known, so a callable member of that name on any class of the
+  `title.toSlug()` binds the one such function of its name that applies, from
+  the first of these scopes holding one: the file's imports, its namespace,
+  then its wildcards; an import is final. A function applies when its receiver
+  type can be the call's receiver. Where the receiver's type is proven, that
+  is the type itself or a supertype the repository declares: `d.format("x")`
+  on a `LocalDate` never binds `fun LocalDateTime.format`. Where it is not
+  proven, only a class the repository declares applies, as only its members
+  can be checked: an untyped `x.toSlug()` binds no `fun String.toSlug()`. Two
+  that apply in one scope bind neither (`overload-ambiguous`). A member wins
+  over an extension, so a callable member of that name on any class of the
   language's family keeps the call unbound (`no-receiver-evidence`). Only the
   call's written arguments decide among overloads: an extension's receiver is
-  not one of its parameters. A bare call `f()` reaches an extension only from
-  inside an extension's own body, never past a member of the name, and there a
-  member of the receiver's own type, when the repository declares it, comes
-  before any top-level function.
+  not one of its parameters. A bare call `f()` reaches an extension from
+  inside an extension's own body, and from inside a class of the extension's
+  receiver type, or a subclass of it, that no member answers — never past a
+  member of the name. In an extension's body a member of the receiver's own
+  type, when the repository declares it, comes before any top-level function.
 - With `file_facade`, another language of the family reaches a file's
   top-level functions through a class named after the file: its stem, with
   every character a class name cannot hold replaced by `_` and the first
@@ -2208,8 +2229,12 @@ file_facade = "Kt"           # a bare identifier; refused under any other kind
   `package mixit.util` gives `mixit.util.UtilsKt`, so Java's `import
   mixit.util.UtilsKt;` binds that file and `UtilsKt.enumMatcher(s)` binds its
   `enumMatcher`. An extension takes its receiver as the first argument there.
-  The declaring language never names the facade itself. A name set with
-  `@file:JvmName` is not read.
+  The declaring language never names the facade itself. A file can name its
+  facade: the string its `symbols` query captures as `@module.facade` replaces
+  the derived name. Kotlin's `@file:JvmName("Slugs")` on `Strings.kt` makes
+  Java's `Slugs.slug("x")` bind and `StringsKt.slug(…)` bind nothing. Two files
+  naming one facade, derived or declared, bind neither.
+  `@file:JvmMultifileClass` is not read.
 
 Both default to off, so a plugin that declares neither binds as before.
 

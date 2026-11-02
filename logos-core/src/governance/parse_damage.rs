@@ -85,6 +85,7 @@ mod tests {
             call_residue: None,
             header_ownership: None,
             parse_damage: Some(ParseDamage::of(damaged, files, 0)),
+            interfaces: None,
         }
     }
 

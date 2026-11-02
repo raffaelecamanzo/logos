@@ -427,7 +427,7 @@ fn an_unrelated_file_of_the_same_name_never_re_keys_a_history_only_secret() {
             tools_dir: None,
             nvd_api_key: None,
         })
-        .security_bless()
+        .security().findings().bless()
         .unwrap();
     assert!(blessed.recorded, "{blessed:?}");
     assert_eq!(ratchet_violations(&root), Vec::<String>::new());

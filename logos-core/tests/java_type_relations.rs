@@ -45,7 +45,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -543,7 +543,7 @@ fn sync_equals_a_full_reindex_after_adding_the_related_types() {
     for (rel, text) in added.iter().zip([BASE, PORT, WIDE, DTO, REQ]) {
         write(tmp.path(), rel, text);
     }
-    engine.sync(&added.map(Into::into));
+    engine.pipeline().sync(&added.map(Into::into));
     assert_eq!(relation_count(rt), 8);
     assert_eq!(binding_facts(rt), cold_facts(&tmp));
 }
@@ -559,7 +559,7 @@ fn sync_equals_a_full_reindex_after_editing_the_relating_file() {
         SVC_FILE,
         "package com.x.svc;\n\nimport com.x.base.Port;\n\npublic class Svc implements Port {\n    public Dto make(Req req) { return new Dto(); }\n    public Req again() { return new Req(); }\n}\n",
     );
-    engine.sync(&[SVC_FILE.into()]);
+    engine.pipeline().sync(&[SVC_FILE.into()]);
     assert!(edges_of(rt, EdgeKind::Extends)
         .iter()
         .all(|(s, _)| !s.starts_with(SVC_FILE)));
@@ -580,7 +580,7 @@ fn sync_equals_a_full_reindex_after_deleting_a_related_type() {
     let rt = engine.runtime().unwrap();
     assert_eq!(relation_count(rt), 8, "precondition: every relation binds");
     fs::remove_file(tmp.path().join(DTO_FILE)).unwrap();
-    engine.sync(&[DTO_FILE.into()]);
+    engine.pipeline().sync(&[DTO_FILE.into()]);
     for kind in TYPE_RELATIONS {
         assert!(
             edges_of(rt, kind).iter().all(|(_, t)| !t.starts_with(DTO_FILE)),
@@ -604,7 +604,7 @@ fn sync_equals_a_full_reindex_after_a_related_type_changes_kind() {
         BASE_FILE,
         "package com.x.base;\n\npublic interface Base {}\n",
     );
-    engine.sync(&[BASE_FILE.into()]);
+    engine.pipeline().sync(&[BASE_FILE.into()]);
     assert_eq!(
         edges_of(rt, EdgeKind::Extends),
         [(
@@ -864,7 +864,7 @@ fn a_wildcard_import_binds_a_relation_cold_and_on_sync() {
     let rt = engine.runtime().unwrap();
     assert!(edges_of(rt, EdgeKind::Implements).is_empty(), "precondition");
     write(tmp.path(), PORT_FILE, PORT);
-    engine.sync(&[PORT_FILE.into()]);
+    engine.pipeline().sync(&[PORT_FILE.into()]);
     let bound = [(
         format!("{SVC_FILE}:Svc"),
         format!("{PORT_FILE}:Port:interface"),

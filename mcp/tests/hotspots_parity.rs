@@ -1,7 +1,7 @@
 //! CLI-vs-MCP payload-equality for the temporal `hotspots` surface (S-048,
 //! [FR-GH-06], [UAT-GH-03]).
 //!
-//! Both surfaces delegate to the **one** `Engine::hotspots` `api` entrypoint
+//! Both surfaces delegate to the **one** `History::hotspots` `api` entrypoint
 //! ([NFR-CC-01]) and serialise its read-model — the CLI via `serde_json` in
 //! `--json` mode, the MCP twin via `Content::json`. This test proves the wire
 //! payloads are byte-identical for the same repository state, over a real
@@ -77,7 +77,7 @@ fn fixture() -> tempfile::TempDir {
     // calm.rs: low on both axes (1 commit, trivial) → ranks last.
     commit(repo, "src/calm.rs", "pub fn calm() -> i64 { 0 }\n", "calm");
 
-    Engine::start(repo).expect("engine starts").index();
+    Engine::start(repo).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -119,7 +119,7 @@ fn fixture_with_test_file() -> tempfile::TempDir {
     // calm.rs: low on both axes.
     commit(repo, "src/calm.rs", "pub fn calm() -> i64 { 0 }\n", "calm");
 
-    Engine::start(repo).expect("engine starts").index();
+    Engine::start(repo).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -143,7 +143,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 fn cli_payload(root: &Path, limit: Option<usize>, production_scope: bool) -> Value {
     let engine = Engine::start(root).expect("engine");
     let report = engine
-        .hotspots(limit, false, production_scope)
+        .history().hotspots(limit, false, production_scope)
         .expect("hotspots");
     serde_json::to_value(&report).expect("serialize")
 }
@@ -176,7 +176,7 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_limit_and_tie_break() {
     // first-mine notice (the surfaces still match — this isolates state drift).
     Engine::start(root)
         .expect("engine")
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("warm-up");
 
     let (client, server) = boot(root).await;
@@ -237,7 +237,7 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_production_scope() {
 
     Engine::start(root)
         .expect("engine")
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("warm-up");
 
     let (client, server) = boot(root).await;
@@ -304,7 +304,7 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_the_findings_column_and
     let root = tmp.path();
     let cli = |with_findings: bool| -> Value {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_value(engine.hotspots_with_findings(None, false, false, with_findings).expect("hotspots"))
+        serde_json::to_value(engine.history().hotspots_with_findings(None, false, false, with_findings).expect("hotspots"))
             .expect("serialize")
     };
     let paths = |payload: &Value| -> Vec<String> {
@@ -334,7 +334,7 @@ async fn cli_and_mcp_hotspot_payloads_are_identical_with_the_findings_column_and
         {"artifactLocation":{"uri":"src/tie_b.rs"},"region":{"startLine":1}}}]}]}]}"#,
     )
     .unwrap();
-    Engine::start(root).expect("engine").security_ingest(&report).expect("ingest");
+    Engine::start(root).expect("engine").security().ingest(&report).expect("ingest");
 
     let (client, server) = boot(root).await;
     let (cli_plain, mcp_plain) = (cli(false), mcp_findings_payload(&client, false).await);

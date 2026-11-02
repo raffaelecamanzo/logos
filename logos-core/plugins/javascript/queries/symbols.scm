@@ -21,7 +21,7 @@
 ; - `{ y: function … | (…) => … }` is a Method of the declaration enclosing the
 ;   object — a `const` it is bound to included — or a module-level Method.
 ; - `this.y = …` in a class's constructor or method is a Field `y` of that class
-;   (S-542, `@symbol.attribute`, as Python's `self.y = …`): taken at its name,
+;   (S-542, `@symbol.at_name`, as Python's `self.y = …`): taken at its name,
 ;   so the assignment's value stays the method's, and declared once per class —
 ;   a class field written `y = 0;` or an earlier write is the declaration, and
 ;   the rest declare nothing. Not captured: `this.#y` (a `#private` field is
@@ -87,4 +87,6 @@
 (assignment_expression
   left: (member_expression
     object: (this)
-    property: (property_identifier) @symbol.field @symbol.attribute))
+    property: (property_identifier) @symbol.field @symbol.at_name)
+  (#set! symbol.field_owner "scope")
+  (#set! symbol.field_order "body-first"))

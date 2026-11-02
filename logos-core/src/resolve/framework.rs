@@ -68,7 +68,10 @@
 //! file's directory — the reach the binder gives it — see `admission`. And a route
 //! whose prefix is a *value* rather than a declaration (a minimal API's
 //! `MapGroup` receiver) or carries a bracketed template token (`[controller]`) is
-//! composed by `group`, not by `compose_prefixes`.
+//! composed by `group`, not by `compose_prefixes`. A registration on an Express
+//! router takes the path its mount gives, usually in another file, so `mount`
+//! joins it once per run over every candidate's facts, after the per-file scans
+//! (S-822).
 //!
 //! # Never fabricate ([NFR-RA-05])
 //!
@@ -121,11 +124,12 @@ use crate::extract::symbol::{build_symbol, descriptor_for, path_segments, Symbol
 use crate::graph_store::{DetectorPrefix, NodeRow, ReceiverParameters, UnresolvedRefRow};
 use crate::model::{EdgeKind, NodeId, NodeKind, RefForm};
 use crate::models::pipeline::FrameworkStats;
+use crate::plugin::registry::claimed_file_names;
 use crate::plugin::{LanguagePlugin, LanguageRegistry};
 use crate::runtime::Runtime;
 
 use super::binder;
-use super::package_key::PackageLayout;
+use super::package_key::{FileFacades, PackageLayout};
 use super::matches_detector;
 use super::promote::{self, Promoted, PromotedEdge};
 
@@ -449,6 +453,9 @@ struct FileMatches {
     /// `controller#action` handlers and the module blocks around them (S-567):
     /// see [`action`].
     actions: action::Facts,
+    /// Routers, their mounts, imports and exports, and the registrations held
+    /// back for the run-level mount join (S-822): see [`mount`].
+    mounts: mount::Facts,
 }
 
 /// Run the framework-promotion pass. See the module docs for the shape.
@@ -535,13 +542,7 @@ pub fn run(
     // parameter its language names is a candidate too (S-541).
     let semantics_by_file: HashMap<i64, &crate::plugin::Semantics> = files
         .iter()
-        .filter_map(|f| {
-            let ext = Path::new(&f.path).extension()?.to_str()?;
-            let semantics = registry.for_extension(ext)?.semantics();
-            (!semantics.framework_detectors.is_empty()
-                || !semantics.framework_receiver_parameters.is_empty())
-            .then_some((f.id, semantics))
-        })
+        .filter_map(|f| Some((f.id, framework_semantics(registry, &f.path)?)))
         .collect();
     let mut candidate_ids: HashSet<i64> = refs
         .iter()
@@ -585,9 +586,12 @@ pub fn run(
     // longer parses simply contributes no matches — best-effort (FR-FW-04).
     // The binder index keys every package-shaped file by its package (S-465),
     // as the resolution pass does, and is built before the scan because the
-    // fold reads it to find a constant's declaring type (S-470).
+    // fold reads it to find a constant's declaring type (S-470). It names each
+    // file's facade as the resolution pass does too (S-832).
+    let declared_facades = files.iter().filter_map(|f| Some((f.path.clone(), f.facade.clone()?)));
     let layout = PackageLayout::from_registry(registry)
         .with_declared_namespaces(namespaces)
+        .with_file_facades(FileFacades::declared(declared_facades))
         .with_import_root_overrides(&resolution.import_roots);
     // A required signature binds nothing (S-606), nor does an interface member
     // an implementing type does not inherit (S-609). A handler written `T::m`
@@ -597,11 +601,12 @@ pub fn run(
     // `controller#action` handler is an instance method, which the arity facts
     // tell from a class method (S-567).
     let (bind_nodes, bind_edges) = binder::bindable(&nodes, &edges, &signatures);
-    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &refs, layout.clone())
+    let index = binder::IndexBuilder::new(&bind_nodes, &bind_edges, &refs, layout.clone())
         .with_associated_items(&bind_nodes, &impl_blocks, &item_facts)
         .with_uninherited(uninherited)
         .with_self_types(self_types)
-        .with_arities(&arities);
+        .with_arities(&arities)
+        .build();
     let member = MemberConstants {
         root,
         registry,
@@ -611,7 +616,7 @@ pub fn run(
         constants: Mutex::default(),
     };
 
-    let scanned: Vec<(i64, &str, FileMatches)> = runtime.worker_pool().install(|| {
+    let mut scanned: Vec<(i64, &str, FileMatches)> = runtime.worker_pool().install(|| {
         candidates
             .par_iter()
             .map_init(Parser::new, |parser, (file_id, rel)| {
@@ -619,6 +624,27 @@ pub fn run(
                 (*file_id, *rel, matches)
             })
             .collect()
+    });
+
+    // A router's routes take the prefixes of the mounts the scanned files state
+    // (S-822), each import's specifier read by the binder as an import row is.
+    // That reading needs the resolution pass's specifier facts, which `index`
+    // does not carry (they would change how a handler binds through an import):
+    // an index of its own holds them, built with the file modules only once a
+    // mount names an import.
+    type Imports<'n> = (binder::Index, HashMap<&'n str, &'n NodeRow>, HashMap<NodeId, &'n str>);
+    let imports: std::cell::OnceCell<Imports<'_>> = std::cell::OnceCell::new();
+    let mut views: Vec<(&str, &mut FileMatches)> = scanned.iter_mut().map(|(_, rel, m)| (*rel, m)).collect();
+    mount::join(&mut views, |importer, spec| {
+        let (index, modules, paths) = imports.get_or_init(|| {
+            let modules = file_modules(&nodes, &edges);
+            let paths = modules.iter().map(|(path, n)| (n.id, *path)).collect();
+            let index = super::SpecifierFacts::discover(registry, root, &nodes)
+                .install(binder::IndexBuilder::new(&bind_nodes, &bind_edges, &[], layout.clone()))
+                .build();
+            (index, modules, paths)
+        });
+        import_file(registry, index, policy, (modules, paths), importer, spec)
     });
 
     // Registrations composition refused, and method paths the fold refused,
@@ -697,9 +723,10 @@ fn footprint_keys(registry: &LanguageRegistry) -> (Vec<DetectorPrefix>, Receiver
         if !semantics.framework_receiver_parameters.is_empty() {
             receivers.names.extend(semantics.framework_receiver_parameters.iter().cloned());
             receivers.extensions.extend(plugin.extensions().iter().cloned());
+            receivers.files.extend(claimed_file_names(plugin).map(str::to_string));
         }
     }
-    for list in [&mut receivers.names, &mut receivers.extensions] {
+    for list in [&mut receivers.names, &mut receivers.extensions, &mut receivers.files] {
         list.sort();
         list.dedup();
     }
@@ -743,6 +770,17 @@ fn scan_path(
     scan_source(parser, plugin, rel, &source, Some(member))
 }
 
+/// The semantics of the language the file at `path` is written in, when that
+/// language names a framework — a detector prefix or a receiver parameter —
+/// else `None`. The language is the registry's claim on the path
+/// ([`LanguageRegistry::for_path`], S-840), so a `Rakefile` is a candidate as a
+/// `.rake` file is.
+pub(super) fn framework_semantics<'r>(registry: &'r LanguageRegistry, path: &str) -> Option<&'r crate::plugin::Semantics> {
+    let semantics = registry.for_path(path)?.semantics();
+    (!semantics.framework_detectors.is_empty() || !semantics.framework_receiver_parameters.is_empty())
+        .then_some(semantics)
+}
+
 /// The grammar and the current text of the file at the project-relative `rel`,
 /// or `None` when it has no grammar, has gone, or cannot be read.
 ///
@@ -752,7 +790,7 @@ fn scan_path(
 /// engine root, even from a corrupted store.
 ///
 /// [NFR-SE-04]: ../../../docs/specs/requirements/NFR-SE-04.md
-fn read_member_file<'r>(
+pub(super) fn read_member_file<'r>(
     registry: &'r LanguageRegistry,
     root: &Path,
     rel: &str,
@@ -760,10 +798,7 @@ fn read_member_file<'r>(
     if Path::new(rel).is_absolute() {
         return None;
     }
-    let plugin = Path::new(rel)
-        .extension()
-        .and_then(|e| e.to_str())
-        .and_then(|ext| registry.for_extension(ext))?;
+    let plugin = registry.for_path(rel)?;
     let source = fs::read_to_string(root.join(rel)).ok()?;
     Some((plugin, source))
 }
@@ -847,7 +882,8 @@ impl MemberConstants<'_> {
     fn constant(&self, user: &str, fqn: &[String], name: &str) -> Option<fold::ForeignConstant> {
         let key = (self.layout.family(user), fqn.to_vec(), name.to_string());
         cached(&self.constants, key, || {
-            let [type_node] = self.index.package_types(user, fqn) else {
+            let packages: &binder::PackageIndex = self.index.packages();
+            let [type_node] = packages.package_types(self.index.layout(), user, fqn) else {
                 return None;
             };
             let rel = self.index.file_of(*type_node)?;
@@ -925,11 +961,13 @@ pub struct ProvidedRoute {
 /// member's constants to reach, so a path built from a constant another file
 /// declares — through `import static a.b.G.X` or a qualified `G.X` (S-470) —
 /// is refused here, while [`run`] folds and promotes it. For such a file this
-/// returns a subset of what the pass promotes.
+/// returns a subset of what the pass promotes. So it does for a router mounted
+/// from another file (S-822): only a mount in this file composes here.
 pub fn routes_in_source(plugin: &dyn LanguagePlugin, rel: &str, source: &str) -> Vec<ProvidedRoute> {
     let mut parser = Parser::new();
-    scan_source(&mut parser, plugin, rel, source, None)
-        .routes
+    let mut out = scan_source(&mut parser, plugin, rel, source, None);
+    mount::join(&mut [(rel, &mut out)], |_, _| None);
+    out.routes
         .into_iter()
         .map(|r| ProvidedRoute {
             path: r.path,
@@ -982,6 +1020,9 @@ fn scan_source(
     // A minimal API's prefix is its receiver's group, not a declaration the
     // route sits in (S-554): resolved first, and those routes are then final.
     group::compose(&mut out);
+    // A registration on a router takes the path its mount gives, which only the
+    // run-level join can read (S-822): held back here, before dedup.
+    mount::defer(&mut out);
     // Join each surviving path onto its declaring type's prefix (FR-FW-05).
     // After precedence, so a suppressed positional path is never composed and
     // then dropped; before dedup, so two paths that only differ before
@@ -1839,6 +1880,8 @@ fn generic_match(
     let mut nest_caps = nest::Captures::default();
     // `@fw.route.handler.action` and `@fw.route.module.*` (S-567): see [`action`].
     let mut action_caps = action::Captures::default();
+    // `@fw.mount.*` (S-822): see [`mount`].
+    let mut mount_caps = mount::Captures::default();
     let mut anchor_node: Option<Node<'_>> = None;
     let mut method_node: Option<Node<'_>> = None;
     let mut handler_node: Option<Node<'_>> = None;
@@ -1903,7 +1946,7 @@ fn generic_match(
             group_capture.take(role, cap.node);
             continue;
         }
-        if nest_caps.read(name, cap.node) || action_caps.read(name, cap.node) {
+        if nest_caps.read(name, cap.node) || action_caps.read(name, cap.node) || mount_caps.read(name, cap.node) {
             generic = true;
             continue;
         }
@@ -2008,6 +2051,7 @@ fn generic_match(
     let opaque_spans = opaque_path_nodes.iter().map(|(n, _)| (n.start_byte(), n.end_byte()));
     nest_caps.record(&mut out.nest, src, at, rooted, opaque_spans.chain(prefix_caps.opaque_spans()), methods);
     action_caps.record(&mut out.actions, src, at, suffix);
+    mount_caps.record(&mut out.mounts, src, at);
     prefix_caps.record(out, src, rooted, &nest_caps, controller, absolute);
 
     if let Some(name) = component_node {
@@ -2668,17 +2712,7 @@ fn desired_set(
         }
     }
 
-    // File-module nodes: parentless Module rows, keyed by their file path.
-    let contained: HashSet<NodeId> = edges
-        .iter()
-        .filter(|e| e.kind == EdgeKind::Contains)
-        .map(|e| e.target)
-        .collect();
-    let module_by_path: HashMap<&str, &NodeRow> = nodes
-        .iter()
-        .filter(|n| n.kind == NodeKind::Module && !contained.contains(&n.id))
-        .filter_map(|n| n.file_path.as_deref().map(|p| (p, n)))
-        .collect();
+    let module_by_path = file_modules(nodes, edges);
     let node_by_id: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
     let file_id_by_path: HashMap<&str, i64> =
         files.iter().map(|f| (f.path.as_str(), f.id)).collect();
@@ -2833,22 +2867,7 @@ fn bind_text(
     rel: &str,
     by_file_name: &HashMap<(&str, &str), Vec<(NodeId, NodeKind)>>,
 ) -> Option<NodeId> {
-    let synthetic = UnresolvedRefRow {
-        id: 0,
-        file_id: Some(file_id),
-        source_symbol: module.symbol.as_str().to_string(),
-        target: target.to_string(),
-        alias: None,
-        form: RefForm::Path,
-        kind,
-        line: None,
-        resolved: false,
-        payload: None,
-        receiver: None,
-        peeled: None,
-        arg_count: None,
-        exported: None,
-    };
+    let synthetic = synthetic_row(module, Some(file_id), target.to_string(), kind);
     match binder::bind(&synthetic, index, policy) {
         binder::Outcome::Bound { target, .. } => Some(target),
         // A fan-out (S-608: a trait-headed `Tr::m`, every impl plus the default)
@@ -2882,6 +2901,75 @@ fn bind_text(
             }
         }
     }
+}
+
+/// File-module nodes: parentless `Module` rows, keyed by their file path — the
+/// node a promoted route hangs off, and the source of an import row.
+fn file_modules<'n>(nodes: &'n [NodeRow], edges: &[crate::graph_store::EdgeRow]) -> HashMap<&'n str, &'n NodeRow> {
+    let contained: HashSet<NodeId> = edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::Contains)
+        .map(|e| e.target)
+        .collect();
+    nodes
+        .iter()
+        .filter(|n| n.kind == NodeKind::Module && !contained.contains(&n.id))
+        .filter_map(|n| n.file_path.as_deref().map(|p| (p, n)))
+        .collect()
+}
+
+/// A ledger row the pass binds itself — a handler's or component's text, or
+/// a mount's import — as if `module` had recorded it: a `Path`-form row of
+/// `kind` to `target`, carrying nothing else.
+fn synthetic_row(module: &NodeRow, file_id: Option<i64>, target: String, kind: EdgeKind) -> UnresolvedRefRow {
+    UnresolvedRefRow {
+        id: 0,
+        file_id,
+        source_symbol: module.symbol.as_str().to_string(),
+        target,
+        alias: None,
+        form: RefForm::Path,
+        kind,
+        line: None,
+        resolved: false,
+        payload: None,
+        receiver: None,
+        peeled: None,
+        arg_count: None,
+        exported: None,
+    }
+}
+
+/// The file the module specifier `spec` (as written, quoted or not) names when
+/// `importer` imports it (S-822): bound through [`binder::bind`] as an import
+/// row of the segments [`specifier_segments`](crate::extract::refs::specifier_segments)
+/// reads — the segments extraction records for a TypeScript-family import,
+/// whose `require`/`import` specifiers are plain paths — so a mount's router is
+/// found by exactly the reading that binds the import, `tsconfig` aliases and
+/// `index` files included, and by nothing looser ([NFR-RA-05]). A dialect whose
+/// imports extraction reads another way (load roots, include roots) would need
+/// that reading here too.
+///
+/// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+fn import_file(
+    registry: &LanguageRegistry,
+    index: &binder::Index,
+    policy: BindingPolicy,
+    (modules, paths): (&HashMap<&str, &NodeRow>, &HashMap<NodeId, &str>),
+    importer: &str,
+    spec: &str,
+) -> Option<String> {
+    let module = modules.get(importer)?;
+    let semantics = registry.for_extension(Path::new(importer).extension()?.to_str()?)?.semantics();
+    let segments = crate::extract::refs::specifier_segments(spec, &semantics.specifier_extensions);
+    if segments.is_empty() {
+        return None;
+    }
+    let row = synthetic_row(module, None, segments.join("::"), EdgeKind::Imports);
+    let binder::Outcome::Bound { target, .. } = binder::bind(&row, index, policy) else {
+        return None;
+    };
+    paths.get(&target).map(|path| (*path).to_string())
 }
 
 // ── Commit (serial, one writer batch) ────────────────────────────────────────
@@ -2958,6 +3046,7 @@ mod admission;
 mod fold;
 mod group;
 mod handler;
+mod mount;
 mod nest;
 
 #[cfg(test)]

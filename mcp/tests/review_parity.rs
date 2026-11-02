@@ -1,12 +1,12 @@
 //! CLI-vs-MCP parity for the branch delta (S-677, [FR-GV-24]):
 //! `logos review --base --json` and the `review` tool.
 //!
-//! Both surfaces delegate to the one `Engine::review` entrypoint
+//! Both surfaces delegate to the one `Review::delta` entrypoint
 //! ([NFR-CC-01]). This test proves the two serialize the **same value** for one
 //! repository, that the MCP payload is byte-stable when asked twice, and that
 //! an unresolvable base answers `measured: false` on the MCP side too. With
 //! `branches` (S-757, [FR-GV-28]) the tool answers what `review --branches`
-//! does, through `Engine::review_branches`.
+//! does, through `Review::branches`.
 //!
 //! **What it does NOT cover.** `cli_payload` calls the `Engine` accessor the
 //! CLI arm calls; it does not spawn the binary — `cli/tests/review_cli.rs`
@@ -69,13 +69,13 @@ fn fixture() -> tempfile::TempDir {
     git(root, &["commit", "-q", "-m", "base"]);
     git(root, &["branch", "-M", "main"]);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    engine.scan(true).expect("scan records the merge-base snapshot");
+    engine.pipeline().index();
+    engine.quality().scan(true).expect("scan records the merge-base snapshot");
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/lib.rs", &format!("{}{}", nested("alpha", 4), nested("beta", 6)));
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "deep"]);
-    engine.index();
+    engine.pipeline().index();
     tmp
 }
 
@@ -98,7 +98,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 /// What the CLI arm prints for `base`: the engine's review, serialized.
 fn cli_payload(root: &Path, base: &str) -> String {
     let engine = Engine::start(root).expect("engine");
-    serde_json::to_string(&engine.review(Some(base)).expect("review runs")).unwrap()
+    serde_json::to_string(&engine.quality().review().delta(Some(base)).expect("review runs")).unwrap()
 }
 
 async fn mcp_call(client: &Client, arguments: Value) -> String {
@@ -171,7 +171,7 @@ async fn cli_and_mcp_return_the_same_branch_projection() {
     let branches = ["b1".to_string(), "b2".to_string()];
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_string(&engine.review_branches(Some("main"), &branches).expect("projection runs")).unwrap()
+        serde_json::to_string(&engine.quality().review().branches(Some("main"), &branches).expect("projection runs")).unwrap()
     };
 
     let (client, server) = boot(root).await;
@@ -191,7 +191,7 @@ async fn cli_and_mcp_return_the_same_branch_projection() {
 }
 
 /// `review` with `headroom: true` ([FR-GV-29], S-798) answers what
-/// `logos review --headroom --json` does, through `Engine::review_headroom`,
+/// `logos review --headroom --json` does, through `Review::headroom`,
 /// and refuses the parameters that only mean something beside it.
 ///
 /// [FR-GV-29]: ../../docs/specs/requirements/FR-GV-29.md
@@ -202,7 +202,7 @@ async fn cli_and_mcp_return_the_same_headroom() {
     let subjects = ["src/engine.rs".to_string(), "src/missing.rs".to_string()];
     let cli = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_string(&engine.review_headroom(Some("main"), &subjects, None).expect("headroom runs")).unwrap()
+        serde_json::to_string(&engine.quality().review().headroom(Some("main"), &subjects, None).expect("headroom runs")).unwrap()
     };
 
     let (client, server) = boot(root).await;
@@ -219,7 +219,7 @@ async fn cli_and_mcp_return_the_same_headroom() {
     let near = json!({"base": "main", "headroom": true, "near": 0});
     let cli_near = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_string(&engine.review_headroom(Some("main"), &[], Some(0)).unwrap()).unwrap()
+        serde_json::to_string(&engine.quality().review().headroom(Some("main"), &[], Some(0)).unwrap()).unwrap()
     };
     assert_eq!(mcp_call(&client, near).await, cli_near, "`near` reaches the engine");
 

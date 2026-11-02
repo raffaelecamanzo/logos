@@ -42,6 +42,16 @@ pub(super) fn extension_of(path: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The key of `path`'s language claim (`""` when it has none): its extension
+/// ([`extension_of`]), else the exact basename its plugin claims (Ruby's
+/// `Gemfile`, S-840) — what the per-language sets and maps the registry builds
+/// are keyed on ([`crate::plugin::registry::claim_key`]). A source file's
+/// language is asked through this; a *target* file's extension (the `.rb` a
+/// `require` names) stays [`extension_of`].
+pub(super) fn claim_key_of(path: &str) -> String {
+    crate::plugin::registry::claim_key(path).unwrap_or_default()
+}
+
 /// The directory segments of `file` (the path with its file name dropped).
 pub(super) fn dir_segments(file: &str) -> Vec<&str> {
     let mut dir: Vec<&str> = file.split('/').collect();

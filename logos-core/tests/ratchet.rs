@@ -83,7 +83,7 @@ fn with_no_blessed_file_every_ratchet_offender_is_an_error_naming_bless() {
     let tmp = project(&branchy("f", 3));
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert_eq!(report.passed, Some(false), "{:?}", report.violations);
     assert_eq!(
         offenders(&report),
@@ -107,7 +107,7 @@ fn bless_writes_a_deterministic_set_and_check_gate_scan_never_touch_it() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let path = blessed_file(tmp.path());
 
-    let blessed = engine.bless_rules(None, true).expect("bless runs");
+    let blessed = engine.quality().bless_rules(None, true).expect("bless runs");
     assert_eq!(blessed.passed, Some(true), "blessed debt passes: {:?}", blessed.violations);
     assert_eq!(blessed.ratchet.as_ref().unwrap().written, Some(2));
     let first = fs::read_to_string(&path).expect("bless wrote the file");
@@ -120,16 +120,16 @@ fn bless_writes_a_deterministic_set_and_check_gate_scan_never_touch_it() {
     // writes byte-identical content.
     fs::remove_file(&path).unwrap();
     let engine = Engine::start(tmp.path()).expect("engine restarts");
-    engine.bless_rules(None, true).expect("re-bless runs");
+    engine.quality().bless_rules(None, true).expect("re-bless runs");
     assert_eq!(fs::read_to_string(&path).unwrap(), first, "byte-identical re-bless");
 
     // check, gate (compare and save) and scan read it at most.
     let before = stamp(&path);
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let checked = engine.check_rules(None, true).expect("check runs");
-    engine.gate(None, true, true).expect("gate --save runs");
-    engine.gate(None, false, true).expect("gate runs");
-    let scanned = engine.scan(true).expect("scan runs");
+    let checked = engine.quality().check_rules(None, true).expect("check runs");
+    engine.quality().gate(None, true, true).expect("gate --save runs");
+    engine.quality().gate(None, false, true).expect("gate runs");
+    let scanned = engine.quality().scan(true).expect("scan runs");
     assert_eq!(stamp(&path), before, "check/gate/scan left the blessed set untouched");
 
     assert_eq!(checked.passed, Some(true), "{:?}", checked.violations);
@@ -158,7 +158,7 @@ fn bless_writes_a_deterministic_set_and_check_gate_scan_never_touch_it() {
 fn worsened_and_new_offenders_fail_and_a_reduced_one_is_reported_fixed() {
     let tmp = project(&branchy("f", 3));
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.bless_rules(None, true).expect("bless F");
+    engine.quality().bless_rules(None, true).expect("bless F");
 
     // F gains a branch (worse than blessed) and G appears (new).
     write(
@@ -166,7 +166,7 @@ fn worsened_and_new_offenders_fail_and_a_reduced_one_is_reported_fixed() {
         "src/lib.rs",
         &format!("{}{}", branchy("f", 4), branchy("g", 2)),
     );
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert_eq!(report.passed, Some(false));
     assert_eq!(
         offenders(&report),
@@ -178,7 +178,7 @@ fn worsened_and_new_offenders_fail_and_a_reduced_one_is_reported_fixed() {
 
     // F falls under max = 2 and G is gone: nothing violates, F is fixed.
     write(tmp.path(), "src/lib.rs", &branchy("f", 1));
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert_eq!(report.passed, Some(true), "{:?}", report.violations);
     assert!(offenders(&report).is_empty());
     let fixed = &report.ratchet.as_ref().unwrap().fixed;
@@ -196,7 +196,7 @@ fn a_blessed_set_holds_in_a_checkout_under_another_coordinate() {
     write(upstream.path(), ".logos/config.toml", "[project]\nid = \"github.com/acme/app\"\n");
     Engine::start(upstream.path())
         .expect("engine starts")
-        .bless_rules(None, true)
+        .quality().bless_rules(None, true)
         .expect("bless runs");
 
     let fork = project(&branchy("f", 3));
@@ -205,7 +205,7 @@ fn a_blessed_set_holds_in_a_checkout_under_another_coordinate() {
 
     let report = Engine::start(fork.path())
         .expect("engine starts")
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("check runs");
     assert_eq!(report.passed, Some(true), "{:?}", report.violations);
     assert_eq!(
@@ -225,15 +225,15 @@ fn blessing_under_an_alternate_contract_keeps_the_default_contracts_debt() {
     fs::write(&alt, "[constraints]\nmax_fn_lines = { max = 3, ratchet = true }\n").unwrap();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.bless_rules(None, true).expect("bless the default contract");
-    engine.bless_rules(Some(&alt), true).expect("bless the alternate contract");
+    engine.quality().bless_rules(None, true).expect("bless the default contract");
+    engine.quality().bless_rules(Some(&alt), true).expect("bless the alternate contract");
     let text = fs::read_to_string(blessed_file(tmp.path())).unwrap();
     assert!(
         text.contains("\"max_cc\"") && text.contains("\"max_fn_lines\""),
         "both contracts' debt is blessed:\n{text}"
     );
 
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert_eq!(report.passed, Some(true), "{:?}", report.violations);
 }
 
@@ -246,15 +246,15 @@ fn a_contract_with_no_ratchet_budget_never_reads_the_blessed_set() {
     write(tmp.path(), ".logos/rules-baseline.json", "{ not json");
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check ignores the blessed set");
+    let report = engine.quality().check_rules(None, true).expect("check ignores the blessed set");
     assert_eq!(report.passed, Some(false), "the scalar budget still fails F");
     assert!(report.ratchet.is_none(), "no ratchet summary without a ratchet budget");
-    engine.scan(true).expect("scan ignores the blessed set");
+    engine.quality().scan(true).expect("scan ignores the blessed set");
 
     // The near miss: the same malformed file under a ratchet contract is read,
     // and refused loud.
     write(tmp.path(), ".logos/rules.toml", RULES);
-    let err = engine.check_rules(None, true).expect_err("a ratchet contract reads it");
+    let err = engine.quality().check_rules(None, true).expect_err("a ratchet contract reads it");
     assert!(err.to_string().contains("rules-baseline.json"), "{err}");
 }
 
@@ -266,7 +266,7 @@ fn bless_with_no_ratchet_budget_writes_nothing_and_says_so() {
     write(tmp.path(), ".logos/rules.toml", "[constraints]\nmax_cc = 2\n");
     let report = Engine::start(tmp.path())
         .expect("engine starts")
-        .bless_rules(None, true)
+        .quality().bless_rules(None, true)
         .expect("bless runs");
     assert!(!blessed_file(tmp.path()).exists(), "no file the contract never reads");
     assert!(

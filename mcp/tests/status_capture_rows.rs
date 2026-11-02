@@ -39,7 +39,10 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 
 const A_FILE: &str = "a/a.go";
-const A_GO: &str = "package a\n\nfunc F() {}\n";
+/// `T` implements `Namer` (S-830): the row's `interfaces` figures are non-zero,
+/// so the surfaces agree on a count, not on an absence.
+const A_GO: &str =
+    "package a\n\nfunc F() {}\n\ntype Namer interface {\n\tName() string\n}\n\ntype T struct{}\n\nfunc (T) Name() string { return \"\" }\n";
 const B_GO: &str = "package b\n\nimport \"example.com/m/a\"\n\nfunc G() {\n\ta.F()\n}\n";
 
 fn write(root: &Path, rel: &str, contents: &str) {
@@ -107,9 +110,9 @@ async fn a_synced_store_and_a_cold_reindex_report_the_same_figures_through_mcp()
     let tmp = module("");
     {
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         write(tmp.path(), A_FILE, &format!("// touched\n{A_GO}"));
-        engine.sync(&[A_FILE.into()]);
+        engine.pipeline().sync(&[A_FILE.into()]);
         let rt = engine.runtime().unwrap();
         let captures = || {
             rt.submit_read(|store| {
@@ -152,7 +155,7 @@ async fn a_synced_store_and_a_cold_reindex_report_the_same_figures_through_mcp()
             })
         })
         .expect("plant the awaiting capture");
-        engine.sync(&[]);
+        engine.pipeline().sync(&[]);
         assert_eq!(
             captures(),
             1,
@@ -162,11 +165,19 @@ async fn a_synced_store_and_a_cold_reindex_report_the_same_figures_through_mcp()
     let synced = figures(&status_tool(tmp.path()).await);
 
     let cold = module("// touched\n");
-    Engine::start(cold.path()).expect("engine starts").index();
+    Engine::start(cold.path()).expect("engine starts").pipeline().index();
     assert_eq!(synced, figures(&status_tool(cold.path()).await));
 
     let go = &synced["resolution_by_language"][0];
     assert_eq!(go["language"], json!("go"));
+    assert_eq!(
+        go["interfaces"],
+        json!({
+            "in_scope": 1, "computed": 1, "implements": 1,
+            "not_computed": { "generic": 0, "unresolved_embedding": 0 }, "empty": 0,
+        }),
+        "the method-set figures (S-830): {go}"
+    );
     for class in ["calls", "imports"] {
         assert_eq!(
             (&go[class]["references"], &go[class]["bound"]),

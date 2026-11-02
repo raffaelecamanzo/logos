@@ -35,7 +35,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -492,7 +492,7 @@ fn a_method_added_to_the_imported_class_binds_on_sync_and_matches_a_full_index()
     assert!(callers_of(rt, &format!("{MAPPER_REL}:toPersistence")).is_empty(), "no toPersistence yet");
 
     write(tmp.path(), MAPPER_REL, USER_MAPPER);
-    engine.sync(&[MAPPER_REL.into()]);
+    engine.pipeline().sync(&[MAPPER_REL.into()]);
     let synced = (edges_of(rt, EdgeKind::Calls), edges_of(rt, EdgeKind::Imports));
     assert_eq!(
         callers_of(rt, &format!("{MAPPER_REL}:toPersistence")),

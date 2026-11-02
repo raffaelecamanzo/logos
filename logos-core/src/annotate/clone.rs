@@ -1288,7 +1288,7 @@ mod tests {
             copy_rust_sources(&src.join(module), &tmp.path().join("src").join(module));
         }
         let engine = crate::Engine::start(tmp.path()).expect("engine starts");
-        let result = engine.index();
+        let result = engine.pipeline().index();
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         let shingles = engine
             .runtime()

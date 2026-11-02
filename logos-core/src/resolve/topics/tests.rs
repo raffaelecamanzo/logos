@@ -121,6 +121,7 @@ fn promote_with(
         id: FILE_ID,
         path: FILE.to_string(),
         content_hash: None,
+        facade: None,
     }];
     let by_path: HashMap<&str, i64> = files.iter().map(|f| (f.path.as_str(), f.id)).collect();
     desired_set(&SymbolContext::default(), refs, nodes, &by_path, corpus)

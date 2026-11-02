@@ -65,8 +65,8 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// just exercises the same path the unit test cannot).
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     // `engine` drops here, releasing the store lock.
 }
 

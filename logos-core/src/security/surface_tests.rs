@@ -1399,7 +1399,7 @@ impl World {
     }
 
     /// What the Security page states as its count: the tally of every stored
-    /// finding, as [`Engine::security_page`](crate::Engine::security_page)
+    /// finding, as [`Findings::page`](crate::Findings::page)
     /// takes it off the unfiltered listing.
     fn page_counts(&self) -> super::FindingTally {
         let no_graph = |listed: &[&SecurityFinding]| {

@@ -1,7 +1,7 @@
 //! CLI-vs-MCP parity for the uncapped offender listing (S-676, [FR-QM-19]):
 //! `logos offenders --json` and the `offenders` tool.
 //!
-//! Both surfaces delegate to the one `Engine::offenders` entrypoint
+//! Both surfaces delegate to the one `Readouts::offenders` entrypoint
 //! ([NFR-CC-01]), through the core's own `OffendersFilter::parse`. This test
 //! proves the two serialize the **same value** for one snapshot, filtered and
 //! unfiltered, that each is byte-stable when asked twice, and that a bad
@@ -52,8 +52,8 @@ fn fixture() -> tempfile::TempDir {
     write(root, "src/a/mod.rs", &a);
     write(root, "src/ab/mod.rs", &format!("{}{}", nested("ab0", 5), nested("ab1", 4)));
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    engine.scan(true).expect("scan runs");
+    engine.pipeline().index();
+    engine.quality().scan(true).expect("scan runs");
     tmp
 }
 
@@ -77,7 +77,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 fn cli_payload(root: &Path, path: Option<&str>, dimension: Option<&str>) -> String {
     let engine = Engine::start(root).expect("engine");
     let filter = OffendersFilter::parse(path, dimension).expect("valid filter");
-    serde_json::to_string(&engine.offenders(&filter).expect("offenders reads")).unwrap()
+    serde_json::to_string(&engine.quality().readouts().offenders(&filter).expect("offenders reads")).unwrap()
 }
 
 async fn mcp_call(client: &Client, arguments: Value) -> Result<String, ServiceError> {

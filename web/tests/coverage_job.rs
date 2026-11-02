@@ -87,7 +87,7 @@ impl Fixture {
             nvd_api_key: None,
         };
         let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-        engine.index();
+        engine.pipeline().index();
         let intent = IntentToken::generate();
         let router = web::router_with_intent(Arc::new(engine), intent.clone());
         Self { _tmp: tmp, repo, bin, user, rec, intent, router }

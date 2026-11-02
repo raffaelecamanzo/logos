@@ -190,8 +190,14 @@ http_client_detectors = [
 # supertypes, never among its companion's, which the written `T.find()`
 # reaches first because this descriptor declares `companion_name`; and, where
 # no level of `T` answers, to the extension as an untyped call is.
+# A top-level `val`/`var` is a Variable and a `const val` a Constant (S-831,
+# `queries/symbols.scm`), terms of the file's package an `import a.b.NAME` binds
+# to; a function of the same name is read first. A property is no call target,
+# and types no receiver.
 # Java reaches a file's top-level functions through its facade class (S-560):
-# `Utils.kt`'s `f` is `UtilsKt.f()` to Java. Kotlin itself never names it.
+# `Utils.kt`'s `f` is `UtilsKt.f()` to Java. Kotlin itself never names it. A
+# file's `@file:JvmName("Slugs")` names it `Slugs` instead (S-832, the
+# `@module.facade` capture of `queries/symbols.scm`).
 # A `companion object` is a node of its own, `C#Companion#` (S-559), and its
 # members are reached through its class (I4-INT): `C.make()` binds among the
 # companion's callables alone, and a bare `make()` inside `C` reaches them once

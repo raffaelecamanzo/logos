@@ -59,7 +59,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// Index `root` and hand back the live runtime.
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 

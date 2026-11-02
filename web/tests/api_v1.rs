@@ -78,9 +78,9 @@ fn build_scanned_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
         "fix: add f",
     );
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
-    engine.index();
-    engine.scan(false).expect("scan persists a metric snapshot");
-    engine.hotspots(None, false, false).expect("hotspots mines a temporal snapshot");
+    engine.pipeline().index();
+    engine.quality().scan(false).expect("scan persists a metric snapshot");
+    engine.history().hotspots(None, false, false).expect("hotspots mines a temporal snapshot");
     (tmp, engine)
 }
 
@@ -190,7 +190,7 @@ async fn every_v1_endpoint_serves_json_under_self_only_csp() {
 
 /// S-505 ([FR-QM-17]): `GET /api/v1/health` carries the "where to start" list of
 /// the snapshot it displays as `scan.where_to_start` — the value
-/// `Engine::improvements` (the CLI `improvements` and the MCP tool) serves, field
+/// `Readouts::improvements` (the CLI `improvements` and the MCP tool) serves, field
 /// for field. The fixture holds one function nested six deep among eight shallow
 /// ones, so the list has a ranked unit and an outlier label to compare, not two
 /// empty lists agreeing.
@@ -207,8 +207,8 @@ async fn health_carries_the_where_to_start_list_the_engine_serves() {
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
     std::fs::write(tmp.path().join("src/lib.rs"), source).unwrap();
     let engine = Arc::new(Engine::start(tmp.path()).expect("engine starts"));
-    engine.index();
-    engine.scan(true).expect("scan persists a snapshot");
+    engine.pipeline().index();
+    engine.quality().scan(true).expect("scan persists a snapshot");
 
     let router = web::router(Arc::clone(&engine));
     let resp = router.oneshot(get("/api/v1/health")).await.unwrap();
@@ -216,7 +216,7 @@ async fn health_carries_the_where_to_start_list_the_engine_serves() {
     assert_eq!(status, StatusCode::OK);
     let health: serde_json::Value = serde_json::from_str(&body).expect("health is JSON");
 
-    let served = serde_json::to_value(engine.improvements().expect("improvements reads")).unwrap();
+    let served = serde_json::to_value(engine.quality().readouts().improvements().expect("improvements reads")).unwrap();
     assert_eq!(served["units"][0]["name"], "deep_one", "{served}");
     assert_eq!(health["scan"]["where_to_start"], served, "Health and the engine's list are one value");
 }
@@ -487,7 +487,7 @@ fn precedent_engine() -> (TempDir, Arc<Engine>) {
     std::fs::create_dir_all(repo.join(".logos")).unwrap();
     std::fs::write(repo.join(".logos/config.toml"), "[project]\nid = \"example.com/fixture\"\n").unwrap();
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -868,7 +868,7 @@ async fn branch_overlap_endpoint_serializes_the_read_model_and_keeps_every_ref()
 /// `GET /api/v1/statistics` serializes the enriched telemetry read-model (S-234,
 /// [FR-OB-04], [FR-UI-27]) — the usage/latency/value fields plus the S-233 daily
 /// activity series and dev-vs-`main` origin split — and `?window=` scopes the
-/// trailing window (default 7). A thin `Engine::stats(window)` pass-through; an empty
+/// trailing window (default 7). A thin `Graph::stats(window)` pass-through; an empty
 /// store degrades to an honest zeroed model, never an error ([NFR-CC-04]).
 #[tokio::test]
 async fn statistics_endpoint_serializes_the_enriched_read_model_and_honors_window() {
@@ -983,7 +983,7 @@ async fn config_endpoint_returns_the_masked_key_never_the_raw_secret() {
     let (_tmp, engine) = scanned_engine();
     // The raw secret the editor would POST — it must never come back out a GET.
     let raw = "sk-logos-supersecret-tail9999";
-    engine.config_write_secret(raw).expect("write the chat key");
+    engine.config().write_secret(raw).expect("write the chat key");
 
     let router = web::router(Arc::clone(&engine));
     let resp = router.oneshot(get("/api/v1/config")).await.unwrap();
@@ -1027,7 +1027,7 @@ async fn config_endpoint_single_root_reaches_no_workspace_origin() {
     assert!(body.contains("\"credential_origin\":\"unset\""), "no key above was inherited: {body}");
     assert!(!body.contains("\"workspace\""), "a single-root payload names no workspace origin: {body}");
     assert!(!body.contains("above/model") && !body.contains(above_key), "{body}");
-    let core = serde_json::to_string(&engine.config_read(None).expect("core read")).unwrap();
+    let core = serde_json::to_string(&engine.config().read(None).expect("core read")).unwrap();
     assert_eq!(body, core, "the single-root handler serves the core read-model with no workspace root");
 }
 
@@ -1102,7 +1102,7 @@ async fn files_untested_query_param_serves_the_untested_board() {
 /// `/api/v1/files?production_scope` exercises the optional production-scope
 /// board branch (CR-076: `wants_flag(.., "production_scope")` ⇒
 /// `latest_hotspots(.., production_scope=true)`), reached through the same
-/// [`Engine::latest_hotspots`] call as the bare `/files` board and the CLI
+/// [`History::latest_hotspots`](logos_core::History::latest_hotspots) call as the bare `/files` board and the CLI
 /// `--production-scope` flag / MCP `production_scope` argument ([FR-UI-05]).
 #[tokio::test]
 async fn files_production_scope_query_param_serves_the_filtered_board() {
@@ -1154,14 +1154,14 @@ async fn files_carries_the_findings_column_only_once_a_scan_is_stored() {
         {"artifactLocation":{"uri":"src/lib.rs"},"region":{"startLine":1}}}]}]}]}"#,
     )
     .unwrap();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.security().ingest(&report).expect("the report ingests");
 
     for (uri, with_findings) in [("/api/v1/files", false), ("/api/v1/files?with_findings", true)] {
         let body = files(uri).await;
         let cell = &body["hotspots"]["files"][0]["findings"];
         assert_eq!((cell["count"].as_u64(), cell["highest"].as_str(), cell["stale"].as_u64()), (Some(1), Some("high"), Some(0)), "{body}");
         let engine_payload = serde_json::to_value(
-            engine.latest_hotspots_with_findings(Some(50), false, false, with_findings).unwrap(),
+            engine.history().latest_hotspots_with_findings(Some(50), false, false, with_findings).unwrap(),
         )
         .unwrap();
         assert_eq!(body["hotspots"], engine_payload, "web carries the engine payload: {uri}");
@@ -1183,7 +1183,7 @@ async fn graph_and_search_serialize_real_graph_fields_over_an_indexed_repo() {
     )
     .expect("write fixture");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     let router = web::router(engine);
 
     let resp = router.clone().oneshot(get("/api/v1/graph?cap=50")).await.unwrap();
@@ -1210,7 +1210,7 @@ async fn node_code_param_serializes_the_source_excerpt() {
     )
     .expect("write fixture");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     let router = web::router(engine);
 
     // With ?code=1 the declaration source is serialized.
@@ -1271,9 +1271,9 @@ async fn served_worst_offenders(src: &str, scan: bool) -> serde_json::Value {
     std::fs::create_dir_all(dir.path().join("src")).expect("mkdir src");
     std::fs::write(dir.path().join("src/lib.rs"), src).expect("write fixture");
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     if scan {
-        engine.scan(false).expect("scan persists a metric snapshot");
+        engine.quality().scan(false).expect("scan persists a metric snapshot");
     }
     let resp = web::router(engine).oneshot(get("/api/v1/health")).await.unwrap();
     let (status, body, _h) = body_string(resp).await;
@@ -1514,8 +1514,8 @@ fn security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>) {
         nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-    engine.index();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.pipeline().index();
+    engine.security().ingest(&report).expect("the report ingests");
     (tmp, Arc::new(engine))
 }
 
@@ -1814,7 +1814,7 @@ async fn a_suppression_with_evidence_re_opens_when_a_literal_changes_and_reconfi
     let repo = tmp.path().canonicalize().unwrap().join("project");
     let cookie = repo.join("src/cookie.rs");
     std::fs::write(&cookie, COOKIE_RS).unwrap();
-    engine.sync(std::slice::from_ref(&cookie));
+    engine.pipeline().sync(std::slice::from_ref(&cookie));
     let intent = web::IntentToken::generate();
     let router = web::router_with_intent(Arc::clone(&engine), intent.clone());
     let (_, payload) = security_payload(router.clone()).await;
@@ -1854,7 +1854,7 @@ async fn a_suppression_with_evidence_re_opens_when_a_literal_changes_and_reconfi
 
     // The literal flips; the index catches up.
     std::fs::write(&cookie, COOKIE_RS.replace("true", "false")).unwrap();
-    engine.sync(std::slice::from_ref(&cookie));
+    engine.pipeline().sync(std::slice::from_ref(&cookie));
     let (_, payload) = security_payload(router.clone()).await;
     let reopened = finding_of(&payload, &fingerprint)["suppression"].clone();
     assert_eq!(reopened["state"], "out_of_date", "{reopened}");
@@ -1880,7 +1880,7 @@ async fn a_suppression_with_evidence_re_opens_when_a_literal_changes_and_reconfi
 
     // Deleting the symbol re-opens it the same way, and it cannot be re-confirmed.
     std::fs::remove_file(&cookie).unwrap();
-    engine.sync(&[cookie]);
+    engine.pipeline().sync(&[cookie]);
     let (_, payload) = security_payload(router.clone()).await;
     let gone = finding_of(&payload, &fingerprint)["suppression"].clone();
     assert_eq!((gone["state"].as_str(), gone["changed"][0]["change"].as_str()), (Some("out_of_date"), Some("gone")), "{gone}");
@@ -2146,7 +2146,7 @@ fn unscanned_security_engine(rules_toml: Option<&str>) -> (TempDir, Arc<Engine>)
         nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-    engine.index();
+    engine.pipeline().index();
     (tmp, Arc::new(engine))
 }
 
@@ -2321,8 +2321,8 @@ async fn the_overview_security_widget_counts_test_code_findings_apart() {
         nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-    engine.index();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.pipeline().index();
+    engine.security().ingest(&report).expect("the report ingests");
     let router = web::router(Arc::new(engine));
 
     let (_, page) = security_payload(router.clone()).await;
@@ -2385,8 +2385,8 @@ async fn the_overview_widget_and_the_page_count_a_needs_review_finding_apart() {
         nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-    engine.index();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.pipeline().index();
+    engine.security().ingest(&report).expect("the report ingests");
     let router = web::router(Arc::new(engine));
 
     let (_, page) = security_payload(router.clone()).await;
@@ -2457,8 +2457,8 @@ async fn the_overview_widget_and_the_page_count_a_dev_only_dependency_finding_ap
         nvd_api_key: None,
     };
     let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(env);
-    engine.index();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.pipeline().index();
+    engine.security().ingest(&report).expect("the report ingests");
     let router = web::router(Arc::new(engine));
 
     let (_, page) = security_payload(router.clone()).await;
@@ -2494,7 +2494,7 @@ async fn a_clean_scan_reads_zero_findings_and_not_never_scanned() {
         r#"{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"Semgrep OSS","semanticVersion":"1.85.0"}},"results":[]}]}"#,
     )
     .unwrap();
-    engine.security_ingest(&report).expect("the clean report ingests");
+    engine.security().ingest(&report).expect("the clean report ingests");
     let router = web::router(engine);
 
     let widget = overview_security(&router).await;
@@ -2528,7 +2528,7 @@ async fn the_security_page_says_whether_dependency_check_has_an_nvd_key_never_wh
             nvd_api_key: key,
         };
         let engine = Arc::new(Engine::start(&repo).expect("engine starts").with_scan_environment(env));
-        let cli = serde_json::to_value(engine.security_status().unwrap()).unwrap();
+        let cli = serde_json::to_value(engine.security().status().unwrap()).unwrap();
         let (body, payload) = security_payload(web::router(engine)).await;
         let page = &payload["security"];
         assert_eq!(scanner_row(page, "dependency-check")["nvd_api_key"], state, "{body}");

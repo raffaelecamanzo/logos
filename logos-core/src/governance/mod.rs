@@ -156,13 +156,13 @@ const EPSILON: f64 = 1.0;
 /// word is not what an audit is for.
 ///
 /// Held as one constant because two gate paths render it — the read-only
-/// verdict [`gate_from_snapshot`] (reached from [`Engine::latest_gate`]) and
+/// verdict [`gate_from_snapshot`] (reached from [`Readouts::latest_gate`]) and
 /// the persisting [`gate`]. They carried byte-identical literals, which is a
 /// pair that can drift and the exact shape R5 exists to stop.
 ///
 /// [`models::quality::absence`]: crate::models::quality::absence
 /// [`SignalAbsence`]: crate::models::quality::SignalAbsence
-/// [`Engine::latest_gate`]: crate::Engine::latest_gate
+/// [`Readouts::latest_gate`]: crate::Readouts::latest_gate
 /// [S-434]: ../../../docs/planning/journal.md#s-434-one-absence-taxonomy-audited-across-the-three-reporting-surfaces
 /// [FR-EH-04]: ../../../docs/specs/requirements/FR-EH-04.md
 /// [CR-138]: ../../../docs/requests/CR-138-a-readout-names-the-cause-its-gating-condition-establishes.md
@@ -469,7 +469,7 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
 
     // Tier 1: the in-process compiled cache.
     {
-        let cached = engine.governance().rules.lock().expect("rules cache lock");
+        let cached = engine.quality().state().rules.lock().expect("rules cache lock");
         if let Some(compiled) = cached.as_ref() {
             if compiled.hash == hash {
                 return Ok(Arc::clone(compiled));
@@ -512,7 +512,7 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
     };
 
     let compiled = Arc::new(CompiledRules::compile(rules, hash)?);
-    *engine.governance().rules.lock().expect("rules cache lock") = Some(Arc::clone(&compiled));
+    *engine.quality().state().rules.lock().expect("rules cache lock") = Some(Arc::clone(&compiled));
     Ok(compiled)
 }
 
@@ -606,7 +606,7 @@ fn reconcile_step(engine: &Engine, reconcile: bool) -> Result<Freshness> {
         });
     }
 
-    let outcome = engine.run_reconcile()?;
+    let outcome = engine.pipeline().run_reconcile()?;
     Ok(Freshness {
         reconciled: outcome.reconciled_files,
         failed: outcome.files_failed,
@@ -742,7 +742,7 @@ fn effective_thresholds(rules: &Rules) -> crate::metrics::Thresholds {
 /// `session_start` and the readout score Cohesion over one population.
 ///
 /// The engine's cached registry when it holds one; otherwise a fresh load, as
-/// [`Engine::languages`] falls back. A registry that will not load declares
+/// [`Graph::languages`](crate::Graph::languages) falls back. A registry that will not load declares
 /// nothing, so Cohesion drops out rather than being scored from calls alone
 /// ([NFR-CC-04]) — and the failure is logged, never swallowed.
 ///
@@ -1910,9 +1910,9 @@ fn materialise_and_evaluate(
     compiled: &CompiledRules,
     cycles: Option<u64>,
 ) -> Result<(Vec<Violation>, u32)> {
-    let (runtime, registry, config) = engine.pipeline_ctx()?;
+    let (runtime, registry, config) = engine.pipeline().ctx()?;
     rematerialise(runtime, registry, &config, &compiled.rules)?;
-    engine.advance_sync_stamp();
+    engine.graph().advance_sync_stamp();
 
     let facts = StoreFacts::read(runtime)?;
     let cycles = match cycles {
@@ -1921,7 +1921,7 @@ fn materialise_and_evaluate(
         // materialise_and_evaluate with no precomputed cycle count), and only
         // when the contract actually budgets cycles.
         None if compiled.rules.constraints.max_cycles.is_some() => {
-            facts.cycle_count(&*engine.hydrate(Granularity::ExcludeContains)?)
+            facts.cycle_count(&*engine.graph().hydrate(Granularity::ExcludeContains)?)
         }
         None => 0,
     };
@@ -2129,7 +2129,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // only; `scan` never writes it.
     let (violations, _) = classify_against_blessed(engine, &compiled, violations)?;
     let rules_present = compiled.hash != ABSENT_RULES_HASH;
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // BR-25: the snapshot scores under the effective rules.toml thresholds, so
     // its persisted hash gates the baseline (FR-GV-10) and the budgets agree.
     let thresholds = effective_thresholds(&compiled.rules);
@@ -2210,7 +2210,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
 }
 
 /// Build the scan's non-gated temporal tier ([FR-GH-07]) from the lazy
-/// [`temporal_report`](Engine::temporal_report) read. Fail-soft: a history
+/// [`temporal_report`](crate::History::temporal_report) read. Fail-soft: a history
 /// error never breaks the gated scan — it degrades to an empty, `n/a` tier
 /// carrying the reason as a warning ([BR-26], [NFR-RA-05]).
 ///
@@ -2218,7 +2218,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
 /// [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
 /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
 fn scan_temporal_tier(engine: &Engine, warnings: &mut Vec<String>) -> TemporalTier {
-    match engine.temporal_report() {
+    match engine.history().temporal_report() {
         Ok(report) => temporal_tier_from_report(report),
         Err(err) => {
             // History never gates: a temporal failure is advisory noise here.
@@ -2229,7 +2229,7 @@ fn scan_temporal_tier(engine: &Engine, warnings: &mut Vec<String>) -> TemporalTi
 }
 
 /// The read-only twin of [`scan_temporal_tier`]: the non-gated temporal tier
-/// built from the **read-only** [`latest_temporal_report`](Engine::latest_temporal_report)
+/// built from the **read-only** [`latest_temporal_report`](crate::History::latest_temporal_report)
 /// — the last-mined facts, never a fresh mine-and-persist ([CR-018], [ADR-28]).
 /// Same fail-soft posture: a history error degrades to an `n/a` tier, never an
 /// error, since the dashboard's Health view leads with the gated signal.
@@ -2237,7 +2237,7 @@ fn scan_temporal_tier(engine: &Engine, warnings: &mut Vec<String>) -> TemporalTi
 /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
 /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
 fn latest_temporal_tier(engine: &Engine, warnings: &mut Vec<String>) -> TemporalTier {
-    match engine.latest_temporal_report() {
+    match engine.history().latest_temporal_report() {
         Ok(report) => temporal_tier_from_report(report),
         Err(err) => {
             warnings.push(format!("temporal tier unavailable: {err:#}"));
@@ -2313,7 +2313,7 @@ pub(crate) struct PersistedSnapshot {
 }
 
 /// The most-recent persisted metric snapshot as a full read-model, or `None` on
-/// a never-`scan`-ned store ([ADR-28] `Engine::latest_metrics`). A pure read —
+/// a never-`scan`-ned store ([ADR-28] `Readouts::latest_metrics`). A pure read —
 /// no compute, no persist. Reconstructs the [`MetricSnapshot`] breakdown from the
 /// last `metric_snapshots` row, preserving the Cohesion/Focus applicability
 /// drop-out as `None` (the [NFR-CC-04] n/a sentinel), never a fabricated zero,
@@ -2847,7 +2847,7 @@ pub(crate) fn quality_readout(engine: &Engine, message_cap: usize) -> Result<Qua
     // `false`: reconciling writes, and this path must not.
     let fresh = reconcile_step(engine, false)?;
     let runtime = quality_runtime(engine)?;
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // BR-25: score under the effective rules.toml thresholds, exactly as `gate`
     // does, so the readout's signal is the one the gate would report.
     let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
@@ -3559,7 +3559,7 @@ fn gate_metrics(
 ) -> Result<GateResult> {
     let fresh = reconcile_step(engine, reconcile)?;
     let runtime = quality_runtime(engine)?;
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // BR-25: the gate scores under the effective rules.toml thresholds, so the
     // snapshot's persisted hash is what the baseline comparison gates on.
     let thresholds = effective_thresholds(&load_rules_cached(engine, None)?.rules);
@@ -3821,7 +3821,7 @@ pub(crate) fn session_start(
 ) -> Result<SessionInfo> {
     let fresh = reconcile_step(engine, true)?;
     let runtime = quality_runtime(engine)?;
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // BR-25: baseline under the effective rules.toml thresholds (its hash gates
     // the later session_end comparison, FR-GV-10).
     let compiled = load_rules_cached(engine, None)?;
@@ -4039,7 +4039,7 @@ pub(crate) fn dsm(
     let granularity = granularity.unwrap_or_default();
     let compiled = load_rules_cached(engine, None)?;
 
-    let view = engine.hydrate(match granularity {
+    let view = engine.graph().hydrate(match granularity {
         DsmGranularity::Module => Granularity::Module,
         DsmGranularity::File => Granularity::File,
     })?;
@@ -4310,7 +4310,7 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
     // surfaces and `index` agree by construction rather than by convention. The
     // seam is infallible, so this advisory adds no way for `doctor` to fail.
     report.zero_admission_warning =
-        engine.zero_admission_diagnostic(indexed_files).map(|d| d.to_string());
+        engine.graph().zero_admission_diagnostic(indexed_files).map(|d| d.to_string());
     // CR-106 / FR-IN-03: an installed hook configuration that cannot fire from
     // THIS working tree. Diagnostic only, like the two lines above — `ok` and
     // the exit status still move on structural drift alone — but not optional:
@@ -4335,7 +4335,7 @@ pub(crate) fn doctor(engine: &Engine) -> Result<DoctorReport> {
 /// project root + on-disk config (the same source the admission tripwire reads)
 /// without a full index walk, so `doctor` stays a cheap diagnostic.
 fn doc_symlink_warnings(engine: &Engine) -> Result<Vec<String>> {
-    let (_runtime, _registry, config) = engine.pipeline_ctx()?;
+    let (_runtime, _registry, config) = engine.pipeline().ctx()?;
     let drops = crate::config::unindexed_doc_symlinks(engine.root(), &config)?;
     Ok(drops.iter().map(ToString::to_string).collect())
 }
@@ -4380,7 +4380,7 @@ impl AdmissionCensus {
 
 /// `admission_tripwire` — the always-on admission guard (S-215, [FR-GV-20],
 /// [ADR-48]): builds the current [`AdmissionAuthority`] from
-/// [`Engine::pipeline_ctx`] (project root + on-disk config) and flags every
+/// [`Pipeline::ctx`](crate::Pipeline::ctx) (project root + on-disk config) and flags every
 /// [`indexed_files`](crate::graph_store::GraphStore::indexed_files) row it
 /// rejects. Read-only, O(files) matcher evaluations — no reindex, no parse —
 /// so it stays cheap enough to fold into every gate. Deliberately free-standing
@@ -4392,7 +4392,7 @@ impl AdmissionCensus {
 /// [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
 /// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
 fn admission_tripwire(engine: &Engine) -> Result<AdmissionCensus> {
-    let (runtime, _registry, config) = engine.pipeline_ctx()?;
+    let (runtime, _registry, config) = engine.pipeline().ctx()?;
     let authority = AdmissionAuthority::from_config(engine.root(), &config)?;
     let files = runtime.submit_read(|store| store.indexed_files())?;
     // `indexed_files` arrives `ORDER BY path` (NFR-RA-06), so the unadmitted
@@ -4579,7 +4579,7 @@ fn edge_diff(
 /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
 /// [CR-236]: ../../../docs/requests/CR-236-incremental-sync-loses-inbound-edges.md
 pub(crate) fn verify(engine: &Engine) -> Result<VerifyReport> {
-    let (runtime, registry, config) = engine.pipeline_ctx()?;
+    let (runtime, registry, config) = engine.pipeline().ctx()?;
 
     // 1. Live census + fast structural check + the FR-GV-20 admission read, in
     //    ONE read-only checkout so the counts, symbol set, structural verdict,

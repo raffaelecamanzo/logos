@@ -73,7 +73,8 @@
 ;   @ref.receiver.other    — every other receiver (`service.List()`,
 ;                            `string.Join()`, `System.Console.Read()`): never
 ;                            bound through the caller's scope — typed where
-;                            the file proves its type (S-558, below), else
+;                            the one binding of its name in scope at the call
+;                            proves its type (S-558, S-823, below), else
 ;                            `no-receiver-evidence`. A call on a type name
 ;                            (`Enumerable.Range()`) is no receiver call: it is
 ;                            the Path row `@ref.call` records.
@@ -165,155 +166,247 @@
 (member_access_expression
   expression: (_) @ref.receiver.other)
 
-; Receiver typing (S-558, CR-177, FR-RS-30, FR-RS-10) — Java's typing markers
-; (`extract::receiver`), recording no row of their own. Where the file proves a
-; member call's receiver type `T`, its Method row is retyped to the Path-form
-; `T::List`, bound among `T`'s members and up its proven supertypes; anything
-; unproven keeps its `other` row (`no-receiver-evidence`):
+; Receiver typing (S-558, CR-177, FR-RS-30, FR-RS-10; scope-precise since S-823,
+; CR-256) — the vocabulary Rust, TypeScript, Python, PHP, Kotlin and C++ speak
+; (`extract::receiver`), recording no row of its own. Where the one binding of a
+; member call's receiver name in scope at the call proves its type `T`, its
+; Method row is retyped to the Path-form `T::List`, bound among `T`'s members
+; and up its proven supertypes; anything unproven keeps its `other` row
+; (`no-receiver-evidence`):
 ;
-;   @ref.receiver.name     — `service.List()`, `_service.List()`: the one type
-;                            the file declares the name with, where it is
-;                            declared in scope at the call — a field or
-;                            property of the enclosing type, a parameter or
-;                            local of the method, or a primary-constructor
-;                            parameter of the type. A PascalCase receiver is
-;                            the type-name Path row above, never this marker.
+;   @ref.receiver.variable — `service.List()`, `_service.List()`: a one-name
+;                            receiver. A PascalCase one is the type-name Path
+;                            row above, never this marker.
+;   @ref.receiver.binding  — each name a declaration binds, and where:
+;                            `.scope` the callable a parameter belongs to (a
+;                            method, constructor, operator, indexer, local
+;                            function, lambda or anonymous method), the `for`,
+;                            `foreach`, `using`, `fixed`, `catch`, `case` or
+;                            switch arm whose variable it is;
+;                            `.after` a local's block, after its statement;
+;                            `.scope` a `case` section's local's whole switch
+;                            body;
+;                            `.member` a field, event or property's type, in
+;                            that type's own members (never a nested type's);
+;                            `.beneath` a primary-constructor parameter, in its
+;                            type's own members beneath every other binding of
+;                            its name, and nowhere in a type with a base list or
+;                            a `partial` one, whose inherited members or other
+;                            parts may hide it.
+;   @ref.receiver.proof    — the binding's type: `.type` a declared `T`, `T<A>`
+;                            (read `T`) or `T?`, `.literal` `var x = new T()`.
+;                            A binding with no proof — `var x = Make()`, an
+;                            untyped lambda parameter, a qualified (`A.B.T`,
+;                            `global::T`) or `dynamic` type — proves nothing,
+;                            and hides every other binding of its name.
+;   @ref.receiver.flows    — a pattern or `out` variable no binding above
+;                            states: in scope from where it is written to the
+;                            end of the innermost @ref.receiver.flow_scope
+;                            around it (a block, `case` section, callable,
+;                            member declaration, or a loop, resource, `catch`,
+;                            query, switch arm or embedded statement that
+;                            scopes it to itself), keeping its proof.
+;   @ref.receiver.hides    — every name a declaration declares. One no binding
+;                            above states — a deconstructed, nested-pattern or
+;                            query range name — is bound with no proof across
+;                            the innermost @ref.receiver.hiding_scope (a
+;                            callable, a property, a field declaration, a
+;                            top-level statement), so an outer binding is never
+;                            the one in scope there.
 ;   @ref.receiver.field    — `this.x.List()`: the field or property `x` the
 ;                            enclosing type declares itself.
-;   @ref.receiver.declared — a declaration whose type its `.type` companion
-;                            names, read in place of the generic one: `var x =
-;                            new T()` (`T`), `T? x` (`T`, also `out T? x`),
-;                            `foreach (T x in xs)` and `foreach (T? x in xs)`,
-;                            whose variable is no `name` field. With a
-;                            `.scope` companion, the name is in scope in the
-;                            type that node declares: a primary-constructor
-;                            parameter — in that type's own members only (no
-;                            nested type), and not where the type has a base
-;                            list, whose inherited members hide it — a
-;                            `partial` type included, whose every part records
-;                            an `Extends` row naming itself (S-557) and whose
-;                            other parts may declare the name.
-;   @ref.receiver.unproven — a name declared where no type is read — an untyped
-;                            lambda parameter, a deconstructed or pattern
-;                            name, a query range variable, a tuple element's
-;                            name (`(Order repo, int n) Get()` declares no
-;                            variable `repo`), and `value` — an accessor's
-;                            implicit parameter, which no parameter list
-;                            declares and which hides a field `value`, so the
-;                            name is never typed — or with a QUALIFIED
-;                            type (`A.B.Order o`, `global::Order o`), whose
-;                            simple name the `using`s may re-qualify to another
-;                            type, or `dynamic`; and the member name of a cast
-;                            `(T)x.y`, which the generic reading would take as a
-;                            declaration of `y` with type `T`. The type the file
-;                            declares for that name elsewhere is not proven to
-;                            be this one's.
+;   @ref.receiver.declared — a field or property declared `T?`, whose `.type`
+;                            companion `T` the `field` marker reads.
+;   @ref.receiver.unproven — `value`, an accessor's implicit parameter, which no
+;                            parameter list declares: never typed, anywhere in
+;                            the file.
 ;
-; Stated ceilings: a PascalCase receiver the file declares as a value
-; (`Logger.Log()` on a property) records no row ("Values that obscure a type
-; name" above); a conditional call `x?.List()` is not typed; a field or property
-; the type inherits, or declares in another part of a `partial` type, is not in
-; scope; `var x = Make()` proves nothing.
+; Stated ceilings: two bindings of a name in scope prove nothing, so a
+; parameter or local that shadows a field refuses the call rather than picking
+; the nearer one; a field or property the type inherits, an outer type
+; declares, or another part of a `partial` type declares is not in scope; a
+; conditional call `x?.List()` is not typed; `var x = Make()` proves nothing;
+; a top-level statement's local types no call; `o is var (a, b)` parses as a
+; call on `o is var` (tree-sitter-c-sharp 0.23), so its names hide no field of
+; theirs.
 (member_access_expression
-  expression: (identifier) @ref.receiver.name
-  (#not-match? @ref.receiver.name "^[A-Z][A-Za-z0-9_]*$"))
+  expression: (identifier) @ref.receiver.variable
+  (#not-match? @ref.receiver.variable "^[A-Z][A-Za-z0-9_]*$"))
 
+; Parameters: of every callable that field-names its list `parameters`.
+(_
+  parameters: (parameter_list (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(indexer_declaration
+  parameters: (bracketed_parameter_list (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(lambda_expression parameters: (implicit_parameter) @ref.receiver.binding) @ref.receiver.binding.scope
+
+; Primary-constructor parameters.
+(class_declaration
+  (parameter_list (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.beneath
+(struct_declaration
+  (parameter_list (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.beneath
+(record_declaration
+  (parameter_list (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.beneath
+
+; Fields, events and properties of a class, struct, record or interface.
+(_
+  body: (declaration_list
+    (field_declaration
+      (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))))) @ref.receiver.binding.member
+(_
+  body: (declaration_list
+    (event_field_declaration
+      (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))))) @ref.receiver.binding.member
+(_
+  body: (declaration_list
+    (property_declaration name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+
+; Locals, from their statement to the end of their block — and a `case`
+; section's local across the whole switch body, every section of which it is
+; in scope in (a read before it is CS0841). A top-level statement's local is
+; no binding: the byte range after it would reach the type declarations that
+; follow, whose members never read it (CS8801).
+(block
+  (local_declaration_statement
+    (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.after)
+(switch_body
+  (switch_section
+    (local_declaration_statement
+      (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))))) @ref.receiver.binding.scope
+
+; Loop, resource, `catch`, `case` and switch-arm variables: their construct.
+(for_statement
+  initializer: (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(foreach_statement left: (identifier) @ref.receiver.binding) @ref.receiver.binding.scope
+(using_statement
+  (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(fixed_statement
+  (variable_declaration (variable_declarator name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(catch_clause (catch_declaration name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(switch_section (declaration_pattern name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(switch_expression_arm (declaration_pattern name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+
+; Pattern and `out` variables: from where each is written to the end of the
+; innermost flow scope around it. C# keeps one declared in the condition of an
+; `if` that sits in a block, or in an expression, declaration or `return`
+; statement, in scope to the end of that block (`if (!(o is T p)) return;
+; p.Run();`); one declared in a loop's condition, a `using`, `lock` or `fixed`
+; resource, a `foreach` expression, a `catch` filter, a query clause, a switch
+; arm or an embedded statement (`else if (…)`, an unbraced loop body) only in
+; that construct. A `case` or switch-arm pattern is that construct's binding
+; above.
+(declaration_pattern name: (identifier) @ref.receiver.flows)
+(declaration_expression name: (identifier) @ref.receiver.flows)
+(block) @ref.receiver.flow_scope
+(switch_section) @ref.receiver.flow_scope
+(_ parameters: (_)) @ref.receiver.flow_scope
+(arrow_expression_clause) @ref.receiver.flow_scope
+(property_declaration) @ref.receiver.flow_scope
+(field_declaration) @ref.receiver.flow_scope
+(event_field_declaration) @ref.receiver.flow_scope
+(global_statement) @ref.receiver.flow_scope
+(while_statement) @ref.receiver.flow_scope
+(do_statement) @ref.receiver.flow_scope
+(for_statement) @ref.receiver.flow_scope
+(foreach_statement) @ref.receiver.flow_scope
+(using_statement) @ref.receiver.flow_scope
+(lock_statement) @ref.receiver.flow_scope
+(fixed_statement) @ref.receiver.flow_scope
+(catch_clause) @ref.receiver.flow_scope
+(query_expression) @ref.receiver.flow_scope
+(switch_expression_arm) @ref.receiver.flow_scope
+(if_statement consequence: (_) @ref.receiver.flow_scope)
+(if_statement alternative: (_) @ref.receiver.flow_scope)
+
+; A declared type, wherever the declaration sits; `var x = new T()`.
+(variable_declaration
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  (variable_declarator name: (identifier) @ref.receiver.proof)
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(variable_declaration
+  type: (nullable_type type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type)
+  (variable_declarator name: (identifier) @ref.receiver.proof))
+(variable_declaration
+  type: (implicit_type)
+  (variable_declarator
+    name: (identifier) @ref.receiver.proof
+    (object_creation_expression
+      type: [(identifier) (generic_name)] @ref.receiver.proof.literal)))
+(parameter
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(parameter
+  type: (nullable_type type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type)
+  name: (identifier) @ref.receiver.proof)
+(property_declaration
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(property_declaration
+  type: (nullable_type type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type)
+  name: (identifier) @ref.receiver.proof)
+(foreach_statement
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  left: (identifier) @ref.receiver.proof
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(foreach_statement
+  type: (nullable_type type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type)
+  left: (identifier) @ref.receiver.proof)
+(catch_declaration
+  type: [(identifier) (generic_name)] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof)
+(declaration_pattern
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(declaration_expression
+  type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type
+  name: (identifier) @ref.receiver.proof
+  (#not-match? @ref.receiver.proof.type "^dynamic$"))
+(declaration_expression
+  type: (nullable_type type: [(identifier) (generic_name) (predefined_type)] @ref.receiver.proof.type)
+  name: (identifier) @ref.receiver.proof)
+
+; Every name a declaration declares, and the scopes an unstated one hides its
+; name across.
+(variable_declarator name: (identifier) @ref.receiver.hides)
+(parameter name: (identifier) @ref.receiver.hides)
+(implicit_parameter) @ref.receiver.hides
+(foreach_statement left: (identifier) @ref.receiver.hides)
+(catch_declaration name: (identifier) @ref.receiver.hides)
+(declaration_pattern name: (identifier) @ref.receiver.hides)
+(declaration_expression name: (identifier) @ref.receiver.hides)
+(recursive_pattern name: (identifier) @ref.receiver.hides)
+(list_pattern name: (identifier) @ref.receiver.hides)
+(var_pattern name: (identifier) @ref.receiver.hides)
+(tuple_pattern name: (identifier) @ref.receiver.hides)
+(parenthesized_variable_designation name: (identifier) @ref.receiver.hides)
+(from_clause name: (identifier) @ref.receiver.hides)
+(let_clause . (identifier) @ref.receiver.hides)
+(join_clause (identifier) @ref.receiver.hides . "in")
+(query_expression "into" . (identifier) @ref.receiver.hides)
+(join_into_clause (identifier) @ref.receiver.hides)
+(_ parameters: (_)) @ref.receiver.hiding_scope
+(property_declaration) @ref.receiver.hiding_scope
+(field_declaration) @ref.receiver.hiding_scope
+(event_field_declaration) @ref.receiver.hiding_scope
+(global_statement) @ref.receiver.hiding_scope
+
+; `this.x.List()`, and the `T?` fields and properties it reads.
 (member_access_expression
   expression: (member_access_expression
     expression: "this"
     name: (identifier) @ref.receiver.field))
-
-(variable_declaration
-  type: (implicit_type)
-  (variable_declarator
-    name: (identifier) @ref.receiver.declared
-    (object_creation_expression
-      type: [(identifier) (generic_name)] @ref.receiver.declared.type)))
 (variable_declaration
   type: (nullable_type type: (_) @ref.receiver.declared.type)
   (variable_declarator name: (identifier) @ref.receiver.declared))
-(parameter
-  type: (nullable_type type: (_) @ref.receiver.declared.type)
-  name: (identifier) @ref.receiver.declared)
 (property_declaration
   type: (nullable_type type: (_) @ref.receiver.declared.type)
   name: (identifier) @ref.receiver.declared)
-(foreach_statement
-  type: (_) @ref.receiver.declared.type
-  left: (identifier) @ref.receiver.declared
-  (#not-match? @ref.receiver.declared.type "\\?$"))
-(foreach_statement
-  type: (nullable_type type: (_) @ref.receiver.declared.type)
-  left: (identifier) @ref.receiver.declared)
-(declaration_expression
-  type: (nullable_type type: (_) @ref.receiver.declared.type)
-  name: (identifier) @ref.receiver.declared)
-(class_declaration
-  (parameter_list (parameter name: (identifier) @ref.receiver.declared))) @ref.receiver.declared.scope
-(struct_declaration
-  (parameter_list (parameter name: (identifier) @ref.receiver.declared))) @ref.receiver.declared.scope
-(record_declaration
-  (parameter_list (parameter name: (identifier) @ref.receiver.declared))) @ref.receiver.declared.scope
 
-(implicit_parameter) @ref.receiver.unproven
-(lambda_expression
-  parameters: (parameter_list (parameter !type name: (identifier) @ref.receiver.unproven)))
-(tuple_pattern name: (identifier) @ref.receiver.unproven)
-(tuple_element name: (identifier) @ref.receiver.unproven)
-(parenthesized_variable_designation name: (identifier) @ref.receiver.unproven)
-(var_pattern name: (identifier) @ref.receiver.unproven)
-(list_pattern name: (identifier) @ref.receiver.unproven)
-(recursive_pattern !type name: (identifier) @ref.receiver.unproven)
-(from_clause !type name: (identifier) @ref.receiver.unproven)
-(let_clause . (identifier) @ref.receiver.unproven)
-(join_clause (identifier) @ref.receiver.unproven . "in")
-(query_expression "into" . (identifier) @ref.receiver.unproven)
-(join_into_clause (identifier) @ref.receiver.unproven)
-(cast_expression
-  value: (member_access_expression name: (identifier) @ref.receiver.unproven))
 ((member_access_expression expression: (identifier) @ref.receiver.unproven)
   (#eq? @ref.receiver.unproven "value"))
-(variable_declaration
-  type: [(qualified_name) (alias_qualified_name)
-         (nullable_type type: [(qualified_name) (alias_qualified_name)])]
-  (variable_declarator name: (identifier) @ref.receiver.unproven))
-(parameter
-  type: [(qualified_name) (alias_qualified_name)
-         (nullable_type type: [(qualified_name) (alias_qualified_name)])]
-  name: (identifier) @ref.receiver.unproven)
-(property_declaration
-  type: [(qualified_name) (alias_qualified_name)
-         (nullable_type type: [(qualified_name) (alias_qualified_name)])]
-  name: (identifier) @ref.receiver.unproven)
-(foreach_statement
-  type: [(qualified_name) (alias_qualified_name)
-         (nullable_type type: [(qualified_name) (alias_qualified_name)])]
-  left: (identifier) @ref.receiver.unproven)
-(declaration_expression
-  type: [(qualified_name) (alias_qualified_name)
-         (nullable_type type: [(qualified_name) (alias_qualified_name)])]
-  name: (identifier) @ref.receiver.unproven)
-(declaration_pattern
-  type: [(qualified_name) (alias_qualified_name)]
-  name: (identifier) @ref.receiver.unproven)
-(catch_declaration
-  type: [(qualified_name) (alias_qualified_name)]
-  name: (identifier) @ref.receiver.unproven)
-(recursive_pattern
-  type: [(qualified_name) (alias_qualified_name)]
-  name: (identifier) @ref.receiver.unproven)
-(variable_declaration
-  type: (identifier) @_dynamic
-  (variable_declarator name: (identifier) @ref.receiver.unproven)
-  (#eq? @_dynamic "dynamic"))
-(parameter
-  type: (identifier) @_dynamic
-  name: (identifier) @ref.receiver.unproven
-  (#eq? @_dynamic "dynamic"))
-(property_declaration
-  type: (identifier) @_dynamic
-  name: (identifier) @ref.receiver.unproven
-  (#eq? @_dynamic "dynamic"))
 
 ; `using` directives (S-518, CR-170, FR-RS-13). The four forms are told apart by
 ; the directive's leading keywords, read off its text, so exactly one pattern

@@ -50,7 +50,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -268,6 +268,60 @@ fn a_prototype_a_cpp_read_header_declares_pairs_with_its_c_definition() {
     assert_eq!(calls_from(&files, "src/main.c"), [edge("src/main.c:main", "src/helper.c:helper")]);
 }
 
+/// A C definition whose file includes the C++-read header declaring it pairs
+/// with the prototype as a C++ one does (S-820, [CR-254]): the prototype
+/// records a `References` link to it, and the call reaches it through the
+/// pair.
+///
+/// [CR-254]: ../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+#[test]
+fn a_c_definition_of_a_prototype_its_file_includes_records_the_pair_link() {
+    let tmp = tree(&[
+        ("src/api.h", "int helper(void);\n"),
+        ("src/helper.c", "#include \"api.h\"\nint helper(void) { return 1; }\n"),
+        ("src/main.c", "#include \"api.h\"\nint main(void) { return helper(); }\n"),
+        ("src/x.cpp", "int x() { return 0; }\n"),
+        ("src/y.cpp", "int y() { return 0; }\n"),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(edges(rt, EdgeKind::References), [edge("src/api.h:helper", "src/helper.c:helper")]);
+    assert_eq!(from_file(rt, EdgeKind::Calls, "src/main.c"), [edge("src/main.c:main", "src/helper.c:helper")]);
+}
+
+/// The pair decides before the link unit does (S-820 review): a second
+/// non-`static` `helper` in a file that never includes the header leaves the
+/// link-unit rule two candidates, but the prototype the call reaches pairs
+/// with the one definition whose file includes it.
+#[test]
+fn a_paired_prototype_binds_its_definition_where_the_link_unit_holds_two() {
+    let files = [
+        ("src/api.h", "int helper(void);\n"),
+        ("src/helper.c", "#include \"api.h\"\nint helper(void) { return 1; }\n"),
+        ("src/other.c", "int helper(void) { return 2; }\n"),
+        ("src/main.c", "#include \"api.h\"\nint main(void) { return helper(); }\n"),
+        ("src/w.cpp", "int w() { return 0; }\n"),
+        ("src/x.cpp", "int x() { return 0; }\n"),
+        ("src/y.cpp", "int y() { return 0; }\n"),
+        ("src/z.cpp", "int z() { return 0; }\n"),
+    ];
+    assert_eq!(calls_from(&files, "src/main.c"), [edge("src/main.c:main", "src/helper.c:helper")]);
+}
+
+/// C overloads nothing, so a C call never reads an included prototype as
+/// another overload of its own file's definition (S-820 review): an old-style
+/// `int helper();` beside `int helper(int x)` is one function.
+#[test]
+fn a_c_call_never_reads_an_included_prototype_as_an_overload() {
+    let files = [
+        ("src/api.h", "int helper();\n"),
+        ("src/helper.c", "#include \"api.h\"\nint helper(int x) { return x; }\nint main(void) { return helper(1); }\n"),
+        ("src/x.cpp", "int x() { return 0; }\n"),
+        ("src/y.cpp", "int y() { return 0; }\n"),
+    ];
+    assert_eq!(calls_from(&files, "src/helper.c"), [edge("src/helper.c:main", "src/helper.c:helper")]);
+}
+
 /// A prototype names a function, never binds one: with no definition of its
 /// name in the link unit, or two, the call stays unbound.
 #[test]
@@ -323,7 +377,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         write(tmp_a.path(), rel, text);
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let mut final_state: std::collections::BTreeMap<&str, &str> = initial.iter().copied().collect();
     final_state.extend(edits.iter().copied());

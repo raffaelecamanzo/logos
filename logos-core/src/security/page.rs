@@ -1,6 +1,6 @@
 //! The Security page's read-model ([FR-SC-09], [S-670]): the scanner matrix,
 //! the findings in graph context, both OWASP editions and the `[security]` gate
-//! band, composed by [`Engine::security_page`](crate::Engine::security_page)
+//! band, composed by [`Findings::page`](crate::Findings::page)
 //! for `GET /api/v1/security`.
 //!
 //! **Both editions ride on one payload**, so the page switches between them
@@ -156,7 +156,7 @@ pub(crate) fn listings(
 // data alone.
 //
 // **Stored-only.** It asks no scanner for anything — not even a version:
-// [`Engine::security_summary`](crate::Engine::security_summary) reads the
+// [`Findings::summary`](crate::Findings::summary) reads the
 // status with [`VersionProbes::Never`](super::VersionProbes::Never), so a
 // Dashboard load, which a cross-site page can trigger, starts no scanner
 // process at all ([ADR-80] §4). It writes nothing ([ADR-28]).
@@ -241,7 +241,7 @@ impl SecuritySummary {
 /// The Dashboard widget's [`SecuritySummary`] over one project: its `status`
 /// and `gate` band, already read, with the stored findings
 /// ([`summary_findings`]) and the ingest time of each stored report. The one
-/// call [`Engine::security_summary`](crate::Engine::security_summary) makes, so
+/// call [`Findings::summary`](crate::Findings::summary) makes, so
 /// the engine depends on this module through `security`'s re-export alone.
 ///
 /// # Errors

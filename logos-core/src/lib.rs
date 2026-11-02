@@ -1,8 +1,8 @@
 //! `logos-core` — the thick-core engine crate (ADR-01).
 //!
 //! All business logic lives here. The two thin adapter crates (`cli`, `mcp`)
-//! call [`Engine`] methods exclusively; they carry no logic of their own
-//! (NFR-MA-02: adapters ≤ 200 non-blank LOC each).
+//! call [`Engine`] and the feature-area façades it hands out exclusively; they
+//! carry no logic of their own (NFR-MA-02: adapters ≤ 200 non-blank LOC each).
 //!
 //! # Architecture
 //! - [`Engine`] is the sole instrumented chokepoint (NFR-CC-01, ADR-01).
@@ -135,7 +135,7 @@ pub mod observability;
 /// through (`perf::scaled`); production code never calls it.
 pub mod perf;
 /// The discover → extract → persist pipeline (S-010): the orchestrator behind
-/// [`Engine::index`](engine::Engine::index) / [`Engine::sync`](engine::Engine::sync),
+/// [`Pipeline::index`](engine::Pipeline::index) / [`Pipeline::sync`](engine::Pipeline::sync),
 /// with blake3 dirty tracking and capture-before-delete incremental sync (ADR-10).
 pub mod pipeline;
 /// The declarative plugin substrate (S-004): the `LanguageRegistry`, the
@@ -176,7 +176,10 @@ pub mod watch;
 /// primary checkout's DB to seed from via `--git-common-dir` (FR-WT-03).
 pub mod workspace;
 
-pub use engine::{ColdStartPhases, Engine};
+pub use engine::{
+    ColdStartPhases, Configuration, Coverage, Engine, Findings, Graph, History, Navigation, Pipeline, Quality, Readouts,
+    Review, Security, Setup, StartOptions, Tools,
+};
 pub use error::{CoreError, Severity};
 pub use hydrate::{Granularity, GraphView, HydrationConfig, HydrationStats, Scope, SyncStamp};
 pub use runtime::{live_worker_threads, Runtime, RuntimeConfig, SharedWorkerPool, WeakWorkerPool};

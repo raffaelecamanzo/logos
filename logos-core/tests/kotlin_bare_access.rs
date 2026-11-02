@@ -61,7 +61,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -619,7 +619,7 @@ fn scan_classes(n: usize) -> (TempDir, RecordedSnapshot) {
     let tmp = tree(&refs);
     let engine = index(tmp.path());
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     let member_access = engine
@@ -678,7 +678,7 @@ fn a_synced_edit_matches_a_fresh_reindex() {
     let engine_a = index(tmp_a.path());
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     fs::write(tmp_a.path().join("src/A.kt"), AFTER).unwrap();
-    engine_a.sync(&[root_a.join("src/A.kt")] as &[PathBuf]);
+    engine_a.pipeline().sync(&[root_a.join("src/A.kt")] as &[PathBuf]);
     let rt_a = engine_a.runtime().unwrap();
 
     let tmp_b = tree(&[("src/A.kt", AFTER)]);
@@ -692,7 +692,7 @@ fn a_synced_edit_matches_a_fresh_reindex() {
 
     // And back: the edit that drops `m` leaves no stale row or edge of it.
     fs::write(tmp_a.path().join("src/A.kt"), BEFORE).unwrap();
-    engine_a.sync(&[root_a.join("src/A.kt")] as &[PathBuf]);
+    engine_a.pipeline().sync(&[root_a.join("src/A.kt")] as &[PathBuf]);
     let tmp_c = tree(&[("src/A.kt", BEFORE)]);
     let engine_c = index(tmp_c.path());
     assert_eq!(
@@ -704,4 +704,18 @@ fn a_synced_edit_matches_a_fresh_reindex() {
         accesses(engine_a.runtime().unwrap()),
         pairs(&[("get", "n")])
     );
+}
+
+/// S-830 kept the receiver read's package rule for every language that keys no
+/// directory package: an extension function's `this.x`, in a sibling file of
+/// its receiver type's directory, binds that type's property — Go alone reads
+/// a `package` clause into it.
+#[test]
+fn an_extensions_receiver_read_binds_the_type_of_its_own_directory() {
+    let tmp = tree(&[
+        ("src/a/Foo.kt", "package a\n\nclass Foo {\n    val x: Int = 1\n}\n"),
+        ("src/a/Ext.kt", "package a\n\nfun Foo.twice(): Int {\n    return this.x + x\n}\n"),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(accesses(engine.runtime().unwrap()), pairs(&[("twice", "x")]));
 }

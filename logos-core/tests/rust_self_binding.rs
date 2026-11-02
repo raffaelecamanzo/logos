@@ -42,7 +42,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -392,7 +392,7 @@ fn a_synced_edit_matches_a_fresh_reindex_and_rederives_only_its_file() {
     let edited = "pub struct T;\nimpl T {\n    fn twin(&self) {}\n}\n";
     write(tmp.path(), "amb/src/y.rs", edited);
     let changed: Vec<PathBuf> = vec!["amb/src/y.rs".into()];
-    engine.sync(&changed);
+    engine.pipeline().sync(&changed);
 
     assert!(
         call_edges(rt).contains(&edge("amb/src/lib.rs:go@5", "amb/src/x.rs:twin@2")),
@@ -471,7 +471,7 @@ fn sync_equals_a_full_reindex_when_a_self_call_type_name_gains_a_twin() {
 
     let second = "pub struct X;\n";
     write(tmp.path(), "src/b.rs", second);
-    engine.sync(&["src/b.rs".into()]);
+    engine.pipeline().sync(&["src/b.rs".into()]);
     let mut edited = files.to_vec();
     edited.push(("src/b.rs", second));
     let fresh_tmp = tree(&edited);

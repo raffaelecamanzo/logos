@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        44,
-        "v44 = migration 44 (S-571 CR-181 a file's parse damage)"
+        47,
+        "v47 = migration 47 (S-832 CR-261 a file's declared facade; v46 = S-830 CR-260 a Go callable's signature, re-extracted)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 44,
+        recorded, 47,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 44);
+        assert_eq!(store.schema_version().unwrap(), 47);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 44);
+    assert_eq!(store.schema_version().unwrap(), 47);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 44, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 47, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 44);
+    assert_eq!(reopened.schema_version().unwrap(), 47);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1172,6 +1172,7 @@ fn a_receiver_parameter_binding_is_a_footprint() {
     let receivers = ReceiverParameters {
         names: names.to_vec(),
         extensions: vec!["js".to_string(), "mjs".to_string()],
+        files: Vec::new(),
     };
     let bound_in = |path: &'static str, name: &'static str, kind: LocalBindingKind| {
         let mut store = mem();
@@ -1229,6 +1230,56 @@ fn a_receiver_parameter_binding_is_a_footprint() {
             .unwrap(),
         "`apps` is not `app`"
     );
+
+    // A language that claims an extension-less name beside its extensions
+    // (Ruby's `Gemfile`, S-840) reads a file of that exact name as its own, at
+    // any depth — and no near miss.
+    let named = ReceiverParameters {
+        names: names.to_vec(),
+        extensions: Vec::new(),
+        files: vec!["Gemfile".to_string()],
+    };
+    for path in ["Gemfile", "sub/Gemfile"] {
+        assert!(
+            bound_in(path, "app", LocalBindingKind::Parameter)
+                .has_framework_footprint(&[], &named)
+                .unwrap(),
+            "{path} is the claimed file"
+        );
+    }
+    // A name is matched literally, never as a pattern: `Ge*file`, `G[ef]mfile`
+    // and `Gemfil?` name those files only.
+    for (claimed, hit, miss) in [
+        ("Ge*file", "sub/Ge*file", "sub/Gemfile"),
+        ("G[ef]mfile", "G[ef]mfile", "Gemfile"),
+        ("Gemfil?", "Gemfil?", "Gemfile"),
+    ] {
+        let literal = ReceiverParameters {
+            names: names.to_vec(),
+            extensions: Vec::new(),
+            files: vec![claimed.to_string()],
+        };
+        assert!(
+            bound_in(hit, "app", LocalBindingKind::Parameter)
+                .has_framework_footprint(&[], &literal)
+                .unwrap(),
+            "{hit} is the claimed name {claimed}"
+        );
+        assert!(
+            !bound_in(miss, "app", LocalBindingKind::Parameter)
+                .has_framework_footprint(&[], &literal)
+                .unwrap(),
+            "{claimed} is no pattern: {miss} is another file"
+        );
+    }
+    for path in ["Gemfile.lock", "sub/NotGemfile", "gemfile", "Gemfile/inner.txt"] {
+        assert!(
+            !bound_in(path, "app", LocalBindingKind::Parameter)
+                .has_framework_footprint(&[], &named)
+                .unwrap(),
+            "{path} is not the claimed file"
+        );
+    }
 }
 
 // ── S-011 / FR-RS-03 / ADR-10: the unresolved_refs reference ledger ──────────
@@ -1274,11 +1325,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v44 forward-only).
+    // data (the runner applies v2..v47 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        44,
+        47,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -1509,7 +1560,7 @@ fn ledger_rows_replace_per_file_and_cascade_on_file_delete() {
 }
 
 /// The live store → `resolve::coverage` path surfaces per-relation-class
-/// bound/unresolved counts (CR-011, FR-CG-11, FR-RS-04) — the read `Engine::stats`
+/// bound/unresolved counts (CR-011, FR-CG-11, FR-RS-04) — the read `Graph::stats`
 /// wraps to populate `StatsInfo.artifact_bindings`. Seeds artifact-ref ledger rows
 /// carrying a relation payload (some resolved, some not) and asserts the grouped
 /// `by_relation` map, exercising the column read-back and grouping end-to-end

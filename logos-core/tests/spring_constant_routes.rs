@@ -87,7 +87,7 @@ fn index(files: &[(&str, &str)]) -> (TempDir, Engine, FrameworkStats) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     (tmp, engine, result.framework)
 }
 
@@ -287,7 +287,7 @@ fn a_constant_of_another_member_or_a_library_is_refused_and_counted() {
         &api("a.c", STATIC_IMPORT, CONCATENATED),
     );
     let engine = Engine::start(workspace.path().join("svc")).expect("engine starts");
-    let stats = engine.index().framework;
+    let stats = engine.pipeline().index().framework;
     assert_eq!(route_names(engine.runtime().unwrap()), Vec::<String>::new());
     assert_eq!(stats.routes_not_composed, 1, "another member's constant is counted");
 
@@ -432,7 +432,7 @@ fn cold(tmp: &TempDir, files: &[&str]) -> (Facts, FrameworkStats) {
     }
     coordinate::pin(copy.path());
     let engine = Engine::start(copy.path()).expect("engine starts");
-    let stats = engine.index().framework;
+    let stats = engine.pipeline().index().framework;
     (facts(engine.runtime().unwrap()), stats)
 }
 
@@ -468,7 +468,7 @@ fn editing_only_the_constants_file_re_folds_its_routes_and_equals_a_full_reindex
         (advice(r#""emailAddress""#), vec![FOLDED_ROUTE], 0),
     ] {
         write(tmp.path(), ADVICE_FILE, &edit);
-        let synced = engine.sync(&[ADVICE_FILE.into()]).framework;
+        let synced = engine.pipeline().sync(&[ADVICE_FILE.into()]).framework;
         assert_eq!(route_names(rt), expected_routes, "after editing to {edit}");
         assert_eq!(synced.routes_not_composed, expected_refused, "after editing to {edit}");
         let (cold_facts, cold_stats) = cold(&tmp, &files);
@@ -488,7 +488,7 @@ fn deleting_the_constants_file_refuses_its_routes_and_equals_a_full_reindex() {
     ]);
     let rt = engine.runtime().unwrap();
     fs::remove_file(tmp.path().join(ADVICE_FILE)).unwrap();
-    let synced = engine.sync(&[ADVICE_FILE.into()]).framework;
+    let synced = engine.pipeline().sync(&[ADVICE_FILE.into()]).framework;
     assert_eq!(route_names(rt), Vec::<String>::new());
     assert_eq!(synced.routes_not_composed, 1);
     let (cold_facts, cold_stats) = cold(&tmp, &[handler.as_str()]);

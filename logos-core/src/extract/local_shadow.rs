@@ -20,7 +20,10 @@
 //!   whose plugin declares `separate_call_namespace` (Java, Ruby), where a
 //!   call never names a value;
 //! - a receiver identifier rebound by either is no longer the method's own
-//!   receiver ([`super::receiver`] reads [`LocalShadows::rebinds`]).
+//!   receiver ([`super::receiver`] reads [`LocalShadows::rebinds`]); a textual
+//!   `self` that a callable nested in the method rebinds with its own
+//!   parameter reads [`LocalShadows::rebinds_inside`] (S-838), because the
+//!   method's own `self` is a recorded parameter too.
 //!
 //! A binding that **is** a declaration the graph captured — a nested function,
 //! a local class, a `const f = () => …` the plugin declares — is not a local
@@ -145,6 +148,19 @@ impl<'a> LocalShadows<'a> {
     /// inside `func (s *Svc) …`), which is no longer the receiver.
     pub(super) fn rebinds(&self, node: Node<'_>, name: &str) -> bool {
         self.in_force(node, name).is_some()
+    }
+
+    /// Whether the innermost local binding of `name` in force at `node` is
+    /// scoped strictly inside `outer` — a callable `outer` holds declares it,
+    /// where a binding scoped to `outer` itself is `outer`'s own (S-838: a
+    /// method's `self` parameter against a nested `def`'s or `lambda`'s).
+    pub(super) fn rebinds_inside(&self, node: Node<'_>, name: &str, outer: Node<'_>) -> bool {
+        let Some(f) = self.in_force(node, name) else {
+            return false;
+        };
+        let scope = ((f.scope_start_line, f.scope_start_column), (f.scope_end_line, f.scope_end_column));
+        let outer = span(outer);
+        scope != outer && outer.0 <= scope.0 && scope.1 <= outer.1
     }
 
     fn in_force(&self, node: Node<'_>, name: &str) -> Option<&'a LocalBindingFact> {

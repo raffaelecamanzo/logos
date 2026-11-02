@@ -68,7 +68,7 @@ fn a_sarif_report_dropped_in_the_security_directory_is_ingested_and_no_scanner_s
         nvd_api_key: None,
     };
     let engine = Arc::new(Engine::start(&root).expect("engine starts").with_scan_environment(env));
-    engine.index();
+    engine.pipeline().index();
     let handle = engine.watch().expect("the watcher starts");
 
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif/semgrep.sarif");
@@ -77,7 +77,7 @@ fn a_sarif_report_dropped_in_the_security_directory_is_ingested_and_no_scanner_s
 
     let started = Instant::now();
     let scanned = loop {
-        let listed = engine.security_findings(&FindingsFilter::default()).expect("findings read");
+        let listed = engine.security().findings().list(&FindingsFilter::default()).expect("findings read");
         if !listed.scanned.is_empty() {
             break listed;
         }
@@ -115,13 +115,13 @@ fn the_watcher_s_ingest_reads_only_a_regular_file() {
     git(&root, &["add", "app", ".logos/config.toml"]);
     git(&root, &["commit", "-q", "-m", "seed"]);
     let engine = Arc::new(Engine::start(&root).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
 
     let outside = base.join("semgrep.sarif");
     fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sarif/semgrep.sarif"), &outside).unwrap();
     let link = root.join(".logos/security/link.sarif");
     std::os::unix::fs::symlink(&outside, &link).unwrap();
-    let err = engine.security_ingest_auto(&link).expect_err("a symbolic link is refused");
+    let err = engine.security().ingest_auto(&link).expect_err("a symbolic link is refused");
     assert!(format!("{err:#}").contains("not a regular file"), "{err:#}");
 
     let fifo = root.join(".logos/security/fifo.sarif");
@@ -131,10 +131,10 @@ fn the_watcher_s_ingest_reads_only_a_regular_file() {
     let worker = Arc::clone(&engine);
     let path = fifo.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(worker.security_ingest_auto(&path).is_err());
+        let _ = tx.send(worker.security().ingest_auto(&path).is_err());
     });
     assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(true), "a FIFO is refused, never read");
 
-    let listed = engine.security_findings(&FindingsFilter::default()).expect("findings read");
+    let listed = engine.security().findings().list(&FindingsFilter::default()).expect("findings read");
     assert!(listed.scanned.is_empty(), "nothing was ingested: {:?}", listed.scanned);
 }

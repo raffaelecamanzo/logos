@@ -18,7 +18,7 @@
 //!     └── fn run    (5)
 //! ```
 
-use super::binder::{bind, bindable, residue, Index, Outcome, Residue};
+use super::binder::{bind, bindable, residue, Index, IndexBuilder, Outcome, Residue};
 use super::package_key::PackageLayout;
 use crate::config::BindingPolicy;
 use crate::graph_store::{EdgeRow, ImplBlockRow, NodeArity, NodeRow, UnresolvedRefRow};
@@ -56,7 +56,7 @@ fn contains(source: i64, target: i64) -> EdgeRow {
 /// type and — when an `Implements` row of `refs` sources at the callable — by
 /// the trait that row names.
 fn with_impl_blocks(
-    ix: Index,
+    ix: IndexBuilder,
     nodes: &[NodeRow],
     self_types: &[(NodeId, String)],
     refs: &[UnresolvedRefRow],
@@ -89,7 +89,7 @@ fn with_impl_blocks(
             })
         })
         .collect();
-    ix.with_associated_items(&lined, &blocks, &[])
+    ix.with_associated_items(&lined, &blocks, &[]).build()
 }
 
 /// The standard fixture: nodes + Contains edges of the two-crate workspace.
@@ -798,7 +798,7 @@ fn associated_function_paths_bind_through_the_type_collapse_rule() {
     assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::SupertypeUnreached));
     // With `new` recorded in `impl Widget`, it binds.
-    let ix = with_impl_blocks(ix, &nodes, &[(NodeId(41), "Widget".to_string())], &all);
+    let ix = with_impl_blocks(IndexBuilder::from_index(ix), &nodes, &[(NodeId(41), "Widget".to_string())], &all);
     bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 41, EdgeKind::Calls);
 }
 
@@ -1090,6 +1090,62 @@ fn schema_type_name_never_binds_to_a_non_type_or_config_node() {
     ];
     let r = artifact_ref("Order", RefForm::Method, ArtifactRelation::SchemaType);
     assert_eq!(bind_artifact(&nodes, &r), Outcome::Unbound);
+}
+
+#[test]
+fn schema_type_name_never_binds_its_lone_non_type_namesake() {
+    // With one node of the name, and that one no type, the kind filter alone
+    // keeps the reference unbound: exactly-one would accept the function
+    // (FR-CG-10, [NFR-RA-05]; the kernel's one-named reading, S-827).
+    //
+    // [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    let nodes = vec![
+        cfg_node(SVC_PROTO, "svc.proto", NodeKind::ConfigFile, "svc.proto"),
+        node(40, "Order", NodeKind::Function, "src/a.rs"),
+    ];
+    let r = artifact_ref("Order", RefForm::Method, ArtifactRelation::SchemaType);
+    assert_eq!(bind_artifact(&nodes, &r), Outcome::Unbound);
+}
+
+#[test]
+fn a_doc_code_name_token_never_binds_its_lone_doc_namesake() {
+    // A documentation code-name token binds code only (FR-DG-04): with a doc
+    // section the one node of its name, the kind filter alone keeps it
+    // unbound — exactly-one would accept the section (S-827). Beside a
+    // same-named function, it binds the function.
+    let r = UnresolvedRefRow {
+        id: 300,
+        file_id: Some(60),
+        source_symbol: "local sym60".to_string(),
+        target: "Intro".to_string(),
+        alias: None,
+        form: RefForm::Method,
+        kind: EdgeKind::DocReference,
+        line: Some(3),
+        resolved: false,
+        payload: None,
+        receiver: None,
+        peeled: None,
+        arg_count: None,
+        exported: None,
+    };
+    let mut nodes = vec![
+        node(60, "guide.md", NodeKind::DocFile, "docs/guide.md"),
+        node(61, "Intro", NodeKind::DocSection, "docs/guide.md"),
+    ];
+    let ix = Index::build(&nodes, &[], std::slice::from_ref(&r));
+    assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
+    nodes.push(node(62, "Intro", NodeKind::Function, "src/intro.rs"));
+    let ix = Index::build(&nodes, &[], std::slice::from_ref(&r));
+    assert_eq!(
+        bind(&r, &ix, BindingPolicy::Strict),
+        Outcome::Bound {
+            source: NodeId(60),
+            target: NodeId(62),
+            kind: EdgeKind::DocReference,
+            payload: None,
+        }
+    );
 }
 
 #[test]
@@ -1667,7 +1723,7 @@ fn path_qualified_call_still_binds_an_associated_method() {
     let r = call(100, LIB_RS, 6, "Store::make");
     let (nodes, edges) = method_cluster();
     let ix = with_impl_blocks(
-        Index::build(&nodes, &edges, std::slice::from_ref(&r)),
+        IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(&r)),
         &nodes,
         &cluster_self_types(),
         std::slice::from_ref(&r),
@@ -1725,8 +1781,9 @@ fn bind_cluster_declared(r: &UnresolvedRefRow, policy: BindingPolicy, free_only:
     let (nodes, edges) = method_cluster();
     let layout = super::package_key::PackageLayout::default()
         .with_free_only_bare_calls(free_only.then(|| "rs".to_string()));
-    let ix = Index::build_with_layout(&nodes, &edges, std::slice::from_ref(r), layout)
-        .with_self_types(cluster_self_types());
+    let ix = IndexBuilder::new(&nodes, &edges, std::slice::from_ref(r), layout)
+        .with_self_types(cluster_self_types())
+        .build();
     bind(r, &ix, policy)
 }
 
@@ -2007,7 +2064,7 @@ fn a_fan_out_through_a_required_signature_is_named_by_the_signature() {
     let r = dyn_call(300, 2, "Plug::run");
     let refs = vec![implements(200, 51, "Plug"), implements(201, 61, "Plug"), r.clone()];
     let (bind_nodes, bind_edges) = bindable(&nodes, &edges, &signatures);
-    let ix = Index::build(&bind_nodes, &bind_edges, &refs).with_trait_signatures(&nodes, &edges, &signatures);
+    let ix = IndexBuilder::for_tests(&bind_nodes, &bind_edges, &refs).with_signatures(&nodes, &edges, &signatures).build();
     bound_many_to(
         bind(&r, &ix, BindingPolicy::Strict),
         2,
@@ -2178,11 +2235,11 @@ fn menu_import(id: i64, target: &str, form: RefForm) -> UnresolvedRefRow {
 /// Build the index over `refs` — with the imported scope when `imported`.
 fn imported_index(refs: &[UnresolvedRefRow], imported: bool) -> Index {
     let (nodes, edges) = imported_fixture();
-    let ix = Index::build(&nodes, &edges, refs).with_path_specifiers(ts_specifiers(), Vec::new());
+    let ix = IndexBuilder::for_tests(&nodes, &edges, refs).with_path_specifiers(ts_specifiers(), Vec::new());
     if imported {
-        ix.with_imported_bindings(refs, BindingPolicy::Balanced)
+        ix.with_imported_bindings(refs, BindingPolicy::Balanced).build()
     } else {
-        ix
+        ix.build()
     }
 }
 
@@ -2296,9 +2353,10 @@ fn a_package_import_binding_several_files_needs_exactly_one_definition() {
         root: String::new(),
         path: "example.com/shop".to_string(),
     };
-    let ix = Index::build(&nodes, &edges, &refs)
+    let ix = IndexBuilder::for_tests(&nodes, &edges, &refs)
         .with_path_specifiers(go, vec![module])
-        .with_imported_bindings(&refs, BindingPolicy::Balanced);
+        .with_imported_bindings(&refs, BindingPolicy::Balanced)
+        .build();
     assert_eq!(
         bind(&import, &ix, BindingPolicy::Balanced),
         Outcome::BoundMany {
@@ -2322,9 +2380,10 @@ fn a_rust_qualified_call_never_reaches_the_imported_rung() {
     let r = call(100, LIB_RS, 2, "util::run");
     let (nodes, edges) = fixture();
     let refs = [r.clone()];
-    let ix = Index::build(&nodes, &edges, &refs)
+    let ix = IndexBuilder::for_tests(&nodes, &edges, &refs)
         .with_path_specifiers(ts_specifiers(), Vec::new())
-        .with_imported_bindings(&refs, BindingPolicy::Strict);
+        .with_imported_bindings(&refs, BindingPolicy::Strict)
+        .build();
     bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 5, EdgeKind::Calls);
 }
 
@@ -2394,7 +2453,7 @@ fn self_type_index(r: &UnresolvedRefRow, drop: &[i64]) -> Index {
     let (mut nodes, edges, mut self_types) = self_type_fixture();
     nodes.retain(|n| !drop.contains(&n.id.0));
     self_types.retain(|(id, _)| !drop.contains(&id.0));
-    with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(r))
+    with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(r))
 }
 
 #[test]
@@ -2438,7 +2497,7 @@ fn a_self_type_call_with_two_or_no_candidates_stays_unbound_with_its_reason() {
     let use_b = make_ref(90, UTIL_RS, 4, "crate::B", Some("B"), RefForm::Path, EdgeKind::Imports);
     let (nodes, edges, self_types) = self_type_fixture();
     let refs = [use_b, two.clone()];
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     assert_eq!(bind(&two, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&two, &ix, BindingPolicy::Aggressive), Some(Residue::OverloadAmbiguous));
     // Without the import, `util`'s header names no type of its scope: the one
@@ -2508,7 +2567,7 @@ fn an_inherent_function_beats_a_trait_impls_in_any_module() {
     let from_trait_impl = call(100, UTIL_RS, 80, "Self::start");
     let from_inherent = call(101, LIB_RS, 83, "Self::start");
     let refs = [implements, use_e, from_trait_impl.clone(), from_inherent.clone()];
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
 
     bound_to(bind(&from_trait_impl, &ix, BindingPolicy::Strict), 80, 82, EdgeKind::Calls);
     bound_to(bind(&from_inherent, &ix, BindingPolicy::Strict), 83, 82, EdgeKind::Calls);
@@ -2529,7 +2588,7 @@ fn a_header_names_its_own_scopes_type_never_a_same_named_one_elsewhere() {
     // Vec<T>`) contributes no candidate to any type.
     let (mut nodes, edges, self_types) = self_type_fixture();
     nodes.retain(|n| ![61, 62, 63, 71, 78].contains(&n.id.0));
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
 }
 
@@ -2543,7 +2602,7 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     let r = call(100, LIB_RS, 70, "Self::helper");
     let (mut nodes, edges, self_types) = self_type_fixture();
     nodes.retain(|n| ![61, 62, 63, 75, 78].contains(&n.id.0));
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(&r)).with_self_types(self_types.clone()), &nodes, &self_types, std::slice::from_ref(&r));
     assert_eq!(bind(&r, &ix, BindingPolicy::Aggressive), Outcome::Unbound);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), external());
 
@@ -2554,7 +2613,7 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     let from_inner = call(101, LIB_RS, 86, "Self::helper");
     let (nodes, edges, self_types) = self_type_fixture();
     let refs = [import.clone(), from_inner.clone()];
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     bound_to(bind(&from_inner, &ix, BindingPolicy::Strict), 86, 73, EdgeKind::Calls);
     // And a caller in a file importing its self type's name from outside the
     // crate — and declaring none of its own — binds nothing.
@@ -2562,7 +2621,7 @@ fn a_self_type_the_crate_does_not_declare_or_imports_from_outside_binds_nothing(
     let lib_import = make_ref(91, UTIL_RS, 4, "std::x::A", Some("A"), RefForm::Path, EdgeKind::Imports);
     let refs = [lib_import, from_util.clone()];
     let nodes: Vec<NodeRow> = nodes.into_iter().filter(|n| n.id.0 != 62).collect();
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     assert_eq!(bind(&from_util, &ix, BindingPolicy::Strict), Outcome::Unbound);
     assert_eq!(residue(&from_util, &ix, BindingPolicy::Strict), external());
 }
@@ -2646,7 +2705,7 @@ fn receiver_index_with(
     self_types.retain(|(id, _)| !drop.contains(&id.0));
     refs.extend(extra.iter().cloned());
     refs.push(r.clone());
-    with_impl_blocks(Index::build_with_layout(&nodes, &edges, &refs, layout).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
+    with_impl_blocks(IndexBuilder::new(&nodes, &edges, &refs, layout).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
 }
 
 /// [`receiver_index_with`] under the layout the Rust plugin declares: its
@@ -2731,7 +2790,7 @@ fn a_type_another_crate_re_exports_is_followed_to_its_declaration() {
         let mut refs = implements.clone();
         refs.extend(extra.iter().cloned());
         refs.push(r.clone());
-        with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
+        with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
     };
     let reexport = |path: &str| make_ref(95, OTHER_LIB_RS, 20, path, Some("Engine"), RefForm::Path, EdgeKind::Imports);
     let r = proven(100, "Engine::start", None);
@@ -2788,7 +2847,7 @@ fn reexport_chain_index(r: &UnresolvedRefRow, reexports: &[(i64, i64, &str)], im
     }
     refs.extend(imports.iter().cloned());
     refs.push(r.clone());
-    with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
+    with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
 }
 
 #[test]
@@ -2904,7 +2963,7 @@ fn a_type_declared_once_binds_a_method_whose_impl_sits_in_another_module() {
     let r = proven(100, "Store::scan", None);
     let mut refs = implements;
     refs.extend([lib_use(90, "crate::util::Store", "Store"), r.clone()]);
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 416, EdgeKind::Calls);
 }
 
@@ -2922,7 +2981,7 @@ fn a_same_named_type_of_another_module_is_told_apart_by_its_own_module() {
         refs.extend(extra.iter().cloned());
         refs.push(r.clone());
         let nodes: Vec<NodeRow> = nodes.iter().filter(|n| !drop.contains(&n.id.0)).cloned().collect();
-        with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
+        with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs)
     };
     let r = proven(100, "Store::get", None);
     bound_to(bind(&r, &index(&r, &[lib_use(90, "crate::util::Store", "Store")], &[]), BindingPolicy::Strict), 2, 402, EdgeKind::Calls);
@@ -2979,9 +3038,9 @@ fn self_fact_index(r: &UnresolvedRefRow, extra: &[UnresolvedRefRow], facts: bool
     }));
     refs.extend(extra.iter().cloned());
     refs.push(r.clone());
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     if facts {
-        ix.with_arities(&arities)
+        IndexBuilder::from_index(ix).with_arities(&arities).build()
     } else {
         ix
     }
@@ -3057,9 +3116,9 @@ fn a_candidate_without_self_elsewhere_leaves_nothing_to_tell_apart() {
     let r = proven(100, "Store::get", None);
     let mut refs = implements;
     refs.extend([lib_use(90, "crate::inner::Store", "Store"), r.clone()]);
-    let ix = with_impl_blocks(Index::build(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
+    let ix = with_impl_blocks(IndexBuilder::for_tests(&nodes, &edges, &refs).with_self_types(self_types.clone()), &nodes, &self_types, &refs);
     assert_eq!(residue(&r, &ix, BindingPolicy::Aggressive), Some(Residue::SupertypeUnreached));
-    let ix = ix.with_arities(&[(NodeId(402), Some(ParamRange { min: 0, max: Some(0) }), Some(false))]);
+    let ix = IndexBuilder::from_index(ix).with_arities(&[(NodeId(402), Some(ParamRange { min: 0, max: Some(0) }), Some(false))]).build();
     for policy in POLICIES {
         assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "{policy:?}");
     }
@@ -3395,7 +3454,7 @@ fn an_interface_body_is_reached_only_where_the_layout_declares_the_key() {
         // An uninherited member (no body, or marked) is never a candidate.
         let r = shaped(101, IMPL_JAVA, 342, "gone", own);
         bound_to(bind(&r, &interface_index(&r, declaring()), policy), 342, 333, EdgeKind::Calls);
-        let ix = interface_index(&r, declaring()).with_uninherited([NodeId(333)]);
+        let ix = IndexBuilder::from_index(interface_index(&r, declaring())).with_uninherited([NodeId(333)]).build();
         assert_eq!(bind(&r, &ix, policy), Outcome::Unbound, "an uninherited member is never bound");
         assert_eq!(residue(&r, &ix, policy), Some(Residue::SupertypeUnreached));
     }
@@ -3873,7 +3932,7 @@ fn the_written_arity_filters_a_level_and_an_unknown_one_admits_any() {
         }
         let refs = std::slice::from_ref(r);
         let arities = arities.iter().map(|&(i, arity)| (NodeId(ty(i)), arity));
-        Index::build_with_layout(&nodes, &edges, refs, layout).with_type_arities(arities, &nodes, refs)
+        IndexBuilder::new(&nodes, &edges, refs, layout).with_type_arities(arities, &nodes, refs).build()
     };
     let types = [("cs", "A", "Result"), ("cs", "A.Sub", "Result"), ("cs", "A.Sub", "Result"), ("cs", "A.Sub", "Impl")];
     let arities = [(0, 0), (1, 0), (2, 1), (3, 0)];
@@ -4468,7 +4527,7 @@ fn range(min: u32, max: Option<u32>) -> Option<ParamRange> {
 
 /// [`hierarchy_index`] given the ranges of `Base.m` (302) and `A.m` (312).
 fn ranged_hierarchy(r: &UnresolvedRefRow, base_m: Option<ParamRange>, own_m: Option<ParamRange>) -> Index {
-    hierarchy_index(r).with_arities(&[(NodeId(302), base_m, None), (NodeId(312), own_m, None)])
+    IndexBuilder::from_index(hierarchy_index(r)).with_arities(&[(NodeId(302), base_m, None), (NodeId(312), own_m, None)]).build()
 }
 
 #[test]
@@ -4539,8 +4598,9 @@ fn same_arity_overloads_stay_overload_ambiguous_and_others_are_told_apart() {
     let r = counted(shaped(100, PY_FILE, 213, "o", Some(ReceiverShape::SelfInstance)), Some(1));
     let (nodes, edges) = shape_fixture();
     let index = |o1: Option<ParamRange>, o2: Option<ParamRange>| {
-        Index::build(&nodes, &edges, std::slice::from_ref(&r))
+        IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(&r))
             .with_arities(&[(NodeId(211), o1, None), (NodeId(212), o2, None)])
+            .build()
     };
     let ix = index(range(1, Some(1)), range(1, Some(1)));
     assert_eq!(bind(&r, &ix, BindingPolicy::Strict), Outcome::Unbound);
@@ -4565,8 +4625,9 @@ fn a_bare_call_is_filtered_only_in_a_language_that_overloads() {
     bound_to(bind(&r, &ix, BindingPolicy::Aggressive), 313, 302, EdgeKind::Calls);
     let (nodes, edges) = shape_fixture();
     let bare = counted(call(101, PY_FILE, 204, "m"), Some(1));
-    let ix = Index::build(&nodes, &edges, std::slice::from_ref(&bare))
-        .with_arities(&[(NodeId(203), range(0, Some(0)), None)]);
+    let ix = IndexBuilder::for_tests(&nodes, &edges, std::slice::from_ref(&bare))
+        .with_arities(&[(NodeId(203), range(0, Some(0)), None)])
+        .build();
     bound_to(bind(&bare, &ix, BindingPolicy::Strict), 204, 203, EdgeKind::Calls);
 }
 
@@ -4587,9 +4648,11 @@ fn the_takes_self_filter_decides_before_the_arity_filter() {
     assert_eq!(residue(&r, &ix, BindingPolicy::Strict), Some(Residue::NoApplicableOverload));
     // The inherent `pair` (422) cannot take one argument and the trait impl's
     // (423) can: the arity filter runs before the inherent-over-trait rank.
-    let ix = self_fact_index(&r, &store, false).with_arities(&[
-        (NodeId(422), range(0, Some(0)), Some(true)),
-        (NodeId(423), range(1, Some(1)), Some(true)),
-    ]);
+    let ix = IndexBuilder::from_index(self_fact_index(&r, &store, false))
+        .with_arities(&[
+            (NodeId(422), range(0, Some(0)), Some(true)),
+            (NodeId(423), range(1, Some(1)), Some(true)),
+        ])
+        .build();
     bound_to(bind(&r, &ix, BindingPolicy::Strict), 2, 423, EdgeKind::Calls);
 }

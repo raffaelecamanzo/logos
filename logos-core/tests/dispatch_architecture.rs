@@ -53,14 +53,14 @@ fn indexed(a_lib: &str) -> (TempDir, Engine) {
     let tmp = two_crates_with(a_lib, &[(".logos/rules.toml", RULES)]);
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     (tmp, engine)
 }
 
 /// The module-DSM cell from crate `from`'s module to crate `to`'s.
 fn dsm_cell(engine: &Engine, from: &str, to: &str) -> u32 {
-    let dsm = engine.dsm(Some(DsmGranularity::Module), false).expect("dsm runs");
+    let dsm = engine.quality().readouts().dsm(Some(DsmGranularity::Module), false).expect("dsm runs");
     let row = |krate: &str| {
         let prefix = format!("{krate}/src/");
         let rows: Vec<usize> = (0..dsm.rows.len()).filter(|&i| dsm.rows[i].name.contains(&prefix)).collect();
@@ -72,7 +72,7 @@ fn dsm_cell(engine: &Engine, from: &str, to: &str) -> u32 {
 
 /// The rules each violation of a `check_rules` run names, in report order.
 fn violated(engine: &Engine) -> Vec<String> {
-    let report = engine.check_rules(None, false).expect("check_rules runs");
+    let report = engine.quality().check_rules(None, false).expect("check_rules runs");
     report.violations.into_iter().map(|v| v.rule).collect()
 }
 
@@ -85,14 +85,14 @@ fn forbidden_edges(engine: &Engine) -> usize {
 /// Whether the module graph canvas draws an edge from crate `from`'s module to
 /// crate `to`'s.
 fn canvas_edge(engine: &Engine, from: &str, to: &str) -> bool {
-    let canvas = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Module), false);
+    let canvas = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Module), false);
     let (from, to) = (format!("{from}/src/"), format!("{to}/src/"));
     canvas.edges.iter().any(|e| e.source.contains(&from) && e.target.contains(&to))
 }
 
 /// The files a change to `b/src/lib.rs` reaches.
 fn affected_by_b(engine: &Engine) -> Vec<String> {
-    let result = engine.affected(&["b/src/lib.rs".to_string()], false);
+    let result = engine.navigation().affected(&["b/src/lib.rs".to_string()], false);
     assert!(result.unknown.is_empty(), "{:?}", result.unknown);
     result.affected.into_iter().map(|f| f.file).collect()
 }
@@ -104,7 +104,7 @@ fn a_call_through_a_trait_is_no_dependency_on_its_implementation() {
     assert_eq!(dsm_cell(&engine, "a", "b"), 0, "no a → b module edge");
     assert!(dsm_cell(&engine, "b", "a") > 0, "b depends on a's trait");
 
-    let metrics = engine.scan(false).expect("scan runs").metrics;
+    let metrics = engine.quality().scan(false).expect("scan runs").metrics;
     assert_eq!(metrics.depth.raw, 2.0, "b → a is two module layers, no cross-crate SCC");
 
     assert_eq!(violated(&engine), Vec::<String>::new(), "a layer rule forbidding a → b fires nothing");
@@ -121,7 +121,7 @@ fn a_direct_call_to_the_implementation_restores_the_dependency() {
 
     assert!(dsm_cell(&engine, "a", "b") > 0, "the direct call is an a → b module edge");
 
-    let metrics = engine.scan(false).expect("scan runs").metrics;
+    let metrics = engine.quality().scan(false).expect("scan runs").metrics;
     assert_eq!(metrics.depth.raw, 1.0, "a ↔ b condenses to one module layer");
 
     assert_eq!(violated(&engine), ["layer-ordering", "boundary:core->plugin"]);

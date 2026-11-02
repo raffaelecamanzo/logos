@@ -1301,7 +1301,7 @@ fn the_security_migration_upgrades_a_pre_change_store_in_place() {
     assert_eq!(coverage, ("h".to_string(), "c".to_string()), "coverage evidence survives");
 }
 
-/// [FR-SC-02] acceptance 4, through the engine: `Engine::security_ingest` binds
+/// [FR-SC-02] acceptance 4, through the engine: `Security::ingest` binds
 /// against the indexed graph, and a full `index` does not delete the evidence.
 #[test]
 fn the_engine_binds_against_the_index_and_evidence_survives_a_full_index() {
@@ -1309,16 +1309,16 @@ fn the_engine_binds_against_the_index_and_evidence_survives_a_full_index() {
     std::fs::create_dir_all(r.join(".logos")).unwrap();
     std::fs::write(r.join(".logos/config.toml"), "[project]\nid = \"sarif-fixture\"\n").unwrap();
     let engine = crate::Engine::start(&r).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert!(indexed.files_indexed > 0, "the fixture indexes: {:?}", indexed.warnings);
 
-    let s = engine.security_ingest(&fixture("semgrep.sarif")).unwrap();
+    let s = engine.security().ingest(&fixture("semgrep.sarif")).unwrap();
     assert_eq!((s.findings, s.bound), (2, 2), "both findings bind through the graph's file set");
     let before = dump(&r);
 
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
     assert_eq!(dump(&r), before, "security evidence survives a full logos.db rebuild");
-    assert!(engine.security_ingest(&fixture("semgrep.sarif")).unwrap().already_ingested);
+    assert!(engine.security().ingest(&fixture("semgrep.sarif")).unwrap().already_ingested);
 }
 
 /// [S-668] migration 5: a store at schema 4 holding a security snapshot

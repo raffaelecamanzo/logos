@@ -31,6 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use logos_core::model::{EdgeKind, NodeId, ReceiverShape, RefForm};
+use logos_core::models::CallResidueReason;
 use logos_core::{Engine, Runtime};
 use tempfile::TempDir;
 
@@ -54,7 +55,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -149,7 +150,7 @@ namespace Shop.Domain {
         public void Ship() { }
     }
     public class SpecialOrder : Order { }
-    public class Mailer { public void Send() { } }
+    public class Mailer { public void Send() { } public bool Ok() { return true; } }
 }
 ";
 
@@ -381,6 +382,10 @@ namespace Shop.Api {
         void Try(out Ext.Order o) { o = null; }
         public dynamic dp { get; set; }
         public void Dynamic(dynamic dy) { dy.Ship(); dynamic dl = null; dl.Ship(); dp.Ship(); }
+        public void DynamicLoop(List<Order> xs) { foreach (dynamic dd in xs) { dd.Ship(); } Out(out dynamic de); de.Ship(); }
+        void Out(out dynamic d) { d = null; }
+        private Order ls;
+        public void Labeled() { lbl: Mailer ls = null; ls.Send(); }
     }
 }
 ";
@@ -448,7 +453,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(path, text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -492,4 +497,416 @@ fn a_synced_edit_to_the_receivers_type_matches_a_fresh_reindex() {
     let retyped = CALLER.replace("IOrderService _orderService", "Order _orderService");
     let edges = synced_equals_reindexed(&initial, &[("src/Handler.cs", &retyped)]);
     assert_eq!(edges, vec![edge("src/Handler.cs:ByField@5", "src/Domain.cs:AddOrderItem@4")]);
+}
+
+// ── A binding types only the calls in its own scope (S-823, CR-256) ─────────
+
+/// The C# reasons of the unbound-call residue, the zero ones dropped.
+fn csharp_residue(engine: &Engine) -> Vec<(CallResidueReason, u64)> {
+    let residue = engine
+        .graph().status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "c-sharp")
+        .and_then(|row| row.call_residue)
+        .expect("the c-sharp row states its call residue");
+    let mut reasons: Vec<(CallResidueReason, u64)> = residue.reasons.into_iter().filter(|(_, n)| *n > 0).collect();
+    reasons.sort();
+    reasons
+}
+
+/// The bound `Calls` edges whose caller sits in `file`, sorted.
+fn calls_from(rt: &Runtime, file: &str) -> Edges {
+    let prefix = format!("{file}:");
+    calls(rt).into_iter().filter(|(from, _)| from.starts_with(&prefix)).collect()
+}
+
+/// A base class in another file: every name it declares is a member the
+/// file below inherits and cannot see, so a call on it proves nothing.
+const SCOPED_BASE: &str = "\
+namespace Shop.Domain {
+    public class Logger { public void Send() { } }
+    public class Oops : System.Exception { public void Send() { } }
+    public class Base {
+        protected Logger svc; protected Logger p; protected Logger e; protected Logger x;
+        protected Logger u; protected Logger before; protected Logger s; protected Logger pv;
+        protected Logger cf; protected Logger qm; protected Logger dm; protected Logger wo; protected Logger lo;
+        protected Logger aa; protected Logger sq; protected Logger lq;
+    }
+}
+";
+
+/// The D1 fixture (CR-256 §2): a typed local in a closed `if` block, the
+/// call on the inherited field of its name after the block.
+const CLOSED_BLOCK: &str = "\
+using Shop.Domain;
+namespace Shop.Api {
+    public class C : Base {
+        public void M(bool f) { if (f) { Mailer svc = new Mailer(); } svc.Send(); }
+        public void N(bool f) { if (f) { Mailer svc = new Mailer(); svc.Send(); } }
+    }
+}
+";
+
+#[test]
+fn a_local_in_a_closed_block_types_no_call_after_it() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/C.cs", CLOSED_BLOCK)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let c = |line: u32, name: &str| format!("src/C.cs:{name}@{line}");
+    // `M`'s `svc` is the inherited `Logger` field: the local's block closed
+    // before the call, so no binding of `svc` is in scope there.
+    assert_eq!(
+        rows(rt, "src/C.cs"),
+        sorted(vec![
+            row(&c(4, "M"), "Send", RefForm::Method, OTHER, false),
+            row(&c(5, "N"), "Mailer::Send", RefForm::Path, None, true),
+        ])
+    );
+    assert_eq!(calls_from(rt, "src/C.cs"), vec![edge(&c(5, "N"), "src/Domain.cs:Send@8")]);
+    assert_eq!(csharp_residue(&engine), vec![(CallResidueReason::NoReceiverEvidence, 1)]);
+}
+
+/// Each binding below is typed, and each is called once inside its scope and
+/// once outside it, where only the inherited member of its name is in scope.
+const OUT_OF_SCOPE: &str = "\
+using System.Collections.Generic;
+using Shop.Domain;
+namespace Shop.Api {
+    public class D : Base {
+        public void Lambda(List<Mailer> ms) { ms.ForEach((Mailer p) => p.Send()); p.Send(); }
+        public void Loop(List<Mailer> ms) { foreach (Mailer e in ms) { e.Send(); } e.Send(); }
+        public void Catch() { try { } catch (Oops x) { x.Send(); } x.Send(); }
+        public void Using() { using (Mailer u = new Mailer()) { u.Send(); } u.Send(); }
+        public void Before() { before.Send(); Mailer before = new Mailer(); before.Send(); }
+        public void Sibling() { Mailer s = new Mailer(); s.Send(); }
+        public void Other() { s.Send(); }
+        public void Pattern(object o, bool f) { if (f) { if (o is Mailer pv) { pv.Send(); } } pv.Send(); }
+    }
+}
+";
+
+#[test]
+fn a_binding_outside_its_construct_or_callable_types_no_call() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/D.cs", OUT_OF_SCOPE)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let d = |line: u32, name: &str| format!("src/D.cs:{name}@{line}");
+    let mailer = |source: String| row(&source, "Mailer::Send", RefForm::Path, None, true);
+    let untyped = |source: String| row(&source, "Send", RefForm::Method, OTHER, false);
+    assert_eq!(
+        rows(rt, "src/D.cs"),
+        sorted(vec![
+            row(&d(5, "Lambda"), "List::ForEach", RefForm::Path, None, false),
+            // The lambda's `p` is its own; after it, `p` is the inherited field.
+            mailer(d(5, "Lambda")),
+            untyped(d(5, "Lambda")),
+            // A loop variable, outside its loop.
+            mailer(d(6, "Loop")),
+            untyped(d(6, "Loop")),
+            // A `catch` variable, outside its clause.
+            row(&d(7, "Catch"), "Oops::Send", RefForm::Path, None, true),
+            untyped(d(7, "Catch")),
+            // A `using` variable, outside its statement.
+            mailer(d(8, "Using")),
+            untyped(d(8, "Using")),
+            // A local, before its declaration.
+            untyped(d(9, "Before")),
+            mailer(d(9, "Before")),
+            // A sibling method's local.
+            mailer(d(10, "Sibling")),
+            untyped(d(11, "Other")),
+            // A pattern variable, after the block around its `if` closed.
+            mailer(d(12, "Pattern")),
+            untyped(d(12, "Pattern")),
+        ])
+    );
+}
+
+/// The binding forms that still type their calls, each beside a field of
+/// its name in another class (`Holder`) that is never in scope here.
+const IN_SCOPE: &str = "\
+using System.Collections.Generic;
+using Shop.Domain;
+namespace Shop.Api {
+    public class Holder { private Order pm; private Order pn; private Order om; private Order sm; private Order am; }
+    public class E {
+        public void Pattern(object o) { if (o is Mailer pm) { pm.Send(); } }
+        public void Guard(object o) { if (!(o is Mailer pn)) { return; } pn.Send(); }
+        public void Out() { Find(out Mailer om); om.Send(); }
+        public void Case(object o) { switch (o) { case Mailer sm: sm.Send(); break; } }
+        public void Arm(object o) { var r = o switch { Mailer am => Use(am), _ => 0 }; }
+        int Use(Mailer am) { am.Send(); return 0; }
+        void Find(out Mailer o) { o = null; }
+        public void Compound(object o, bool b) { if (!(o is Mailer pc) || b) { return; } pc.Send(); }
+        public void Chain(object o, bool b) { if (o is Mailer pd && b && pd != null) { pd.Send(); } }
+        public void Lambda(List<object> xs) { xs.ForEach(o => { if (o is Mailer pl && pl != null) pl.Send(); }); }
+    }
+    public class Cp(Order repo) {
+        private Mailer repo = null;
+        public void Run() { repo.Send(); }
+    }
+    public class Cq(Order repo) {
+        public void Run(Mailer repo) { repo.Send(); }
+        public void Own() { repo.Ship(); }
+    }
+}
+";
+
+#[test]
+fn a_pattern_out_case_or_primary_binding_types_the_calls_in_its_scope() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/E.cs", IN_SCOPE)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let e = |line: u32, name: &str| format!("src/E.cs:{name}@{line}");
+    let send = "src/Domain.cs:Send@8";
+    assert_eq!(
+        calls_from(rt, "src/E.cs"),
+        sorted_edges(vec![
+            edge(&e(6, "Pattern"), send),
+            // A guard's pattern variable flows into the rest of the block.
+            edge(&e(7, "Guard"), send),
+            edge(&e(8, "Out"), send),
+            edge(&e(8, "Out"), &e(12, "Find")),
+            edge(&e(9, "Case"), send),
+            edge(&e(10, "Arm"), &e(11, "Use")),
+            edge(&e(11, "Use"), send),
+            // A pattern variable in a compound condition, a chain or a lambda.
+            edge(&e(13, "Compound"), send),
+            edge(&e(14, "Chain"), send),
+            edge(&e(15, "Lambda"), send),
+            // A member hides a primary-constructor parameter of its name...
+            edge(&e(19, "Run"), send),
+            // ...and so does a parameter; the type's own members read it.
+            edge(&e(22, "Run"), send),
+            edge(&e(23, "Own"), "src/Domain.cs:Ship@5"),
+        ])
+    );
+}
+
+fn sorted_edges(mut edges: Edges) -> Edges {
+    edges.sort();
+    edges
+}
+
+#[test]
+fn a_synced_edit_closing_a_locals_block_matches_a_fresh_reindex() {
+    let initial = [("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/C.cs", CLOSED_BLOCK)];
+    // `N`'s call moves after the block that declares its local: it is unbound.
+    let closed = CLOSED_BLOCK.replace("svc.Send(); } }\n    }", "} svc.Send(); }\n    }");
+    assert_ne!(closed, CLOSED_BLOCK, "the edit applies");
+    let edges = synced_equals_reindexed(&initial, &[("src/C.cs", &closed)]);
+    assert!(!edges.iter().any(|(from, _)| from.starts_with("src/C.cs:")), "{edges:#?}");
+}
+
+/// A `case` section's local is in scope across the whole switch body: in a
+/// later section it is still the local, never the field of its name.
+const SWITCH_LOCAL: &str = "\
+using Shop.Domain;
+namespace Shop.Api {
+    public class Sw {
+        private Logger o;
+        public void M(int k) {
+            switch (k) {
+                case 1: Mailer o = new Mailer(); break;
+                case 2: o = new Mailer(); o.Send(); break;
+            }
+        }
+    }
+    public class Sx : Base {
+        public void N(int k) {
+            switch (k) {
+                case 1: Mailer svc = new Mailer(); break;
+                case 2: svc = new Mailer(); svc.Send(); break;
+            }
+        }
+    }
+}
+";
+
+#[test]
+fn a_case_sections_local_is_in_scope_in_every_section_of_its_switch() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/Sw.cs", SWITCH_LOCAL)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    // `M`'s local and its field are both in scope in `case 2`: refused, and
+    // never the field's `Logger`. `N`'s local is the one binding there.
+    assert_eq!(
+        rows(rt, "src/Sw.cs"),
+        sorted(vec![
+            row("src/Sw.cs:M@5", "Send", RefForm::Method, OTHER, false),
+            row("src/Sw.cs:N@13", "Mailer::Send", RefForm::Path, None, true),
+        ])
+    );
+    assert_eq!(calls_from(rt, "src/Sw.cs"), vec![edge("src/Sw.cs:N@13", "src/Domain.cs:Send@8")]);
+}
+
+/// Top-level statements before the file's types: a member reads its own
+/// type's members — an inherited `svc`, a primary-constructor `w` — never a
+/// top-level local of the name (CS8801).
+const TOP_LEVEL: &str = "\
+using Shop.Domain;
+var svc = new Mailer();
+Mailer w = new Mailer();
+class Tl : Base { public void M() { svc.Send(); } }
+class Wk(Logger w) : Base { public void N() { w.Send(); } }
+";
+
+#[test]
+fn a_top_level_local_types_no_call_in_the_types_after_it() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/Program.cs", TOP_LEVEL)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let methods: Vec<Row> = rows(rt, "src/Program.cs").into_iter().filter(|r| !r.0.contains(":Program.cs@")).collect();
+    assert_eq!(
+        methods,
+        sorted(vec![
+            row("src/Program.cs:M@4", "Send", RefForm::Method, OTHER, false),
+            row("src/Program.cs:N@5", "Send", RefForm::Method, OTHER, false),
+        ])
+    );
+    assert!(!calls(rt).iter().any(|(from, _)| from.starts_with("src/Program.cs:")), "{:#?}", calls(rt));
+}
+
+/// Pattern and `out` variables C# scopes to their own construct: each types
+/// the call inside it, and none the call after it, where only the inherited
+/// member of its name is in scope.
+const CONSTRUCT_SCOPED: &str = "\
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using Shop.Domain;
+namespace Shop.Api {
+    public class W : Base {
+        public void While(object o) { while (o is Mailer x) { x.Send(); break; } x.Send(); }
+        public void Do(object o) { do { } while (o is Mailer dm && Go(dm)); dm.Send(); }
+        public void WhileOut() { while (Try(out Mailer wo)) { wo.Send(); } wo.Send(); }
+        public void ElseIf(object o, bool f) { if (f) { } else if (o is Mailer e) { e.Send(); } e.Send(); }
+        public void UsingOut() { using (Make(out Mailer u)) { u.Send(); } u.Send(); }
+        public void For(object o) { for (int i = 0; o is Mailer p && i < 1; i++) { p.Send(); } p.Send(); }
+        public void Embedded(List<object> xs) { foreach (var q in xs) if (q is Mailer s) { s.Send(); } s.Send(); }
+        public void Filter() { try { } catch (Exception ex) when (ex.Data is Mailer cf) { cf.Send(); } cf.Send(); }
+        public void Lock(object o) { lock (o is Mailer lo ? lo : o) { lo.Send(); } lo.Send(); }
+        public object Query(List<object> xs) { var r = from z in xs where z is Mailer qm select qm; qm.Send(); return r; }
+        bool Go(Mailer m) { return true; }
+        bool Try(out Mailer m) { m = null; return false; }
+        IDisposable Make(out Mailer m) { m = null; return null; }
+    }
+}
+";
+
+#[test]
+fn a_pattern_or_out_variable_of_a_loop_resource_filter_or_embedded_statement_stays_in_it() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/W.cs", CONSTRUCT_SCOPED)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let w = |line: u32, name: &str| format!("src/W.cs:{name}@{line}");
+    let send: Vec<Row> = rows(rt, "src/W.cs").into_iter().filter(|r| r.1.ends_with("Send")).collect();
+    let mailer = |source: String| row(&source, "Mailer::Send", RefForm::Path, None, true);
+    let untyped = |source: String| row(&source, "Send", RefForm::Method, OTHER, false);
+    assert_eq!(
+        send,
+        sorted(vec![
+            mailer(w(7, "While")),
+            untyped(w(7, "While")),
+            untyped(w(8, "Do")),
+            mailer(w(9, "WhileOut")),
+            untyped(w(9, "WhileOut")),
+            mailer(w(10, "ElseIf")),
+            untyped(w(10, "ElseIf")),
+            mailer(w(11, "UsingOut")),
+            untyped(w(11, "UsingOut")),
+            mailer(w(12, "For")),
+            untyped(w(12, "For")),
+            mailer(w(13, "Embedded")),
+            untyped(w(13, "Embedded")),
+            mailer(w(14, "Filter")),
+            untyped(w(14, "Filter")),
+            mailer(w(15, "Lock")),
+            untyped(w(15, "Lock")),
+            untyped(w(16, "Query")),
+        ])
+    );
+}
+
+/// A switch arm's, a `case` section's and an expression lambda's pattern
+/// variable: typed inside its construct, and after it only the inherited
+/// member of its name is in scope.
+const FLOW_BOUNDS: &str = "\
+using System.Collections.Generic;
+using System.Linq;
+using Shop.Domain;
+namespace Shop.Api {
+    public class F : Base {
+        public void Arm(object o) { var r = o switch { Mailer aa => aa.Ok(), _ => false }; aa.Send(); }
+        public void Sec(object o, int k) { switch (k) { case 1: if (o is Mailer sq) { sq.Send(); } break; } sq.Ok(); }
+        public void Lam(List<object> xs) { var r = xs.Select(o => o is Mailer lq && lq.Ok()); lq.Send(); }
+    }
+}
+";
+
+#[test]
+fn a_switch_arm_section_or_expression_lambda_bounds_its_pattern_variable() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/Base.cs", SCOPED_BASE), ("src/F.cs", FLOW_BOUNDS)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let f = |line: u32, name: &str| format!("src/F.cs:{name}@{line}");
+    let receiver_calls: Vec<Row> =
+        rows(rt, "src/F.cs").into_iter().filter(|r| r.1.ends_with("Send") || r.1.ends_with("Ok")).collect();
+    assert_eq!(
+        receiver_calls,
+        sorted(vec![
+            row(&f(6, "Arm"), "Mailer::Ok", RefForm::Path, None, true),
+            row(&f(6, "Arm"), "Send", RefForm::Method, OTHER, false),
+            row(&f(7, "Sec"), "Mailer::Send", RefForm::Path, None, true),
+            row(&f(7, "Sec"), "Ok", RefForm::Method, OTHER, false),
+            row(&f(8, "Lam"), "Mailer::Ok", RefForm::Path, None, true),
+            row(&f(8, "Lam"), "Send", RefForm::Method, OTHER, false),
+        ])
+    );
+}
+
+/// The binding forms the fixtures above leave out, each typing its call: an
+/// indexer parameter, an event field, a `for` variable, `var x = new T<A>()`,
+/// a `T?` property read through `this.`, a field initializer's pattern
+/// variable.
+const MORE_FORMS: &str = "\
+using System.Collections.Generic;
+using Shop.Domain;
+namespace Shop.Api {
+    public class Repo<T> { public void Add() { } }
+    public class G {
+        public Mailer this[Mailer ix] { get { ix.Send(); return ix; } }
+        public event Mailer ev;
+        public void Event() { ev.Send(); }
+        public void For() { for (Mailer fi = null; ; ) { fi.Send(); break; } }
+        public void Generic() { var r = new Repo<Order>(); r.Add(); }
+        public Mailer? NProp { get; set; }
+        public void ThisProp() { this.NProp.Send(); }
+        static object Obj;
+        private static bool B = Obj is Mailer fq && fq.Ok();
+    }
+}
+";
+
+#[test]
+fn every_other_binding_form_types_its_call() {
+    let tmp = tree(&[("src/Domain.cs", DOMAIN), ("src/G.cs", MORE_FORMS)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let g = |line: u32, name: &str| format!("src/G.cs:{name}@{line}");
+    let send = "src/Domain.cs:Send@8";
+    assert_eq!(
+        calls_from(rt, "src/G.cs"),
+        sorted_edges(vec![
+            // An indexer is no symbol: its call is its class's.
+            edge(&g(5, "G"), send),
+            edge(&g(8, "Event"), send),
+            edge(&g(9, "For"), send),
+            edge(&g(10, "Generic"), &g(4, "Add")),
+            edge(&g(12, "ThisProp"), send),
+            // A field initializer's call is the field's.
+            edge(&g(14, "B"), "src/Domain.cs:Ok@8"),
+        ])
+    );
 }
