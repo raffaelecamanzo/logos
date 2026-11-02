@@ -298,7 +298,7 @@ pub(crate) fn stats(root: &Path, window_days: Option<u32>) -> Result<StatsInfo> 
 /// N members for N small store reads rather than N engine constructions, which
 /// is the only way the aggregate stays inside [NFR-PE-10]'s ceiling.
 ///
-/// The `artifact_bindings` half of `Engine::stats` is deliberately *not* here:
+/// The `artifact_bindings` half of `Graph::stats` is deliberately *not* here:
 /// it is a live-graph property read from `logos.db` and reaching it is exactly
 /// what would need an engine. Its absence from a member's contribution is a
 /// property of this read-model, not a degradation of it.
@@ -607,7 +607,7 @@ pub(crate) fn stats_from(conn: &Connection, window_days: u32, now_unix: i64) -> 
         reads_saved_estimate,
         tokens_saved_estimate,
         // Cross-artifact binding counts are a live-graph property merged by
-        // `Engine::stats` (CR-011); the telemetry layer leaves them empty.
+        // `Graph::stats` (CR-011); the telemetry layer leaves them empty.
         artifact_bindings: std::collections::BTreeMap::new(),
         activity_by_day,
         calls_by_origin,

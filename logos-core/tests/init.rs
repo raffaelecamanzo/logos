@@ -1,7 +1,7 @@
 //! End-to-end tests for the full `init` experience (S-023, FR-IN-01..04).
 //!
-//! Everything runs through the public façade ([`Engine::init`] /
-//! [`Engine::init_with`]) on throwaway roots, pinning the DL-07 contract:
+//! Everything runs through the public façade ([`Setup::init`](crate::Setup::init) /
+//! [`Setup::init_with`](crate::Setup::init_with)) on throwaway roots, pinning the DL-07 contract:
 //! idempotent, non-clobbering, managed blocks.
 
 use std::fs;
@@ -11,7 +11,7 @@ use std::process::Command;
 use logos_core::config::{Config, Rules};
 use logos_core::init::{ClaudePlugin, InitOptions};
 use logos_core::models::pipeline::{InitAction, InitResult, InitStep};
-use logos_core::Engine;
+use logos_core::{Engine, Setup};
 use tempfile::TempDir;
 
 /// The full `-i` step set minus hooks — the non-TTY `init -i` default, with
@@ -58,7 +58,7 @@ fn git_init(root: &Path) {
 #[test]
 fn plain_init_creates_policy_files_gitignore_and_store() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init(tmp.path()).expect("init succeeds");
+    let result = Setup::init(tmp.path()).expect("init succeeds");
 
     for rel in [
         ".logos/config.toml",
@@ -107,7 +107,7 @@ fn plain_init_creates_policy_files_gitignore_and_store() {
 #[test]
 fn the_template_exclude_line_documents_the_built_in_default_when_uncommented() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
     let template = read(tmp.path(), ".logos/config.toml");
     let line = template
         .lines()
@@ -131,14 +131,14 @@ fn the_template_exclude_line_documents_the_built_in_default_when_uncommented() {
 #[test]
 fn re_init_never_clobbers_edited_policy_files() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
 
     let custom_config = "languages = [\"rust\"]\n";
     let custom_rules = "[constraints]\nmax_cycles = 0\n";
     fs::write(tmp.path().join(".logos/config.toml"), custom_config).unwrap();
     fs::write(tmp.path().join(".logos/rules.toml"), custom_rules).unwrap();
 
-    let result = Engine::init(tmp.path()).expect("re-init succeeds");
+    let result = Setup::init(tmp.path()).expect("re-init succeeds");
 
     // S-702: an edited config lacking `[project] id` gains it, appended after
     // every byte the user wrote; nothing else is touched.
@@ -163,12 +163,12 @@ fn re_init_never_clobbers_edited_policy_files() {
 /// **The single-repo byte-identical anchor.** The plain (non-workspace)
 /// `init` message must read exactly as it always has — CR-119 changes only
 /// the workspace-member path, never this one. Pinned literally so a future
-/// edit to either branch of `Engine::init_with`'s message selection cannot
+/// edit to either branch of `Setup::init_with`'s message selection cannot
 /// silently drift the one CR-119 promises is untouched.
 #[test]
 fn a_fresh_plain_init_message_is_byte_identical_to_before_cr_119() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init(tmp.path()).expect("init succeeds");
+    let result = Setup::init(tmp.path()).expect("init succeeds");
     assert_eq!(
         result.message,
         "initialised — run `logos index` to build the code graph",
@@ -181,8 +181,8 @@ fn a_fresh_plain_init_message_is_byte_identical_to_before_cr_119() {
 #[test]
 fn a_re_init_message_is_byte_identical_to_before_cr_119() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
-    let result = Engine::init(tmp.path()).expect("re-init succeeds");
+    Setup::init(tmp.path()).unwrap();
+    let result = Setup::init(tmp.path()).expect("re-init succeeds");
     assert_eq!(
         result.message,
         "already initialised — store opened, pending migrations applied"
@@ -196,7 +196,7 @@ fn a_re_init_message_is_byte_identical_to_before_cr_119() {
 #[test]
 fn a_workspace_member_init_message_never_names_logos_index() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(
+    let result = Setup::init_with(
         tmp.path(),
         &InitOptions {
             workspace_member: true,
@@ -226,8 +226,8 @@ fn a_re_init_workspace_member_message_matches_the_plain_re_init() {
         workspace_member: true,
         ..InitOptions::default()
     };
-    Engine::init_with(tmp.path(), &opts).unwrap();
-    let result = Engine::init_with(tmp.path(), &opts).expect("re-init succeeds");
+    Setup::init_with(tmp.path(), &opts).unwrap();
+    let result = Setup::init_with(tmp.path(), &opts).expect("re-init succeeds");
     assert_eq!(
         result.message,
         "already initialised — store opened, pending migrations applied"
@@ -240,7 +240,7 @@ fn a_re_init_workspace_member_message_matches_the_plain_re_init() {
 fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
     let tmp = TempDir::new().unwrap();
     git_init(tmp.path());
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
 
     let gitignore = read(tmp.path(), ".logos/.gitignore");
     for pattern in [
@@ -302,14 +302,14 @@ fn gitignore_ignores_derived_state_and_keeps_policy_tracked() {
 #[test]
 fn gitignore_managed_block_refreshes_and_preserves_user_lines() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
 
     // The user appends an ignore of their own and tampers inside the block.
     let original = read(tmp.path(), ".logos/.gitignore");
     let tampered = original.replace("telemetry.db*\n", "") + "my-custom-ignore\n";
     fs::write(tmp.path().join(".logos/.gitignore"), &tampered).unwrap();
 
-    let result = Engine::init(tmp.path()).unwrap();
+    let result = Setup::init(tmp.path()).unwrap();
 
     let refreshed = read(tmp.path(), ".logos/.gitignore");
     assert!(refreshed.contains("telemetry.db*"), "managed body restored");
@@ -323,7 +323,7 @@ fn gitignore_managed_block_refreshes_and_preserves_user_lines() {
     );
 
     // And a second run with nothing to do reports Unchanged.
-    let again = Engine::init(tmp.path()).unwrap();
+    let again = Setup::init(tmp.path()).unwrap();
     assert_eq!(
         step(&again, ".logos/.gitignore").action,
         InitAction::Unchanged
@@ -333,7 +333,7 @@ fn gitignore_managed_block_refreshes_and_preserves_user_lines() {
 #[test]
 fn unbalanced_gitignore_markers_are_skipped_untouched() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
 
     // The user deletes the end marker: the block is structurally malformed —
     // init must refuse to guess (DL-07), leaving the file byte-identical.
@@ -344,7 +344,7 @@ fn unbalanced_gitignore_markers_are_skipped_untouched() {
         .collect::<String>();
     fs::write(tmp.path().join(".logos/.gitignore"), &truncated).unwrap();
 
-    let result = Engine::init(tmp.path()).expect("init still succeeds");
+    let result = Setup::init(tmp.path()).expect("init still succeeds");
 
     let s = step(&result, ".logos/.gitignore");
     assert_eq!(s.action, InitAction::Skipped);
@@ -361,7 +361,7 @@ fn unbalanced_gitignore_markers_are_skipped_untouched() {
 #[test]
 fn interactive_init_injects_the_mcp_server_block_idempotently() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(step(&result, ".mcp.json").action, InitAction::Created);
 
     let parsed: serde_json::Value =
@@ -374,7 +374,7 @@ fn interactive_init_injects_the_mcp_server_block_idempotently() {
 
     // Re-run: byte-identical file, no duplicate block (UAT-IN-02).
     let before = read(tmp.path(), ".mcp.json");
-    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let again = Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(read(tmp.path(), ".mcp.json"), before);
     assert_eq!(step(&again, ".mcp.json").action, InitAction::Unchanged);
 }
@@ -389,7 +389,7 @@ fn mcp_injection_preserves_other_servers_and_an_existing_logos_entry() {
         r#"{ "mcpServers": { "other": { "command": "other-bin" } } }"#,
     )
     .unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&read(tmp.path(), ".mcp.json")).unwrap();
     assert_eq!(parsed["mcpServers"]["other"]["command"], "other-bin");
     assert_eq!(parsed["mcpServers"]["logos"]["command"], "logos");
@@ -401,7 +401,7 @@ fn mcp_injection_preserves_other_servers_and_an_existing_logos_entry() {
         r#"{ "mcpServers": { "logos": { "command": "my-wrapper" } } }"#,
     )
     .unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&read(tmp.path(), ".mcp.json")).unwrap();
     assert_eq!(parsed["mcpServers"]["logos"]["command"], "my-wrapper");
     assert_eq!(step(&result, ".mcp.json").action, InitAction::Unchanged);
@@ -417,7 +417,7 @@ fn malformed_mcp_json_is_skipped_never_clobbered() {
     let malformed = "{ this is not json";
     fs::write(tmp.path().join(".mcp.json"), malformed).unwrap();
 
-    let result = Engine::init_with(tmp.path(), &interactive()).expect("init still succeeds");
+    let result = Setup::init_with(tmp.path(), &interactive()).expect("init still succeeds");
 
     assert_eq!(read(tmp.path(), ".mcp.json"), malformed, "file untouched");
     let s = step(&result, ".mcp.json");
@@ -433,7 +433,7 @@ fn mcp_json_with_non_object_mcp_servers_is_skipped() {
     let original = r#"{ "mcpServers": [] }"#;
     fs::write(tmp.path().join(".mcp.json"), original).unwrap();
 
-    let result = Engine::init_with(tmp.path(), &interactive()).expect("init still succeeds");
+    let result = Setup::init_with(tmp.path(), &interactive()).expect("init still succeeds");
 
     let s = step(&result, ".mcp.json");
     assert_eq!(s.action, InitAction::Skipped);
@@ -453,7 +453,7 @@ fn claude_md_managed_block_is_created_and_user_content_preserved() {
 
     // The user already has a CLAUDE.md — init must append, not replace.
     fs::write(tmp.path().join("CLAUDE.md"), "# My project rules\n").unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     let claude = read(tmp.path(), "CLAUDE.md");
     assert!(
@@ -467,14 +467,14 @@ fn claude_md_managed_block_is_created_and_user_content_preserved() {
 
     // Idempotent: nothing changes on re-run.
     let before = claude;
-    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let again = Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(read(tmp.path(), "CLAUDE.md"), before);
     assert_eq!(step(&again, "CLAUDE.md").action, InitAction::Unchanged);
 
     // A tampered managed body is regenerated; user content survives.
     let tampered = before.replace("context", "CONTEXT-GONE");
     fs::write(tmp.path().join("CLAUDE.md"), &tampered).unwrap();
-    let third = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let third = Setup::init_with(tmp.path(), &interactive()).unwrap();
     let refreshed = read(tmp.path(), "CLAUDE.md");
     assert!(refreshed.starts_with("# My project rules\n"));
     assert!(refreshed.contains("context"), "managed body restored");
@@ -484,7 +484,7 @@ fn claude_md_managed_block_is_created_and_user_content_preserved() {
 #[test]
 fn fresh_claude_md_is_created_when_absent() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Created);
     assert!(read(tmp.path(), "CLAUDE.md").contains("<!-- logos:managed:begin -->"));
 }
@@ -495,7 +495,7 @@ fn fresh_claude_md_is_created_when_absent() {
 ///
 /// The same property `init::tests::upsert_replaces_only_the_marker_span` pins at
 /// unit level, but over the **MD** marker pair and through the real
-/// `Engine::init_with`. What it adds over
+/// `Setup::init_with`. What it adds over
 /// `claude_md_managed_block_is_created_and_user_content_preserved` above is
 /// trailing user content and byte-equality of the whole file: that test only has
 /// content *before* the block and asserts `starts_with` + `contains`, which a
@@ -503,7 +503,7 @@ fn fresh_claude_md_is_created_when_absent() {
 #[test]
 fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
     let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     // Sandwich the managed block between user content on both sides.
     let generated = read(tmp.path(), "CLAUDE.md");
@@ -516,7 +516,7 @@ fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
     let tampered = sandwiched.replace("structural code intelligence", "TAMPERED");
     assert_ne!(tampered, sandwiched, "the tamper actually changed the body");
     fs::write(tmp.path().join("CLAUDE.md"), &tampered).unwrap();
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     let refreshed = read(tmp.path(), "CLAUDE.md");
     assert_eq!(
@@ -526,7 +526,7 @@ fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
     assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Updated);
 
     // And a clean re-run over the sandwich is a no-op, not a rewrite.
-    let again = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let again = Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(read(tmp.path(), "CLAUDE.md"), sandwiched);
     assert_eq!(step(&again, "CLAUDE.md").action, InitAction::Unchanged);
 }
@@ -537,14 +537,14 @@ fn regenerating_the_managed_block_rewrites_only_the_marker_span() {
 ///
 /// `init::tests::upsert_refuses_unbalanced_markers` covers the decision at unit
 /// level against the `#` gitignore markers; this drives the same refusal through
-/// `Engine::init_with` on the file a user actually edits.
+/// `Setup::init_with` on the file a user actually edits.
 #[test]
 fn a_half_deleted_managed_block_is_refused_not_guessed() {
     let tmp = TempDir::new().unwrap();
     let mangled = "# My rules\n\n<!-- logos:managed:begin -->\nhalf a block\n";
     fs::write(tmp.path().join("CLAUDE.md"), mangled).unwrap();
 
-    let result = Engine::init_with(tmp.path(), &interactive()).unwrap();
+    let result = Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     assert_eq!(
         read(tmp.path(), "CLAUDE.md"),
@@ -568,7 +568,7 @@ fn hooks_install_sets_hooks_path_and_writes_sync_hooks() {
     let tmp = TempDir::new().unwrap();
     git_init(tmp.path());
 
-    let result = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    let result = Setup::init_with(tmp.path(), &hook_opts()).unwrap();
     assert_eq!(step(&result, ".logos/hooks").action, InitAction::Created);
 
     let hooks_path = git(tmp.path(), &["config", "core.hooksPath"]);
@@ -593,7 +593,7 @@ fn hooks_install_sets_hooks_path_and_writes_sync_hooks() {
     }
 
     // Idempotent re-run.
-    let again = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    let again = Setup::init_with(tmp.path(), &hook_opts()).unwrap();
     assert_eq!(step(&again, ".logos/hooks").action, InitAction::Unchanged);
 }
 
@@ -606,7 +606,7 @@ fn hooks_install_sets_hooks_path_and_writes_sync_hooks() {
 fn init_rewrites_a_managed_hook_left_by_an_older_release() {
     let tmp = TempDir::new().unwrap();
     git_init(tmp.path());
-    Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    Setup::init_with(tmp.path(), &hook_opts()).unwrap();
 
     let path = tmp.path().join(".logos/hooks/post-checkout");
     let current = fs::read_to_string(&path).unwrap();
@@ -614,7 +614,7 @@ fn init_rewrites_a_managed_hook_left_by_an_older_release() {
                  changed=$(git diff --name-only \"$1\" \"$2\")\n";
     fs::write(&path, stale).unwrap();
 
-    let again = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    let again = Setup::init_with(tmp.path(), &hook_opts()).unwrap();
 
     assert_eq!(step(&again, ".logos/hooks").action, InitAction::Updated);
     assert_eq!(fs::read_to_string(&path).unwrap(), current);
@@ -629,7 +629,7 @@ fn a_foreign_hooks_path_is_never_overwritten() {
         .status
         .success());
 
-    let result = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    let result = Setup::init_with(tmp.path(), &hook_opts()).unwrap();
 
     let s = step(&result, ".logos/hooks");
     assert_eq!(s.action, InitAction::Skipped);
@@ -653,7 +653,7 @@ fn a_non_managed_hook_file_blocks_the_install() {
     fs::create_dir_all(tmp.path().join(".logos/hooks")).unwrap();
     fs::write(tmp.path().join(".logos/hooks/post-commit"), foreign).unwrap();
 
-    let result = Engine::init_with(tmp.path(), &hook_opts()).expect("init still succeeds");
+    let result = Setup::init_with(tmp.path(), &hook_opts()).expect("init still succeeds");
 
     let s = step(&result, ".logos/hooks");
     assert_eq!(s.action, InitAction::Skipped);
@@ -678,11 +678,11 @@ fn a_non_managed_hook_file_blocks_the_install() {
 fn deleted_hook_file_triggers_updated_on_reinstall() {
     let tmp = TempDir::new().unwrap();
     git_init(tmp.path());
-    Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    Setup::init_with(tmp.path(), &hook_opts()).unwrap();
 
     fs::remove_file(tmp.path().join(".logos/hooks/post-commit")).unwrap();
 
-    let result = Engine::init_with(tmp.path(), &hook_opts()).unwrap();
+    let result = Setup::init_with(tmp.path(), &hook_opts()).unwrap();
 
     assert_eq!(step(&result, ".logos/hooks").action, InitAction::Updated);
     assert!(
@@ -694,7 +694,7 @@ fn deleted_hook_file_triggers_updated_on_reinstall() {
 #[test]
 fn hooks_outside_a_git_repository_skip_gracefully() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_with(tmp.path(), &hook_opts()).expect("init still succeeds");
+    let result = Setup::init_with(tmp.path(), &hook_opts()).expect("init still succeeds");
     let s = step(&result, ".logos/hooks");
     assert_eq!(s.action, InitAction::Skipped);
     assert!(!s.detail.is_empty());
@@ -721,7 +721,7 @@ fn hook_scripts(root: &std::path::Path) -> Vec<String> {
 #[test]
 fn init_i_installs_no_augmentation_hook() {
     let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     assert_eq!(
         hook_scripts(tmp.path()),
@@ -743,7 +743,7 @@ fn init_i_installs_no_augmentation_hook() {
 #[test]
 fn init_i_installs_no_autogen_hook_and_no_claude_p_reference_remains() {
     let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     assert!(
         !tmp.path().join(".claude/settings.local.json").exists(),
@@ -801,7 +801,7 @@ fn assert_one_managed_quality_report_hook(root: &Path) {
 #[test]
 fn init_i_installs_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     let script = tmp.path().join(".claude/hooks/logos-quality-open.sh");
     assert!(script.exists(), "the quality-report hook script is written");
@@ -850,10 +850,10 @@ fn init_i_installs_the_quality_report_hook() {
 #[test]
 fn second_init_i_leaves_the_quality_report_hook_unchanged() {
     let tmp = TempDir::new().unwrap();
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
     let before = read(tmp.path(), ".claude/settings.json");
 
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(
         read(tmp.path(), ".claude/settings.json"),
         before,
@@ -866,7 +866,7 @@ fn second_init_i_leaves_the_quality_report_hook_unchanged() {
 #[test]
 fn plain_init_does_not_install_the_quality_report_hook() {
     let tmp = TempDir::new().unwrap();
-    Engine::init(tmp.path()).unwrap();
+    Setup::init(tmp.path()).unwrap();
     assert!(
         !tmp.path().join(".claude/hooks/logos-quality-open.sh").exists(),
         "no quality-report script without -i"
@@ -887,7 +887,7 @@ fn init_i_quality_report_preserves_foreign_settings_entries() {
     )
     .unwrap();
 
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
     let merged: serde_json::Value =
         serde_json::from_str(&read(tmp.path(), ".claude/settings.json")).expect("settings JSON");
 
@@ -929,7 +929,7 @@ fn init_i_sweeps_the_retired_session_end_quality_report_hook() {
     )
     .unwrap();
 
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
 
     assert!(!retired_script.exists(), "the orphaned retired script is deleted");
     let merged: serde_json::Value =
@@ -950,7 +950,7 @@ fn init_i_quality_report_never_overwrites_a_foreign_settings_file() {
     let foreign = "{ this is not valid json";
     fs::write(&settings, foreign).unwrap();
 
-    Engine::init_with(tmp.path(), &interactive()).unwrap();
+    Setup::init_with(tmp.path(), &interactive()).unwrap();
     assert_eq!(
         read(tmp.path(), ".claude/settings.json"),
         foreign,
@@ -990,7 +990,7 @@ fn repo_with_worktree(name: &str) -> (TempDir, TempDir, std::path::PathBuf) {
 fn init_hooks_seeds_the_repositorys_other_working_trees() {
     let (main, _trees, worktree) = repo_with_worktree("feature");
 
-    let result = Engine::init_with(main.path(), &hook_opts()).unwrap();
+    let result = Setup::init_with(main.path(), &hook_opts()).unwrap();
 
     let s = step(&result, ".logos/hooks");
     assert_eq!(s.action, InitAction::Created);
@@ -1015,7 +1015,7 @@ fn init_hooks_seeds_the_repositorys_other_working_trees() {
 fn init_hooks_from_a_linked_worktree_names_the_limit_it_installed_under() {
     let (main, _trees, worktree) = repo_with_worktree("feature");
 
-    let result = Engine::init_with(&worktree, &hook_opts()).unwrap();
+    let result = Setup::init_with(&worktree, &hook_opts()).unwrap();
 
     // It installs where it was asked to…
     assert!(worktree.join(".logos/hooks/pre-push").is_file());
@@ -1061,7 +1061,7 @@ fn a_contributed_init_step_runs_after_the_core_steps_with_the_same_options() {
     let dir = TempDir::new().unwrap();
     let step = contributed(false);
     let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> = vec![step.clone()];
-    let result = Engine::init_with_contributions(dir.path(), &interactive(), &contributions, &[]).unwrap();
+    let result = Setup::init_with_contributions(dir.path(), &interactive(), &contributions, &[]).unwrap();
 
     let targets: Vec<&str> = result.steps.iter().map(|s| s.target.as_str()).collect();
     assert_eq!(targets.last(), Some(&".logos/contributed"), "last, after the core steps: {targets:?}");
@@ -1069,8 +1069,8 @@ fn a_contributed_init_step_runs_after_the_core_steps_with_the_same_options() {
     assert_eq!(*step.seen.lock().unwrap(), [true], "run once, with `-i`'s options");
 
     let plain = TempDir::new().unwrap();
-    let without = Engine::init_with_contributions(plain.path(), &interactive(), &[], &[]).unwrap();
-    let with_init_with = Engine::init_with(TempDir::new().unwrap().path(), &interactive()).unwrap();
+    let without = Setup::init_with_contributions(plain.path(), &interactive(), &[], &[]).unwrap();
+    let with_init_with = Setup::init_with(TempDir::new().unwrap().path(), &interactive()).unwrap();
     let names = |r: &InitResult| r.steps.iter().map(|s| s.target.clone()).collect::<Vec<_>>();
     assert_eq!(names(&without), names(&with_init_with), "no contribution is `init_with` exactly");
 }
@@ -1081,7 +1081,7 @@ fn a_failing_contributed_init_step_fails_init() {
     let dir = TempDir::new().unwrap();
     let contributions: Vec<std::sync::Arc<dyn logos_core::init::InitContribution>> =
         vec![contributed(true)];
-    let err = Engine::init_with_contributions(dir.path(), &InitOptions::default(), &contributions, &[])
+    let err = Setup::init_with_contributions(dir.path(), &InitOptions::default(), &contributions, &[])
         .expect_err("the contribution's failure is init's");
     assert!(format!("{err:#}").contains(".logos/contributed"), "{err:#}");
 }
@@ -1108,7 +1108,7 @@ fn init_writes_the_project_id_once_and_a_re_run_leaves_the_file_byte_identical()
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("payments");
     fs::create_dir_all(&root).unwrap();
-    let first = Engine::init(&root).unwrap();
+    let first = Setup::init(&root).unwrap();
     assert_eq!(project_step(&first).action, InitAction::Updated);
     assert_eq!(project_step(&first).detail, "id = \"payments\"");
     let config = root.join(".logos/config.toml");
@@ -1119,7 +1119,7 @@ fn init_writes_the_project_id_once_and_a_re_run_leaves_the_file_byte_identical()
 
     let snapshot = tmp.path().join("config.before");
     fs::copy(&config, &snapshot).unwrap();
-    let again = Engine::init(&root).unwrap();
+    let again = Setup::init(&root).unwrap();
     assert_eq!(project_step(&again).action, InitAction::Unchanged);
     assert!(cmp(&snapshot, &config), "a re-run leaves config.toml byte-identical");
 }
@@ -1136,11 +1136,11 @@ fn an_existing_project_id_is_never_rewritten() {
     let snapshot = tmp.path().join("config.before");
     fs::copy(&config, &snapshot).unwrap();
 
-    let result = Engine::init(tmp.path()).unwrap();
+    let result = Setup::init(tmp.path()).unwrap();
     assert_eq!(project_step(&result).action, InitAction::Unchanged);
     assert!(cmp(&snapshot, &config), "an existing id stays byte-identical");
     assert_eq!(
-        Engine::start(tmp.path()).unwrap().status().project_id.as_deref(),
+        Engine::start(tmp.path()).unwrap().graph().status().project_id.as_deref(),
         Some("example.org/pinned/app"),
         "the store records the configured id, not the derived one"
     );
@@ -1172,7 +1172,7 @@ fn a_key_less_project_table_gains_the_id_under_its_own_header() {
         fs::create_dir_all(root.join(".logos")).unwrap();
         fs::write(root.join(".logos/config.toml"), before).unwrap();
 
-        let result = Engine::init(&root).unwrap();
+        let result = Setup::init(&root).unwrap();
         assert_eq!(project_step(&result).action, InitAction::Updated, "{before:?}");
         assert_eq!(read(&root, ".logos/config.toml"), after, "{before:?}");
     }
@@ -1197,7 +1197,7 @@ fn a_config_init_cannot_extend_is_skipped_and_left_untouched() {
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".logos")).unwrap();
         fs::write(tmp.path().join(".logos/config.toml"), text).unwrap();
-        let result = Engine::init(tmp.path()).expect("init still succeeds");
+        let result = Setup::init(tmp.path()).expect("init still succeeds");
         let row = project_step(&result);
         assert_eq!(row.action, InitAction::Skipped, "{text:?}");
         assert!(row.detail.contains(why), "{text:?}: {}", row.detail);
@@ -1215,7 +1215,7 @@ fn a_config_that_is_not_utf_8_is_skipped_and_init_completes() {
     let bytes = b"# caf\xe9 settings\n[watcher]\n";
     fs::write(tmp.path().join(".logos/config.toml"), bytes).unwrap();
 
-    let result = Engine::init(tmp.path()).expect("init still succeeds");
+    let result = Setup::init(tmp.path()).expect("init still succeeds");
     let row = project_step(&result);
     assert_eq!(row.action, InitAction::Skipped);
     assert!(row.detail.contains("could not be read"), "{}", row.detail);
@@ -1234,7 +1234,7 @@ fn init_says_a_git_ignored_project_id_will_not_travel() {
     git_init(&root);
     fs::write(root.join(".gitignore"), ".logos/\n").unwrap();
 
-    let result = Engine::init(&root).unwrap();
+    let result = Setup::init(&root).unwrap();
     let detail = &project_step(&result).detail;
     assert!(detail.starts_with("id = \"shop\""), "{detail}");
     assert!(
@@ -1244,7 +1244,7 @@ fn init_says_a_git_ignored_project_id_will_not_travel() {
     );
     // Re-running repeats the statement: the key is still kept off every other
     // checkout.
-    let again = Engine::init(&root).unwrap();
+    let again = Setup::init(&root).unwrap();
     assert!(project_step(&again).detail.contains("will not travel"));
 }
 
@@ -1257,7 +1257,7 @@ fn a_committable_project_id_carries_no_travel_warning() {
     fs::create_dir_all(&root).unwrap();
     git_init(&root);
     fs::write(root.join(".gitignore"), "target/\n").unwrap();
-    let result = Engine::init(&root).unwrap();
+    let result = Setup::init(&root).unwrap();
     assert_eq!(project_step(&result).detail, "id = \"shop\"");
 }
 
@@ -1268,8 +1268,8 @@ fn init_records_the_coordinate_and_status_reports_it() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().join("ledger");
     fs::create_dir_all(&root).unwrap();
-    Engine::init(&root).unwrap();
-    let status = Engine::start(&root).unwrap().status();
+    Setup::init(&root).unwrap();
+    let status = Engine::start(&root).unwrap().graph().status();
     assert_eq!(status.project_id.as_deref(), Some("ledger"));
     let json = serde_json::to_value(&status).unwrap();
     assert_eq!(json["project_id"], "ledger");
@@ -1350,11 +1350,11 @@ fn rows(result: &InitResult) -> Vec<(&str, InitAction)> {
 fn plugin_enabled_init_i_migrates_a_legacy_setup() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    Engine::init_with(root, &interactive()).unwrap();
+    Setup::init_with(root, &interactive()).unwrap();
     plant_emitted_skill(root, LEGACY_CORE_SKILL);
     assert!(root.join(".mcp.json").is_file() && root.join(".claude/hooks/logos-quality-open.sh").is_file());
 
-    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    let result = Setup::init_with(root, &plugin_enabled()).unwrap();
     let rows = rows(&result);
     for expected in [
         (".claude/settings.json", InitAction::Updated),
@@ -1374,7 +1374,7 @@ fn plugin_enabled_init_i_migrates_a_legacy_setup() {
     assert_eq!(step(&result, "CLAUDE.md").action, InitAction::Unchanged, "the CLAUDE.md block stays");
 
     let before = tree(root);
-    let again = Engine::init_with(root, &plugin_enabled()).unwrap();
+    let again = Setup::init_with(root, &plugin_enabled()).unwrap();
     assert!(again.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", rows_of(&again));
     assert_eq!(tree(root), before, "a re-run writes nothing");
 }
@@ -1389,7 +1389,7 @@ fn rows_of(result: &InitResult) -> Vec<(String, InitAction)> {
 fn plugin_enabled_init_i_on_a_fresh_project_writes_no_mcp_entry() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    let result = Setup::init_with(root, &plugin_enabled()).unwrap();
     assert_eq!(step(&result, ".claude/settings.json").action, InitAction::Created);
     assert_eq!(step(&result, ".mcp.json").action, InitAction::Unchanged);
     assert!(!root.join(".mcp.json").exists());
@@ -1407,13 +1407,13 @@ fn detect_reads_the_project_scope_and_lets_it_override_the_user() {
     let root = tmp.path();
     fs::create_dir_all(root.join(".claude")).unwrap();
     fs::write(root.join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
-    Engine::init_with(root, &detect).unwrap();
+    Setup::init_with(root, &detect).unwrap();
     assert!(!root.join(".mcp.json").exists(), "an enrolled project gets no MCP entry");
 
     let off = TempDir::new().unwrap();
     fs::create_dir_all(off.path().join(".claude")).unwrap();
     fs::write(off.path().join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":false}}"#).unwrap();
-    Engine::init_with(off.path(), &detect).unwrap();
+    Setup::init_with(off.path(), &detect).unwrap();
     assert!(off.path().join(".mcp.json").is_file(), "a project that disables the plugin gets today's files");
 }
 
@@ -1424,7 +1424,7 @@ fn a_run_asked_to_materialize_skills_keeps_the_skill_copy() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     plant_emitted_skill(root, LEGACY_CORE_SKILL);
-    let result = Engine::init_with(root, &InitOptions { materialize_skill: true, ..plugin_enabled() }).unwrap();
+    let result = Setup::init_with(root, &InitOptions { materialize_skill: true, ..plugin_enabled() }).unwrap();
     assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
     assert!(root.join(".agents/skills/logos-wiki/SKILL.md").is_file());
 }
@@ -1444,7 +1444,7 @@ fn a_logos_stamped_skill_under_no_legacy_name_survives_init_i() {
         fs::write(&skill, &edited).unwrap();
         let before = tree(root);
 
-        let result = Engine::init_with(root, &InitOptions { materialize_skill, ..plugin_enabled() }).unwrap();
+        let result = Setup::init_with(root, &InitOptions { materialize_skill, ..plugin_enabled() }).unwrap();
         assert!(result.steps.iter().all(|s| !s.target.starts_with(".agents")), "{:?}", rows_of(&result));
         assert_eq!(fs::read_to_string(&skill).unwrap(), edited, "materialize_skill={materialize_skill}: edits intact");
         assert_eq!(skills_subtree(tree(root)), skills_subtree(before), "materialize_skill={materialize_skill}: copy and pointer untouched");
@@ -1458,7 +1458,7 @@ fn a_legacy_core_skill_is_still_retired_by_init_i() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     plant_emitted_skill(root, LEGACY_CORE_SKILL);
-    let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+    let result = Setup::init_with(root, &plugin_enabled()).unwrap();
     assert!(rows_of(&result).contains(&(".agents/skills/logos-wiki".to_string(), InitAction::Removed)), "{:?}", rows_of(&result));
     assert!(!root.join(".agents/skills/logos-wiki").exists());
 }
@@ -1475,7 +1475,7 @@ fn a_skill_an_extension_owns_is_never_retired_even_under_a_legacy_name() {
         let root = tmp.path();
         plant_emitted_skill(root, LEGACY_CORE_SKILL);
         let before = skills_subtree(tree(root));
-        let result = Engine::init_with_contributions(root, &plugin_enabled(), &[], owners).unwrap();
+        let result = Setup::init_with_contributions(root, &plugin_enabled(), &[], owners).unwrap();
         let kept = skills_subtree(tree(root)) == before;
         (kept, rows_of(&result).iter().any(|(t, _)| t.starts_with(".agents")))
     };
@@ -1501,14 +1501,14 @@ fn uninstall_leaves_only_foreign_content_and_a_second_run_is_a_no_op() {
     fs::write(root.join(".claude/settings.json"), "{\n  \"model\": \"x\"\n}\n").unwrap();
     let pristine = tree(root);
 
-    Engine::init_with(root, &interactive()).unwrap();
+    Setup::init_with(root, &interactive()).unwrap();
     plant_emitted_skill(root, "gen");
-    let first = Engine::init_uninstall(root).unwrap();
+    let first = Setup::uninstall(root).unwrap();
     assert_eq!(tree(root), pristine, "only foreign content is left: {:?}", first.steps);
     assert!(root.join(".logos/logos.db").is_file(), ".logos/ data stays");
     assert_eq!(step_of(&first.steps, ".logos/hooks").detail, "not a git repository — no git hooks");
 
-    let second = Engine::init_uninstall(root).unwrap();
+    let second = Setup::uninstall(root).unwrap();
     assert!(second.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", second.steps);
     assert_eq!(tree(root), pristine);
 }
@@ -1526,10 +1526,10 @@ fn uninstall_removes_the_enrolment_and_the_git_hooks() {
     let root = tmp.path();
     git_init(root);
     let pristine = tree(root);
-    Engine::init_with(root, &InitOptions { install_hooks: true, ..plugin_enabled() }).unwrap();
+    Setup::init_with(root, &InitOptions { install_hooks: true, ..plugin_enabled() }).unwrap();
     assert!(root.join(".claude/settings.json").is_file());
 
-    let result = Engine::init_uninstall(root).unwrap();
+    let result = Setup::uninstall(root).unwrap();
     assert_eq!(step_of(&result.steps, ".claude/settings.json").action, InitAction::Removed);
     assert_eq!(step_of(&result.steps, ".logos/hooks").action, InitAction::Removed);
     assert!(!git(root, &["config", "core.hooksPath"]).status.success(), "core.hooksPath unset");
@@ -1541,7 +1541,7 @@ fn uninstall_removes_the_enrolment_and_the_git_hooks() {
 #[test]
 fn uninstall_in_an_untouched_directory_creates_nothing() {
     let tmp = TempDir::new().unwrap();
-    let result = Engine::init_uninstall(tmp.path()).unwrap();
+    let result = Setup::uninstall(tmp.path()).unwrap();
     assert!(result.steps.iter().all(|s| s.action == InitAction::Unchanged), "{:?}", result.steps);
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0, "nothing created");
     assert!(result.message.starts_with("nothing of Logos's to remove"), "{}", result.message);
@@ -1555,11 +1555,11 @@ fn legacy_registrations_stay_until_the_committed_settings_enable_the_plugin() {
     for settings in [r#"{"enabledPlugins":{"logos@logos":false}}"#, "[]"] {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        Engine::init_with(root, &interactive()).unwrap();
+        Setup::init_with(root, &interactive()).unwrap();
         plant_emitted_skill(root, LEGACY_CORE_SKILL);
         fs::write(root.join(".claude/settings.json"), settings).unwrap();
 
-        let result = Engine::init_with(root, &plugin_enabled()).unwrap();
+        let result = Setup::init_with(root, &plugin_enabled()).unwrap();
         assert_eq!(step(&result, ".mcp.json").action, InitAction::Skipped, "{settings}: {:?}", rows_of(&result));
         assert_eq!(step(&result, ".claude/hooks/logos-quality-open.sh").action, InitAction::Skipped);
         assert!(root.join(".mcp.json").is_file(), "{settings}: the committed MCP entry stays");
@@ -1581,14 +1581,14 @@ fn an_unreadable_settings_file_does_not_stop_the_uninstall() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
-    Engine::init_with(root, &interactive()).unwrap();
+    Setup::init_with(root, &interactive()).unwrap();
     let settings = root.join(".claude/settings.json");
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o000)).unwrap();
     if fs::read(&settings).is_ok() {
         return; // running as a user that reads anything; nothing to prove here
     }
 
-    let result = Engine::init_uninstall(root);
+    let result = Setup::uninstall(root);
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
     let result = result.expect("an unreadable shared file is not a failure");
     assert_eq!(step_of(&result.steps, ".claude/hooks/logos-quality-open.sh").action, InitAction::Skipped);
@@ -1607,10 +1607,10 @@ fn a_git_failure_part_way_through_the_hook_removal_fails_loud() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     git_init(root);
-    Engine::init_with(root, &hook_opts()).unwrap();
+    Setup::init_with(root, &hook_opts()).unwrap();
     let git_dir = root.join(".git");
     fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o555)).unwrap();
-    let result = Engine::init_uninstall(root);
+    let result = Setup::uninstall(root);
     fs::set_permissions(&git_dir, fs::Permissions::from_mode(0o755)).unwrap();
     if git(root, &["config", "core.hooksPath"]).status.success() {
         let err = result.expect_err("core.hooksPath could not be unset, so the uninstall fails");
@@ -1628,7 +1628,7 @@ fn a_plain_init_never_migrates_even_with_the_plugin_enabled() {
     plant_emitted_skill(root, "gen");
     // Enrolled and committed: everything a migration needs, except being asked.
     fs::write(root.join(".claude/settings.json"), r#"{"enabledPlugins":{"logos@logos":true}}"#).unwrap();
-    let result = Engine::init_with(
+    let result = Setup::init_with(
         root,
         &InitOptions { claude_plugin: ClaudePlugin::Enabled, ..InitOptions::default() },
     )

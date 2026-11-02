@@ -85,7 +85,7 @@ impl World {
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
-        Engine::start(w.root()).expect("engine").index();
+        Engine::start(w.root()).expect("engine").pipeline().index();
         w.manifest = w.build_manifest();
         w
     }
@@ -359,7 +359,7 @@ fn outcomes(payload: &Value) -> Vec<(String, String)> {
 }
 
 fn status_row(engine: &Engine, tool: &str) -> Value {
-    let status = json(&engine.security_status().unwrap());
+    let status = json(&engine.security().status().unwrap());
     status["scanners"]
         .as_array()
         .unwrap()
@@ -377,7 +377,7 @@ fn install_all_and_install_and_scan_never_select_the_opt_in_pair() {
     let w = World::new();
     let engine = w.engine();
 
-    let refused = refusal(engine.security_install(&w.request(&[], false, &[])));
+    let refused = refusal(engine.security().tools().install(&w.request(&[], false, &[])));
     assert!(
         refused.contains(&format!("trivy {} from {HOST} (", w.version("trivy"))),
         "{refused}"
@@ -389,7 +389,7 @@ fn install_all_and_install_and_scan_never_select_the_opt_in_pair() {
         );
     }
 
-    let installed = json(&engine.security_install(&w.request(&[], true, &[])).unwrap());
+    let installed = json(&engine.security().tools().install(&w.request(&[], true, &[])).unwrap());
     assert_eq!(
         outcomes(&installed),
         [("trivy".to_string(), "installed".to_string())]
@@ -398,7 +398,7 @@ fn install_all_and_install_and_scan_never_select_the_opt_in_pair() {
         installed["consent_recorded"],
         serde_json::json!([format!("trivy {}", w.version("trivy"))])
     );
-    let scanned = json(&engine.security_scan_install(true).unwrap());
+    let scanned = json(&engine.security().scan_install(true).unwrap());
     assert!(
         outcomes(&scanned["install"]).is_empty(),
         "nothing else is installed for a scan: {scanned}"
@@ -455,7 +455,7 @@ fn codeql_is_refused_without_its_licence_and_the_acknowledgement_is_recorded_and
     );
 
     // Even with the install consent given, the licence is asked for first.
-    let refused = refusal(engine.security_install(&w.request(&["codeql"], true, &[])));
+    let refused = refusal(engine.security().tools().install(&w.request(&["codeql"], true, &[])));
     for shown in [
         "GitHub CodeQL Terms and Conditions",
         "open-source codebases",
@@ -471,7 +471,7 @@ fn codeql_is_refused_without_its_licence_and_the_acknowledgement_is_recorded_and
     );
 
     // The licence alone records nothing while the install consent is missing.
-    let refused = refusal(engine.security_install(&w.request(&["codeql"], false, &["codeql"])));
+    let refused = refusal(engine.security().tools().install(&w.request(&["codeql"], false, &["codeql"])));
     assert!(
         refused.contains(&format!("codeql {version} from {HOST} (")),
         "{refused}"
@@ -484,7 +484,7 @@ fn codeql_is_refused_without_its_licence_and_the_acknowledgement_is_recorded_and
 
     let installed = json(
         &engine
-            .security_install(&w.request(&["codeql"], true, &["codeql"]))
+            .security().tools().install(&w.request(&["codeql"], true, &["codeql"]))
             .unwrap(),
     );
     assert_eq!(
@@ -531,7 +531,7 @@ fn codeql_is_refused_without_its_licence_and_the_acknowledgement_is_recorded_and
 
     // Once accepted, a reinstall asks for neither.
     engine
-        .security_uninstall(&Selection::Only(vec!["codeql".to_string()]))
+        .security().tools().uninstall(&Selection::Only(vec!["codeql".to_string()]))
         .unwrap();
     assert_eq!(
         status_row(&engine, "codeql")["install"],
@@ -539,7 +539,7 @@ fn codeql_is_refused_without_its_licence_and_the_acknowledgement_is_recorded_and
     );
     let again = json(
         &engine
-            .security_install(&w.request(&["codeql"], false, &[]))
+            .security().tools().install(&w.request(&["codeql"], false, &[]))
             .unwrap(),
     );
     assert_eq!(
@@ -559,7 +559,7 @@ fn dependency_check_runs_on_the_managed_java_runtime_and_its_sarif_ingests() {
     let (dc, jre) = (w.version("dependency-check"), w.version("java"));
     assert!(!w.bin().join("java").exists(), "the machine has no Java");
 
-    let refused = refusal(engine.security_install(&w.request(&["dependency-check"], false, &[])));
+    let refused = refusal(engine.security().tools().install(&w.request(&["dependency-check"], false, &[])));
     for line in [
         format!("dependency-check {dc} from {HOST} ("),
         format!("java {jre} from {HOST} ("),
@@ -570,7 +570,7 @@ fn dependency_check_runs_on_the_managed_java_runtime_and_its_sarif_ingests() {
 
     let installed = json(
         &engine
-            .security_install(&w.request(&["dependency-check"], true, &[]))
+            .security().tools().install(&w.request(&["dependency-check"], true, &[]))
             .unwrap(),
     );
     assert_eq!(
@@ -602,7 +602,7 @@ fn dependency_check_runs_on_the_managed_java_runtime_and_its_sarif_ingests() {
 
     let scan = json(
         &engine
-            .security_scan_selected(
+            .security().scan_selected(
                 true,
                 &ScanRequest::new(vec!["dependency-check".to_string()], Vec::new()),
                 |_| {},
@@ -636,15 +636,15 @@ fn uninstall_removes_the_java_runtime_only_once_no_installed_tool_needs_it() {
     let w = World::new();
     let engine = w.engine();
     let all = w.request(&["dependency-check", "codeql", "trivy"], true, &["codeql"]);
-    engine.security_install(&all).unwrap();
+    engine.security().tools().install(&all).unwrap();
     assert_eq!(
         w.installed(),
         ["codeql", "dependency-check", "java", "trivy"]
     );
 
     let only = |tool: &str| Selection::Only(vec![tool.to_string()]);
-    engine.security_uninstall(&only("codeql")).unwrap();
-    engine.security_uninstall(&only("trivy")).unwrap();
+    engine.security().tools().uninstall(&only("codeql")).unwrap();
+    engine.security().tools().uninstall(&only("trivy")).unwrap();
     assert_eq!(
         w.installed(),
         ["dependency-check", "java"],
@@ -661,7 +661,7 @@ fn uninstall_removes_the_java_runtime_only_once_no_installed_tool_needs_it() {
     let fetched = w.downloads().len();
     let again = json(
         &engine
-            .security_install(&w.request(&["dependency-check"], false, &[]))
+            .security().tools().install(&w.request(&["dependency-check"], false, &[]))
             .unwrap(),
     );
     assert_eq!(
@@ -680,7 +680,7 @@ fn uninstall_removes_the_java_runtime_only_once_no_installed_tool_needs_it() {
     assert!(w.downloads().last().unwrap().ends_with(".tar.gz"));
     assert_eq!(w.installed(), ["dependency-check", "java"]);
 
-    let removed = json(&engine.security_uninstall(&Selection::All).unwrap());
+    let removed = json(&engine.security().tools().uninstall(&Selection::All).unwrap());
     assert!(
         outcomes(&removed).contains(&("dependency-check".to_string(), "removed".to_string())),
         "--all covers the opt-in tools: {removed}"
@@ -707,7 +707,7 @@ fn a_failed_dependency_check_install_leaves_no_java_runtime_behind() {
     let engine = w.engine();
     let report = json(
         &engine
-            .security_install(&w.request(&["dependency-check"], true, &[]))
+            .security().tools().install(&w.request(&["dependency-check"], true, &[]))
             .unwrap(),
     );
     assert_eq!(report["tools"][0]["outcome"], "failed", "{report}");
@@ -733,7 +733,7 @@ fn a_tree_archive_without_its_root_or_executable_fails_at_unpack_and_leaves_noth
     let engine = w.engine();
     let report = json(
         &engine
-            .security_install(&w.request(&["dependency-check", "codeql"], true, &["codeql"]))
+            .security().tools().install(&w.request(&["dependency-check", "codeql"], true, &["codeql"]))
             .unwrap(),
     );
     let reasons: Vec<(&str, &str, &str)> = report["tools"]
@@ -771,7 +771,7 @@ fn a_users_own_copies_run_on_their_own_java_and_ask_no_licence() {
     let w = World::new();
     let engine = w.engine();
     engine
-        .security_install(&w.request(&["dependency-check"], true, &[]))
+        .security().tools().install(&w.request(&["dependency-check"], true, &[]))
         .unwrap();
     assert_eq!(w.installed(), ["dependency-check", "java"]);
 
@@ -796,7 +796,7 @@ fn a_users_own_copies_run_on_their_own_java_and_ask_no_licence() {
     assert_eq!(row["installed"]["copy"], "path", "{row}");
     let scan = json(
         &engine
-            .security_scan_selected(
+            .security().scan_selected(
                 true,
                 &ScanRequest::new(vec!["dependency-check".to_string()], Vec::new()),
                 |_| {},
@@ -821,7 +821,7 @@ fn a_users_own_copies_run_on_their_own_java_and_ask_no_licence() {
     // Beside a missing tool, so the install goes ahead past the kept copy.
     let kept = json(
         &engine
-            .security_install(&w.request(&["codeql", "trivy"], true, &[]))
+            .security().tools().install(&w.request(&["codeql", "trivy"], true, &[]))
             .unwrap(),
     );
     assert_eq!(outcomes(&kept), [("trivy".to_string(), "installed".to_string())]);
@@ -857,7 +857,7 @@ fn a_tree_whose_root_or_executable_is_a_link_is_refused_at_unpack() {
 
         let report = json(
             &w.engine()
-                .security_install(&w.request(&["codeql"], true, &["codeql"]))
+                .security().tools().install(&w.request(&["codeql"], true, &["codeql"]))
                 .unwrap(),
         );
         let reason = match root_is_link {

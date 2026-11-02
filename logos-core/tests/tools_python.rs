@@ -1083,7 +1083,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
     git(&w.root(), &["init", "-q", "-b", "main"]);
     git(&w.root(), &["add", "."]);
     git(&w.root(), &["commit", "-q", "-m", "seed"]);
-    Engine::start(w.root()).expect("engine").index();
+    Engine::start(w.root()).expect("engine").pipeline().index();
     // Only the Python scanners are under test: the others are switched off.
     fs::write(
         w.root().join(".logos/config.toml"),
@@ -1106,7 +1106,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
         .with_tools_manifest(manifest);
 
     let refused = engine
-        .security_install(&InstallRequest {
+        .security().tools().install(&InstallRequest {
             tools: Selection::Only(vec!["bandit".to_string()]),
             update: false,
             from: None,
@@ -1131,7 +1131,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
     // Offline, every line names the directory instead of a host.
     let from = w.base.join("offline-dir");
     let refused = engine
-        .security_install(&InstallRequest {
+        .security().tools().install(&InstallRequest {
             tools: Selection::Only(vec!["bandit".to_string()]),
             update: false,
             from: Some(from.clone()),
@@ -1160,7 +1160,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
         consent,
         accept_licences: Vec::new(),
     };
-    engine.security_install(&request("bandit", true)).unwrap();
+    engine.security().tools().install(&request("bandit", true)).unwrap();
     let consent_file = w.user().join(INSTALL_CONSENT_FILE);
     let consent = fs::read_to_string(&consent_file).unwrap();
     for line in [
@@ -1174,7 +1174,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
     // Python would show in the refusal below.
     fs::write(&consent_file, "[tool]\nbandit = [\"1.7.10\"]\n").unwrap();
     let refused = engine
-        .security_install(&request("semgrep", false))
+        .security().tools().install(&request("semgrep", false))
         .expect_err("semgrep is not consented to")
         .to_string();
     assert!(
@@ -1188,7 +1188,7 @@ fn scan_install_consents_to_uv_and_python_installs_the_three_and_ingests_their_s
         );
     }
 
-    let done: Value = serde_json::to_value(engine.security_scan_install(true).unwrap()).unwrap();
+    let done: Value = serde_json::to_value(engine.security().scan_install(true).unwrap()).unwrap();
     let installed_tools: Vec<&str> = done["install"]["tools"]
         .as_array()
         .unwrap()

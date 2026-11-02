@@ -437,7 +437,7 @@ class Repo {
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let get = node_id(rt, "get", NodeKind::Method);
         let count = node_id(rt, "count", NodeKind::Field);
@@ -503,7 +503,7 @@ class B {
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let edges = accesses_edges(rt);
         assert_eq!(
@@ -590,7 +590,7 @@ public class Repo {
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let get = node_id(rt, "Get", NodeKind::Method);
         let count = node_id(rt, "count", NodeKind::Field);
@@ -778,7 +778,7 @@ class Ok {
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let mut edges = accesses_edges(rt);
         let mut want = vec![
@@ -835,7 +835,7 @@ class Ok {
         fs::write(tmp.path().join(file), src).unwrap();
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
         check(rt);
     }
 
@@ -951,9 +951,9 @@ class Split {
         .unwrap();
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let view = engine
-            .hydrate(Granularity::ExcludeContains)
+            .graph().hydrate(Granularity::ExcludeContains)
             .expect("dependency view hydrates");
         let rt = engine.runtime().unwrap();
         let thresholds = metrics::Thresholds {
@@ -1104,7 +1104,7 @@ class Account {
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let read = node_id(rt, "read", NodeKind::Method);
         let balance = node_id(rt, "balance", NodeKind::Field);
@@ -1198,7 +1198,7 @@ class MapAdapter:
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        engine.index();
+        engine.pipeline().index();
 
         let init = node_id(rt, "__init__", NodeKind::Method);
         let matcher = node_id(rt, "match", NodeKind::Method);
@@ -1258,9 +1258,9 @@ class Split:
         .unwrap();
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let view = engine
-            .hydrate(Granularity::ExcludeContains)
+            .graph().hydrate(Granularity::ExcludeContains)
             .expect("dependency view hydrates");
         let rt = engine.runtime().unwrap();
         let thresholds = metrics::Thresholds {

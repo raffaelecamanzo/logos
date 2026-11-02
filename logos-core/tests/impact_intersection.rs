@@ -1,6 +1,6 @@
 //! Impact-set intersection across planned work items (S-358 / [FR-NV-11],
 //! [FR-NV-06], [NFR-CC-04], CR-114), exercised end-to-end through
-//! `Engine::impact_intersection` against a real temp-directory fixture.
+//! `Navigation::impact_intersection` against a real temp-directory fixture.
 //!
 //! Coverage by acceptance criterion:
 //! - every pair with intersecting transitive impact sets is reported, naming
@@ -73,7 +73,7 @@ fn fixture() -> TempDir {
 /// An indexed engine over the fixture.
 fn indexed_engine(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -125,7 +125,7 @@ fn sprint_63_replay_reports_the_missed_http_client_crates_intersection() {
         item("S-343=typescript_http_client_call"),
         item("S-345=go_http_client_call"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     // All three pairs collide, and none is reported safely parallel.
@@ -180,7 +180,7 @@ fn shared_symbols_name_which_items_declared_them_directly() {
         item("S-341=java_http_client_call,http_client_crates"),
         item("S-343=typescript_http_client_call"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
 
     let found = pair(&result, "S-341", "S-343").expect("the pair collides");
     let shared = found
@@ -211,7 +211,7 @@ fn items_with_disjoint_impact_sets_are_reported_safely_parallel() {
         item("S-341=java_http_client_call"),
         item("S-999=wiki_render"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     assert!(
@@ -253,11 +253,11 @@ fn the_depth_bound_narrows_the_impact_sets() {
         item("S-345=go_http_client_call"),
     ];
 
-    let deep = engine.impact_intersection(&items, None);
+    let deep = engine.navigation().impact_intersection(&items, None);
     assert_eq!(deep.depth, 3, "the default depth matches `impact`");
     assert!(pair(&deep, "S-343", "S-345").is_some(), "{deep:?}");
 
-    let shallow = engine.impact_intersection(&items, Some(0));
+    let shallow = engine.navigation().impact_intersection(&items, Some(0));
     assert_eq!(shallow.depth, 0);
     assert!(
         shallow.intersecting.is_empty(),
@@ -284,7 +284,7 @@ fn the_payload_states_its_coverage_limits_and_names_unresolved_declarations() {
         item("S-341=java_http_client_call"),
         item("S-500=a_symbol_no_index_knows"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
 
     // The standing statement: a disjoint verdict is bounded by the index.
     let statement = &result.coverage.statement;
@@ -324,7 +324,7 @@ fn fewer_than_two_items_is_an_honest_empty_answer_with_a_warning() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.impact_intersection(&[item("S-341=java_http_client_call")], None);
+    let result = engine.navigation().impact_intersection(&[item("S-341=java_http_client_call")], None);
     assert!(result.intersecting.is_empty());
     assert!(result.safe_parallel.is_empty());
     assert_eq!(result.items.len(), 1, "the item is still reported");
@@ -334,7 +334,7 @@ fn fewer_than_two_items_is_an_honest_empty_answer_with_a_warning() {
         result.warnings
     );
 
-    let empty = engine.impact_intersection(&[], None);
+    let empty = engine.navigation().impact_intersection(&[], None);
     assert!(empty.items.is_empty());
     assert!(
         empty.warnings.iter().any(|w| w.contains("at least two")),
@@ -354,7 +354,7 @@ fn a_symbol_both_items_declare_is_attributed_to_both() {
         item("S-341=http_client_crates"),
         item("S-343=http_client_crates,typescript_http_client_call"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
 
     let found = pair(&result, "S-341", "S-343").expect("the pair collides");
     let shared = found
@@ -383,7 +383,7 @@ fn a_mixed_set_reports_intersecting_and_safe_parallel_pairs_together() {
         item("S-343=typescript_http_client_call"),
         item("S-999=wiki_render"),
     ];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
 
     let intersecting: Vec<(&str, &str)> = result
         .intersecting
@@ -439,7 +439,7 @@ fn a_large_overlap_is_truncated_counted_and_keeps_declared_collisions() {
 
     // `alpha_arm` declares the hub directly; `beta_arm` only reaches it.
     let items = [item("A=alpha_arm,hub"), item("B=beta_arm")];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
     let found = pair(&result, "A", "B").expect("the pair collides");
 
     assert!(
@@ -492,7 +492,7 @@ fn an_unindexed_project_reports_its_emptiness_not_a_bare_parallel_verdict() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let items = [item("A=no_such_symbol_a"), item("B=no_such_symbol_b")];
-    let result = engine.impact_intersection(&items, None);
+    let result = engine.navigation().impact_intersection(&items, None);
 
     assert!(result.intersecting.is_empty(), "{result:?}");
     assert_eq!(result.safe_parallel.len(), 1, "the verdict is 'parallel'…");
@@ -521,7 +521,7 @@ fn an_ambiguous_name_is_warned_about_rather_than_silently_disambiguated() {
     write(tmp.path(), "src/other.rs", "pub fn unrelated() {}\n");
     let engine = indexed_engine(&tmp);
 
-    let result = engine.impact_intersection(&[item("A=helper"), item("B=unrelated")], None);
+    let result = engine.navigation().impact_intersection(&[item("A=helper"), item("B=unrelated")], None);
     assert!(
         result
             .warnings
@@ -532,7 +532,7 @@ fn an_ambiguous_name_is_warned_about_rather_than_silently_disambiguated() {
     );
 
     // An unambiguous name draws no such warning.
-    let result = engine.impact_intersection(&[item("A=unrelated"), item("B=unrelated")], None);
+    let result = engine.navigation().impact_intersection(&[item("A=unrelated"), item("B=unrelated")], None);
     assert!(
         !result.warnings.iter().any(|w| w.contains("matched")),
         "a unique name is not flagged: {:?}",
@@ -547,14 +547,14 @@ fn a_repeated_declaration_is_one_intention_not_two() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.impact_intersection(
+    let result = engine.navigation().impact_intersection(
         &[
             item("A=http_client_crates,http_client_crates"),
             item("B=wiki_render"),
         ],
         None,
     );
-    let once = engine.impact_intersection(
+    let once = engine.navigation().impact_intersection(
         &[item("A=http_client_crates"), item("B=wiki_render")],
         None,
     );
@@ -565,7 +565,7 @@ fn a_repeated_declaration_is_one_intention_not_two() {
         "declaring a symbol twice is the same query as declaring it once"
     );
 
-    let result = engine.impact_intersection(
+    let result = engine.navigation().impact_intersection(
         &[item("A=ghost_symbol,ghost_symbol"), item("B=wiki_render")],
         None,
     );

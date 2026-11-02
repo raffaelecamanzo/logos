@@ -55,7 +55,7 @@ fn indexed(fixture: fixtures::Fixture) -> (TempDir, Engine) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -451,7 +451,7 @@ fn sync_equals_a_full_reindex_after_a_file_changes_its_namespace() {
         formatter,
         "<?php\n\nnamespace Monolog\\Legacy;\n\nclass LineFormatter\n{\n}\n",
     );
-    engine.sync(&[formatter.into()]);
+    engine.pipeline().sync(&[formatter.into()]);
     assert!(
         edges_from(rt, "src/Monolog/Handler/StreamHandler.php", EdgeKind::Imports).is_empty(),
         "the import names a namespace the type left"
@@ -475,7 +475,7 @@ fn sync_equals_a_full_reindex_after_a_file_leaves_and_joins_a_wildcards_namespac
         item,
         "namespace eShop.Catalog\n{\n    public class OrderItem\n    {\n        public int Units;\n    }\n}\n",
     );
-    engine.sync(&[item.into()]);
+    engine.pipeline().sync(&[item.into()]);
     assert_eq!(
         edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports),
         strings(&["src/Ordering.Domain/Order.cs:Order:module"])
@@ -488,7 +488,7 @@ fn sync_equals_a_full_reindex_after_a_file_leaves_and_joins_a_wildcards_namespac
         guard,
         "namespace eShop.Ordering.Domain\n{\n    public static class Guard\n    {\n        public static void NotNull(object o) { }\n    }\n}\n",
     );
-    engine.sync(&[guard.into()]);
+    engine.pipeline().sync(&[guard.into()]);
     assert_eq!(
         edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports),
         strings(&[
@@ -506,12 +506,12 @@ fn sync_equals_a_full_reindex_after_a_global_using_changes() {
     let (tmp, engine) = indexed(fixtures::C_SHARP);
     let rt = engine.runtime().unwrap();
     write(tmp.path(), GLOBAL_USINGS, "global using System;\n");
-    engine.sync(&[GLOBAL_USINGS.into()]);
+    engine.pipeline().sync(&[GLOBAL_USINGS.into()]);
     assert!(edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports).is_empty());
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(fixtures::C_SHARP)));
 
     write(tmp.path(), GLOBAL_USINGS, "global using eShop.Shared;\n");
-    engine.sync(&[GLOBAL_USINGS.into()]);
+    engine.pipeline().sync(&[GLOBAL_USINGS.into()]);
     assert_eq!(
         edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports),
         strings(&["src/Shared/Guard.cs:Guard:module"])
@@ -532,10 +532,10 @@ fn sync_equals_a_full_reindex_after_adding_and_deleting_a_namespaced_file() {
     let engine = index(&tmp);
     let rt = engine.runtime().unwrap();
     write(tmp.path(), module, fixtures::KOTLIN[0].1);
-    engine.sync(&[module.into()]);
+    engine.pipeline().sync(&[module.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &koin));
     fs::remove_file(tmp.path().join(module)).unwrap();
-    engine.sync(&[module.into()]);
+    engine.pipeline().sync(&[module.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &koin));
 }
 
@@ -554,10 +554,10 @@ fn a_purge_unbinds_a_wildcard_whose_namespace_file_left() {
     assert_eq!(edges_from(rt, user, EdgeKind::Imports), strings(&["src/Other/Impl.cs:Impl:module"]));
 
     engine
-        .config_write(logos_core::config::PolicyFile::Config, "exclude = [\"src/Other/**\"]\n")
+        .config().write(logos_core::config::PolicyFile::Config, "exclude = [\"src/Other/**\"]\n")
         .expect("a valid config write succeeds");
     engine
-        .config_apply(logos_core::config::PolicyFile::Config)
+        .config().apply(logos_core::config::PolicyFile::Config)
         .expect("config apply runs");
     assert!(edges_from(rt, user, EdgeKind::Imports).is_empty());
     assert_eq!(
@@ -580,7 +580,7 @@ fn sync_equals_a_full_reindex_after_a_file_loses_its_one_namespace() {
         item,
         "namespace eShop.Ordering.Domain\n{\n    public class OrderItem { }\n}\n\nnamespace eShop.Catalog\n{\n    public class CatalogItem { }\n}\n",
     );
-    engine.sync(&[item.into()]);
+    engine.pipeline().sync(&[item.into()]);
     assert_eq!(
         edges_from(rt, GLOBAL_USINGS, EdgeKind::Imports),
         strings(&["src/Ordering.Domain/Order.cs:Order:module"]),
@@ -623,21 +623,21 @@ fn a_csharp_base_class_binds_from_an_enclosing_namespace_and_sync_equals_reindex
 
     // A `Base` in `Acme.Core` is nearer.
     write(tmp.path(), CLOSER, "namespace Acme.Core\n{\n    public class Base { }\n}\n");
-    engine.sync(&[CLOSER.into()]);
+    engine.pipeline().sync(&[CLOSER.into()]);
     assert_eq!(extends(rt), strings(&["src/Core/Base.cs:Base:class"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 
     // A second `Base` in `Acme.Core` is an ambiguity the walk stops at.
     let other = "src/Core/Other.cs";
     write(tmp.path(), other, "namespace Acme.Core\n{\n    public class Base { }\n}\n");
-    engine.sync(&[other.into()]);
+    engine.pipeline().sync(&[other.into()]);
     assert!(extends(rt).is_empty(), "two candidates at one level bind nothing");
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 
     // Removing both returns the name to the outer namespace's.
     for path in [CLOSER, other] {
         fs::remove_file(tmp.path().join(path)).unwrap();
-        engine.sync(&[path.into()]);
+        engine.pipeline().sync(&[path.into()]);
     }
     assert_eq!(extends(rt), strings(&["src/Base.cs:Base:class"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
@@ -729,7 +729,7 @@ fn nested_csharp_blocks_read_each_levels_usings_after_its_types() {
 
     // `Y` no longer supplies it: `A`'s own `Foo` comes before `A`'s `using X;`.
     write(tmp.path(), "src/Y.cs", "namespace Y\n{\n    public class Other { }\n}\n");
-    engine.sync(&["src/Y.cs".into()]);
+    engine.pipeline().sync(&["src/Y.cs".into()]);
     assert_eq!(edges_from(rt, nested, EdgeKind::Extends), strings(&["src/A.cs:Foo:class"]));
 
     // A second `using` of the inner block supplying `Foo` is an ambiguity the
@@ -741,7 +741,7 @@ fn nested_csharp_blocks_read_each_levels_usings_after_its_types() {
         nested,
         "using Z;\n\nnamespace A\n{\n    using X;\n\n    namespace B\n    {\n        using Y;\n        using W;\n\n        public class C : Foo { }\n    }\n}\n",
     );
-    engine.sync(&["src/Y.cs".into(), "src/W.cs".into(), nested.into()]);
+    engine.pipeline().sync(&["src/Y.cs".into(), "src/W.cs".into(), nested.into()]);
     assert!(edges_from(rt, nested, EdgeKind::Extends).is_empty());
 }
 
@@ -761,15 +761,15 @@ fn sync_equals_a_full_reindex_when_a_block_scoped_using_is_added_moved_and_remov
         ("namespace Acme.Sub\n{\n    public class Impl : Foo { }\n}\n", "src/Acme/Foo.cs:Foo:class"),
     ] {
         write(tmp.path(), IMPL, source);
-        engine.sync(&[IMPL.into()]);
+        engine.pipeline().sync(&[IMPL.into()]);
         assert_eq!(edges_from(rt, IMPL, EdgeKind::Extends), strings(&[expected]), "{source}");
         assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{source}");
     }
     // The supplying namespace leaving and returning re-binds the block's row too.
     write(tmp.path(), IMPL, BLOCK_USING);
-    engine.sync(&[IMPL.into()]);
+    engine.pipeline().sync(&[IMPL.into()]);
     write(tmp.path(), VENDOR_FOO, "namespace X\n{\n    public class Bar { }\n}\n");
-    engine.sync(&[VENDOR_FOO.into()]);
+    engine.pipeline().sync(&[VENDOR_FOO.into()]);
     assert_eq!(edges_from(rt, IMPL, EdgeKind::Extends), strings(&["src/Acme/Foo.cs:Foo:class"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }

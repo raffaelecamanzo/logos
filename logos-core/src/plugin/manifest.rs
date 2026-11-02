@@ -525,7 +525,9 @@ pub struct ModuleModel {
     /// when `true`, a function a file declares at its top level — a Scala 3
     /// top-level `def` — is a member of the namespace the file declares, as
     /// its types are: an import names it, a wildcard of the namespace brings it
-    /// into view, and a call from the same namespace reaches it. Defaults to
+    /// into view, and a call from the same namespace reaches it. A top-level
+    /// `Variable` or `Constant` the plugin emits is a member too (S-831): an
+    /// import's target, never a call's. Defaults to
     /// `false`, so a language that does not declare it binds exactly as before.
     ///
     /// [FR-RS-36]: ../../../docs/specs/requirements/FR-RS-36.md
@@ -650,6 +652,16 @@ pub enum ModuleModelKind {
 ///
 /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
 pub(crate) const NAMESPACE_CAPTURE: &str = "module.namespace";
+
+/// The capture a `symbols` query names the facade class a file's own
+/// annotation declares with (S-832, [FR-RS-31]): the string content of
+/// Kotlin's `@file:JvmName("Slugs")`. Its group is `module`, so the declaration
+/// walk never reads it as a node. Optional: a language that declares a
+/// [`file_facade`](ModuleModel::file_facade) suffix and captures none names
+/// every file's facade from its stem.
+///
+/// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+pub(crate) const FACADE_CAPTURE: &str = "module.facade";
 
 /// The capture a `references` query records a type's supertype under (S-522):
 /// what a language that declares

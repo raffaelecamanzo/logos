@@ -9389,9 +9389,9 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("temp root");
         let engine = crate::Engine::start(tmp.path()).expect("engine starts");
 
-        let scan = engine.scan(true).expect("scan runs");
-        let gate = engine.gate(None, false, true).expect("gate runs");
-        let check = engine.check_rules(None, true).expect("check_rules runs");
+        let scan = engine.quality().scan(true).expect("scan runs");
+        let gate = engine.quality().gate(None, false, true).expect("gate runs");
+        let check = engine.quality().check_rules(None, true).expect("check_rules runs");
 
         let scan_json = serde_json::to_string(&scan).expect("scan serializes");
         let gate_json = serde_json::to_string(&gate).expect("gate serializes");
@@ -9448,7 +9448,7 @@ mod tests {
 
         // With no `Federation`, no `Backing::Federated` registry is ever
         // built, so `cross_service_coverage` is never reachable on this path.
-        let scan = engine.scan(true).expect("scan runs on the single-root path");
+        let scan = engine.quality().scan(true).expect("scan runs on the single-root path");
         assert!(scan.warnings.iter().all(|w| !w.contains("workspace")));
     }
 

@@ -339,7 +339,7 @@ fn the_reference_workspace_reports_a_reconciled_subscribe_topic_inventory_when_o
 /// named surface — `logos workspace status` reporting a non-empty topic inventory —
 /// argued rather than exercised on the real estate. This closes the gap without
 /// re-indexing the reference workspace itself: it copies the `@KafkaListener`-bearing
-/// Java sources of the corpus into a temp project, runs a real `Engine::index`, and
+/// Java sources of the corpus into a temp project, runs a real `Pipeline::index`, and
 /// reads the **same** `topic_surface()` projection that `workspace status` builds a
 /// member's inventory from ([FR-WS-11]).
 ///
@@ -392,7 +392,7 @@ fn real_listener_sources_promote_a_non_empty_member_topic_inventory() {
     );
 
     let engine = logos_core::Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // The exact projection `workspace status` reports a member's inventory from.
     let surface = {
@@ -2400,7 +2400,7 @@ fn hops(identities: &BTreeMap<String, Vec<SiteIdentity>>, committed: bool) -> BT
 /// what the shipped identity rule implies under a faithful join — and read the
 /// **product-side** assertion in
 /// [`the_reference_workspace_reports_its_promotion_pass_cost_when_one_is_configured`]
-/// for the one figure here that a real `Engine::index` produced.
+/// for the one figure here that a real `Pipeline::index` produced.
 ///
 /// [CR-136]: ../../docs/requests/CR-136-promoted-topic-identity-is-the-committed-value.md
 /// [FR-WS-27]: ../../docs/specs/requirements/FR-WS-27.md
@@ -2768,8 +2768,8 @@ const COST_MEMBER: &str = "mailbox-manager";
 ///
 /// # How "before" is obtained, stated rather than implied
 ///
-/// AFTER is measured wall clock: a real `Engine::index` and a real
-/// `Engine::sync` of the member's broker sources, with the delivered code.
+/// AFTER is measured wall clock: a real `Pipeline::index` and a real
+/// `Pipeline::sync` of the member's broker sources, with the delivered code.
 ///
 /// BEFORE is **AFTER minus the added read**, and the added read is measured too —
 /// not modelled. Everything the promotion pass did before this story it still
@@ -2818,11 +2818,11 @@ fn the_reference_workspace_reports_its_promotion_pass_cost_when_one_is_configure
 
     let engine = logos_core::Engine::start(&dest).expect("engine starts");
     let cold_started = std::time::Instant::now();
-    engine.index();
+    engine.pipeline().index();
     let cold_ms = cold_started.elapsed().as_millis();
 
     let inc_started = std::time::Instant::now();
-    engine.sync(&dirty);
+    engine.pipeline().sync(&dirty);
     let inc_ms = inc_started.elapsed().as_millis();
 
     let rt = engine.runtime().unwrap();
@@ -2931,7 +2931,7 @@ fn the_reference_workspace_reports_its_promotion_pass_cost_when_one_is_configure
 
     // **The one product-side assertion in this file.** Everything above is wall
     // clock, and everything in the sibling inventory harness is modelled from
-    // `topic_identity`. These names came out of a real `Engine::index` over real
+    // `topic_identity`. These names came out of a real `Pipeline::index` over real
     // estate sources, through `desired_set` and `broker_refs`, so they are the
     // shipped pass's own output — and on this member every operand is a `${…}`
     // placeholder that only committed configuration can resolve.
@@ -2989,7 +2989,7 @@ fn count_files(root: &std::path::Path) -> usize {
 }
 
 /// The dirty set for the incremental leg: every Java source naming a broker
-/// template call or listener, project-relative, as `Engine::sync` takes them.
+/// template call or listener, project-relative, as `Pipeline::sync` takes them.
 fn broker_source_files(root: &std::path::Path) -> Vec<PathBuf> {
     corpus_walker(root)
         .flatten()

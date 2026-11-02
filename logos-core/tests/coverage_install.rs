@@ -61,7 +61,7 @@ impl World {
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
-        Engine::start(w.root()).expect("engine").index();
+        Engine::start(w.root()).expect("engine").pipeline().index();
         w
     }
 
@@ -269,7 +269,7 @@ fn json<T: serde::Serialize>(value: &T) -> Value {
 
 /// `coverage status`'s row for `cargo-llvm-cov`.
 fn status_row(engine: &Engine) -> Value {
-    let status = json(&engine.coverage_status().unwrap());
+    let status = json(&engine.coverage().status().unwrap());
     status["runner"]["tools"].as_array().unwrap().iter().find(|t| t["tool"] == "cargo-llvm-cov").unwrap().clone()
 }
 
@@ -291,7 +291,7 @@ fn neither_tool_reports_the_install_command_then_one_consent_installs_both_and_a
     assert_eq!(row["state"], "not_installed", "{row}");
     assert!(row["hint"].as_str().unwrap().contains("logos coverage install"), "{row}");
 
-    let refused = refusal(engine.coverage_install(&install(false)));
+    let refused = refusal(engine.coverage().install(&install(false)));
     let mb = format!("({:.1} MB)", entry.artifacts[0].size as f64 / 1_000_000.0);
     for named in [
         format!("cargo-llvm-cov {} from {HOST} {mb}", entry.version),
@@ -305,7 +305,7 @@ fn neither_tool_reports_the_install_command_then_one_consent_installs_both_and_a
     assert!(w.rustup_runs("rustup.log").is_empty(), "no rustup command ran before the consent");
     assert!(!w.tools().exists() && !w.user().join(INSTALL_CONSENT_FILE).exists());
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     assert_eq!(done.exit_code(), 0, "{done:?}");
     let payload = json(&done);
     assert_eq!(
@@ -329,7 +329,7 @@ fn neither_tool_reports_the_install_command_then_one_consent_installs_both_and_a
     assert_eq!((row["state"].as_str(), row["origin"].as_str()), (Some("never_run"), Some("managed")), "{row}");
     assert_eq!(row["version"], entry.version.as_str());
 
-    let summary = engine.coverage_run(None, true).unwrap();
+    let summary = engine.coverage().run(None, true).unwrap();
     let ran = json(&summary)["tools"].as_array().unwrap().iter().find(|t| t["tool"] == "cargo-llvm-cov").unwrap().clone();
     assert_eq!(ran["outcome"], "ran", "{ran}");
     assert_eq!(ran["ingests"][0]["format"], "cobertura", "{ran}");
@@ -337,7 +337,7 @@ fn neither_tool_reports_the_install_command_then_one_consent_installs_both_and_a
     assert!(!w.rec().join(SENTINEL).exists() && !w.root().join(SENTINEL).exists());
 
     // Again: everything is in place, so nothing is asked, fetched or added.
-    let again = json(&engine.coverage_install(&install(false)).unwrap());
+    let again = json(&engine.coverage().install(&install(false)).unwrap());
     assert_eq!(again["kept"][0]["origin"], "managed", "{again}");
     assert_eq!(again["tools"], serde_json::json!([]));
     assert_eq!(again["llvm_tools"]["outcome"], "already_present", "{again}");
@@ -357,11 +357,11 @@ fn a_users_own_cargo_llvm_cov_is_used_and_never_downloaded() {
     let own = w.bin().join("cargo-llvm-cov");
 
     script(&own, &w.llvm_cov_script("0.5.9"));
-    let refused = refusal(engine.coverage_install(&install(false)));
+    let refused = refusal(engine.coverage().install(&install(false)));
     assert!(refused.contains(&format!("cargo-llvm-cov {} from", entry.version)), "below the minimum is not kept: {refused}");
 
     script(&own, &w.llvm_cov_script(&entry.min_version));
-    let done = json(&engine.coverage_install(&install(true)).unwrap());
+    let done = json(&engine.coverage().install(&install(true)).unwrap());
     assert_eq!(done["kept"][0]["origin"], "path", "{done}");
     assert_eq!(done["kept"][0]["binary"], own.to_str().unwrap());
     assert_eq!(done["kept"][0]["version"], entry.min_version.as_str());
@@ -371,7 +371,7 @@ fn a_users_own_cargo_llvm_cov_is_used_and_never_downloaded() {
     assert!(!w.tools().join("cargo-llvm-cov").exists());
 
     assert_eq!(status_row(&engine)["origin"], "path");
-    let summary = json(&engine.coverage_run(Some("cargo-llvm-cov"), true).unwrap());
+    let summary = json(&engine.coverage().run(Some("cargo-llvm-cov"), true).unwrap());
     assert_eq!(summary["tools"][0]["outcome"], "ran", "{summary}");
     let runs = lines(&w.rec().join("cargo-llvm-cov.log"));
     assert!(runs.iter().any(|r| r.starts_with("llvm-cov --workspace --cobertura")), "the user's copy ran: {runs:?}");
@@ -390,10 +390,10 @@ fn without_rustup_the_component_is_reported_with_the_manual_command_and_nothing_
     let manifest = w.manifest(None);
     let engine = w.engine(&manifest, Some(search));
 
-    let refused = refusal(engine.coverage_install(&install(false)));
+    let refused = refusal(engine.coverage().install(&install(false)));
     assert!(!refused.contains("rustup component add"), "no rustup line without rustup: {refused}");
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     assert_eq!(done.exit_code(), 0, "the managed copy is in place: {done:?}");
     let payload = json(&done);
     assert_eq!(payload["tools"][0]["outcome"], "installed");
@@ -418,7 +418,7 @@ fn a_checksum_mismatch_never_executes_the_download() {
     let manifest = w.manifest(Some(&"0".repeat(64)));
     let engine = w.engine(&manifest, None);
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     let payload = json(&done);
     assert_eq!(payload["tools"][0]["outcome"], "failed", "{payload}");
     assert_eq!(payload["tools"][0]["stage"], "checksum", "{payload}");
@@ -444,12 +444,12 @@ fn the_security_install_never_touches_the_coverage_tool() {
         consent: true,
         accept_licences: Vec::new(),
     };
-    let refused = refusal(engine.security_install(&named));
+    let refused = refusal(engine.security().tools().install(&named));
     assert!(refused.contains("\"cargo-llvm-cov\" is not a tool Logos installs"), "{refused}");
     let all = InstallRequest { tools: Selection::All, consent: false, ..named };
-    let refused = refusal(engine.security_install(&all));
+    let refused = refusal(engine.security().tools().install(&all));
     assert!(refused.contains("trivy") && !refused.contains("cargo-llvm-cov"), "{refused}");
-    assert!(refusal(engine.security_uninstall(&Selection::Only(vec!["cargo-llvm-cov".to_string()]))).contains("is not a tool"));
+    assert!(refusal(engine.security().tools().uninstall(&Selection::Only(vec!["cargo-llvm-cov".to_string()]))).contains("is not a tool"));
     assert!(w.downloads().is_empty());
 }
 
@@ -465,10 +465,10 @@ fn a_managed_copy_still_needs_the_run_consent() {
     w.rustup();
     let manifest = w.manifest(None);
     let engine = w.engine(&manifest, None);
-    assert_eq!(engine.coverage_install(&install(true)).unwrap().exit_code(), 0);
+    assert_eq!(engine.coverage().install(&install(true)).unwrap().exit_code(), 0);
     let before = lines(&w.rec().join("cargo-llvm-cov.log"));
 
-    let refused = refusal(engine.coverage_run(Some("cargo-llvm-cov"), false));
+    let refused = refusal(engine.coverage().run(Some("cargo-llvm-cov"), false));
     assert!(refused.contains("cargo-llvm-cov") && refused.contains("--consent"), "{refused}");
     assert_eq!(lines(&w.rec().join("cargo-llvm-cov.log")), before, "the managed copy never started");
 }
@@ -482,7 +482,7 @@ fn a_failed_rustup_add_fails_the_step_and_the_install_exits_1() {
     w.rustup_scripted(&w.bin().join("rustup"), "rustup.log", "", &format!("echo \"{stderr}\" >&2; exit 1"));
     let engine = w.engine(&w.manifest(None), None);
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     let payload = json(&done);
     assert_eq!(payload["tools"][0]["outcome"], "installed", "{payload}");
     assert_eq!(payload["llvm_tools"]["outcome"], "failed", "{payload}");
@@ -501,7 +501,7 @@ fn a_failed_listing_reads_as_missing_and_the_component_is_added() {
     w.rustup_scripted(&w.bin().join("rustup"), "rustup.log", "echo 'error: no default toolchain' >&2; exit 1", &add);
     let engine = w.engine(&w.manifest(None), None);
 
-    let done = json(&engine.coverage_install(&install(true)).unwrap());
+    let done = json(&engine.coverage().install(&install(true)).unwrap());
     assert_eq!(done["llvm_tools"]["outcome"], "added", "{done}");
     assert!(w.component().exists());
     assert_eq!(w.rustup_runs("rustup.log").len(), 2, "listed, then added");
@@ -525,7 +525,7 @@ fn an_override_that_cannot_run_is_kept_and_nothing_is_downloaded_beside_it() {
     .unwrap();
     let engine = w.engine(&w.manifest(None), None);
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     let payload = json(&done);
     assert_eq!(payload["kept"][0]["origin"], "override", "{payload}");
     assert_eq!(payload["kept"][0]["binary"], broken.to_str().unwrap());
@@ -559,7 +559,7 @@ fn with_a_copy_kept_the_component_step_needs_no_tools_directory() {
         })
         .with_tools_manifest(manifest);
 
-    let done = engine.coverage_install(&install(true)).unwrap();
+    let done = engine.coverage().install(&install(true)).unwrap();
     let payload = json(&done);
     assert_eq!(payload["kept"][0]["origin"], "path", "{payload}");
     assert_eq!(payload["llvm_tools"]["outcome"], "added", "{payload}");

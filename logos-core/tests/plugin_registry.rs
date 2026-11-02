@@ -202,7 +202,7 @@ fn a_broken_invocations_override_surfaces_as_a_load_error_not_a_silent_empty_lis
     )
     .unwrap();
 
-    let info = Engine::open(root.path()).languages();
+    let info = Engine::open(root.path()).graph().languages();
 
     assert!(
         info.languages.is_empty() && info.skipped.is_empty(),

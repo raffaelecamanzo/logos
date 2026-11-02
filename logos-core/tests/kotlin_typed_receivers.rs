@@ -57,7 +57,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -146,7 +146,7 @@ fn edge(from: &str, to: &str) -> (String, String) {
 /// Every call-residue reason the Kotlin row states, with its count, sorted.
 fn kotlin_residue(engine: &Engine) -> Vec<(CallResidueReason, u64)> {
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "kotlin")
@@ -666,7 +666,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(path, text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -729,4 +729,185 @@ class Special(private val s: SpecialOrder) {
     let orphan = DOMAIN.replace("class SpecialOrder : Order()", "class SpecialOrder");
     let edges = synced_equals_reindexed(&[(DOMAIN_PATH, &orphan), (CALLER_PATH, special)], &[(DOMAIN_PATH, DOMAIN)]);
     assert_eq!(edges, vec![edge(&format!("{CALLER_PATH}:go@6"), &format!("{DOMAIN_PATH}:ship@7"))]);
+}
+
+// ── S-834: a bare call inside a lambda with a proven receiver ────────────────
+
+const SCOPED_PATH: &str = "src/main/kotlin/shop/api/Scoped.kt";
+
+/// Bare calls inside `with(x) { … }`, `x.apply { … }` and `x.run { … }`, each
+/// `x` proven by S-563's markers, beside same-named top-level functions and
+/// members of the enclosing class.
+const SCOPED: &str = "\
+package shop.api
+
+import shop.domain.Mailer
+import shop.domain.Order
+
+fun ship() {}
+fun audit() {}
+fun send() {}
+
+class Scoped(private val order: Order) {
+    fun helper() {}
+    fun withProven(o: Order) { with(o) { ship() } }
+    fun applyProven() { order.apply { ship() } }
+    fun runProven(m: Mailer) { m.run { send() } }
+    fun falls(o: Order) { with(o) { audit() } }
+    fun toTheClass(o: Order) { with(o) { helper() } }
+    fun enclosed(o: Order, m: Mailer) { with(m) { with(o) { audit() } } }
+    fun untyped() { with(make()) { ship() } }
+    fun make(): Order = Order()
+}
+
+class Owner {
+    fun ship() {}
+    fun loses(o: Order) { with(o) { ship() } }
+}
+
+fun topLevel(o: Order) = with(o) { ship() }
+";
+
+/// FR-RS-31 (S-834, CR-261 K4): a bare call inside a lambda whose receiver is
+/// proven binds that type's member of the name first — before a top-level
+/// function and before the enclosing class's member. With no such member on a
+/// type whose whole hierarchy is seen, it falls through to the enclosing
+/// scopes as before: the class's member, then the package. Inside another
+/// receiver lambda, or with a receiver nothing proves, it binds no top-level
+/// function.
+#[test]
+fn a_bare_call_inside_a_proven_receiver_lambda_binds_the_receivers_member_first() {
+    let tmp = tree(&[(DOMAIN_PATH, DOMAIN), (SCOPED_PATH, SCOPED)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let s = |line: u32, name: &str| format!("{SCOPED_PATH}:{name}@{line}");
+    let ship = format!("{DOMAIN_PATH}:ship@7");
+    let mut from_file: Edges = calls(rt).into_iter().filter(|(from, _)| from.starts_with(SCOPED_PATH)).collect();
+    from_file.sort();
+    let mut expected = vec![
+        edge(&s(13, "applyProven"), &ship),
+        edge(&s(15, "falls"), &s(7, "audit")),
+        edge(&s(24, "loses"), &ship),
+        edge(&s(14, "runProven"), &format!("{DOMAIN_PATH}:send@15")),
+        edge(&s(16, "toTheClass"), &s(11, "helper")),
+        edge(&s(27, "topLevel"), &ship),
+        edge(&s(18, "untyped"), &s(19, "make")),
+        edge(&s(12, "withProven"), &ship),
+    ];
+    expected.sort();
+    assert_eq!(from_file, expected);
+}
+
+const SCOPED_CALLER: &str = "\
+package shop.api
+
+import shop.domain.Order
+
+fun audit() {}
+
+class Caller {
+    fun go(o: Order) { with(o) { audit() } }
+}
+";
+
+/// NFR-RA-06 (S-834): what a proven receiver lambda's bare call reads — the
+/// receiver type's members and whether its hierarchy is seen — moves with an
+/// edit to the type's own file, which the caller's row does not spell: a sync
+/// binds what a fresh index of the final tree binds.
+#[test]
+fn a_synced_edit_to_a_receiver_lambdas_type_matches_a_fresh_reindex() {
+    let go = format!("{CALLER_PATH}:go@8");
+    let top = format!("{CALLER_PATH}:audit@5");
+    let audited = DOMAIN.replace("    fun ship() {}\n    fun addOrderItem", "    fun ship() {}\n    fun audit() {}\n    fun addOrderItem");
+    // The type gains the member: the call leaves the top-level function.
+    let edges = synced_equals_reindexed(&[(DOMAIN_PATH, DOMAIN), (CALLER_PATH, SCOPED_CALLER)], &[(DOMAIN_PATH, &audited)]);
+    assert_eq!(edges, vec![edge(&go, &format!("{DOMAIN_PATH}:audit@8"))]);
+    // The type loses it: the call falls through to the top-level function.
+    let edges = synced_equals_reindexed(&[(DOMAIN_PATH, &audited), (CALLER_PATH, SCOPED_CALLER)], &[(DOMAIN_PATH, DOMAIN)]);
+    assert_eq!(edges, vec![edge(&go, &top)]);
+    // The type gains a base the graph does not hold, which may declare the
+    // member: the call binds nothing, though neither file spells `audit` anew.
+    let based = DOMAIN.replace("open class Order {", "open class Order : Unseen() {");
+    let edges = synced_equals_reindexed(&[(DOMAIN_PATH, DOMAIN), (CALLER_PATH, SCOPED_CALLER)], &[(DOMAIN_PATH, &based)]);
+    assert!(edges.is_empty(), "{edges:?}");
+    // A type in no hierarchy is renamed away: nothing proves the receiver
+    // now, so the call binds no top-level function. Only the type the row's
+    // mark carries spells a token the edit dirties.
+    let box_path = "src/main/kotlin/shop/domain/Box.kt";
+    let boxed = "package shop.domain\n\nclass Box {\n    fun open() {}\n}\n";
+    let packer = "\
+package shop.api
+
+import shop.domain.Box
+
+fun audit() {}
+
+class Packer {
+    fun go(b: Box) { with(b) { audit() } }
+}
+";
+    let edges = synced_equals_reindexed(&[(box_path, boxed), (CALLER_PATH, packer)], &[]);
+    assert_eq!(edges, vec![edge(&go, &top)]);
+    let edges = synced_equals_reindexed(&[(box_path, boxed), (CALLER_PATH, packer)], &[(box_path, &boxed.replace("Box", "Crate"))]);
+    assert!(edges.is_empty(), "{edges:?}");
+}
+
+/// FR-RS-31 (S-834 review): a proven receiver whose type holds two members
+/// the call admits decides the call: it binds neither, never the enclosing
+/// class's member of the name, and states why (`overload-ambiguous`).
+#[test]
+fn an_ambiguous_member_of_a_proven_lambda_receiver_binds_nothing_past_it() {
+    let picker = "src/main/kotlin/shop/domain/Picker.kt";
+    let host = "src/main/kotlin/shop/api/Host.kt";
+    let tmp = tree(&[
+        (picker, "package shop.domain\n\nclass Picker {\n    fun pick(n: Int) {}\n    fun pick(s: String) {}\n}\n"),
+        (
+            host,
+            "package shop.api\n\nimport shop.domain.Picker\n\nclass Host {\n    fun pick(c: Int) {}\n    fun go(p: Picker) { with(p) { pick(1) } }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let from_host: Edges = calls(rt).into_iter().filter(|(from, _)| from.starts_with(host)).collect();
+    assert!(from_host.is_empty(), "{from_host:?}");
+    assert!(
+        kotlin_residue(&engine).contains(&(CallResidueReason::OverloadAmbiguous, 1)),
+        "{:?}",
+        kotlin_residue(&engine)
+    );
+}
+
+/// FR-RS-31 (S-834 review): a proven receiver lambda inside another receiver
+/// lambda reads only its own receiver; on a miss the enclosing one's comes
+/// next, so no top-level function binds — but a member the enclosing class
+/// inherits, a call on the instance, still does.
+#[test]
+fn an_enclosed_proven_lambda_keeps_a_member_the_enclosing_class_inherits() {
+    let host = "src/main/kotlin/shop/api/Nest.kt";
+    let tmp = tree(&[
+        (DOMAIN_PATH, DOMAIN),
+        (
+            host,
+            "\
+package shop.api
+
+import shop.domain.Mailer
+import shop.domain.Order
+
+fun audit() {}
+
+open class Base {
+    fun helper() {}
+}
+
+class Nest : Base() {
+    fun go(o: Order, m: Mailer) { with(m) { with(o) { helper(); audit() } } }
+}
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let from_host: Edges = calls(rt).into_iter().filter(|(from, _)| from.starts_with(host)).collect();
+    assert_eq!(from_host, vec![edge(&format!("{host}:go@13"), &format!("{host}:helper@9"))]);
 }

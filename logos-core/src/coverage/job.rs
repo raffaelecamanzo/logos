@@ -3,11 +3,11 @@
 //! the [analysis-jobs] runner the security scan runs on — one runner for both
 //! surfaces under `serve`, so either one joins a run the other started.
 //!
-//! The run is [`Engine::coverage_run_reporting`]: each tool's start and
+//! The run is [`Coverage::run_reporting`](crate::Coverage::run_reporting): each tool's start and
 //! outcome is a job event, and a cancel kills the tool running and starts
 //! nothing after it, ending the job cancelled. A start that does not join is
 //! admitted against the project's execution consent first
-//! ([`Engine::coverage_run_admit`], [FR-CV-13]). The kind takes no project
+//! ([`Coverage::run_admit`](crate::Coverage::run_admit), [FR-CV-13]). The kind takes no project
 //! lock and excludes no other kind: a coverage run and a security scan run
 //! side by side ([ADR-87] §5).
 //!
@@ -58,7 +58,7 @@ use crate::Engine;
 /// answers for `surface`.
 ///
 /// # Errors
-/// As [`Engine::coverage_run_admit`], and the job thread's creation. Nothing
+/// As [`Coverage::run_admit`](crate::Coverage::run_admit), and the job thread's creation. Nothing
 /// is started on any error.
 pub fn start(
     engine: &Arc<Engine>,
@@ -72,7 +72,7 @@ pub fn start(
     // ended, never joins the run being cancelled.
     jobs.await_cancelled(JobKind::CoverageRun, root, crate::jobs::SHUTDOWN_GRACE);
     if !jobs.is_running(JobKind::CoverageRun, root) {
-        if let Some(pending) = engine.coverage_run_admit(tool, answer)? {
+        if let Some(pending) = engine.coverage().run_admit(tool, answer)? {
             return Ok(CoverageJobStart::Ask(pending));
         }
     }
@@ -86,7 +86,7 @@ pub fn start(
 /// The run of `tool` — every tool when `None` — on `job`'s thread, each step
 /// a job event; the summary is the job's result.
 fn run_reported(engine: &Engine, tool: Option<&str>, job: &JobContext) -> Result<serde_json::Value> {
-    let summary = engine.coverage_run_reporting(tool, |step| {
+    let summary = engine.coverage().run_reporting(tool, |step| {
         job.emit(serde_json::to_value(step).unwrap_or_default());
     })?;
     // Each tool's part is already in the events and the last-run record; the
@@ -195,11 +195,11 @@ pub enum PrepareAdmission {
 /// without managed installs). An I/O error recording.
 pub fn admit_prepared(engine: &Engine, prepare: &Prepare, answer: &PrepareAnswer<'_>) -> Result<PrepareAdmission> {
     let root = engine.root();
-    let env = engine.scan_environment();
+    let env = engine.security().tools().environment();
     let user_dir = env.user_dir.as_deref();
     let (install, dependencies, enabled): (Vec<CoverageInstallLine>, Vec<DependencyAsk>, Vec<String>) = match prepare {
         Prepare::Install => {
-            let manifest = engine.tools_manifest();
+            let manifest = engine.security().tools().manifest();
             let enabled = manifest.coverage.iter().map(|entry| entry.tool.clone()).collect();
             (coverage_install_pending(root, &env, manifest)?, Vec::new(), enabled)
         }
@@ -283,7 +283,7 @@ pub fn start_prepared(
     }
     let install = *prepare == Prepare::Install;
     if install {
-        if let Some(busy) = peek(&engine.security_lock_file()?)? {
+        if let Some(busy) = peek(&engine.security().lock_file()?)? {
             return Ok(PreparedStart::Busy(busy));
         }
     }
@@ -296,7 +296,7 @@ pub fn start_prepared(
     let started = jobs.start(JobKind::CoverageRun, root, move |job| {
         crate::observability::in_surface(surface, || {
             if install {
-                let done = engine.coverage_install_job(|step| {
+                let done = engine.coverage().install_job(|step| {
                     job.emit(serde_json::to_value(step).unwrap_or_default());
                 })?;
                 if job.is_cancelled() {

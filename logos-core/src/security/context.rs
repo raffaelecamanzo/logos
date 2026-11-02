@@ -259,7 +259,7 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
             .collect());
     }
 
-    let runtime = engine.nav_runtime()?;
+    let runtime = engine.navigation().runtime()?;
     let (spans, languages, rows) = runtime.submit_read(move |store| {
         Ok((
             store.span_nodes_in_files(&paths)?,
@@ -269,10 +269,10 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
     })?;
     let bound = bind(&spans, &anchors);
 
-    let view = engine.hydrate(Granularity::ExcludeContains)?;
+    let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // The full symbol view keeps `Contains` and the structural facts
     // (`Implements`, `Extends`) the dependency view fences out.
-    let symbols = engine.hydrate(Granularity::Symbol)?;
+    let symbols = engine.graph().hydrate(Granularity::Symbol)?;
     let routes = route_reach(&view);
     // Every bound symbol's documentation links, in one read.
     let ids: Vec<NodeId> = bound
@@ -338,13 +338,17 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
 
 /// Whether each finding's enclosing code node is test code ([FR-AN-05]), in
 /// order: the graph's half of its code scope ([`super::scope`], [FR-SC-28]).
-/// A finding binds exactly as [`contexts`] binds it, so a historical, unbound
-/// or stale one has no enclosing node and reads `false`, as does one whose
-/// line lies in no code symbol. One span read and one read of the test-marked
-/// ids, with no hydration: the counting surfaces ask it of every stored
-/// finding. It reads the graph as it stands and never indexes first; an engine
-/// with no graph reader (a transient [`Engine::open`]) answers `false` for
-/// every finding, so the path rule alone classifies them.
+/// A bound finding binds exactly as [`contexts`] binds it, so an unbound or
+/// stale one has no enclosing node and reads `false`, as does one whose line
+/// lies in no code symbol. A historical one is re-anchored
+/// ([`super::historical`]): its line at its anchor commit, found in today's
+/// file, or that commit's version of the file, read in memory, names the node
+/// it was found in; when neither does, it reads `false`. One span read and one
+/// read of the test-marked ids, with no hydration: the counting surfaces ask
+/// it of every stored finding. It reads the graph as it stands and never
+/// indexes first; an engine with no graph reader (a transient
+/// [`Engine::open`]) answers `false` for every finding, so the path rule alone
+/// classifies them.
 ///
 /// # Errors
 /// A store failure.
@@ -353,15 +357,41 @@ pub(crate) fn contexts(engine: &Engine, findings: &[&SecurityFinding]) -> Result
 /// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
 pub(crate) fn in_test_symbols(engine: &Engine, findings: &[&SecurityFinding]) -> Result<Vec<bool>> {
     let anchors: Vec<Result<(&str, u32), UnboundBecause>> = findings.iter().map(|f| anchor(f)).collect();
-    let paths = anchored_paths(&anchors);
-    let Some(runtime) = engine.nav_runtime_no_prologue().ok().filter(|_| !paths.is_empty()) else {
+    let Ok(runtime) = engine.navigation().runtime_no_prologue() else {
         return Ok(vec![false; findings.len()]);
     };
+    let mut historical = super::historical::Reanchoring::read(engine.root(), findings);
+    let mut paths = anchored_paths(&anchors);
+    paths.extend(historical.today_paths().map(str::to_string));
+    paths.sort_unstable();
+    paths.dedup();
+    if paths.is_empty() && historical.is_empty() {
+        return Ok(vec![false; findings.len()]);
+    }
     let (spans, tests) = runtime.submit_read(move |store| Ok((store.span_nodes_in_files(&paths)?, store.test_node_ids()?)))?;
     let tests: HashSet<NodeId> = tests.into_iter().collect();
+    let by_path = code_spans_by_path(&spans);
+    let today = |path: &str, line: u32| by_path.get(path).and_then(|nodes| enclosing(nodes, line)).map(|row| tests.contains(&row.id));
+    // A config that does not load names no test markers to judge an anchor
+    // commit's node by: that read is skipped, and says why, rather than made
+    // under the default markers.
+    let markers = (!historical.is_empty())
+        .then(|| crate::config::load_config_from_root(engine.root()))
+        .and_then(|loaded| {
+            loaded
+                .inspect_err(|err| {
+                    tracing::warn!("historical security findings are not read at their commits: the configuration does not load ({err})");
+                })
+                .ok()
+        })
+        .map(|config| config.semantics.test_markers);
     Ok(bind(&spans, &anchors)
         .into_iter()
-        .map(|row| row.is_ok_and(|row| tests.contains(&row.id)))
+        .enumerate()
+        .map(|(i, row)| match row {
+            Ok(row) => tests.contains(&row.id),
+            Err(_) => historical.in_test(i, today, engine.registry(), markers.as_deref()).unwrap_or(false),
+        })
         .collect())
 }
 
@@ -379,7 +409,7 @@ pub(crate) fn enclosing_symbols(engine: &Engine, findings: &[&SecurityFinding]) 
     if paths.is_empty() {
         return Ok(vec![None; findings.len()]);
     }
-    let spans = engine.nav_runtime()?.submit_read(move |store| store.span_nodes_in_files(&paths))?;
+    let spans = engine.navigation().runtime()?.submit_read(move |store| store.span_nodes_in_files(&paths))?;
     Ok(bind(&spans, &anchors).into_iter().map(|row| row.ok().cloned()).collect())
 }
 
@@ -411,12 +441,7 @@ fn bind<'a>(
     spans: &'a [NodeRow],
     anchors: &[Result<(&str, u32), UnboundBecause>],
 ) -> Vec<Result<&'a NodeRow, UnboundBecause>> {
-    let mut by_path: BTreeMap<&str, Vec<&NodeRow>> = BTreeMap::new();
-    for row in spans.iter().filter(|row| encloses_code(row.kind)) {
-        if let Some(path) = row.file_path.as_deref() {
-            by_path.entry(path).or_default().push(row);
-        }
-    }
+    let by_path = code_spans_by_path(spans);
     anchors
         .iter()
         .map(|anchor| {
@@ -424,6 +449,25 @@ fn bind<'a>(
             by_path.get(path).and_then(|nodes| enclosing(nodes, line)).ok_or(UnboundBecause::NoSymbol)
         })
         .collect()
+}
+
+/// The code nodes among `spans` — the candidates a finding binds to — by file.
+fn code_spans_by_path(spans: &[NodeRow]) -> BTreeMap<&str, Vec<&NodeRow>> {
+    let mut by_path: BTreeMap<&str, Vec<&NodeRow>> = BTreeMap::new();
+    for row in spans.iter().filter(|row| encloses_code(row.kind)) {
+        if let Some(path) = row.file_path.as_deref() {
+            by_path.entry(path).or_default().push(row);
+        }
+    }
+    by_path
+}
+
+/// The code node `line` sits innermost in among `nodes` — one file's nodes —
+/// by the one binding [`bind`] uses: what a historical finding's anchor
+/// commit's version of its file is read with ([`super::historical`]).
+pub(super) fn enclosing_code<'a>(nodes: &[&'a NodeRow], line: u32) -> Option<&'a NodeRow> {
+    let code: Vec<&NodeRow> = nodes.iter().copied().filter(|row| encloses_code(row.kind)).collect();
+    enclosing(&code, line)
 }
 
 /// The indexed path and line a finding binds at, or why it binds at none.

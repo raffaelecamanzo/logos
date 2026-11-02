@@ -157,14 +157,20 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// the baseline's re-bless record), 40 (S-761, the where-to-start rows'
 /// identity — its rebuilt tables go with migration 36's), 41 (S-593, the
 /// local-binding table), 42 (S-602, the `nodes.type_arity` column), 43
-/// (S-712, the dispatch re-bind) and 44 (S-571, the `files.parse_damaged`
-/// column and the snapshot entries' `partial_parse` flags) after it; the next [`Engine::start`] re-applies all twenty-one,
+/// (S-712, the dispatch re-bind), 44 (S-571, the `files.parse_damaged`
+/// column and the snapshot entries' `partial_parse` flags), 45 (S-820, the
+/// `nodes.callable_signature` column), 46 (S-830, the Go signature
+/// re-extraction) and 47 (S-832, the `files.facade` column) after it; the next
+/// [`Engine::start`] re-applies all twenty-four,
 /// as a real upgrade
 /// does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
          DELETE FROM schema_versions WHERE version = 43; \
@@ -247,7 +253,7 @@ fn indexing_a_member_records_its_source_and_avro_types_with_their_provenance() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     let rows = types(rt);
@@ -298,7 +304,7 @@ fn a_refused_package_and_a_malformed_schema_stay_in_the_denominator_with_their_r
     write(root, "ignored/skip.avsc", AUDIT);
     write(root, ".gitignore", "ignored/\n");
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     let rows = types(rt);
@@ -329,7 +335,7 @@ fn an_unreadable_schema_is_recorded_and_a_fixed_one_is_read_by_the_next_sync() {
     fs::create_dir_all(root.join("src/main/avro")).unwrap();
     fs::write(root.join(bin), [0xff, 0xfe, 0x00]).unwrap();
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     let rows = schemas(rt);
@@ -340,7 +346,7 @@ fn an_unreadable_schema_is_recorded_and_a_fixed_one_is_read_by_the_next_sync() {
     assert!(types(rt).is_empty());
 
     write(root, bin, AUDIT);
-    engine.sync(&[PathBuf::from(bin)]);
+    engine.pipeline().sync(&[PathBuf::from(bin)]);
     let rows = schemas(rt);
     assert_eq!((rows[0].status.as_str(), rows[0].content_hash.is_some()), ("read", true));
     assert_eq!(summary(&types(rt))[0].1, "com.x.audit.AuditKind");
@@ -358,7 +364,7 @@ fn a_member_with_no_java_kotlin_or_avro_file_writes_nothing_but_the_marker() {
     }
     write(with_avro.path(), "src/main/avro/audit.avsc", AUDIT);
     for root in [bare.path(), with_avro.path()] {
-        Engine::start(root).expect("engine starts").index();
+        Engine::start(root).expect("engine starts").pipeline().index();
     }
 
     // Clock-stamped bookkeeping aside, a schema changes the two declared-type
@@ -383,8 +389,8 @@ fn a_member_with_no_java_kotlin_or_avro_file_writes_nothing_but_the_marker() {
     // Neither a partial sync nor a full-walk reconcile writes anything for it.
     let before = dump(bare.path(), &["schema_versions"]);
     let engine = Engine::start(bare.path()).expect("engine restarts");
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     drop(engine);
     assert_eq!(
         dump(bare.path(), &["schema_versions"]),
@@ -407,7 +413,7 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     let before = with_ids(root);
 
@@ -421,10 +427,10 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
             {"type": "enum", "name": "AuditLevel", "namespace": "com.x.audit", "symbols": ["L"]}]"#,
     );
     let rev = revision(root);
-    engine.sync(&[PathBuf::from("svc/src/main/avro/audit.avsc")]);
+    engine.pipeline().sync(&[PathBuf::from("svc/src/main/avro/audit.avsc")]);
     assert_ne!(revision(root), rev, "a changed schema alone advances the graph revision");
     let rev = revision(root);
-    engine.sync(&[PathBuf::from("svc/src/main/java/com/x/mail/MailPort.java")]);
+    engine.pipeline().sync(&[PathBuf::from("svc/src/main/java/com/x/mail/MailPort.java")]);
     assert_ne!(revision(root), rev, "a changed source file advances the graph revision");
 
     let after = with_ids(root);
@@ -442,7 +448,7 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
 
     // An unchanged schema named again rewrites nothing and advances nothing.
     let before = (revision(root), with_ids(root));
-    engine.sync(&[PathBuf::from("svc/src/main/avro/audit.avsc")]);
+    engine.pipeline().sync(&[PathBuf::from("svc/src/main/avro/audit.avsc")]);
     assert_eq!((revision(root), with_ids(root)), before, "an unchanged schema is a no-op");
 
     // sync ≡ reindex: the synced facts are what a fresh index of the same tree
@@ -451,7 +457,7 @@ fn changing_one_source_file_and_one_schema_resyncs_only_their_facts_and_sync_equ
     copy_tree(root, fresh.path());
     coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "sync ≡ reindex over the declared types");
     assert_eq!(schemas(rt), schemas(fresh_engine.runtime().unwrap()), "and over the schemas");
 }
@@ -465,14 +471,14 @@ fn a_file_that_stops_declaring_any_type_loses_its_facts() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     let kotlin = "svc/src/main/kotlin/com/x/mail/Channels.kt";
     let java = "svc/src/main/java/com/x/mail/MailPort.java";
     write(root, kotlin, "package com.x.mail\n\nfun helper() {}\n");
     write(root, java, "package com.x.mail;\n\n// nothing declared here any more\n");
-    engine.sync(&[PathBuf::from(kotlin), PathBuf::from(java)]);
+    engine.pipeline().sync(&[PathBuf::from(kotlin), PathBuf::from(java)]);
 
     let rows = types(rt);
     assert!(
@@ -484,7 +490,7 @@ fn a_file_that_stops_declaring_any_type_loses_its_facts() {
     copy_tree(root, fresh.path());
     coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     assert_eq!(rows, types(fresh_engine.runtime().unwrap()), "sync ≡ reindex");
 }
 
@@ -512,13 +518,13 @@ fn a_deleted_source_file_or_schema_takes_its_facts_by_a_partial_sync_and_by_a_fu
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     // Partial: named deletions.
     fs::remove_file(root.join("svc/src/main/kotlin/com/x/mail/Channels.kt")).unwrap();
     fs::remove_file(root.join("svc/src/main/avro/audit.avsc")).unwrap();
-    engine.sync(&[
+    engine.pipeline().sync(&[
         PathBuf::from("svc/src/main/kotlin/com/x/mail/Channels.kt"),
         PathBuf::from("svc/src/main/avro/audit.avsc"),
     ]);
@@ -530,7 +536,7 @@ fn a_deleted_source_file_or_schema_takes_its_facts_by_a_partial_sync_and_by_a_fu
     // addition too.
     fs::remove_file(root.join("svc/src/main/avro/events.avsc")).unwrap();
     write(root, "lib/src/main/avro/shared.avsc", AUDIT);
-    engine.health(true).expect("reconcile runs");
+    engine.quality().health(true).expect("reconcile runs");
     assert_eq!(
         schemas(rt).iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
         vec!["lib/src/main/avro/shared.avsc"]
@@ -548,9 +554,9 @@ fn a_re_index_forgets_a_schema_the_walk_no_longer_finds() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     fs::remove_file(root.join("svc/src/main/avro/events.avsc")).unwrap();
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(
         schemas(rt).iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
@@ -565,11 +571,11 @@ fn a_gitignored_schema_named_by_a_sync_is_treated_as_absent() {
     let root = tmp.path();
     member(root);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     write(root, ".gitignore", "*.avsc\n");
-    engine.sync(&[PathBuf::from("svc/src/main/avro/events.avsc")]);
+    engine.pipeline().sync(&[PathBuf::from("svc/src/main/avro/events.avsc")]);
     assert_eq!(
         schemas(rt).iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
         vec!["svc/src/main/avro/audit.avsc"],
@@ -591,7 +597,7 @@ fn the_first_full_walk_backfills_an_upgraded_members_declared_types() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     member(root);
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     let graph_before = graph(root);
     downgrade_to_v23(root);
 
@@ -601,27 +607,27 @@ fn the_first_full_walk_backfills_an_upgraded_members_declared_types() {
     assert!(!extracted(rt), "an upgraded store records no extraction");
 
     write(root, "tools/src/lib.rs", "pub fn hello() {}\npub fn more() {}\n");
-    engine.sync(&[PathBuf::from("tools/src/lib.rs"), PathBuf::from("svc/src/main/avro/audit.avsc")]);
+    engine.pipeline().sync(&[PathBuf::from("tools/src/lib.rs"), PathBuf::from("svc/src/main/avro/audit.avsc")]);
     assert_eq!(schemas(rt).len(), 1, "the partial sync read the schema it named");
     assert!(!extracted(rt), "a partial sync never marks the facts extracted");
 
     let rev = revision(root);
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     assert!(extracted(rt), "the first full walk marks the facts extracted");
     assert_ne!(revision(root), rev, "completing the facts advances the graph revision");
     write(root, "tools/src/lib.rs", "pub fn hello() {}\n");
-    engine.sync(&[PathBuf::from("tools/src/lib.rs")]);
+    engine.pipeline().sync(&[PathBuf::from("tools/src/lib.rs")]);
     assert_eq!(graph(root), graph_before, "the backfill re-extracts unchanged source into the same graph");
 
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
     coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");
 
     let before = dump(root, &["schema_versions"]);
-    engine.health(true).expect("a second full-walk reconcile runs");
+    engine.quality().health(true).expect("a second full-walk reconcile runs");
     assert_eq!(dump(root, &["schema_versions"]), before, "once marked, a no-op full walk writes nothing");
 }
 
@@ -636,14 +642,14 @@ fn a_backfill_file_that_fails_to_persist_keeps_the_backfill_open() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     member(root);
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     downgrade_to_v23(root);
 
     let engine = Engine::start(root).expect("the upgraded store opens");
     let rt = engine.runtime().unwrap();
     let service = "svc/src/main/java/com/x/mail/MailService.java";
     rt.inject_persist_fault(service);
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     assert!(!extracted(rt), "a failed backfill file leaves the facts unmarked");
     assert!(
         !types(rt).iter().any(|t| t.path == service),
@@ -651,13 +657,13 @@ fn a_backfill_file_that_fails_to_persist_keeps_the_backfill_open() {
     );
 
     rt.clear_persist_faults();
-    engine.health(true).expect("the next full walk retries it");
+    engine.quality().health(true).expect("the next full walk retries it");
     assert!(extracted(rt), "the retried backfill completes and marks the facts");
     let fresh = tempfile::tempdir().unwrap();
     copy_tree(root, fresh.path());
     coordinate::pin(fresh.path());
     let fresh_engine = Engine::start(fresh.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     assert_eq!(types(rt), types(fresh_engine.runtime().unwrap()), "backfilled ≡ freshly indexed");
 }
 
@@ -669,19 +675,19 @@ fn the_first_full_walk_marks_an_upgraded_member_with_nothing_to_declare() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     write(root, "src/lib.rs", "pub fn hello() {}\n");
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     downgrade_to_v23(root);
 
     let engine = Engine::start(root).expect("the upgraded store opens");
     let rt = engine.runtime().unwrap();
     assert!(!extracted(rt));
     let rev = revision(root);
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     assert!(extracted(rt), "the first full walk marks a member with nothing to declare");
     assert_ne!(revision(root), rev, "turning an unread member into a read one advances the revision");
     assert!(types(rt).is_empty() && schemas(rt).is_empty());
 
     let before = dump(root, &["schema_versions"]);
-    engine.health(true).expect("a second full-walk reconcile runs");
+    engine.quality().health(true).expect("a second full-walk reconcile runs");
     assert_eq!(dump(root, &["schema_versions"]), before, "once marked, a no-op full walk writes nothing");
 }

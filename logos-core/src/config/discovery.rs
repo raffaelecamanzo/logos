@@ -284,7 +284,7 @@ impl ZeroAdmissionDiagnostic {
     ///
     /// - **the persisted-count seam, and this is the case the guard exists
     ///   for.** `status` and `doctor` do not walk; they read the file count the
-    ///   *last completed index* stored ([`Engine::zero_admission_diagnostic`]).
+    ///   *last completed index* stored ([`Graph::zero_admission_diagnostic`]).
     ///   At a root indexed **before** enablement that count is `0` for as long
     ///   as no index has run since, while the manifest is already on disk — so
     ///   `admits_diagnosis` passes, the depth-1 prunes are still there, and
@@ -299,7 +299,7 @@ impl ZeroAdmissionDiagnostic {
     /// that reads it inherits the same answer and none can disagree
     /// ([FR-IX-11]).
     ///
-    /// [`Engine::zero_admission_diagnostic`]: ../struct.Engine.html
+    /// [`Graph::zero_admission_diagnostic`]: crate::Graph::zero_admission_diagnostic
     ///
     /// It is the **last** guard deliberately. It is the only one that costs
     /// filesystem I/O, and the two free gates above — the admitted count and the

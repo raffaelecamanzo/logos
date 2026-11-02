@@ -90,7 +90,7 @@ impl Fixture {
         git(&repo, &["commit", "-q", "-m", "seed"]);
         let engine = Engine::start(&repo).expect("engine starts").with_scan_environment(scan_env(&user, &bin));
         if index {
-            engine.index();
+            engine.pipeline().index();
         }
         let intent = IntentToken::generate();
         let router = web::router_with_intent(Arc::new(engine), intent.clone());
@@ -520,7 +520,7 @@ fn freshness(status: &Value, scanner: &str) -> (Value, Value, Value, Value) {
 
 /// HF-2: a scanner made stale by a new HEAD reads `fresh` on the very next
 /// page read after a Run scan job ends — no later read, no wait — and the
-/// CLI and MCP `security status` (`Engine::security_status`) agree with the
+/// CLI and MCP `security status` (`Security::status`) agree with the
 /// page row for row. A source file changed after that scan still makes it
 /// stale. That the page shows this read, and nothing older, once the job
 /// ended is the SPA's half: `SecurityView.test.tsx`.
@@ -554,7 +554,7 @@ async fn the_read_after_a_scan_job_ends_shows_the_scanned_scanner_fresh() {
         assert_eq!(freshness(&page_status(&page), "bandit"), (json!("fresh"), Value::Null, json!(release), json!(1)), "{page}");
 
         // One freshness model: the CLI and MCP readout states every row as the page does.
-        let direct = serde_json::to_value(f.direct_engine().security_status().unwrap()).unwrap();
+        let direct = serde_json::to_value(f.direct_engine().security().status().unwrap()).unwrap();
         for scanner in ["semgrep", "trivy", "gitleaks", "osv-scanner", "bandit", "gosec", "checkov", "codeql", "dependency-check"] {
             assert_eq!(freshness(&direct, scanner), freshness(&page_status(&page), scanner), "{scanner}: {direct}");
         }
@@ -563,7 +563,7 @@ async fn the_read_after_a_scan_job_ends_shows_the_scanned_scanner_fresh() {
         std::fs::write(f.repo.join("app.py"), "import sqlite3\nimport os\n").unwrap();
         let (_, page) = f.get("/api/v1/security").await;
         assert_eq!(freshness(&page_status(&page), "bandit").1, json!("files_changed"), "{page}");
-        let direct = serde_json::to_value(f.direct_engine().security_status().unwrap()).unwrap();
+        let direct = serde_json::to_value(f.direct_engine().security().status().unwrap()).unwrap();
         assert_eq!(freshness(&direct, "bandit"), freshness(&page_status(&page), "bandit"));
     })
     .await;

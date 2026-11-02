@@ -144,6 +144,12 @@ impl World {
     /// binary's environment, or removed from it when `None` — never inherited
     /// from this test process.
     fn logos_keyed(&self, root: &Path, args: &[&str], nvd_api_key: Option<&str>) -> Output {
+        self.logos_logged(root, args, nvd_api_key, None)
+    }
+
+    /// [`World::logos_keyed`] with `RUST_LOG` set to `log` in the binary's
+    /// environment, or removed from it when `None`.
+    fn logos_logged(&self, root: &Path, args: &[&str], nvd_api_key: Option<&str>, log: Option<&str>) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_logos"));
         command
             .arg("--project")
@@ -156,6 +162,10 @@ impl World {
         match nvd_api_key {
             Some(key) => command.env("NVD_API_KEY", key),
             None => command.env_remove("NVD_API_KEY"),
+        };
+        match log {
+            Some(log) => command.env("RUST_LOG", log),
+            None => command.env_remove("RUST_LOG"),
         };
         let out = command.output().expect("the logos binary runs");
         for (stream, secret) in [&out.stdout, &out.stderr].into_iter().flat_map(|s| [(s, PLANTED), (s, NVD_KEY)]) {
@@ -1498,6 +1508,129 @@ fn a_secret_found_only_in_history_is_anchored_to_its_commit_and_still_counts() {
     assert!(!message("app/settings.py").contains("historical"), "{}", message("app/settings.py"));
 }
 
+/// Every file under `dir`, read whole: what a store holds on disk, its
+/// write-ahead log and its logs included.
+fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push((path.clone(), fs::read(&path).unwrap()));
+        }
+    }
+    files
+}
+
+/// A historical secret takes the scope of the code it was found in ([S-843],
+/// [FR-SC-28] as amended by [CR-265]), through the binary. Six fake AWS keys
+/// are committed; the next commit moves one down, deletes three files, puts a
+/// production copy of one key's line above it and moves another's line from
+/// production code into a test. History mode reports each at
+/// the first commit, so every one is `historical`:
+/// - the key moved down in `src/lib.rs`'s `#[cfg(test)]` module is re-anchored
+///   in today's file, in its test fn: `test` by its symbol (1.22.1 read it
+///   `production` by its `src/` path);
+/// - the key in a test module of a deleted file reads `test` from its anchor
+///   commit's version; the key in deleted production code reads `production`,
+///   still historical;
+/// - the key whose line today sits in a production fn and in a test fn has
+///   matches in two scopes, so its anchor commit's version decides: `test`;
+/// - the key in a deleted file no plugin parses falls back to the path rule;
+/// - the key whose line moved into a test reads `test` from today's file,
+///   which decides before its anchor commit's version would;
+/// - the gate still counts every one, whatever its scope; and no key reaches
+///   the store, a log line or the output.
+///
+/// [S-843]: ../../docs/planning/journal.md#s-843-a-historical-security-finding-takes-the-scope-of-the-code-it-was-found-in
+/// [FR-SC-28]: ../../docs/specs/requirements/FR-SC-28.md
+/// [CR-265]: ../../docs/requests/CR-265-security-findings-without-fixture-and-audit-noise.md
+#[test]
+fn a_historical_secret_takes_the_scope_of_the_code_it_was_found_in() {
+    let w = World::new();
+    // Spelled in pieces, so this file holds no key a scanner reads.
+    let keys: Vec<String> = (1..=6).map(|n| format!("AKIA{}{n}", "QWERTYUIOPASDFG")).collect();
+    let test_module = |fn_name: &str, key: &str| {
+        format!("#[cfg(test)]\nmod tests {{\n    #[test]\n    fn {fn_name}() {{\n        let key = \"{key}\";\n        assert_eq!(key.len(), 20);\n    }}\n}}\n")
+    };
+    let first = [
+        ("src/lib.rs", format!("pub fn mask() {{}}\n\n{}", test_module("masks", &keys[0]))),
+        ("src/old_masks.rs", test_module("masks", &keys[1])),
+        ("src/vault.rs", format!("pub fn key() -> &'static str {{\n    let key = \"{}\";\n    key\n}}\n", keys[2])),
+        ("src/dup.rs", test_module("reads", &keys[3])),
+        ("deploy/fixtures/creds.cfg", format!("[aws]\nkey = {}\n", keys[4])),
+        ("src/moved.rs", format!("pub fn key() -> &'static str {{\n    let key = \"{}\";\n    key\n}}\n", keys[5])),
+    ];
+    for (path, body) in &first {
+        fs::create_dir_all(w.root.join(path).parent().unwrap()).unwrap();
+        fs::write(w.root.join(path), body).unwrap();
+    }
+    git(&w.root, &["add", "."]);
+    git(&w.root, &["commit", "-q", "-m", "keys"]);
+    let added = rev(&w.root, "HEAD");
+    let moved = format!("pub fn mask() {{}}\n\n/// Masks nothing yet.\npub fn unmask() {{}}\n\n{}", test_module("masks", &keys[0]));
+    fs::write(w.root.join("src/lib.rs"), moved).unwrap();
+    let dup = format!("pub fn load() {{\n        let key = \"{}\";\n}}\n\n{}", keys[3], test_module("reads", &keys[3]));
+    fs::write(w.root.join("src/dup.rs"), dup).unwrap();
+    fs::write(w.root.join("src/moved.rs"), format!("pub fn key() -> &'static str {{\n    \"\"\n}}\n\n{}", test_module("reads", &keys[5]))).unwrap();
+    for gone in ["src/old_masks.rs", "src/vault.rs", "deploy/fixtures/creds.cfg"] {
+        fs::remove_file(w.root.join(gone)).unwrap();
+    }
+    git(&w.root, &["add", "-A"]);
+    git(&w.root, &["commit", "-q", "-m", "move the keys"]);
+    assert!(w.logos(&["index"]).status.success());
+    w.rules(Some("[security]\nratchet_min_severity = \"medium\"\n"));
+    let (code, saved) = w.verdict(&["gate", "--save"]);
+    assert_eq!(code, Some(0), "the baseline holds the semgrep findings alone: {saved}");
+
+    // Each key read one column late, as Gitleaks 8.18.4 reads a line that is
+    // not its hunk's first: `(line, start, end)` at the first commit.
+    let places = [("src/lib.rs", 7, 21, 40), ("src/old_masks.rs", 5, 21, 40), ("src/vault.rs", 2, 17, 36), ("src/dup.rs", 5, 21, 40), ("deploy/fixtures/creds.cfg", 2, 8, 27), ("src/moved.rs", 2, 17, 36)];
+    let results: Vec<_> = places.iter().map(|&(path, line, start, end)| (Some(added.as_str()), path, line, start, end)).collect();
+    w.ingest(&gitleaks_report_in(w.root.parent().unwrap(), "history.sarif", &results));
+
+    let listed = w.json(&["security", "findings", "--scanner", "gitleaks", "--scope", "all"]);
+    let scope_of = |path: &str| -> (String, String, Value) {
+        let f = listed["findings"].as_array().unwrap().iter().find(|f| f["report_path"] == path).unwrap_or_else(|| panic!("{path}: {listed}"));
+        (f["binding"].as_str().unwrap().to_string(), f["code_scope"].as_str().unwrap().to_string(), f["code_scope_reason"].clone())
+    };
+    let historical = |scope: &str, reason: Value| ("historical".to_string(), scope.to_string(), reason);
+    assert_eq!(scope_of("src/lib.rs"), historical("test", Value::from("test_symbol")), "moved down in its test module");
+    assert_eq!(scope_of("src/old_masks.rs"), historical("test", Value::from("test_symbol")), "at its anchor commit");
+    assert_eq!(scope_of("src/vault.rs"), historical("production", Value::Null), "deleted production code still counts");
+    assert_eq!(scope_of("src/dup.rs"), historical("test", Value::from("test_symbol")), "two scopes today: its commit decides");
+    assert_eq!(scope_of("deploy/fixtures/creds.cfg"), historical("test", Value::from("test_path")), "no parse: the path rule");
+    assert_eq!(scope_of("src/moved.rs"), historical("test", Value::from("test_symbol")), "today's file decides before its commit's");
+
+    let default = w.json(&["security", "findings", "--scanner", "gitleaks"]);
+    let kept: Vec<&str> = default["findings"].as_array().unwrap().iter().filter_map(|f| f["report_path"].as_str()).collect();
+    assert_eq!((kept, default["hidden_by_scope"].as_u64()), (vec!["src/vault.rs"], Some(5)), "{default}");
+    let status = w.json(&["security", "status"]);
+    let gitleaks = row(&status, "gitleaks");
+    assert_eq!((gitleaks["findings"].as_u64(), gitleaks["test"].as_u64()), (Some(1), Some(5)), "{gitleaks}");
+
+    // The gate never reads the scope: every one is new to the ratchet.
+    let (code, check) = w.verdict(&["check"]);
+    let ratchet = check["violations"].as_array().unwrap().iter().filter(|v| v["rule"] == "security:ratchet").count();
+    assert_eq!((code, ratchet), (Some(1), 6), "{check}");
+
+    // No key in any output, at the most verbose log level, nor in the store.
+    let mut outputs = Vec::new();
+    for args in [&["--json", "security", "findings", "--scope", "all"][..], &["security", "findings", "--scope", "all"], &["--json", "security", "status"], &["--json", "check"]] {
+        let out = w.logos_logged(&w.root, args, None, Some("trace"));
+        outputs.push((format!("{args:?}"), [out.stdout, out.stderr].concat()));
+    }
+    outputs.extend(files_under(&w.root.join(".logos")).into_iter().map(|(path, bytes)| (path.display().to_string(), bytes)));
+    let stores = ["history.db", "logos.db"].map(|db| outputs.iter().any(|(place, _)| place.ends_with(db)));
+    assert_eq!(stores, [true, true], "both stores are read");
+    for (place, bytes) in &outputs {
+        for key in &keys {
+            assert!(!bytes.windows(key.len()).any(|w| w == key.as_bytes()), "{place} holds a fixture key");
+        }
+    }
+}
+
 /// `logos --json <args>` on the project at `root`: the exit code and stdout.
 fn verdict_in(w: &World, root: &Path, args: &[&str]) -> (Option<i32>, Value) {
     let mut all = vec!["--json"];
@@ -1846,8 +1979,9 @@ fn lists_flag(help: &str, name: &str) -> bool {
 }
 
 /// Flags the page names that belong to a scanner, not to Logos: Dependency-Check's
-/// two that hand it an NVD API key (S-794) among them.
-const SCANNER_FLAGS: [&str; 4] = ["metrics", "no-git", "nvdApiKey", "propertyfile"];
+/// two that hand it an NVD API key (S-794) among them, and Bandit's `--skip`, the
+/// checks its template leaves out (S-844).
+const SCANNER_FLAGS: [&str; 5] = ["metrics", "no-git", "nvdApiKey", "propertyfile", "skip"];
 
 /// Every bare `--flag` span in `markdown` that no `logos security` command lists
 /// and no scanner owns, and how many were checked.

@@ -46,7 +46,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -514,7 +514,7 @@ def top(): Unit = discard(1)
             root_a.join(rel)
         })
         .collect();
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -754,7 +754,7 @@ fn an_unbound_call_on_a_companion_pair_states_its_reason() {
     ]);
     let engine = index(tmp.path());
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "scala")

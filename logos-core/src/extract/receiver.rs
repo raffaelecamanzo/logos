@@ -19,13 +19,13 @@
 //!
 //! | marker | receiver | `T` |
 //! |---|---|---|
-//! | `name` | `x.send()` | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, in the callable around it, or across a `declared` marker's `.scope`); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
+//! | `name` | `x.send()` (Scala's; Java's until S-825, whose plain names 1b types) | [`DeclaredTypes::get`]: the one type the file declares `x` with, where `x` is declared in scope at the call (a field of the enclosing class, or in the callable around it); a name the file never declares as a variable is a static type name when its single-type import or its own declaration names that type |
 //! | `field` | `this.x.send()` | [`DeclaredTypes::field`] (S-398), where the enclosing class declares the field `x` itself — and, in a path-import language, no `unproven` marker names `x` (S-537: a field declared with a qualified type) |
 //! | `this` | `this.send()` | the enclosing class |
 //! | `super` | `super.send()` | the enclosing class's `extends`, as S-466's row records it ([`declared_superclass`]) — in a package-model language only; every other language's `super` call keeps its shape and binds through the proven hierarchy (S-522) |
 //! | `implicit` | `send()`, on a `@ref.call` row | the enclosing class, when it declares `send` itself, or when nothing else in scope — an outer class, a static import — could supply `send` |
 //!
-//! Everything else keeps its bare row: a chained call; a name the file also
+//! Everything else keeps its bare row: a chained call; under `name`, a name the file also
 //! declares where [`DeclaredTypes`] cannot read its type (an untyped lambda
 //! parameter, a for-each, catch, pattern or varargs variable, one declared with
 //! a qualified type the simple name would lose — the `unproven` marker); a
@@ -38,12 +38,16 @@
 //! its scope — the file's single-type imports, then the same package — is the
 //! binder's package rung (S-465), the one FQN derivation there is.
 //!
-//! `name`, `field`, `this`, `refused` and `unproven` are Java's vocabulary: they
-//! prove types through [`DeclaredTypes`], whose declaration reading is the
-//! grammar's field names. C# speaks it too (S-558, [FR-RS-30]), with `name`,
-//! `field` and `unproven`, and so does Scala (S-576, [FR-RS-37]), whose
-//! `val`/`var` names are `declared` (a `pattern:`, which the walk never reads
-//! as a name); TypeScript, Python and PHP speak `field`
+//! `name`, `field`, `this`, `refused` and `unproven` are the S-467 vocabulary:
+//! they prove types through [`DeclaredTypes`], whose declaration reading is
+//! the grammar's field names. Java speaks `field`, `this`, `super`, `implicit`
+//! and `refused` — its plain names are typed by the 1b markers since S-825, so
+//! none of the `name` refusals above is Java's any more. C# speaks `field` and `unproven` (S-558,
+//! [FR-RS-30]: an accessor's implicit `value`) — its plain names are typed by
+//! the 1b markers (S-823) — and Scala speaks `field` (S-576, [FR-RS-37]),
+//! whose `val`/`var` names are `declared` (a `pattern:`, which the walk never
+//! reads as a name) — its plain names are typed by the 1b markers (S-824);
+//! TypeScript, Python and PHP speak `field`
 //! (S-537, [FR-RS-21]; S-546, [FR-RS-24]: `self.x`; S-552, [FR-RS-27]);
 //! any other grammar uses the shape markers below until a typing story of its
 //! own opts it in. A language opts in through its query alone — the mechanism is
@@ -51,8 +55,7 @@
 //!
 //! | marker | what it states |
 //! |---|---|
-//! | `declared` + `.type` | a declaration whose type the companion node names, read in place of the field walk's reading of the name: one the walk misreads (C#'s `var x = new T()`, `T? x`) or never sees (C#'s `foreach (T x in xs)`). The companion is the language's type-name normalisation: the node whose text the simple-name rule reads ([`Declarations`]) |
-//! | `declared` + `.scope` | the name is in scope in the type the companion declares, beyond the callable it sits in — a C# primary-constructor parameter, which its type declares no field of — wherever that type is the call's own (never in a nested type) and records no supertype (an inherited member of the name would hide it) |
+//! | `declared` + `.type` | a declaration whose type the companion node names, read in place of the field walk's reading of the name: one the walk misreads (C#'s `T? x` field, which `this.x` reads). The companion is the language's type-name normalisation: the node whose text the simple-name rule reads ([`Declarations`]) |
 //! | `declared` + `.field` | the declaration is a field of its class besides, wherever it sits ([`Declarations::field`]): a TypeScript constructor parameter property (`constructor(private svc: Svc)`, S-537), which types `this.svc` as an annotated field does. Any other stated declaration is a field by its position alone, outside every callable |
 //! | `declared` + `.untyped` | the declaration names no type a call is typed by (S-537: an unannotated, union or qualified TypeScript field), which refuses its name — unless a `.type` statement names the same node |
 //!
@@ -95,8 +98,17 @@
 //! local), `.class` a class body that no method of it sees (a Python
 //! class-body name, which outranks any other scope of the name), `.member`
 //! a class whose own members read the name with no receiver written (a Kotlin
-//! property, S-563), and none means the whole callable, which can only refuse
-//! more.
+//! property, S-563), `.beneath` such a class with the name beneath every other
+//! binding of it, and nowhere where the class records a supertype (a C#
+//! primary-constructor parameter, S-823), `.enclosing` a class whose members
+//! and nested classes read the name, hidden by a binding declared inside the
+//! class and hiding one declared outside it (a Java field, S-825), `.through`
+//! from where the name is written to the end of its node (a Java local,
+//! S-825), and none means the whole callable,
+//! which can only refuse more. A name a `flows` marker names, which no
+//! `binding` states, is in scope from where it is written to the end of the
+//! innermost `flow_scope` around it, and keeps its proof (a C# pattern or
+//! `out` variable, S-823: [`bind_flows`]).
 //! A shadowed, re-bound or two-typed name — two bindings in scope — proves
 //! nothing, and neither does a generic parameter, `impl Trait`, a slice, tuple,
 //! pointer or `fn` type, an associated type, a chain, or `Self` outside an impl.
@@ -141,8 +153,9 @@
 //! there ([`Receivers::companion_paths`]), so the written `T::m` is the
 //! companion's: a proven Kotlin row keeps its `other` shape, and the binder
 //! binds it among `T`'s own members. So does a proven Scala row (S-576), typed
-//! by Java's `name` and `field` markers: a Scala class lends its name to its
-//! companion `object` (S-573), whose methods the written `T::m` reaches.
+//! by the markers below (S-824) and Java's `field` marker: a Scala class lends
+//! its name to its companion `object` (S-573), whose methods the written
+//! `T::m` reaches.
 //!
 //! C++ speaks them too (S-581, [FR-RS-39]), with one more receiver marker:
 //! `pointee`, the `p` of `p->m()`, proven only by a `.pointer` proof — `T*`,
@@ -162,6 +175,61 @@
 //! ([`Receivers::bind_hiders`]). A proven C++ row is the
 //! written `T::m` a qualified call records, with no shape, bound through the
 //! includes up `T`'s proven bases (`binder::includes`).
+//!
+//! C# speaks them too (S-823, [CR-256], [FR-RS-30]), as C++ does: a
+//! parameter's binding is scoped to its callable, a `for`, `foreach`, `using`,
+//! `fixed`, `catch`, `case` or switch-arm variable's to its construct, a
+//! local's to the rest of its block (`.after`) or, in a `case` section, to the
+//! whole switch body, a pattern or `out` variable from where it is written to
+//! the end of its block — or of the loop, resource, `catch`, query, switch arm
+//! or embedded statement that scopes it to itself (`flows`), a field's, event's or property's to its type's own members
+//! (`.member`), and a primary-constructor parameter's to them beneath every
+//! other binding of its name (`.beneath`) — and every name a declaration
+//! declares is a `hides` marker, bound with no proof across the innermost
+//! callable, property, field declaration or top-level statement when no
+//! `binding` states it; a top-level statement's local is bound by none, as
+//! no member reads it. Its proofs are `.type` (`T`, `T<A>`, `T?`) and `.literal` (`var
+//! x = new T()`); a qualified or `dynamic` type proves nothing. A proven C#
+//! row is the written `T::m` the namespace rungs bind up `T`'s proven
+//! supertypes, with no shape: the row S-558's `name` marker wrote.
+//!
+//! Scala speaks them too (S-824, [CR-256], [FR-RS-37]): a parameter's binding
+//! is scoped to its `def`, extension or `given`, a lambda, `case`, `catch` or
+//! `for` name's to its construct — every name its pattern spells — a local
+//! `val`, `var` or `given`'s to the rest of its block or `case` body
+//! (`.after`), a local `def` or `object`'s to its block, a self-type alias's to
+//! the body it names, a class parameter's and a member `val`, `var` or
+//! `given`'s to its class, object or trait's own members, and an enum's class
+//! parameters and `val`/`var` to the enum's (`.member`), and a `new T { … }`
+//! or `given … with` body's member's — or a local class's member `def` or
+//! `object` — to that body. Its proofs
+//! are `.type` (`T`, `T[A]`) and `.literal` (`new T`, `new T(…)` with no body);
+//! a pattern or generator variable, a `given` or a type that is not one simple
+//! name proves nothing, in its own scope only. A proven Scala row keeps the
+//! companion-path form above, and only an applied call is typed.
+//!
+//! Java speaks them too (S-825, [CR-256], [FR-RS-10]): a parameter's binding
+//! is scoped to its method, constructor, lambda or record, an enhanced `for`
+//! or `catch` variable's to its statement, a local's, a `for` variable's and a
+//! resource's from where it is written to the end of its block, `switch` block,
+//! statement or `try` block (`.through`), a pattern variable from where it is written to
+//! the end of its block (`flows`), an anonymous class or enum constant body's field
+//! to that body, an
+//! interface constant to its whole interface body, an enum constant to its
+//! enum's body, and a named
+//! class's field to its members and its nested classes' (`.enclosing`,
+//! [`Scope::Enclosing`]): the nearest class declaring a field of the name,
+//! reached outward through classes that record no supertype, hidden by a
+//! parameter or local declared inside that class and hiding one declared
+//! outside it ([`visible`]) — and every name a declaration declares is
+//! a `hides` marker, across the innermost callable or initializer. Its proof
+//! is `.type` (`T`, `T<A>`) on a field, local, parameter or resource — every
+//! other binding proves nothing — read as its `name` marker read a declaration
+//! ([`Receivers::package_model`]): one identifier, `$` included, no type
+//! variable at the call. A name no binding anywhere in the file declares is a
+//! static type name where its single-type import or own declaration names
+//! it. A proven Java row is the written `T::m` the package rungs bind, with no
+//! shape: the row S-467's `name` marker wrote.
 //!
 //! **1c. A receiver inside a macro (S-610).** A macro's token tree is never
 //! parsed as expressions, so the query marks no receiver there. The token-tree
@@ -207,6 +275,7 @@
 //! it `other`; either beats `other`, which beats `implicit`.
 //!
 //! [CR-150]: ../../../docs/requests/CR-150-java-receiver-typing-for-method-calls.md
+//! [FR-RS-10]: ../../../docs/specs/requirements/FR-RS-10.md
 //! [FR-RS-21]: ../../../docs/specs/requirements/FR-RS-21.md
 //! [FR-RS-24]: ../../../docs/specs/requirements/FR-RS-24.md
 //! [FR-RS-30]: ../../../docs/specs/requirements/FR-RS-30.md
@@ -215,6 +284,7 @@
 //! [FR-RS-39]: ../../../docs/specs/requirements/FR-RS-39.md
 //! [FR-RS-27]: ../../../docs/specs/requirements/FR-RS-27.md
 //! [CR-188]: ../../../docs/requests/CR-188-rust-receiver-typing.md
+//! [CR-256]: ../../../docs/requests/CR-256-scope-precise-receiver-typing-csharp-scala-java.md
 //! [FR-RS-42]: ../../../docs/specs/requirements/FR-RS-42.md
 //! [CR-169]: ../../../docs/requests/CR-169-a-call-on-another-object-never-binds-to-the-callers-own-method.md
 //! [FR-EX-13]: ../../../docs/specs/requirements/FR-EX-13.md
@@ -229,6 +299,7 @@ use tree_sitter::Node;
 
 use super::config::accessor::{outermost_callable, Declarations, DeclaredTypes};
 use super::local_shadow::{LocalShadows, Shadow};
+use super::receiver_lambda::ReceiverLambdaCalls;
 use super::refs::MacroReceiver;
 use super::{
     declared_superclass, type_parameters_in_scope, Decl, RefFact, SELF_RECEIVER_METHOD_CAPTURE,
@@ -271,6 +342,10 @@ struct Marks {
     typed: Option<Typed>,
     /// `self` (or Java's `this`): the caller's own instance.
     own: bool,
+    /// An `own` marker's receiver text when it is an identifier a callable can
+    /// bind (Python's `self`, `cls`): the name a nested callable's own
+    /// parameter of it would rebind (S-838).
+    own_text: Option<String>,
     /// `super`: the caller's base.
     base: bool,
     /// `other`, `name` or `field`: any other receiver.
@@ -370,6 +445,31 @@ enum Scope<'tree> {
     /// never in a nested or anonymous class, a companion, or a body a
     /// `rebinds` marker names, whose own receiver may declare the name.
     Member(Node<'tree>),
+    /// In the members of this class-like declaration as [`Scope::Member`]
+    /// is, beneath every other binding of the name (the companion
+    /// `.beneath`): a C# primary-constructor parameter (S-823), which a
+    /// member, a parameter or a local of its name hides. Any member the class
+    /// inherits may hide it too, so a class that records a supertype — a
+    /// `partial` part records one naming itself (S-557) — never has it in
+    /// scope: [`Receivers::finish`] drops its binding there
+    /// ([`drop_inherited_beneath`]).
+    Beneath(Node<'tree>),
+    /// In the members of this class-like declaration and of every class
+    /// nested in it reached outward only through classes that record no
+    /// supertype (the companion `.enclosing`): a Java field (S-825). A
+    /// parameter or local declared inside the class hides it, it hides a
+    /// binding declared outside the class (a local of the method a local
+    /// class sits in), and a nearer class's field of its name shadows it
+    /// ([`visible`]). A nested class that records a supertype may inherit a
+    /// same-named field this file cannot see, so the walk stops there
+    /// ([`field_owner`]).
+    Enclosing(Node<'tree>),
+    /// From where the name is written to the end of this node (the companion
+    /// `.through`): a Java local, in scope in its own and every later
+    /// declarator's initializer and to the end of its block, its `switch`
+    /// block or its `for` statement, never before it, and a resource to the
+    /// end of its `try` block, never in its `catch` or `finally` (S-825).
+    Through(Node<'tree>),
 }
 
 /// Where one name a pattern binds is in scope (S-587), resolved once when
@@ -377,7 +477,8 @@ enum Scope<'tree> {
 #[derive(Clone, Copy)]
 enum Binding {
     /// The calls whose bytes lie in `start..=end`: [`Scope::Whole`]'s node,
-    /// or [`Scope::After`]'s parent from where its node ends.
+    /// [`Scope::After`]'s parent from where its node ends, or
+    /// [`Scope::Through`]'s node from where the name is written.
     Bytes { start: usize, end: usize },
     /// The calls in the outermost callable with this node id (`None`: at a
     /// field position).
@@ -388,6 +489,14 @@ enum Binding {
     /// The calls whose member owner is the class-like declaration with this
     /// node id: [`Scope::Member`]'s.
     Member(usize),
+    /// [`Scope::Beneath`]'s: as [`Binding::Member`], and only where no other
+    /// binding of the name is in scope. Dropped in a class that records a
+    /// supertype ([`drop_inherited_beneath`]).
+    Beneath(usize),
+    /// [`Scope::Enclosing`]'s: the calls whose field owner ([`field_owner`])
+    /// is the class-like declaration with node id `class`, which spans
+    /// `start..=end` ([`visible`]).
+    Enclosing { class: usize, start: usize, end: usize },
 }
 
 impl Binding {
@@ -406,13 +515,25 @@ impl Binding {
             },
             Scope::Class(node) => Binding::ClassBody { start: node.start_byte(), end: node.end_byte() },
             Scope::Member(node) => Binding::Member(node.id()),
+            Scope::Beneath(node) => Binding::Beneath(node.id()),
+            Scope::Enclosing(node) => {
+                Binding::Enclosing { class: node.id(), start: node.start_byte(), end: node.end_byte() }
+            }
+            Scope::Through(node) => Binding::Bytes { start: leaf.start_byte(), end: node.end_byte() },
         }
     }
 
     /// Whether this binding is in scope at `invocation`, the outermost
     /// callable around which has node id `callable`; `owner` answers whose
-    /// members it reads with no receiver written ([`Receivers::member_owner`]).
-    fn in_scope(self, invocation: Node<'_>, callable: Option<usize>, owner: impl FnOnce() -> Option<usize>) -> bool {
+    /// members it reads with no receiver written ([`Receivers::member_owner`]),
+    /// `fields` whose field of the name it reads ([`field_owner`]).
+    fn in_scope(
+        self,
+        invocation: Node<'_>,
+        callable: Option<usize>,
+        owner: impl FnOnce() -> Option<usize>,
+        fields: impl FnOnce() -> Option<usize>,
+    ) -> bool {
         let within = |start: usize, end: usize| start <= invocation.start_byte() && invocation.end_byte() <= end;
         match self {
             Binding::Bytes { start, end } => within(start, end),
@@ -420,9 +541,51 @@ impl Binding {
             Binding::ClassBody { start, end } => {
                 within(start, end) && innermost_callable(invocation).is_none_or(|c| c.start_byte() < start)
             }
-            Binding::Member(class) => owner() == Some(class),
+            Binding::Member(class) | Binding::Beneath(class) => owner() == Some(class),
+            Binding::Enclosing { class, .. } => fields() == Some(class),
         }
     }
+
+    /// Whether another binding of the name in scope may hide this one: a
+    /// [`Scope::Beneath`] or [`Scope::Enclosing`] binding ([`visible`]).
+    fn beneath(self) -> bool {
+        matches!(self, Binding::Beneath(_) | Binding::Enclosing { .. })
+    }
+
+    /// Whether this binding's scope starts inside `start..=end`: where a
+    /// [`Binding::Bytes`] or [`Binding::ClassBody`] one is declared. Any
+    /// other form is taken to start inside, which can only hide more.
+    fn starts_within(self, start: usize, end: usize) -> bool {
+        match self {
+            Binding::Bytes { start: at, .. } | Binding::ClassBody { start: at, .. } => start <= at && at <= end,
+            _ => true,
+        }
+    }
+}
+
+/// The bindings of one name in scope at a call that shadowing leaves
+/// visible: a [`Binding::Beneath`] one is hidden by any other; a
+/// [`Binding::Enclosing`] field is hidden by a binding declared inside its
+/// class — a member's parameter or local — and hides every binding declared
+/// outside that class, as Java's nearest declaration does (S-825): a local
+/// class's field, not the local of the method around the class.
+fn visible<'b>(in_scope: Vec<(&'b usize, &'b Binding)>) -> Vec<(&'b usize, &'b Binding)> {
+    let field = in_scope.iter().find_map(|(_, b)| match b {
+        Binding::Enclosing { start, end, .. } => Some((*start, *end)),
+        _ => None,
+    });
+    let others = || in_scope.iter().filter(|(_, b)| !b.beneath());
+    let hides_beneath = others().next().is_some();
+    let hides_field = field.is_some_and(|(start, end)| others().any(|(_, b)| b.starts_within(start, end)));
+    in_scope
+        .iter()
+        .copied()
+        .filter(|(_, b)| match b {
+            Binding::Beneath(_) => !hides_beneath,
+            Binding::Enclosing { .. } => !hides_field,
+            _ => field.is_none_or(|(start, end)| b.starts_within(start, end)),
+        })
+        .collect()
 }
 
 /// The innermost node at or around `node` that declares a callable — the
@@ -504,6 +667,9 @@ pub(super) struct Receivers<'tree> {
     /// whose own receiver may declare any name — Kotlin's `x.apply { }` — so
     /// no [`Scope::Member`] binding of an enclosing class is in scope inside.
     rebinding: HashSet<usize>,
+    /// A `rebinds` body's id → the value its receiver is, where the call
+    /// names it (S-834, the companion `.receiver`): the `x` of `with(x) { }`.
+    lambda_receivers: HashMap<usize, Node<'tree>>,
     /// declaration index → the name it binds its own instance to (`self_name`);
     /// `None` when two of its markers disagree.
     self_names: HashMap<usize, Option<String>>,
@@ -513,14 +679,6 @@ pub(super) struct Receivers<'tree> {
     macro_sites: Vec<MacroSite<'tree>>,
     /// What an unqualified call inside a class body means here.
     implicit_receiver: ImplicitReceiver,
-    /// Whether a `super` call is typed by its class's one `Extends` row
-    /// ([`declared_superclass`]): only in a package-model language (Java,
-    /// S-467), whose package rungs walk the typed row into that type's members.
-    /// Every other language's `super` call keeps its shape and binds through
-    /// the proven hierarchy (S-522): a path-model module walk never reaches a
-    /// class's members, and a C# or Kotlin class's one supertype may be an
-    /// interface.
-    types_super: bool,
     /// Whether a typed row is a proven row: it keeps its `other` shape, its
     /// type qualified through the file's named imports ([`FileDecls::imported`]),
     /// and is bound by the binder's proven-receiver rung; a `this.x` reads the
@@ -566,10 +724,6 @@ pub(super) struct Receivers<'tree> {
     /// `declared` marker's `.type` companion): read in place of the field
     /// walk's reading of the same name.
     declarations: Declarations<'tree>,
-    /// name → the byte ranges of the type declarations a `declared` marker's
-    /// `.scope` companion puts it in scope in (S-558): a C# primary-constructor
-    /// parameter, which its type declares no field of.
-    scoped: HashMap<String, Vec<(usize, usize)>>,
     /// Each operand-named access row (S-529), with its caller, its operand's
     /// node and that node's text — appended by [`finish`](Self::finish) when
     /// the operand is the caller's `self_name` and no local binding rebinds it
@@ -582,6 +736,34 @@ pub(super) struct Receivers<'tree> {
     /// The byte ranges the `hiding_scope` marker names: a C++ function or
     /// lambda, across which an unstated declaration hides its name (S-581).
     hiding_scopes: Vec<(usize, usize)>,
+    /// Every name a `flows` marker names: a declaration in scope from where
+    /// it is written to the end of the innermost `flow_scope` around it,
+    /// which [`bind_flows`] binds where no `binding` states it, keeping its
+    /// proof (S-823: a C# pattern or `out` variable).
+    flows: Vec<Node<'tree>>,
+    /// The byte ranges the `flow_scope` marker names: a block, a callable, a
+    /// statement list a `flows` name stays in scope to the end of (S-823).
+    flow_scopes: Vec<(usize, usize)>,
+    /// Whether the language reads its receivers as Java's package model does
+    /// (the plugin's `module_model` is `package`), whose package rungs walk a
+    /// typed row into that type's members (S-467):
+    ///
+    /// - a `super` call is typed by its class's one `Extends` row
+    ///   ([`declared_superclass`]). Every other language's `super` call keeps
+    ///   its shape and binds through the proven hierarchy (S-522): a
+    ///   path-model module walk never reaches a class's members, and a C# or
+    ///   Kotlin class's one supertype may be an interface;
+    /// - a `variable` receiver's declared type is one identifier, `$`
+    ///   included, typed only where it is no type variable at the call —
+    ///   what its `name` marker read — and a name no binding anywhere in the
+    ///   file declares is a static type name, when its single-type import or
+    ///   its own declaration names it (S-825).
+    package_model: bool,
+    /// The node ids of the class-like declarations that may inherit a member
+    /// this file cannot see ([`records_supertype`]), filled by
+    /// [`finish`](Self::finish) for a file with a [`Scope::Beneath`] or
+    /// [`Scope::Enclosing`] binding.
+    inheriting: HashSet<usize>,
 }
 
 /// What a file's declarations say, for the receiver passes.
@@ -621,11 +803,11 @@ impl<'tree> Receivers<'tree> {
                 type_imports: HashSet::new(),
                 anonymous: HashSet::new(),
                 rebinding: HashSet::new(),
+                lambda_receivers: HashMap::new(),
                 self_names: HashMap::new(),
                 sites: Vec::new(),
                 macro_sites: Vec::new(),
                 implicit_receiver: semantics.implicit_receiver,
-                types_super: semantics.module_model == ModuleModelKind::Package,
                 proven_rows,
                 impl_blocks: semantics.impl_block_lookup,
                 companion_paths: semantics.companion_name.is_some() || semantics.companion_objects,
@@ -635,10 +817,13 @@ impl<'tree> Receivers<'tree> {
                 impl_owners: HashMap::new(),
                 members: HashMap::new(),
                 declarations: if proven_rows { Declarations::stated_only() } else { Declarations::default() },
-                scoped: HashMap::new(),
                 accesses: Vec::new(),
                 hiders: Vec::new(),
                 hiding_scopes: Vec::new(),
+                flows: Vec::new(),
+                flow_scopes: Vec::new(),
+                package_model: semantics.module_model == ModuleModelKind::Package,
+                inheriting: HashSet::new(),
             })
     }
 
@@ -667,6 +852,9 @@ impl<'tree> Receivers<'tree> {
                     .or_else(|| companion("ref.receiver.binding.local").map(Scope::Local))
                     .or_else(|| companion("ref.receiver.binding.class").map(Scope::Class))
                     .or_else(|| companion("ref.receiver.binding.member").map(Scope::Member))
+                    .or_else(|| companion("ref.receiver.binding.beneath").map(Scope::Beneath))
+                    .or_else(|| companion("ref.receiver.binding.enclosing").map(Scope::Enclosing))
+                    .or_else(|| companion("ref.receiver.binding.through").map(Scope::Through))
                     .unwrap_or(Scope::Callable);
                 for leaf in bound_names(node) {
                     if let Some(name) = read(leaf).filter(|n| is_identifier(n)) {
@@ -709,9 +897,9 @@ impl<'tree> Receivers<'tree> {
                 }
                 return;
             }
-            // A declaration the field walk misreads or never sees, one in scope
-            // beyond the callable it sits in (S-558), one declaring no type a
-            // call is typed by, or a field from a parameter list (S-537).
+            // A declaration the field walk misreads or never sees (S-558), one
+            // declaring no type a call is typed by, or a field from a parameter
+            // list (S-537).
             "ref.receiver.declared" => {
                 if let Some(declared) = companion("ref.receiver.declared.type") {
                     self.declarations.declare(node, declared);
@@ -721,9 +909,6 @@ impl<'tree> Receivers<'tree> {
                 }
                 if companion("ref.receiver.declared.field").is_some() {
                     self.declarations.field(node);
-                }
-                if let (Some(scope), Some(name)) = (companion("ref.receiver.declared.scope"), text()) {
-                    self.scoped.entry(name).or_default().push((scope.start_byte(), scope.end_byte()));
                 }
                 return;
             }
@@ -753,10 +938,22 @@ impl<'tree> Receivers<'tree> {
                 self.hiding_scopes.push((node.start_byte(), node.end_byte()));
                 return;
             }
-            "ref.receiver.rebinds" => {
-                self.rebinding.insert(node.id());
+            "ref.receiver.flows" => {
+                self.flows.push(node);
                 return;
             }
+            "ref.receiver.flow_scope" => {
+                self.flow_scopes.push((node.start_byte(), node.end_byte()));
+                return;
+            }
+            "ref.receiver.rebinds" => {
+                self.rebinding.insert(node.id());
+                if let Some(receiver) = companion("ref.receiver.rebinds.receiver") {
+                    self.lambda_receivers.insert(node.id(), receiver);
+                }
+                return;
+            }
+            "ref.receiver.rebinds.receiver" => return,
             "ref.receiver.self_name" => {
                 if let (Some(decl), Some(name)) = (declaration(), text()) {
                     self.self_names
@@ -816,7 +1013,10 @@ impl<'tree> Receivers<'tree> {
                 marks.typed = name.map(if through_pointer { Typed::Pointee } else { Typed::Variable });
             }
             "ref.receiver.self_field" => marks.typed = text().map(Typed::SelfField),
-            "ref.receiver.self" => marks.own = true,
+            "ref.receiver.self" => {
+                marks.own = true;
+                marks.own_text = text();
+            }
             "ref.receiver.other" => {
                 marks.other = true;
                 marks.other_text = text();
@@ -835,14 +1035,13 @@ impl<'tree> Receivers<'tree> {
     /// outside every hiding scope (a prototype's parameter, a namespace-scope
     /// variable) binds nothing.
     fn bind_hiders(&mut self, source: &[u8]) {
-        let stated: HashSet<usize> = self.bindings.values().flat_map(|leaves| leaves.keys().copied()).collect();
+        let stated = stated_leaves(&self.bindings);
         for leaf in std::mem::take(&mut self.hiders) {
             if stated.contains(&leaf.id()) {
                 continue;
             }
-            let around = |&&(start, end): &&(usize, usize)| start <= leaf.start_byte() && leaf.end_byte() <= end;
-            let innermost = self.hiding_scopes.iter().filter(around).min_by_key(|(start, end)| end - start);
-            let (Some(&(start, end)), Some(name)) = (innermost, leaf.utf8_text(source).ok().map(str::trim)) else {
+            let innermost = innermost_around(&self.hiding_scopes, leaf);
+            let (Some((start, end)), Some(name)) = (innermost, leaf.utf8_text(source).ok().map(str::trim)) else {
                 continue;
             };
             self.proofs.remove(&leaf.id());
@@ -945,8 +1144,10 @@ impl<'tree> Receivers<'tree> {
     /// then retype every site whose receiver the file proves and shape every
     /// Method-form row typing left bare, in place. Runs once, after every
     /// match: a `super` receiver reads the `Extends` rows this same pass
-    /// recorded, and a bare call the file's imports.
-    pub(super) fn finish(mut self, refs: &mut Vec<RefFact>, file: &FileDecls<'_, 'tree>) {
+    /// recorded, and a bare call the file's imports. Returns the bare calls
+    /// inside a lambda with a receiver (S-834, [`lambda_calls`]),
+    /// which are marked once the free-call pass has shaped them.
+    pub(super) fn finish(mut self, refs: &mut Vec<RefFact>, file: &FileDecls<'_, 'tree>) -> ReceiverLambdaCalls {
         // The deferred accesses on the caller's own receiver, appended: no
         // site's row moves. A receiver name the body rebinds where the access
         // is (S-594) — a `range` variable, a `:=`, a closure parameter — is
@@ -961,9 +1162,14 @@ impl<'tree> Receivers<'tree> {
                 .map(|(_, _, _, row)| row),
         );
         if self.sites.is_empty() && self.macro_sites.is_empty() {
-            return;
+            return ReceiverLambdaCalls::default();
         }
+        bind_flows(&mut self.bindings, std::mem::take(&mut self.flows), &self.flow_scopes, file.source);
         self.bind_hiders(file.source);
+        if self.bindings.values().flat_map(BTreeMap::values).any(|b| b.beneath()) {
+            self.inheriting = inheriting_classes(refs, file);
+            drop_inherited_beneath(&mut self.bindings, &self.inheriting);
+        }
         // A row typing retyped is Path form now: only bare Method rows remain.
         self.retype(refs, file);
         for site in &self.sites {
@@ -988,6 +1194,7 @@ impl<'tree> Receivers<'tree> {
                 Recorded::Nothing => {}
             }
         }
+        lambda_calls(&self, refs, file)
     }
 
     /// The shape a site's markers give its Method-form row.
@@ -1009,6 +1216,12 @@ impl<'tree> Receivers<'tree> {
                     }
                     _ => Recorded::Shape(ReceiverShape::Other),
                 };
+            }
+            // A textual `self` a callable nested in the method rebinds with its
+            // own parameter (`def each(self):`, `lambda self:`) is another
+            // value, as the `other` arm reads a rebound receiver (S-838).
+            (true, false) if rebound_by_nested_callable(marks, site, file) => {
+                return Recorded::Shape(ReceiverShape::Other);
             }
             (true, false) => return Recorded::Shape(ReceiverShape::SelfInstance),
             (false, true) => return Recorded::Shape(ReceiverShape::Super),
@@ -1078,11 +1291,7 @@ impl<'tree> Receivers<'tree> {
 
         // Every class that records a supertype: its fields may be shadowed by
         // an inherited one this file cannot see.
-        let supertyped: HashSet<&str> = refs
-            .iter()
-            .filter(|r| matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements))
-            .map(|r| r.source.as_str())
-            .collect();
+        let supertyped = supertyped(refs);
         let anonymous = &self.anonymous;
         // A callable's own declarations, keyed by the callable — the scope a
         // simple-name receiver must be declared in (see `declared_in_scope`).
@@ -1156,10 +1365,11 @@ impl<'tree> Receivers<'tree> {
                     .filter(|t| provable(t))
                     .map(str::to_string),
                 Typed::This => class().map(|i| file.decls[i].name.clone()),
-                // Typed in a package-model language only ([`types_super`]):
-                // everywhere else the shape pass's `super` binds through the
-                // proven hierarchy (S-522).
-                Typed::Super if !self.types_super => None,
+                // Typed in a package-model language only
+                // ([`package_model`](Self::package_model)): everywhere else the
+                // shape pass's `super` binds through the proven hierarchy
+                // (S-522).
+                Typed::Super if !self.package_model => None,
                 Typed::Super => class()
                     .and_then(|i| file.symbols[i].as_ref())
                     .and_then(|class| declared_superclass(refs, class))
@@ -1213,14 +1423,8 @@ impl<'tree> Receivers<'tree> {
     /// [`DeclaredTypes`] over that callable alone, so the rule for what a
     /// declaration is stays the one [`DeclaredTypes::build_with`] has — or as a
     /// field of the enclosing class, or of a class enclosing THAT one reached
-    /// only through classes that inherit nothing (`supertyped`: a class
-    /// recording an `extends` or `implements` row may inherit a same-named
-    /// field from another file, which would shadow the outer one), or in the
-    /// type a `declared` marker scopes it to (S-558: a C# primary-constructor
-    /// parameter) when that type is the call's own class and inherits nothing —
-    /// a member it inherits hides the parameter, and a nested type never sees
-    /// it. A `@Nested` test class reading its outer class's field is the shape
-    /// the outer-class walk admits.
+    /// only through classes that inherit nothing ([`field_owner`];
+    /// `supertyped`: a class recording an `extends` or `implements` row).
     fn declared_in_scope(
         &self,
         invocation: Node<'_>,
@@ -1229,27 +1433,9 @@ impl<'tree> Receivers<'tree> {
         supertyped: &HashSet<&str>,
         scopes: &mut HashMap<usize, DeclaredTypes>,
     ) -> bool {
-        let inherits = |i: usize| file.symbols[i].as_ref().is_none_or(|s| supertyped.contains(s.as_str()));
-        let mut class = enclosing_class(invocation, file, &self.anonymous).class();
-        // A `.scope` name is in scope in the type its companion declares, and
-        // only where that type is the call's own: a nested type never sees it.
-        // Any member the type inherits hides it, so a type that records a
-        // supertype proves nothing of it.
-        if let Some(i) = class.filter(|&i| !inherits(i)) {
-            let own = file.decls[i].node;
-            let declares = |&(start, end): &(usize, usize)| start == own.start_byte() && end == own.end_byte();
-            if self.scoped.get(name).is_some_and(|ranges| ranges.iter().any(declares)) {
-                return true;
-            }
-        }
-        while let Some(i) = class {
-            if declares_field(file.decls, i, name) {
-                return true;
-            }
-            if inherits(i) {
-                break;
-            }
-            class = outer_class(file.decls, i);
+        let inherits = |i: usize| records_supertype(file, i, supertyped);
+        if field_owner(invocation, name, file, &self.anonymous, inherits).is_some() {
+            return true;
         }
         outermost_callable(invocation).is_some_and(|callable| {
             scopes
@@ -1277,7 +1463,16 @@ impl<'tree> Receivers<'tree> {
             .and_then(|c| file.decls[c].self_type.as_deref());
         let module = caller.and_then(|c| module_of(file.decls, c));
         match receiver {
-            Typed::Variable(x) => self.variable_type(x, false, invocation, own_type, module, file),
+            // In a package-model language, a static type name (S-467, S-825):
+            // only where no binding anywhere in the file declares `x` — a
+            // variable obscures a type of its name, and one declared out of
+            // scope may be an inherited field's twin — and the file's
+            // single-type import of it or its own declaration names it.
+            Typed::Variable(x) => self.variable_type(x, false, invocation, own_type, module, file).or_else(|| {
+                let declared = self.bindings.contains_key(x) || self.unproven.contains(x);
+                let named = self.type_imports.contains(x) || declares_type(file.decls, x);
+                (self.package_model && !declared && named).then(|| Proven { head: x.clone(), peeled: Vec::new() })
+            }),
             Typed::Pointee(x) => self.variable_type(x, true, invocation, own_type, module, file),
             Typed::SelfField(x) => own_type.and_then(|own| self.member_type(own, x, module, file)),
             _ => None,
@@ -1341,7 +1536,21 @@ impl<'tree> Receivers<'tree> {
         let callable = outermost_callable(invocation).map(|n| n.id());
         let owner: OnceCell<Option<usize>> = OnceCell::new();
         let owner = || *owner.get_or_init(|| self.member_owner(invocation, file));
-        let mut in_scope = self.bindings.get(x)?.iter().filter(|(_, b)| b.in_scope(invocation, callable, owner));
+        // The class whose field `x` the call reads ([`Scope::Enclosing`]).
+        let fields: OnceCell<Option<usize>> = OnceCell::new();
+        let fields = || {
+            *fields.get_or_init(|| {
+                let inherits = |i: usize| self.inheriting.contains(&file.decls[i].node.id());
+                field_owner(invocation, x, file, &self.anonymous, inherits).map(|i| file.decls[i].node.id())
+            })
+        };
+        let in_scope: Vec<(&usize, &Binding)> = self
+            .bindings
+            .get(x)?
+            .iter()
+            .filter(|(_, b)| b.in_scope(invocation, callable, owner, fields))
+            .collect();
+        let mut in_scope = visible(in_scope).into_iter();
         let (Some((&leaf, _)), None) = (in_scope.next(), in_scope.next()) else {
             return None;
         };
@@ -1351,6 +1560,9 @@ impl<'tree> Receivers<'tree> {
             return None;
         }
         match proof {
+            Proof::Declared(declared) if self.package_model => {
+                package_type(text(declared)?, invocation, source).map(|head| Proven { head, peeled: Vec::new() })
+            }
             // Only Rust peels a wrapper, for its impl-block lookup: anywhere
             // else `Box<T>` is a `Box`, and a pointer names its type pointed to.
             Proof::Declared(declared) | Proof::Pointer(declared) if !self.impl_blocks => {
@@ -1420,6 +1632,171 @@ impl<'tree> Receivers<'tree> {
             return None;
         };
         declared_type(declared.utf8_text(file.source).ok()?.trim(), declared, Some(own), file.source)
+    }
+}
+
+/// Every bare call inside a body a `rebinds` marker names, whose own
+/// receiver Kotlin reads first (S-834), with the type the file proves for
+/// the innermost such body's receiver: the value its `.receiver` companion
+/// names, typed as a `variable` receiver is where the call names it. The
+/// walk out stops at the nearest class or `anonymous` body, whose own
+/// receiver lies past the lambda's. A call to a callable an enclosing
+/// callable declares names that local callable, which Kotlin reads before
+/// any implicit receiver, so it is left out.
+fn lambda_calls<'tree>(receivers: &Receivers<'tree>, refs: &[RefFact], file: &FileDecls<'_, 'tree>) -> ReceiverLambdaCalls {
+    let mut calls = ReceiverLambdaCalls::default();
+    if receivers.rebinding.is_empty() {
+        return calls;
+    }
+    for site in &receivers.sites {
+        if !receivers.marks.get(&site.invocation.id()).is_some_and(|m| m.implicit) {
+            continue;
+        }
+        let lambdas = rebinding_around(receivers, site.invocation, file);
+        let Some(innermost) = lambdas.first() else {
+            continue;
+        };
+        let class = enclosing_class(site.invocation, file, &receivers.anonymous).class();
+        if declared_locally(file, site.caller, class.unwrap_or(usize::MAX), &refs[site.row].target) {
+            continue;
+        }
+        let ty = receivers.lambda_receivers.get(innermost).filter(|_| receivers.proven_rung()).and_then(|&x| {
+            let name = x.utf8_text(file.source).ok()?.trim().to_string();
+            let module = site.caller.and_then(|c| module_of(file.decls, c));
+            let found = receivers.variable_type(&name, false, x, None, module, file)?;
+            let found = receivers.qualified(found, x, file);
+            found.peeled.is_empty().then_some(found.head)
+        });
+        calls.push(site.row, ty, lambdas.len() > 1);
+    }
+    calls
+}
+
+/// The ids of the bodies a `rebinds` marker names around `invocation`,
+/// innermost first, up to the nearest class-like declaration or
+/// `anonymous` body.
+fn rebinding_around(receivers: &Receivers<'_>, invocation: Node<'_>, file: &FileDecls<'_, '_>) -> Vec<usize> {
+    let mut around = Vec::new();
+    let mut at = invocation.parent();
+    while let Some(node) = at {
+        let class = file.id_to_idx.get(&node.id()).is_some_and(|&i| is_class_like(file.decls[i].kind));
+        if class || receivers.anonymous.contains(&node.id()) {
+            break;
+        }
+        if receivers.rebinding.contains(&node.id()) {
+            around.push(node.id());
+        }
+        at = node.parent();
+    }
+    around
+}
+
+/// Bind every name in `flows` — the `flows` marker's — that no `binding`
+/// states (S-823): from where it is written to the end of the innermost
+/// `flow_scope` around it, keeping the proof its declaration states. A C#
+/// pattern or `out` variable declared in an `if` condition or a statement is
+/// in scope after it, to the end of its block — `if (!(o is T p)) return;
+/// p.m();` — wherever in that statement it sits; a block that closed before the
+/// call ends it, and so does a loop, resource or embedded statement the query
+/// names a flow scope of its own. Runs before [`Receivers::bind_hiders`], which then finds it
+/// stated; a name outside every flow scope is left to it.
+fn bind_flows<'tree>(
+    bindings: &mut HashMap<String, BTreeMap<usize, Binding>>,
+    flows: Vec<Node<'tree>>,
+    flow_scopes: &[(usize, usize)],
+    source: &[u8],
+) {
+    let stated = stated_leaves(bindings);
+    for leaf in flows {
+        if stated.contains(&leaf.id()) {
+            continue;
+        }
+        let innermost = innermost_around(flow_scopes, leaf);
+        let (Some((_, end)), Some(name)) = (innermost, leaf.utf8_text(source).ok().map(str::trim)) else {
+            continue;
+        };
+        let binding = Binding::Bytes { start: leaf.start_byte(), end };
+        bindings.entry(name.to_string()).or_default().insert(leaf.id(), binding);
+    }
+}
+
+/// The pattern leaves some `binding` states already, which a `flows` or
+/// `hides` name of the same leaf leaves as they are.
+fn stated_leaves(bindings: &HashMap<String, BTreeMap<usize, Binding>>) -> HashSet<usize> {
+    bindings.values().flat_map(|leaves| leaves.keys().copied()).collect()
+}
+
+/// The smallest of `ranges` that holds `leaf`.
+fn innermost_around(ranges: &[(usize, usize)], leaf: Node<'_>) -> Option<(usize, usize)> {
+    ranges
+        .iter()
+        .copied()
+        .filter(|&(start, end)| start <= leaf.start_byte() && leaf.end_byte() <= end)
+        .min_by_key(|(start, end)| end - start)
+}
+
+/// The symbols of the declarations that record a supertype: the sources of
+/// the file's `Extends` and `Implements` rows — a `partial` part records one
+/// naming itself (S-557).
+fn supertyped(refs: &[RefFact]) -> HashSet<&str> {
+    refs.iter()
+        .filter(|r| matches!(r.kind, EdgeKind::Extends | EdgeKind::Implements))
+        .map(|r| r.source.as_str())
+        .collect()
+}
+
+/// Whether the declaration at `decl` may inherit a member this file cannot
+/// see: it records a supertype ([`supertyped`]), or builds no symbol to tell.
+fn records_supertype(file: &FileDecls<'_, '_>, decl: usize, supertyped: &HashSet<&str>) -> bool {
+    file.symbols[decl].as_ref().is_none_or(|s| supertyped.contains(s.as_str()))
+}
+
+/// The node ids of the file's class-like declarations that may inherit a
+/// member this file cannot see ([`records_supertype`]).
+fn inheriting_classes(refs: &[RefFact], file: &FileDecls<'_, '_>) -> HashSet<usize> {
+    let supertyped = supertyped(refs);
+    file.decls
+        .iter()
+        .enumerate()
+        .filter(|&(i, d)| is_class_like(d.kind) && records_supertype(file, i, &supertyped))
+        .map(|(_, d)| d.node.id())
+        .collect()
+}
+
+/// The declaration index of the class whose field `name` is in scope at
+/// `invocation`: the nearest class around the call that declares a field
+/// `name` itself, reached outward only through classes `inherits` does not
+/// name — one that may inherit a same-named field from another file, which
+/// would shadow the outer one. `None` inside an anonymous body, whose class
+/// has no declaration. A `@Nested` test class reading its outer class's field
+/// is the shape the outer-class walk admits (S-467); [`Scope::Enclosing`]
+/// reads it (S-825).
+fn field_owner(
+    invocation: Node<'_>,
+    name: &str,
+    file: &FileDecls<'_, '_>,
+    anonymous: &HashSet<usize>,
+    inherits: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let mut class = enclosing_class(invocation, file, anonymous).class();
+    while let Some(i) = class {
+        if declares_field(file.decls, i, name) {
+            return Some(i);
+        }
+        if inherits(i) {
+            return None;
+        }
+        class = outer_class(file.decls, i);
+    }
+    None
+}
+
+/// Drop every [`Scope::Beneath`] binding of a class in `inheriting`
+/// ([`inheriting_classes`]): any member the class inherits may hide the name,
+/// so it is in scope nowhere there.
+fn drop_inherited_beneath(bindings: &mut HashMap<String, BTreeMap<usize, Binding>>, inheriting: &HashSet<usize>) {
+    for leaves in bindings.values_mut() {
+        leaves.retain(|_, b| !matches!(b, Binding::Beneath(class) if inheriting.contains(class)));
     }
 }
 
@@ -1626,6 +2003,17 @@ fn provable_type(t: &str, invocation: Node<'_>, source: &[u8]) -> bool {
     identifier && t != "var" && !type_parameters_in_scope(invocation, source).contains(t)
 }
 
+/// The head a package-model declared type `text` proves at `invocation`
+/// (S-825): its text with its generic arguments dropped, when that is one
+/// [`provable_type`] identifier — the reading Java's `name` marker gave a
+/// declaration (S-467). The query states no proof for a qualified, array or
+/// annotated type.
+fn package_type(text: &str, invocation: Node<'_>, source: &[u8]) -> Option<String> {
+    let head = strip_generics(text);
+    let head = head.trim();
+    provable_type(head, invocation, source).then(|| head.to_string())
+}
+
 /// Where `invocation` sits: in the class-like declaration nearest it, in an
 /// anonymous class body (the `anonymous` marker) nearer than any — whose
 /// `this` has no name the file can write — or in no class at all.
@@ -1694,6 +2082,29 @@ fn declared_locally(file: &FileDecls<'_, '_>, caller: Option<usize>, class: usiz
         scope = file.decls[s].parent;
     }
     false
+}
+
+/// Whether the receiver a call writes as its own (`self.m()`) is rebound by a
+/// callable nested in the method it sits in — a nested `def` or a `lambda`
+/// that declares a parameter of that name (S-838). The method is the outermost
+/// declaration around the caller below its class: its own `self` binding has
+/// the method as scope, so only a binding scoped strictly inside the method is
+/// a nested callable's. A nested callable that declares no such parameter reads
+/// the method's `self` by closure and stays the method's instance.
+fn rebound_by_nested_callable(marks: &Marks, site: &Site<'_>, file: &FileDecls<'_, '_>) -> bool {
+    let (Some(name), Some(caller)) = (marks.own_text.as_deref(), site.caller) else {
+        return false;
+    };
+    // A call in a class body (`f = lambda self: self.go()`) has no method
+    // around it: the lambda is itself the method, and its `self` the instance.
+    if is_class_like(file.decls[caller].kind) {
+        return false;
+    }
+    let mut method = caller;
+    while let Some(outer) = file.decls[method].parent.filter(|&p| !is_class_like(file.decls[p].kind)) {
+        method = outer;
+    }
+    file.shadows.rebinds_inside(site.invocation, name, file.decls[method].node)
 }
 
 /// Whether the anonymous class body with node id `body` itself declares a

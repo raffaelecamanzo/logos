@@ -52,7 +52,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -302,7 +302,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(path, text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -428,7 +428,7 @@ fn a_receiver_the_file_proves_no_type_for_binds_nowhere() {
     // Each is classified `no-receiver-evidence`; the file's free calls bind.
     let unproven = rows(rt, "src/Http/Hidden.php", &["send"]).len() as u64;
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "php")

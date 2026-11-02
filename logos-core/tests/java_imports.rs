@@ -38,7 +38,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -607,7 +607,7 @@ fn sync_equals_a_full_reindex_after_adding_a_java_file() {
         "precondition: nothing to bind yet"
     );
     write(tmp.path(), SVC_FILE, SVC);
-    engine.sync(&[SVC_FILE.into()]);
+    engine.pipeline().sync(&[SVC_FILE.into()]);
     assert_eq!(
         imports_of(rt, CTL_FILE),
         [
@@ -634,7 +634,7 @@ fn sync_equals_a_full_reindex_after_editing_a_java_file() {
         SVC_FILE,
         "package com.x.svc;\n\npublic class Svc {\n    public static class Inner { public static String helper() { return \"h\"; } }\n}\n",
     );
-    engine.sync(&[SVC_FILE.into()]);
+    engine.pipeline().sync(&[SVC_FILE.into()]);
     assert_eq!(imports_of(rt, CTL_FILE), [format!("{SVC_FILE}:Svc:class")]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[SVC_FILE, CTL_FILE]));
 }
@@ -649,7 +649,7 @@ fn sync_equals_a_full_reindex_after_deleting_a_java_file() {
         "precondition: the imports bind"
     );
     fs::remove_file(tmp.path().join(SVC_FILE)).unwrap();
-    engine.sync(&[SVC_FILE.into()]);
+    engine.pipeline().sync(&[SVC_FILE.into()]);
     assert!(
         imports_of(rt, CTL_FILE).is_empty(),
         "{:?}",
@@ -666,7 +666,7 @@ fn sync_equals_a_full_reindex_after_deleting_a_java_file() {
 fn sync_re_decides_a_wildcard_call_when_its_imported_type_becomes_ambiguous() {
     // The call `util()` spells no token of the file that makes it ambiguous: a
     // second `com.x.svc.Svc` under `src/test`. Only the glob's own tokens can
-    // select the row for re-binding (`Index::ref_affected`).
+    // select the row for re-binding (`Invalidation::ref_affected`).
     let tmp = single_module(
         "package com.x.web;\n\nimport static com.x.svc.Svc.*;\n\npublic class Ctl {\n    public String b() { return util(); }\n}\n",
     );
@@ -682,7 +682,7 @@ fn sync_re_decides_a_wildcard_call_when_its_imported_type_becomes_ambiguous() {
         dup,
         "package com.x.svc;\n\npublic class Svc {}\n",
     );
-    engine.sync(&[dup.into()]);
+    engine.pipeline().sync(&[dup.into()]);
     // The ledger and the edges are re-decided exactly as a cold index decides
     // them: the row that turns ambiguous takes its edge with it (S-596).
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[SVC_FILE, CTL_FILE, dup]));
@@ -694,7 +694,7 @@ fn sync_re_decides_a_call_whose_second_static_import_stops_being_ambiguous() {
     // ledger orders `com::…` before `org::…`). While `org.y.b.B` is declared
     // twice the call is ambiguous; deleting the test
     // copy — a file that declares no `m` — must re-decide it, so the row is
-    // selected by the second expansion's tokens (`Index::ref_affected`): the
+    // selected by the second expansion's tokens (`Invalidation::ref_affected`): the
     // first expansion shares no token with the deleted file's path or names.
     let tmp = TempDir::new().unwrap();
     let a = "src/main/java/com/x/a/A.java";
@@ -723,7 +723,7 @@ fn sync_re_decides_a_call_whose_second_static_import_stops_being_ambiguous() {
         "precondition: ambiguous"
     );
     fs::remove_file(tmp.path().join(b_dup)).unwrap();
-    engine.sync(&[b_dup.into()]);
+    engine.pipeline().sync(&[b_dup.into()]);
     assert_eq!(
         callers_of(rt, &format!("{b}:m:method")),
         [format!("{CTL_FILE}:get")]
@@ -737,7 +737,7 @@ fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_l
     // in-repository type. Adding the second `Helper` makes the head ambiguous
     // (S-599); deleting it must bind the call again, exactly as a cold index
     // decides it. The call's own target spells `Helper`, which the added and
-    // the removed file both declare, so `Index::ref_affected` selects the row
+    // the removed file both declare, so `Invalidation::ref_affected` selects the row
     // on its target token; the test pins that the re-decision agrees with a
     // cold index in both directions.
     let tmp = TempDir::new().unwrap();
@@ -761,7 +761,7 @@ fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_l
         "precondition: the one in-repository `Helper` binds"
     );
     write(tmp.path(), b, &helper("org.y.b"));
-    engine.sync(&[b.into()]);
+    engine.pipeline().sync(&[b.into()]);
     // The row that turns ambiguous takes its edge with it (S-596), so edges and
     // ledger both equal a cold index's.
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, b, CTL_FILE]));
@@ -772,7 +772,7 @@ fn sync_re_decides_a_qualified_call_when_a_second_import_of_its_head_gains_and_l
     assert_eq!(ambiguous.len(), 1, "{ambiguous:?}");
     assert!(ambiguous[0].ends_with(" false"), "the call stays unbound: {ambiguous:?}");
     fs::remove_file(tmp.path().join(b)).unwrap();
-    engine.sync(&[b.into()]);
+    engine.pipeline().sync(&[b.into()]);
     assert_eq!(callers_of(rt, &a_util), [format!("{CTL_FILE}:get")]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[a, CTL_FILE]));
 }

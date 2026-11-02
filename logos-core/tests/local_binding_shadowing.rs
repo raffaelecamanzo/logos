@@ -51,7 +51,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -109,7 +109,7 @@ fn call_rows(engine: &Engine) -> Vec<String> {
 /// The `call_residue` reasons of `language`'s `status` row, the zeros left out.
 fn residue(engine: &Engine, language: &str) -> BTreeMap<R, u64> {
     let residue: CallResidue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == language)
@@ -294,7 +294,7 @@ fn a_local_binding_row_moves_no_other_figure_of_its_language() {
     let python = |files: &[(&str, &str)]| {
         let tmp = tree(files);
         let engine = index(tmp.path());
-        let row = engine.status().resolution_by_language.into_iter().find(|r| r.language == "python").expect("a python row");
+        let row = engine.graph().status().resolution_by_language.into_iter().find(|r| r.language == "python").expect("a python row");
         (row.calls.provably_external, row.call_residue)
     };
     let (alone, none) = python(&[("app.py", APP)]);
@@ -321,7 +321,7 @@ fn a_local_binding_row_admits_no_walk_beside_a_walked_language() {
         ("web/app.js", "function apply(f) {\n  return f();\n}\n\nfunction pick() {\n  return Math.max(1, 2);\n}\n"),
     ]);
     let engine = index(tmp.path());
-    let row = engine.status().resolution_by_language.into_iter().find(|r| r.language == "javascript").expect("a javascript row");
+    let row = engine.graph().status().resolution_by_language.into_iter().find(|r| r.language == "javascript").expect("a javascript row");
     let residue = row.call_residue.expect("the local-binding row brings the residue");
     assert_eq!(residue.reasons.iter().filter(|(_, n)| **n > 0).collect::<Vec<_>>(), [(&R::LocalBinding, &1)], "{residue:?}");
     assert_eq!((residue.unbound, residue.unclassified), (2, 1), "`Math.max` is counted, unclassified: {residue:?}");
@@ -604,7 +604,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(tmp_a.path().join(rel), text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let mut state: BTreeMap<&str, &str> = initial.iter().copied().collect();
     state.extend(edits.iter().copied());
     let files: Vec<(&str, &str)> = state.into_iter().collect();

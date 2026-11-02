@@ -36,7 +36,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -368,7 +368,7 @@ end
     assert_eq!(accesses(engine_a.runtime().unwrap()), [pair("initialize", "@a"), pair("total", "@a")]);
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     fs::write(tmp_a.path().join("app/box.rb"), AFTER).unwrap();
-    engine_a.sync(&[root_a.join("app/box.rb")] as &[PathBuf]);
+    engine_a.pipeline().sync(&[root_a.join("app/box.rb")] as &[PathBuf]);
     let rt_a = engine_a.runtime().unwrap();
 
     let tmp_b = tree(&[("app/box.rb", AFTER)]);
@@ -395,7 +395,7 @@ end
 fn cohesion(source: &str) -> Option<f64> {
     let tmp = tree(&[("shared.rb", source)]);
     let engine = index(tmp.path());
-    let view = engine.hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
+    let view = engine.graph().hydrate(Granularity::ExcludeContains).expect("dependency view hydrates");
     let rt = engine.runtime().unwrap();
     let thresholds = metrics::Thresholds { cohesion_min_classes: 1, ..metrics::Thresholds::default() };
     let member_access = engine.registry().expect("a started engine holds its registry").member_access_extensions();

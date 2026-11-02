@@ -361,7 +361,7 @@ impl Runtime {
     /// [NFR-PE-05]-enumerated grouping. `open_with_config` is untouched, so
     /// this diagnostic path's own cost never lands on the production
     /// cold-start path — used only by
-    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    /// [`ColdStartPhases::measure`](crate::ColdStartPhases::measure).
     ///
     /// # Errors
     /// As [`open_with_config`](Self::open_with_config).

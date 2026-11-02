@@ -18,7 +18,7 @@
 //!   [NFR-OO-02]).
 //!
 //! The `stats` read-models ([FR-OB-04], [NFR-OO-03]) are served from the same
-//! store by [`stats::stats`] via [`Engine::stats`](crate::Engine::stats).
+//! store by [`stats::stats`] via [`Graph::stats`](crate::Graph::stats).
 //!
 //! [observability]: ../../../docs/specs/architecture/components/observability.md
 //! [ADR-13]: ../../../docs/specs/architecture/decisions/ADR-13.md
@@ -922,7 +922,7 @@ pub(crate) fn seed_store_with_invokers_for_tests(
     db::write_batch(&mut conn, &batch)
 }
 
-/// Aggregated usage/perf stats from `telemetry.db` — see [`crate::Engine::stats`]
+/// Aggregated usage/perf stats from `telemetry.db` — see [`crate::Graph::stats`]
 /// for the engine-bound read, and `stats::read_stats` for the engine-free one a
 /// workspace fan-out uses ([FR-UI-37]).
 ///

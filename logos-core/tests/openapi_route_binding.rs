@@ -58,10 +58,10 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// against the now-present route node (the retry-on-sync contract).
 fn index_then_rebind(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     // A sync over no changed paths re-extracts nothing but re-runs resolution over
     // the full ledger, which now sees the promoted route node.
-    let _ = engine.sync(&[] as &[PathBuf]);
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     engine
 }
 
@@ -147,7 +147,7 @@ fn the_binding_surfaces_through_node_and_context() {
 
     // `node` on the route lists the ArtifactBinding among its immediate edges.
     let route = symbol_of(rt, "GET /users/{id}", NodeKind::Route);
-    let info = engine.node(&route, false);
+    let info = engine.navigation().node(&route, false);
     let detail = info.node.expect("the route node resolves");
     assert!(
         detail
@@ -161,7 +161,7 @@ fn the_binding_surfaces_through_node_and_context() {
     // `context` seeded at the handler pulls in its ApiOperation and spec section:
     // the handler → route (RoutesTo) → ApiOperation (ArtifactBinding) → ApiPath
     // (Contains) chain is traversed through the store-read artifact expansion.
-    let bundle = engine.context("get_user", None, false);
+    let bundle = engine.navigation().context("get_user", None, false);
     let kinds: Vec<NodeKind> = bundle.nodes.iter().map(|n| n.symbol.kind).collect();
     assert!(
         kinds.contains(&NodeKind::ApiOperation),

@@ -70,7 +70,7 @@ fn indexed(files: &[(&str, &str)]) -> (TempDir, Engine) {
         write(tmp.path(), rel, contents);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -148,7 +148,7 @@ fn each_row_lands_in_exactly_one_class_and_the_classes_sum_to_the_population() {
     .collect();
     assert_eq!(rows, expected);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     // Doc references: the three code spans, two bound.
     assert_eq!((status.doc_resolution.references, status.doc_resolution.resolved), (3, 2));
     // Provably external: `iter`, `drop` and `serde_json::to_string` name
@@ -181,7 +181,7 @@ fn each_row_lands_in_exactly_one_class_and_the_classes_sum_to_the_population() {
 #[test]
 fn status_json_carries_the_headline_beside_the_unchanged_deprecated_fields() {
     let (_tmp, engine) = indexed(FIXTURE);
-    let status: Value = serde_json::to_value(engine.status()).expect("serialises");
+    let status: Value = serde_json::to_value(engine.graph().status()).expect("serialises");
     assert_eq!(
         status["internal_resolution"],
         json!({
@@ -221,7 +221,7 @@ fn status_json_carries_the_headline_beside_the_unchanged_deprecated_fields() {
 #[test]
 fn a_graph_with_no_code_reference_reads_absent_not_complete() {
     let (_tmp, engine) = indexed(&[("README.md", README)]);
-    let status = engine.status();
+    let status = engine.graph().status();
     assert_eq!(status.internal_resolution.code_references, 0);
     let headline = serde_json::to_value(status.internal_resolution).unwrap();
     assert_eq!(headline["lower_bound"], Value::Null);
@@ -231,7 +231,7 @@ fn a_graph_with_no_code_reference_reads_absent_not_complete() {
     assert!(status.doc_resolution.ratio.is_some());
 
     let (_empty, nothing) = indexed(&[("Cargo.toml", CARGO_TOML)]);
-    let status = serde_json::to_value(nothing.status()).unwrap();
+    let status = serde_json::to_value(nothing.graph().status()).unwrap();
     for figure in ["internal_resolution", "doc_resolution"] {
         assert_eq!(status[figure]["absence"], none_recorded, "{figure}");
     }
@@ -266,8 +266,8 @@ fn plant_capture(engine: &Engine) {
 #[test]
 fn two_reads_agree_and_a_synced_store_reads_as_a_cold_reindex() {
     let (tmp, engine) = indexed(FIXTURE);
-    let first = figures(&engine.status());
-    assert_eq!(first, figures(&engine.status()), "two reads of one graph agree");
+    let first = figures(&engine.graph().status());
+    assert_eq!(first, figures(&engine.graph().status()), "two reads of one graph agree");
 
     // A sync that moves every class: a new library call, a new internal call
     // and a new code span.
@@ -278,9 +278,9 @@ fn two_reads_agree_and_a_synced_store_reads_as_a_cold_reindex() {
     write(tmp.path(), "src/lib.rs", &edited);
     let readme = format!("{README}\nSee `make`.\n");
     write(tmp.path(), "README.md", &readme);
-    engine.sync(&["src/lib.rs".into(), "README.md".into()]);
+    engine.pipeline().sync(&["src/lib.rs".into(), "README.md".into()]);
     plant_capture(&engine);
-    let synced = figures(&engine.status());
+    let synced = figures(&engine.graph().status());
     assert_ne!(synced, first, "the sync moved the figures, or this test pins nothing");
 
     let (_cold_dir, cold) = indexed(&[
@@ -289,7 +289,7 @@ fn two_reads_agree_and_a_synced_store_reads_as_a_cold_reindex() {
         ("src/util.rs", UTIL_RS),
         ("README.md", &readme),
     ]);
-    assert_eq!(synced, figures(&cold.status()), "a synced store reads as a cold reindex");
+    assert_eq!(synced, figures(&cold.graph().status()), "a synced store reads as a cold reindex");
 }
 
 /// A ledger target that is not UTF-8 — a corrupt store, an outside writer —
@@ -298,7 +298,7 @@ fn two_reads_agree_and_a_synced_store_reads_as_a_cold_reindex() {
 #[test]
 fn a_target_that_is_not_utf8_is_counted_and_fails_no_status() {
     let (tmp, engine) = indexed(FIXTURE);
-    let before = engine.status().internal_resolution;
+    let before = engine.graph().status().internal_resolution;
     let conn = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).unwrap();
     let corrupted = conn
         .execute(
@@ -309,7 +309,7 @@ fn a_target_that_is_not_utf8_is_counted_and_fails_no_status() {
     assert_eq!(corrupted, 1, "the fixture's `iter` row, or this pins nothing");
     drop(conn);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.indexed, "{:?}", status.warnings);
     assert_eq!(status.internal_resolution, before, "the row keeps its class");
 }
@@ -321,7 +321,7 @@ fn a_target_that_is_not_utf8_is_counted_and_fails_no_status() {
 #[test]
 fn a_call_site_whose_declaration_is_not_utf8_is_counted_and_fails_no_status() {
     let (tmp, engine) = indexed(FIXTURE);
-    let before = engine.status().internal_resolution;
+    let before = engine.graph().status().internal_resolution;
     let conn = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).unwrap();
     conn.execute(
         "INSERT INTO unresolved_refs (source_symbol, target, form, kind, payload) \
@@ -331,7 +331,7 @@ fn a_call_site_whose_declaration_is_not_utf8_is_counted_and_fails_no_status() {
     .unwrap();
     drop(conn);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.indexed, "{:?}", status.warnings);
     let after = status.internal_resolution;
     assert_eq!(

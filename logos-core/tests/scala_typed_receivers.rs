@@ -25,7 +25,12 @@
 //!   same-named copy-builder `def` would bind the builder;
 //! - a type parameter (`class Box[T](t: T)`, `def gen[A](a: A)`) is no type,
 //!   even beside a class of that name, and a member a base class declares is
-//!   not in scope.
+//!   not in scope;
+//! - a binding types only the calls in its own scope (S-824, CR-256): a local
+//!   `val` in a block that has closed, a nested `def`'s parameter and a typed
+//!   lambda parameter type no call outside them, and a name a pattern,
+//!   generator, untyped lambda, `catch`, `given` or self-type alias binds is
+//!   refused inside its own construct alone.
 //!
 //! Fixtures are written inline into temp directories, like every sibling
 //! binding suite (`scala_calls.rs`): a fixture tree checked into this
@@ -62,7 +67,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -476,7 +481,7 @@ fn assert_every_ship_call_stays_untyped(path: &str, src: &str, expected: usize) 
     let edges = calls(rt);
     assert!(!edges.iter().any(|(from, to)| from.starts_with(path) && to.starts_with(DOMAIN_PATH)), "{edges:#?}");
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "scala")
@@ -651,7 +656,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(path, text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -696,4 +701,459 @@ fn a_synced_edit_to_the_receivers_type_matches_a_fresh_reindex() {
     let retyped = CALLER.replace("orderService: OrderService", "orderService: Order");
     let edges = synced_equals_reindexed(&initial, &[(HANDLER_PATH, &retyped)]);
     assert_eq!(edges, vec![edge(&caller, &format!("{DOMAIN_PATH}:addOrderItem@8"))]);
+}
+
+// ── Scope-precise bindings (S-824, CR-256) ─────────────────────────────────
+
+/// Two types of one method name, and a base class in its own file whose `svc`
+/// is a `SLogger` — a member the class inheriting it never sees declared.
+const SCOPED_DOMAIN_PATH: &str = "src/main/scala/shop/s/Shop.scala";
+const SCOPED_DOMAIN: &str = "\
+package shop.s
+
+class SLogger { def send(): Unit = {} }
+class SMailer { def send(): Unit = {} }
+";
+
+const SBASE_PATH: &str = "src/main/scala/shop/s/SBase.scala";
+const SBASE: &str = "\
+package shop.s
+
+class SBase { val svc: SLogger = null }
+";
+
+const SC_PATH: &str = "src/main/scala/shop/s/SC.scala";
+const SC: &str = "\
+package shop.s
+
+class SC extends SBase {
+  def m(f: Boolean): Unit = { if (f) { val svc: SMailer = new SMailer(); () }; svc.send() }
+  def n(f: Boolean): Unit = { if (f) { val svc: SMailer = new SMailer(); svc.send() } }
+}
+";
+
+/// The status readout's Scala call residue, by reason, the empty ones dropped.
+fn scala_residue(engine: &Engine) -> Vec<(CallResidueReason, u64)> {
+    let residue = engine
+        .graph().status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "scala")
+        .and_then(|row| row.call_residue)
+        .expect("the scala row states its call residue");
+    let mut reasons: Vec<(CallResidueReason, u64)> = residue.reasons.into_iter().filter(|(_, n)| *n > 0).collect();
+    reasons.sort_by_key(|(reason, _)| format!("{reason:?}"));
+    reasons
+}
+
+/// A `val` in a block that has closed types no later call of its name (S-824):
+/// `m`'s `svc` is the inherited `SLogger` member, which no binding in this
+/// file states, so the call reads `no-receiver-evidence`. Before, the file-wide
+/// reading typed it `SMailer` and bound `SC#m() → SMailer#send()`. The same
+/// call inside the block still binds the local's type.
+#[test]
+fn a_val_in_a_closed_block_types_no_call_after_it() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (SBASE_PATH, SBASE), (SC_PATH, SC)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let c = |line: u32, name: &str| format!("{SC_PATH}:{name}@{line}");
+    assert_eq!(
+        rows(rt, SC_PATH, &["send"]),
+        sorted(vec![
+            row(&c(4, "m"), "send", RefForm::Method, OTHER, false),
+            row(&c(5, "n"), "SMailer::send", RefForm::Path, OTHER, true),
+        ])
+    );
+    let from_sc: Edges = calls(rt).into_iter().filter(|(from, _)| from.starts_with(SC_PATH)).collect();
+    assert_eq!(from_sc, vec![edge(&c(5, "n"), &format!("{SCOPED_DOMAIN_PATH}:send@4"))]);
+    assert_eq!(scala_residue(&engine), vec![(CallResidueReason::NoReceiverEvidence, 1)]);
+}
+
+/// A nested `def`'s parameter and a typed lambda parameter are in scope in
+/// their own declaration alone (S-824): the call after each is on the
+/// inherited `svc`, which no binding states. Before, the outermost callable
+/// declaring `svc: SMailer` anywhere typed both.
+const SN_PATH: &str = "src/main/scala/shop/s/SN.scala";
+const SN: &str = "\
+package shop.s
+
+class SN extends SBase {
+  def nested(): Unit = { def inner(svc: SMailer): Unit = svc.send(); svc.send() }
+  def lambda(ms: List[SMailer]): Unit = { ms.foreach((svc: SMailer) => svc.send()); svc.send() }
+}
+";
+
+#[test]
+fn a_nested_defs_or_typed_lambdas_parameter_types_no_call_outside_it() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (SBASE_PATH, SBASE), (SN_PATH, SN)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let s = |line: u32, name: &str| format!("{SN_PATH}:{name}@{line}");
+    let mailer = |source: String| row(&source, "SMailer::send", RefForm::Path, OTHER, true);
+    let untyped = |source: String| row(&source, "send", RefForm::Method, OTHER, false);
+    assert_eq!(
+        rows(rt, SN_PATH, &["send"]),
+        sorted(vec![
+            // `inner`'s own parameter; after `inner`, `svc` is the inherited one.
+            mailer(s(4, "inner")),
+            untyped(s(4, "nested")),
+            // The lambda's own parameter; after the lambda, the inherited one.
+            mailer(s(5, "lambda")),
+            untyped(s(5, "lambda")),
+        ])
+    );
+}
+
+/// Every name a pattern, a generator, an untyped lambda, a `catch`, a `given`,
+/// a destructuring `val`, a `new T { … }` value or a self-type alias binds is
+/// refused inside its own construct alone (S-824): each `cN` is called there,
+/// and again in a sibling method whose typed parameter of that name types the
+/// call. Before, each such name was refused in the whole file.
+const REFUSED_PATH: &str = "src/main/scala/shop/s/Refused.scala";
+const REFUSED: &str = "\
+package shop.s
+
+class Refused {
+  def caseVar(v: Any): Unit = v match { case c1 => c1.send() }
+  def ok1(c1: SMailer): Unit = c1.send()
+  def generator(xs: List[Any]): Unit = for (c2 <- xs) c2.send()
+  def ok2(c2: SMailer): Unit = c2.send()
+  def lambda(xs: List[Any]): Unit = xs.foreach(c3 => c3.send())
+  def ok3(c3: SMailer): Unit = c3.send()
+  def catchVar(): Unit = try make() catch case c4 => c4.send()
+  def ok4(c4: SMailer): Unit = c4.send()
+  def given(): Unit = { given c5: SMailer = null; c5.send() }
+  def ok5(c5: SMailer): Unit = c5.send()
+  def tuple(): Unit = { val (c6, n) = pair(); c6.send() }
+  def ok6(c6: SMailer): Unit = c6.send()
+  def anon(): Unit = { val c7 = new SMailer { }; c7.send() }
+  def ok7(c7: SMailer): Unit = c7.send()
+  def typedCase(v: Any): Unit = v match { case c8: SMailer => c8.send() }
+  def ok8(c8: SMailer): Unit = c8.send()
+  def make(): Any = null
+  def pair(): (Any, Int) = (null, 0)
+}
+
+class Aliased { c9 => def go(): Unit = c9.send() }
+class Typed9 { def ok9(c9: SMailer): Unit = c9.send() }
+";
+
+#[test]
+fn a_name_a_pattern_binds_is_refused_only_inside_its_construct() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (REFUSED_PATH, REFUSED)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let r = |line: u32, name: &str| format!("{REFUSED_PATH}:{name}@{line}");
+    let mailer = |source: String| row(&source, "SMailer::send", RefForm::Path, OTHER, true);
+    let untyped = |source: String| row(&source, "send", RefForm::Method, OTHER, false);
+    assert_eq!(
+        rows(rt, REFUSED_PATH, &["send"]),
+        sorted(vec![
+            untyped(r(4, "caseVar")),
+            mailer(r(5, "ok1")),
+            untyped(r(6, "generator")),
+            mailer(r(7, "ok2")),
+            untyped(r(8, "lambda")),
+            mailer(r(9, "ok3")),
+            untyped(r(10, "catchVar")),
+            mailer(r(11, "ok4")),
+            untyped(r(12, "given")),
+            mailer(r(13, "ok5")),
+            untyped(r(14, "tuple")),
+            mailer(r(15, "ok6")),
+            untyped(r(16, "anon")),
+            mailer(r(17, "ok7")),
+            // A typed `case` pattern proves nothing (a stated ceiling).
+            untyped(r(18, "typedCase")),
+            mailer(r(19, "ok8")),
+            untyped(r(24, "go")),
+            mailer(r(25, "ok9")),
+        ])
+    );
+}
+
+/// The forms of `new` a local is initialised with: `new T` and `new T()`
+/// prove `T`; `new T() { … }` builds an anonymous subclass and `new T(a)(b)`
+/// is a curried constructor, which prove nothing (a stated ceiling).
+const NEWS_PATH: &str = "src/main/scala/shop/s/News.scala";
+const NEWS: &str = "\
+package shop.s
+
+class News {
+  def bare(): Unit = { val a = new SMailer; a.send() }
+  def applied(): Unit = { var b = new SMailer(); b.send() }
+  def anon(): Unit = { val c = new SMailer() { }; c.send() }
+  def curried(): Unit = { val d = new SMailer(1)(2); d.send() }
+}
+";
+
+#[test]
+fn a_new_instance_proves_its_class_unless_it_has_a_body_or_two_argument_lists() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (NEWS_PATH, NEWS)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let n = |line: u32, name: &str| format!("{NEWS_PATH}:{name}@{line}");
+    assert_eq!(
+        rows(rt, NEWS_PATH, &["send"]),
+        sorted(vec![
+            row(&n(4, "bare"), "SMailer::send", RefForm::Path, OTHER, true),
+            row(&n(5, "applied"), "SMailer::send", RefForm::Path, OTHER, true),
+            row(&n(6, "anon"), "send", RefForm::Method, OTHER, false),
+            row(&n(7, "curried"), "send", RefForm::Method, OTHER, false),
+        ])
+    );
+}
+
+/// A call moved into the block that declares its receiver binds on sync, and
+/// the synced graph equals a fresh index of the edited tree (NFR-RA-06).
+#[test]
+fn a_synced_move_into_the_locals_block_matches_a_fresh_reindex() {
+    let initial = [(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (SBASE_PATH, SBASE), (SC_PATH, SC)];
+    let mailer_send = format!("{SCOPED_DOMAIN_PATH}:send@4");
+    // Before the edit, only `n`'s call is inside the local's block.
+    let before = tree(&initial);
+    let engine = index(before.path());
+    let from_sc: Edges = calls(engine.runtime().unwrap()).into_iter().filter(|(from, _)| from.starts_with(SC_PATH)).collect();
+    assert_eq!(from_sc, vec![edge(&format!("{SC_PATH}:n@5"), &mailer_send)]);
+
+    let moved = SC.replace("new SMailer(); () }; svc.send() }", "new SMailer(); svc.send() } }");
+    assert_ne!(moved, SC, "the edit moves the call");
+    let edges = synced_equals_reindexed(&initial, &[(SC_PATH, &moved)]);
+    let from_sc: Edges = edges.into_iter().filter(|(from, _)| from.starts_with(SC_PATH)).collect();
+    assert_eq!(
+        from_sc,
+        vec![edge(&format!("{SC_PATH}:m@4"), &mailer_send), edge(&format!("{SC_PATH}:n@5"), &mailer_send)]
+    );
+}
+
+/// A member `val` is in scope in its own type's members alone (S-824's
+/// `.member` scope, a stated ceiling): `own` types its call, while a nested
+/// class's method — which Scala lets read the outer member — and a top-level
+/// `def` reading a top-level `val` type none, and neither does a call on a
+/// lowercase `object` the file declares, which no binding names. Before, the
+/// outer-class walk typed the nested class's call and the `name` marker's
+/// static-name reading typed `util.send()`; at ox and gitbucket no edge
+/// depended on either.
+const MEMBERS_PATH: &str = "src/main/scala/shop/s/Members.scala";
+const MEMBERS: &str = "\
+package shop.s
+
+val top: SMailer = null
+def topLevel(): Unit = top.send()
+
+class Outer {
+  private val svc: SMailer = null
+  def own(): Unit = svc.send()
+  class Inner { def go(): Unit = svc.send() }
+  def viaObject(): Unit = util.send()
+}
+
+object util { def send(): Unit = {} }
+";
+
+#[test]
+fn a_member_is_in_scope_in_its_own_types_members_alone() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (MEMBERS_PATH, MEMBERS)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let m = |line: u32, name: &str| format!("{MEMBERS_PATH}:{name}@{line}");
+    assert_eq!(
+        rows(rt, MEMBERS_PATH, &["send"]),
+        sorted(vec![
+            row(&m(4, "topLevel"), "send", RefForm::Method, OTHER, false),
+            row(&m(8, "own"), "SMailer::send", RefForm::Path, OTHER, true),
+            row(&m(9, "go"), "send", RefForm::Method, OTHER, false),
+            row(&m(10, "viaObject"), "send", RefForm::Method, OTHER, false),
+        ])
+    );
+}
+
+/// A declaration no proof types still hides an outer binding of its name
+/// (S-824 review): a local `object` is the receiver of the call in its block,
+/// a `given … with` body's own `val` is a second binding of the name, and so
+/// is an anonymous or local class's member `def` or `object` in its body, so
+/// the enclosing parameter or local is not the one binding in scope there.
+const HIDDEN_PATH: &str = "src/main/scala/shop/s/Hidden.scala";
+const HIDDEN: &str = "\
+package shop.s
+
+class I(svc: SMailer) {
+  def localObject(): Unit = { object svc { def send(): Unit = {} }; svc.send() }
+  def outside(): Unit = svc.send()
+  given Ordering[Int] with
+    val svc: SLogger = null
+    def compare(a: Int, b: Int): Int = { svc.send(); 0 }
+}
+
+class E {
+  def anonDef(svc: SMailer): Runnable = new Runnable { def svc: SLogger = null; def run(): Unit = svc.send() }
+  def localDef(svc: SMailer): Unit = { class L { def svc(): SLogger = null; def go(): Unit = svc.send() }; () }
+  def localObj(): Unit = { val svc: SMailer = null; class L { object svc { def send(): Unit = {} }; def go(): Unit = svc.send() }; svc.send() }
+}
+";
+
+#[test]
+fn a_declaration_no_proof_types_hides_an_outer_binding_of_its_name() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (HIDDEN_PATH, HIDDEN)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let h = |line: u32, name: &str| format!("{HIDDEN_PATH}:{name}@{line}");
+    let typed: Vec<Row> =
+        rows(rt, HIDDEN_PATH, &["send"]).into_iter().filter(|r| r.2 == RefForm::Path).collect();
+    // Only the calls outside every hiding declaration are typed by `svc: SMailer`.
+    assert_eq!(
+        typed,
+        vec![
+            row(&h(14, "localObj"), "SMailer::send", RefForm::Path, OTHER, true),
+            row(&h(5, "outside"), "SMailer::send", RefForm::Path, OTHER, true),
+        ]
+    );
+}
+
+/// A nearer binding with no proof of its own — or another type's — refuses
+/// the call an outer `SLogger` binding of its name would type (S-824 review):
+/// an extension's or `given`'s parameter, a `new T { … }` body's `val`, `var`
+/// or `given`, a brace-less or `case`-body local, a local `def`, a Scala 3
+/// colon lambda's parameter and a self-type alias. Each is the binding whose
+/// pattern alone keeps the outer one from being the one in scope.
+const NEARER_PATH: &str = "src/main/scala/shop/s/Nearer.scala";
+const NEARER: &str = "\
+package shop.s
+
+trait Tr { def send(): Unit }
+
+object Ext { private val svc: SLogger = null; extension (svc: SMailer) def go(): Unit = svc.send() }
+object Giv { private val svc: SLogger = null; given ord(using svc: SMailer): Tr = { svc.send(); null } }
+
+class Anon {
+  def f1(a1: SLogger): Any = new Tr { val a1 = make(); def send(): Unit = a1.send() }
+  def f2(a2: SLogger): Any = new Tr { var a2 = make(); def send(): Unit = a2.send() }
+  def f3(a3: SLogger): Any = new Tr { given a3: Tr = null; def send(): Unit = a3.send() }
+  def make(): Any = null
+}
+
+class Ib(i1: SLogger, i2: SLogger, i3: SLogger) {
+  def f(): Unit =
+    val i1 = make()
+    i1.send()
+  def g(): Unit =
+    var i2 = make()
+    i2.send()
+  def h(): Unit =
+    given i3: Tr = null
+    i3.send()
+  def make(): Any = null
+}
+
+class Cc(k1: SLogger, k2: SLogger, k3: SLogger) {
+  def f(v: Any): Unit = v match { case _ => val k1 = make(); k1.send() }
+  def g(v: Any): Unit = v match { case _ => var k2 = make(); k2.send() }
+  def h(v: Any): Unit = v match { case _ => given k3: Tr = null; k3.send() }
+  def make(): Any = null
+}
+
+class LocalDef(d1: SLogger, d2: SLogger) {
+  def f(): Unit = { def d1: Any = null; d1.send() }
+  def g(): Unit =
+    def d2: Any = null
+    d2.send()
+}
+
+class Colon(co: SLogger) {
+  def f(xs: List[Any]): Unit = xs.foreach: co =>
+    co.send()
+}
+
+class SelfAlias {
+  def m(sf: SLogger): Unit = { class In { sf => def go(): Unit = sf.send() }; () }
+}
+";
+
+#[test]
+fn a_nearer_binding_refuses_the_call_an_outer_one_would_type() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (NEARER_PATH, NEARER)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let n = |line: u32, name: &str| format!("{NEARER_PATH}:{name}@{line}");
+    let untyped = |source: String| row(&source, "send", RefForm::Method, OTHER, false);
+    assert_eq!(
+        rows(rt, NEARER_PATH, &["send"]),
+        sorted(vec![
+            untyped(n(5, "go")),
+            // A `given` with a parameter list is no declaration: its object's.
+            untyped(n(6, "Giv")),
+            untyped(n(9, "send")),
+            untyped(n(10, "send")),
+            untyped(n(11, "send")),
+            untyped(n(16, "f")),
+            untyped(n(19, "g")),
+            untyped(n(22, "h")),
+            untyped(n(29, "f")),
+            untyped(n(30, "g")),
+            untyped(n(31, "h")),
+            untyped(n(36, "f")),
+            untyped(n(37, "g")),
+            untyped(n(43, "f")),
+            untyped(n(48, "go")),
+        ])
+    );
+}
+
+/// Every member, class-parameter and proof form a typed call reads, beyond
+/// the ones the main fixtures write (S-824 review): a trait's and an enum's
+/// class parameter; a class `var`; an object's, a trait's and an enum's
+/// `val` and `var`; a generic class parameter, lambda parameter, `val` and
+/// `var` (`Box[Int]` reads `Box`); and `var x = new T`.
+const FORMS_PATH: &str = "src/main/scala/shop/s/Forms.scala";
+const FORMS: &str = "\
+package shop.s
+
+class Box[A] { def send(): Unit = {} }
+
+trait TP(tp: SMailer) { def go(): Unit = tp.send() }
+enum EP(ep: SMailer) { case A extends EP(null); def go(): Unit = ep.send() }
+class CV { var cv: SMailer = null; def go(): Unit = cv.send() }
+object OV { val ov: SMailer = null; def go(): Unit = ov.send() }
+object OW { var ow: SMailer = null; def go(): Unit = ow.send() }
+trait TV { val tv: SMailer = null; def go(): Unit = tv.send() }
+trait TW { var tw: SMailer = null; def go(): Unit = tw.send() }
+enum EV { case B; val ev: SMailer = null; def go(): Unit = ev.send() }
+enum EW { case C; var ew: SMailer = null; def go(): Unit = ew.send() }
+
+class Gen(cb: Box[Int]) {
+  def a(): Unit = cb.send()
+  def b(xs: List[Box[Int]]): Unit = xs.foreach((lb: Box[Int]) => lb.send())
+  def c(): Unit = { val vb: Box[Int] = null; vb.send() }
+  def d(): Unit = { var wb: Box[Int] = null; wb.send() }
+  def e(): Unit = { var nb = new SMailer; nb.send() }
+}
+";
+
+#[test]
+fn every_member_parameter_and_proof_form_types_its_call() {
+    let tmp = tree(&[(SCOPED_DOMAIN_PATH, SCOPED_DOMAIN), (FORMS_PATH, FORMS)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    let f = |line: u32, name: &str| format!("{FORMS_PATH}:{name}@{line}");
+    let mailer = |source: String| row(&source, "SMailer::send", RefForm::Path, OTHER, true);
+    let boxed = |source: String| row(&source, "Box::send", RefForm::Path, OTHER, true);
+    assert_eq!(
+        rows(rt, FORMS_PATH, &["send"]),
+        sorted(vec![
+            mailer(f(5, "go")),
+            mailer(f(6, "go")),
+            mailer(f(7, "go")),
+            mailer(f(8, "go")),
+            mailer(f(9, "go")),
+            mailer(f(10, "go")),
+            mailer(f(11, "go")),
+            mailer(f(12, "go")),
+            mailer(f(13, "go")),
+            boxed(f(16, "a")),
+            boxed(f(17, "b")),
+            boxed(f(18, "c")),
+            boxed(f(19, "d")),
+            mailer(f(20, "e")),
+        ])
+    );
 }

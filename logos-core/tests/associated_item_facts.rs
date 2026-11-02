@@ -56,7 +56,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -264,7 +264,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         fs::write(tmp_a.path().join(rel), text).unwrap();
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -404,7 +404,7 @@ fn a_handoff_beside_a_same_named_signature_roots_the_handler() {
     let root = tmp.path().canonicalize().unwrap();
     let edited = format!("{AXUM_SIGNATURE_AND_HANDLER}pub fn other() {{}}\n");
     fs::write(tmp.path().join(LIB), &edited).unwrap();
-    engine.sync(&[root.join(LIB)]);
+    engine.pipeline().sync(&[root.join(LIB)]);
     assert_eq!(markers(engine.runtime().unwrap()), ["index@5"], "a sync roots the same handler");
 }
 
@@ -429,7 +429,7 @@ pub fn q(x: &X) { x.twice(); }
     let tmp = tree(&[(LIB, src)]);
     let engine = index(tmp.path());
     let residue: CallResidue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "rust")

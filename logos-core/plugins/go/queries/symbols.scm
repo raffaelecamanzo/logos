@@ -98,8 +98,9 @@
       name: (type_identifier) @symbol.type_alias) @item.alias))
 
 ; Interface method specs. A spec's parameter range is captured below with the
-; callables' (`@arity.parameters`): the method-set pass matches a type's methods
-; against an interface's by name and parameter count (S-529, FR-RS-18).
+; callables' (`@arity.parameters`), and its signature at the end of this file
+; (`@signature.*`): the method-set pass matches a type's methods against an
+; interface's by name and by parameter and result types (S-529, S-830, FR-RS-18).
 (type_spec
   type: (interface_type
     (method_elem
@@ -211,3 +212,40 @@
 (parameter_list (parameter_declaration name: (_) @arity.required))
 (parameter_list (parameter_declaration !name) @arity.required)
 (parameter_list (variadic_parameter_declaration) @arity.variadic)
+
+; ── Signature (S-830, CR-260, FR-RS-18) ──────────────────────────────────────
+; The `@signature.*` vocabulary the extraction engine reads
+; (`extract::signature`): a callable's parameter list and its result, each the
+; declaration's own field, recorded beside the node as `([]byte)(int,error)` —
+; the parameter and result types the method-set pass matches a method against
+; an interface's spec by. A generic interface records the type parameters it
+; binds (`[T]`), which is how the pass knows it is generic, specs or none, and a
+; method of a generic receiver the ones its receiver names (`[T](T)(bool)`), so
+; a `T` there is never read as a type of the package. Captures never name a
+; declaration, so every symbol and node is unchanged.
+(function_declaration
+  parameters: (parameter_list) @signature.parameters)
+(function_declaration
+  result: (_) @signature.results)
+(method_declaration
+  parameters: (parameter_list) @signature.parameters)
+(method_declaration
+  result: (_) @signature.results)
+(method_elem
+  parameters: (parameter_list) @signature.parameters)
+(method_elem
+  result: (_) @signature.results)
+(type_spec
+  type_parameters: (type_parameter_list) @signature.type_parameters
+  type: (interface_type))
+(method_declaration
+  receiver: (parameter_list
+    (parameter_declaration
+      type: (generic_type
+        type_arguments: (type_arguments) @signature.type_parameters))))
+(method_declaration
+  receiver: (parameter_list
+    (parameter_declaration
+      type: (pointer_type
+        (generic_type
+          type_arguments: (type_arguments) @signature.type_parameters)))))

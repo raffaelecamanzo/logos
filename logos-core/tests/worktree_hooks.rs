@@ -137,7 +137,7 @@ impl Repo {
     /// Install the managed hooks through the same `Engine` seam `init -i`
     /// consumes.
     fn install(&self) -> logos_core::hooks::HooksResult {
-        logos_core::Engine::install_hooks(self.main.path()).expect("hooks install")
+        logos_core::Setup::install_hooks(self.main.path()).expect("hooks install")
     }
 
     /// Add a linked worktree on a new branch and return its root.
@@ -483,7 +483,7 @@ fn starting_an_engine_in_a_linked_worktree_makes_the_hooks_fire() {
 /// **The same seam, through the phase-timed twin** — the sprint-level check
 /// that the two hand-mirrored cold paths did not drift apart.
 ///
-/// `Engine::start_with_phase_report` (S-368, [CR-116]) is a deliberate
+/// `ColdStartPhases::measure` (S-368, [CR-116]) is a deliberate
 /// near-duplicate of `Engine::start`'s call sequence, written so the timing
 /// instrumentation never lands on the production path. S-338 then added the
 /// hook-reachability step to `start_with_configs` in the *same* iteration, and
@@ -505,7 +505,7 @@ fn a_phase_reported_engine_start_seeds_the_worktree_hooks_too() {
     let wt = repo.add_worktree("feature");
 
     let (engine, _phases) =
-        logos_core::Engine::start_with_phase_report(&wt).expect("instrumented engine starts");
+        logos_core::ColdStartPhases::measure(&wt).expect("instrumented engine starts");
     drop(engine);
 
     repo.commit(
@@ -612,7 +612,7 @@ fn doctor_reports_unreachable_hooks_without_moving_its_verdict() {
     fs::remove_dir_all(repo.main.path().join(".logos/hooks")).expect("remove the source scripts");
 
     let engine = logos_core::Engine::start(&wt).expect("engine starts");
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
 
     assert_eq!(report.hook_warnings.len(), 1, "{:?}", report.hook_warnings);
     assert!(
@@ -634,7 +634,7 @@ fn doctor_is_silent_about_hooks_in_a_worktree_of_an_unhooked_project() {
     let wt = repo.add_worktree("feature"); // no `install` anywhere
 
     let engine = logos_core::Engine::start(&wt).expect("engine starts");
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
 
     assert!(report.hook_warnings.is_empty(), "{:?}", report.hook_warnings);
     assert!(!wt.join(".logos/hooks").exists());

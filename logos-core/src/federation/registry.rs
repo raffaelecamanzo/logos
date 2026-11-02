@@ -164,10 +164,9 @@ impl MemberEngine for Engine {
         read_connections: usize,
         worker_pool: SharedWorkerPool,
     ) -> Result<Arc<Self>> {
-        Ok(Arc::new(Engine::start_with_pools(
+        Ok(Arc::new(Engine::start_with(
             root,
-            read_connections,
-            Some(worker_pool),
+            crate::StartOptions::pools(read_connections, Some(worker_pool)),
         )?))
     }
 

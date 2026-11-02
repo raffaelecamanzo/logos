@@ -11,7 +11,7 @@
 //! The honest-expectations contract from [NFR-PE-09] is a one-line **advisory**
 //! emitted by `index` and `status` when a repository materially exceeds the
 //! envelope. [`index`](crate::pipeline::index) records the LOC it ingested under
-//! [`INDEXED_LOC_KEY`] so [`status`](crate::Engine::status) can repeat the same
+//! [`INDEXED_LOC_KEY`] so [`status`](crate::Graph::status) can repeat the same
 //! advisory without re-reading the working tree.
 //!
 //! The budgets themselves are asserted as release-gating fitness functions in
@@ -34,7 +34,7 @@
 pub const ENVELOPE_LOC: u64 = 100_000;
 
 /// The `project_metadata` key under which a full [`index`](crate::pipeline::index)
-/// records the LOC it ingested, so [`status`](crate::Engine::status) can emit the
+/// records the LOC it ingested, so [`status`](crate::Graph::status) can emit the
 /// same [NFR-PE-09] advisory without re-reading the tree.
 ///
 /// It doubles as the **total** of the source/test physical-LOC roll-up
@@ -50,7 +50,7 @@ pub const INDEXED_LOC_KEY: &str = "indexed_loc";
 /// ingested-LOC sum restricted to files matched by the [FR-AN-05] test-path
 /// conventions ([`crate::navigate::is_test_path`]).
 ///
-/// Only the test bucket is persisted: [`status`](crate::Engine::status) reads the
+/// Only the test bucket is persisted: [`status`](crate::Graph::status) reads the
 /// total from [`INDEXED_LOC_KEY`] and derives `source = total − test`, so the
 /// source figure is never counted independently. This key's **presence** is the
 /// roll-up's presence marker, and it reads absent in two ways, both of them

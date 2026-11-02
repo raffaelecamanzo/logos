@@ -1,6 +1,6 @@
 //! The `rules.toml [review]` policy (S-754, [FR-GV-25], [UAT-GV-15], [ADR-89]),
-//! end-to-end through `Engine::gate`, `Engine::session_end` and
-//! `Engine::review` over real git fixtures.
+//! end-to-end through `Quality::gate`, `Quality::session_end` and
+//! `Review::delta` over real git fixtures.
 //!
 //! Coverage by acceptance criterion:
 //! - with `[review]` at defaults a branch adding a 6-deep function fails the
@@ -128,8 +128,8 @@ fn repo() -> (TempDir, Engine) {
     commit(root, "base");
     git(root, &["branch", "-M", "main"]);
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let saved = engine.gate(None, true, true).expect("gate --save");
+    engine.pipeline().index();
+    let saved = engine.quality().gate(None, true, true).expect("gate --save");
     assert!(saved.saved && saved.signal.is_some(), "{saved:?}");
     (tmp, engine)
 }
@@ -140,7 +140,7 @@ fn rules(root: &Path, text: &str) {
 }
 
 fn gate(engine: &Engine) -> GateResult {
-    engine.gate(None, false, true).expect("gate runs")
+    engine.quality().gate(None, false, true).expect("gate runs")
 }
 
 /// The branch `deep` off `main`, adding a 6-deep function and committed.
@@ -148,7 +148,7 @@ fn add_deep_function(root: &Path, engine: &Engine) {
     git(root, &["checkout", "-q", "-b", "deep"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
     commit(root, "add a 6-deep function");
-    engine.index();
+    engine.pipeline().index();
 }
 
 /// The branch `feature` off `main`, adding one above-mean function and committed.
@@ -156,7 +156,7 @@ fn add_above_mean_function(root: &Path, engine: &Engine) {
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/many.rs", &format!("{}{}", many(), branches("g_above_mean", 5)));
     commit(root, "add an above-mean function");
-    engine.index();
+    engine.pipeline().index();
 }
 
 /// Each serialised key of `value`, in order.
@@ -174,7 +174,7 @@ fn a_six_deep_function_fails_the_gate_named_with_its_value_threshold_and_trust()
     rules(root, "[review]\n");
     add_deep_function(root, &engine);
 
-    for result in [gate(&engine), engine.session_end().expect("session_end runs")] {
+    for result in [gate(&engine), engine.quality().session_end().expect("session_end runs")] {
         assert!(!result.passed, "{result:#?}");
         assert_eq!(result.exit_code(), 1);
         let names: Vec<(&str, &str, ReviewStatus)> = result
@@ -199,7 +199,7 @@ fn a_six_deep_function_fails_the_gate_named_with_its_value_threshold_and_trust()
         assert_eq!(json["gating_entries"][0]["gating"], true, "{json}");
     }
 
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     assert_eq!(
         review.policy,
         Some(ReviewPolicy {
@@ -260,7 +260,7 @@ fn an_equality_only_drift_is_reported_and_fails_only_past_its_budget() {
     assert_eq!(reported.regressions.len(), 1, "per-metric movement is still detail");
 
     // The above-mean function is a new Equality entry, which never gates.
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     let equality = review
         .offenders
         .iter()
@@ -295,12 +295,12 @@ fn the_verdict_over_uncommitted_work_at_the_merge_base_holds_on_a_rerun() {
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
 
     for run in 1..=3 {
-        let result = engine.session_end().expect("session_end runs");
+        let result = engine.quality().session_end().expect("session_end runs");
         let names: Vec<&str> = result.gating_entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["beta_depth_six"], "run {run}: {result:#?}");
         assert!(!result.passed, "run {run}");
     }
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     assert_eq!(review.before_state, Some(BranchReview::SHADOW_INDEX));
 }
 
@@ -316,16 +316,16 @@ fn committing_work_a_gate_failed_does_not_make_it_pass() {
     rules(root, "[review]\n");
     git(root, &["checkout", "-q", "-b", "deep"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
-    let uncommitted = engine.session_end().expect("session_end runs");
+    let uncommitted = engine.quality().session_end().expect("session_end runs");
     assert!(!uncommitted.passed, "{uncommitted:#?}");
 
     commit(root, "add a 6-deep function");
-    engine.index();
-    let committed = engine.session_end().expect("session_end runs");
+    engine.pipeline().index();
+    let committed = engine.quality().session_end().expect("session_end runs");
     let names: Vec<&str> = committed.gating_entries.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["beta_depth_six"], "{committed:#?}");
     assert!(!committed.passed);
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     assert_eq!(review.before_state, Some(BranchReview::SHADOW_INDEX), "no recorded snapshot under the policy");
 }
 
@@ -338,7 +338,7 @@ fn a_save_under_the_policy_judges_nothing() {
     rules(root, "[review]\n");
     add_deep_function(root, &engine);
 
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.passed && saved.saved, "{saved:#?}");
     assert!(saved.gating_entries.is_empty() && saved.drift.is_none(), "{saved:#?}");
     assert!(saved.message.starts_with("baseline saved"), "{}", saved.message);
@@ -354,7 +354,7 @@ fn the_threshold_floor_still_fails_under_the_policy() {
     rules(root, "[review]\n");
     add_above_mean_function(root, &engine);
 
-    let floored = engine.gate(Some(10_001), false, true).expect("gate runs");
+    let floored = engine.quality().gate(Some(10_001), false, true).expect("gate runs");
     assert!(!floored.passed, "{floored:#?}");
     assert!(floored.drift.is_some_and(|d| !d.exceeded), "the drift alone passes: {floored:#?}");
     assert!(floored.message.contains("under the required threshold 10001"), "{}", floored.message);
@@ -415,7 +415,7 @@ fn a_new_near_clone_group_gates_though_uniqueness_has_no_threshold() {
     write(root, "src/lib.rs", "pub mod deep;\npub mod many;\npub mod build;\n");
     write(root, "src/build.rs", &format!("{BUILDER}\n{BUILDER_COPY}"));
     commit(root, "a builder and its copy");
-    engine.index();
+    engine.pipeline().index();
 
     let result = gate(&engine);
     assert!(!result.passed, "{result:#?}");
@@ -462,7 +462,7 @@ fn without_a_review_table_gate_and_review_carry_none_of_its_fields() {
         result.message
     );
 
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     assert!(review.policy.is_none());
     let text = serde_json::to_string(&review).unwrap();
     assert!(!text.contains("\"policy\"") && !text.contains("\"gating\""), "{text}");
@@ -519,7 +519,7 @@ fn the_change_is_attributed_to_its_dimension_and_its_driving_symbol() {
     rules(root, "[review]\n");
     add_above_mean_function(root, &engine);
 
-    let review = engine.review(None).expect("review runs").attribution.expect("measured, so attributed");
+    let review = engine.quality().review().delta(None).expect("review runs").attribution.expect("measured, so attributed");
     assert_sums(&review);
     assert!(review.change.unwrap() < -2, "{review:#?}");
     let equality = review.contributions.first().expect("a contribution");
@@ -532,11 +532,11 @@ fn the_change_is_attributed_to_its_dimension_and_its_driving_symbol() {
 
     // The gate attributes the change from its baseline, saved at `main`, and
     // reads the same measurement on both sides.
-    for gate in [gate(&engine), engine.session_end().expect("session_end runs")] {
+    for gate in [gate(&engine), engine.quality().session_end().expect("session_end runs")] {
         assert_eq!(gate.attribution.as_ref(), Some(&review), "{gate:#?}");
     }
     // The read-only verdict the dashboard shows, over the snapshot just taken.
-    let latest = engine.latest_gate().expect("the read-only verdict");
+    let latest = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert_eq!(latest.attribution.as_ref(), Some(&review), "{latest:#?}");
 }
 
@@ -550,9 +550,9 @@ fn a_new_near_clone_group_is_named_with_its_members() {
     write(root, "src/lib.rs", "pub mod deep;\npub mod many;\npub mod build;\n");
     write(root, "src/build.rs", &format!("{BUILDER}\n{BUILDER_COPY}"));
     commit(root, "a builder and its copy");
-    engine.index();
+    engine.pipeline().index();
 
-    let review = engine.review(None).expect("review runs");
+    let review = engine.quality().review().delta(None).expect("review runs");
     // `main`'s saved baseline is a snapshot at the merge-base, and no rule is
     // declared: the before-state's terms are read from that row.
     assert_eq!(review.before_state, Some(BranchReview::RECORDED_SNAPSHOT));
@@ -573,8 +573,8 @@ fn a_new_near_clone_group_is_named_with_its_members() {
     git(root, &["checkout", "-q", "-b", "dedupe"]);
     write(root, "src/build.rs", BUILDER);
     commit(root, "the copy goes");
-    engine.index();
-    let a = engine.review(None).expect("review runs").attribution.expect("attributed");
+    engine.pipeline().index();
+    let a = engine.quality().review().delta(None).expect("review runs").attribution.expect("attributed");
     assert_sums(&a);
     let uniqueness = a.contributions.iter().find(|c| c.dimension == "uniqueness").expect("listed");
     assert!(uniqueness.points > 0.0, "{a:#?}");
@@ -613,7 +613,7 @@ fn a_rebless_past_the_budget_requires_a_reason_and_records_it() {
     assert!(drift.exceeded, "the fixture drifts past the budget: {drift:?}");
 
     for reason in [None, Some("  ")] {
-        let err = engine.gate_with_reason(None, true, true, reason).expect_err("refused");
+        let err = engine.quality().gate_with_reason(None, true, true, reason).expect_err("refused");
         let config = err.downcast_ref::<ConfigError>().unwrap_or_else(|| panic!("a usage error: {err:#}"));
         assert_eq!(config.exit_code(), 2);
         let text = err.to_string();
@@ -627,7 +627,7 @@ fn a_rebless_past_the_budget_requires_a_reason_and_records_it() {
     assert_eq!(baseline_record(root), (None, None));
 
     let why = "an above-mean dispatcher is intrinsic to the feature";
-    let saved = engine.gate_with_reason(None, true, true, Some(why)).expect("gate --save --reason");
+    let saved = engine.quality().gate_with_reason(None, true, true, Some(why)).expect("gate --save --reason");
     assert!(saved.saved && saved.passed, "{saved:#?}");
     assert_eq!(saved.baseline_reason.as_deref(), Some(why));
     let blessed = saved.attribution.clone().expect("the blessed change, under the table");
@@ -639,20 +639,20 @@ fn a_rebless_past_the_budget_requires_a_reason_and_records_it() {
 
     let next = gate(&engine);
     assert!(next.passed && next.baseline_reason.as_deref() == Some(why), "{next:#?}");
-    let web = engine.latest_gate().expect("the read-only verdict");
+    let web = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert_eq!(web.baseline_reason.as_deref(), Some(why), "the dashboard names it too: {web:#?}");
     assert_eq!(next.attribution.as_ref().and_then(|a| a.change), Some(0), "nothing moved since the bless");
 
     // A save within the budget needs no reason, and replaces the record.
-    let plain = engine.gate(None, true, true).expect("a save with nothing to bless");
+    let plain = engine.quality().gate(None, true, true).expect("a save with nothing to bless");
     assert!(plain.saved && plain.baseline_reason.is_none(), "{plain:#?}");
     let (reason, stored) = baseline_record(root);
     assert_eq!(reason, None, "a reason never outlives its anchor");
     assert_eq!(parsed(stored)["change"], 0);
     // `session_start` moves no existing baseline (S-763), so the record stays.
-    engine.gate_with_reason(None, true, true, Some(why)).expect("record a reason again");
+    engine.quality().gate_with_reason(None, true, true, Some(why)).expect("record a reason again");
     let kept = baseline_record(root);
-    engine.session_start().expect("session_start runs");
+    engine.quality().session_start().expect("session_start runs");
     assert_eq!(kept.0.as_deref(), Some(why));
     assert_eq!(baseline_record(root), kept, "the reason outlives no anchor: the anchor stayed");
 }
@@ -666,7 +666,7 @@ fn without_the_table_a_save_records_the_attribution_and_reports_none() {
     add_above_mean_function(root, &engine);
     assert!(!gate(&engine).passed, "the drift fails the plain gate");
 
-    let saved = engine.gate(None, true, true).expect("gate --save without a reason");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save without a reason");
     assert!(saved.saved && saved.attribution.is_none() && saved.baseline_reason.is_none(), "{saved:#?}");
     let json = serde_json::to_value(&saved).unwrap();
     assert!(json.get("attribution").is_none() && json.get("baseline_reason").is_none(), "{json}");
@@ -679,7 +679,7 @@ fn without_the_table_a_save_records_the_attribution_and_reports_none() {
 
     let compare = gate(&engine);
     assert!(compare.attribution.is_none(), "a compare without the table attributes nothing: {compare:#?}");
-    let web = engine.latest_gate().expect("the read-only verdict");
+    let web = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert!(web.attribution.is_none(), "nor does the dashboard's verdict: {web:#?}");
 }
 
@@ -693,7 +693,7 @@ fn a_save_across_a_threshold_change_attributes_nothing_and_needs_no_reason() {
     rules(root, "[review]\ndrift_budget = 0\n[metric_thresholds]\nduplicate_min_tokens = 5\n");
     add_above_mean_function(root, &engine);
 
-    let saved = engine.gate(None, true, true).expect("no reason is needed across a threshold change");
+    let saved = engine.quality().gate(None, true, true).expect("no reason is needed across a threshold change");
     assert!(saved.saved && saved.attribution.is_none(), "{saved:#?}");
     assert_eq!(baseline_record(root), (None, None));
 }
@@ -708,7 +708,7 @@ fn an_unreadable_contract_leaves_the_read_only_verdict_standing() {
     add_above_mean_function(root, &engine);
     assert!(gate(&engine).attribution.is_some(), "the gate attributes under the table");
     rules(root, "[review]\nnot_a_key = 1\n");
-    let web = engine.latest_gate().expect("the verdict stands over an invalid contract");
+    let web = engine.quality().readouts().latest_gate().expect("the verdict stands over an invalid contract");
     assert!(web.attribution.is_none() && web.baseline_signal.is_some(), "{web:#?}");
 }
 
@@ -758,7 +758,7 @@ fn trend(warnings: &[String]) -> Vec<String> {
 /// Equality, which must have fallen from `before` when one is given.
 fn scan_with(root: &Path, engine: &Engine, extra: usize, before: Option<f64>) -> (Vec<String>, f64) {
     write(root, "src/many.rs", &many_plus(extra));
-    let scan = engine.scan(true).expect("scan runs");
+    let scan = engine.quality().scan(true).expect("scan runs");
     let equality = scan.metrics.equality.normalized;
     if let Some(before) = before {
         assert!(equality < before, "the fixture lowers Equality: {before} → {equality}");
@@ -793,13 +793,13 @@ fn two_equality_declines_warn_on_scan_gate_and_review_and_move_no_exit_code() {
 
     let warned = gate(&engine);
     assert_eq!(trend(&warned.warnings), std::slice::from_ref(&expected), "{warned:#?}");
-    let ended = engine.session_end().expect("session_end runs");
+    let ended = engine.quality().session_end().expect("session_end runs");
     assert_eq!(trend(&ended.warnings), std::slice::from_ref(&expected));
-    let reviewed = engine.review(None).expect("review runs");
+    let reviewed = engine.quality().review().delta(None).expect("review runs");
     assert_eq!(reviewed.warnings, std::slice::from_ref(&expected));
     // The trend reads the recorded series, so a review that cannot measure
     // still carries it.
-    let unmeasured = engine.review(Some("no-such-ref")).expect("review runs");
+    let unmeasured = engine.quality().review().delta(Some("no-such-ref")).expect("review runs");
     assert!(!unmeasured.measured, "{unmeasured:#?}");
     assert_eq!(unmeasured.warnings, std::slice::from_ref(&expected));
 
@@ -812,14 +812,14 @@ fn two_equality_declines_warn_on_scan_gate_and_review_and_move_no_exit_code() {
         "the warning moves no verdict"
     );
     assert_eq!(quiet.warnings.len() + 1, warned.warnings.len());
-    let unwarned = engine.review(None).expect("review runs");
+    let unwarned = engine.quality().review().delta(None).expect("review runs");
     assert!(unwarned.warnings.is_empty());
     assert_eq!((unwarned.measured, unwarned.policy), (reviewed.measured, reviewed.policy));
 
     // `gate --save` carries it too, and saves all the same. Last: a save
     // moves the baseline the verdicts above compare against.
     rules(root, "[review]\n");
-    let saved = engine.gate(None, true, true).expect("gate --save runs");
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
     assert!(saved.saved && saved.passed, "{saved:#?}");
     assert_eq!(trend(&saved.warnings), [expected]);
     assert_eq!(
@@ -864,7 +864,7 @@ fn without_the_table_two_declines_warn_nowhere() {
     let (two, _) = scan_with(root, &engine, 2, Some(first));
     assert!(two.is_empty(), "{two:?}");
     assert!(trend(&gate(&engine).warnings).is_empty());
-    let review = serde_json::to_value(engine.review(None).expect("review runs")).unwrap();
+    let review = serde_json::to_value(engine.quality().review().delta(None).expect("review runs")).unwrap();
     assert!(!keys(&review).contains(&"warnings".to_string()), "{review}");
 }
 
@@ -875,9 +875,9 @@ fn without_the_table_two_declines_warn_nowhere() {
 fn an_unmeasured_review_over_an_invalid_table_answers_as_before() {
     let (tmp, engine) = repo();
     rules(tmp.path(), "[review]\ntrend_window = 0\n");
-    let review = engine.review(Some("no-such-ref")).expect("an unmeasured review is an answer");
+    let review = engine.quality().review().delta(Some("no-such-ref")).expect("an unmeasured review is an answer");
     assert!(!review.measured && review.warnings.is_empty(), "{review:#?}");
-    let err = engine.review(None).expect_err("a measured review loads the contract");
+    let err = engine.quality().review().delta(None).expect_err("a measured review loads the contract");
     assert!(format!("{err:#}").contains("review.trend_window"), "{err:#}");
 }
 
@@ -893,7 +893,7 @@ fn the_read_only_verdict_judges_the_drift_budget_as_the_gate_does() {
     add_above_mean_function(root, &engine);
 
     let persisting = gate(&engine);
-    let web = engine.latest_gate().expect("the read-only verdict");
+    let web = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     let drift = persisting.drift.expect("a drift under the table");
     assert!(drift.drop > 0 && persisting.passed, "{persisting:#?}");
     assert_eq!((web.passed, web.message.as_str(), web.drift.as_ref()), (true, persisting.message.as_str(), Some(&drift)), "{web:#?}");
@@ -901,7 +901,7 @@ fn the_read_only_verdict_judges_the_drift_budget_as_the_gate_does() {
 
     rules(root, "[review]\ndrift_budget = 0\n");
     let persisting = gate(&engine);
-    let web = engine.latest_gate().expect("the read-only verdict");
+    let web = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert!(!persisting.passed, "{persisting:#?}");
     assert_eq!((web.passed, web.message.as_str()), (false, persisting.message.as_str()), "{web:#?}");
 }
@@ -949,10 +949,10 @@ fn gate_session_end_and_the_read_only_verdict_carry_one_structured_trend() {
     );
 
     let persisting = gate(&engine);
-    let ended = engine.session_end().expect("session_end runs");
+    let ended = engine.quality().session_end().expect("session_end runs");
     let recorded = snapshot_count(root);
-    let health = engine.latest_health().expect("the Health bundle").gate;
-    let web = engine.latest_gate().expect("the read-only verdict");
+    let health = engine.quality().readouts().latest_health().expect("the Health bundle").gate;
+    let web = engine.quality().readouts().latest_gate().expect("the read-only verdict");
     assert_eq!(snapshot_count(root), recorded, "the read-only verdict records nothing");
 
     for result in [&persisting, &ended, &health, &web] {
@@ -981,13 +981,13 @@ fn a_flat_scan_keeps_the_trend_and_a_rise_removes_it_everywhere() {
     let (two, second) = scan_with(root, &engine, 2, Some(first));
     assert_eq!(two.len(), 1, "the flat step neither breaks nor extends the run: {two:?}");
     let expected_trend = serde_json::json!([{"dimension": "equality", "values": [start, first, second], "window": 2}]);
-    assert_eq!(trend_json(&engine.latest_gate().unwrap()), expected_trend);
+    assert_eq!(trend_json(&engine.quality().readouts().latest_gate().unwrap()), expected_trend);
     assert_eq!(trend_json(&gate(&engine)), expected_trend);
 
     // Back to the base tree: Equality rises.
     let (risen, up) = scan_with(root, &engine, 0, None);
     assert!(up > second && risen.is_empty(), "the rise ends the run: {second} → {up} {risen:?}");
-    for result in [engine.latest_gate().unwrap(), gate(&engine)] {
+    for result in [engine.quality().readouts().latest_gate().unwrap(), gate(&engine)] {
         let json = serde_json::to_value(&result).unwrap();
         assert!(!keys(&json).contains(&"trend".to_string()), "{json}");
         assert!(trend(&result.warnings).is_empty(), "{result:#?}");
@@ -1020,15 +1020,15 @@ fn without_a_readable_table_the_read_only_verdict_is_byte_identical_on_every_arm
             db().execute(sql, []).unwrap();
         }
         fs::remove_file(&rules_path).unwrap();
-        let without = serde_json::to_string(&engine.latest_gate().unwrap()).unwrap();
+        let without = serde_json::to_string(&engine.quality().readouts().latest_gate().unwrap()).unwrap();
         for unreadable in ["[review]\nnot_a_key = 1\n", "[review]\ntrend_window = 0\n", "[review\n"] {
             rules(root, unreadable);
-            let read = serde_json::to_string(&engine.latest_gate().unwrap()).unwrap();
+            let read = serde_json::to_string(&engine.quality().readouts().latest_gate().unwrap()).unwrap();
             assert_eq!(read, without, "{arm} arm under {unreadable:?}");
         }
 
         rules(root, "[review]\n");
-        let under = engine.latest_gate().unwrap();
+        let under = engine.quality().readouts().latest_gate().unwrap();
         assert_eq!(trend_json(&under)[0]["dimension"], "equality", "{arm}: {under:#?}");
         let mut stripped = serde_json::to_value(&under).unwrap();
         let object = stripped.as_object_mut().unwrap();

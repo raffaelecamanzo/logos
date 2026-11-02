@@ -379,7 +379,7 @@ fn index_member(member_root: &Path, sites: &BTreeMap<String, Vec<Site>>) -> Memb
         fs::copy(member_root.join(&rel), &target).expect("copy");
     }
     let engine = Engine::start(copy.path()).expect("engine starts over the copy");
-    let stats = engine.index().framework;
+    let stats = engine.pipeline().index().framework;
     let routes: Vec<(String, String, i64, i64)> = engine
         .runtime()
         .expect("runtime")

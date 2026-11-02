@@ -1,7 +1,7 @@
 //! The MCP `node` answer names the alternatives a bare-name lookup passed over
 //! (S-550 / [FR-NV-15]), byte-identical to what the CLI prints.
 //!
-//! Both surfaces delegate to the one `Engine::node` entrypoint ([NFR-CC-01]) and
+//! Both surfaces delegate to the one `Navigation::node` entrypoint ([NFR-CC-01]) and
 //! serialise its read-model, so this guards the wire half: the `alternatives`
 //! field survives the MCP adapter, and a lookup that passes over nothing keeps the
 //! payload it always had (no `alternatives` key).
@@ -35,7 +35,7 @@ fn fixture() -> tempfile::TempDir {
         "<?php\n\nnamespace Monolog;\n\nfinal class Utils\n{\n    public static function canonicalize(string $path): string\n    {\n        return $path;\n    }\n}\n",
     )
     .unwrap();
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -57,7 +57,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 /// serialises (a fresh engine, dropped before the server boots).
 fn cli_payload(root: &Path, symbol: &str) -> Value {
     let engine = Engine::start(root).expect("engine");
-    serde_json::to_value(engine.node(symbol, false)).expect("serialize")
+    serde_json::to_value(engine.navigation().node(symbol, false)).expect("serialize")
 }
 
 /// The MCP `node` tool payload for the same symbol.

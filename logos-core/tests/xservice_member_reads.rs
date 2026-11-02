@@ -59,8 +59,8 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// re-opens it.
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// Five indexed members — `api`, `web` and the three [`UNRELATED`] — under a
@@ -360,7 +360,7 @@ fn a_resident_member_that_re_syncs_invalidates_the_warm_bridge() {
     assert_eq!(query::bridge_read(&bridge, &registry).reads.read, names(&["api"]), "guard the guard: a warm hit");
 
     write(&root.join("api"), "src/main.rs", &format!("{AXUM_MAIN}\npub fn added() {{}}\n"));
-    let _ = api.sync(&[root.join("api/src/main.rs")]);
+    let _ = api.pipeline().sync(&[root.join("api/src/main.rs")]);
     let after = query::bridge_read(&bridge, &registry);
     assert_eq!(
         after.reads.read,

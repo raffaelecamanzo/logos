@@ -25,7 +25,7 @@ use anyhow::Result;
 use logos_core::security::{FindingsFilter, ScanRequest, Selection};
 use logos_core::tools::surface::InstallRequest;
 use logos_core::{
-    config::load_config_from_root, governance::OffendersFilter, models::GateResult, Engine,
+    config::load_config_from_root, governance::OffendersFilter, models::GateResult, Engine, Setup,
 };
 use logos_ext::ExtensionHost;
 
@@ -42,7 +42,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
     match command {
         // FR-IN-12: an uninstall touches no store and offers no workspace, so
         // it is routed before the nudge; `-i`/`--hooks` add nothing to it.
-        Commands::Init { uninstall: true, .. } => out.print(&Engine::init_uninstall(root)?).map(|()| 0),
+        Commands::Init { uninstall: true, .. } => out.print(&Setup::uninstall(root)?).map(|()| 0),
         Commands::Init {
             interactive,
             hooks,
@@ -71,13 +71,13 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
                 crate::workspace_init::run(root, nudged.then_some((interactive, hooks)), yes, &exclude, out, crate::workspace_init::spawn_supervisor, host)
             } else {
                 let steps = host.init_steps();
-                out.print(&Engine::init_with_contributions(root, &init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?;
+                out.print(&Setup::init_with_contributions(root, &init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?;
                 Ok(0)
             }
         }
         Commands::Index => {
             // A malformed `config.toml` is a usage fault that must fail loud with
-            // exit 2 (FR-CF-03), not degrade to a silent empty index: `Engine::index`
+            // exit 2 (FR-CF-03), not degrade to a silent empty index: `Pipeline::index`
             // is an infallible surface (ADR-14) that would otherwise swallow the
             // `ConfigError`. Validate up front so the fault propagates — the same
             // loud-failure contract `check`/`gate` honour for `rules.toml`.
@@ -85,7 +85,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             // A run that reached persistence and persisted nothing, or whose
             // pipeline failed, exits 1 (FR-CL-03, FR-EH-05); a degraded run with
             // some files failed, or one admitting no file (FR-IX-13), exits 0.
-            let result = engine(root, true)?.index();
+            let result = engine(root, true)?.pipeline().index();
             out.print(&result)?;
             Ok(crate::violation_code(!result.failed))
         }
@@ -99,13 +99,13 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         } => Ok(crate::workspace_init::run_supervisor(&members, concurrency)),
         Commands::Sync { paths } => {
             // As `index` above: a malformed `config.toml` is a usage fault (exit 2,
-            // FR-CF-03), validated up front — `Engine::sync` would fold it into a
+            // FR-CF-03), validated up front — `Pipeline::sync` would fold it into a
             // `failed` run (exit 1, FR-EH-05) instead.
             load_config_from_root(root)?;
-            out.report_gate(root, |e| Ok(e.sync(&paths)), |r| crate::violation_code(!r.failed))
+            out.report_gate(root, |e| Ok(e.pipeline().sync(&paths)), |r| crate::violation_code(!r.failed))
         }
-        Commands::Status { member } => out.query_for(root, &member, |e| e.status()),
-        Commands::Search { query, kind, limit, member } => out.query_for(root, &member, |e| e.search(&query, kind, limit)),
+        Commands::Status { member } => out.query_for(root, &member, |e| e.graph().status()),
+        Commands::Search { query, kind, limit, member } => out.query_for(root, &member, |e| e.navigation().search(&query, kind, limit)),
         Commands::Query {
             symbol,
             kind,
@@ -116,11 +116,11 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         } => {
             // The façade picks ONE Engine call per invocation (FR-CL-05).
             if callers {
-                out.query_for(root, &member, |e| e.callers(&symbol, limit))
+                out.query_for(root, &member, |e| e.navigation().callers(&symbol, limit))
             } else if callees {
-                out.query_for(root, &member, |e| e.callees(&symbol, limit))
+                out.query_for(root, &member, |e| e.navigation().callees(&symbol, limit))
             } else {
-                out.query_for(root, &member, |e| e.search(&symbol, kind, limit))
+                out.query_for(root, &member, |e| e.navigation().search(&symbol, kind, limit))
             }
         }
         Commands::Context {
@@ -128,27 +128,27 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             max_nodes,
             no_code,
             member,
-        } => out.query_for(root, &member, |e| e.context(&task.join(" "), max_nodes, !no_code)),
-        Commands::Explore { query, max_files, member } => out.query_for(root, &member, |e| e.explore(&query, max_files)),
-        Commands::Node { symbol, code, member } => out.query_for(root, &member, |e| e.node(&symbol, code)),
-        Commands::Callers { symbol, limit, member } => out.query_for(root, &member, |e| e.callers(&symbol, limit)),
-        Commands::Callees { symbol, limit, member } => out.query_for(root, &member, |e| e.callees(&symbol, limit)),
-        Commands::Impact { symbol, depth, member } => out.query_for(root, &member, |e| e.impact(&symbol, depth)),
+        } => out.query_for(root, &member, |e| e.navigation().context(&task.join(" "), max_nodes, !no_code)),
+        Commands::Explore { query, max_files, member } => out.query_for(root, &member, |e| e.navigation().explore(&query, max_files)),
+        Commands::Node { symbol, code, member } => out.query_for(root, &member, |e| e.navigation().node(&symbol, code)),
+        Commands::Callers { symbol, limit, member } => out.query_for(root, &member, |e| e.navigation().callers(&symbol, limit)),
+        Commands::Callees { symbol, limit, member } => out.query_for(root, &member, |e| e.navigation().callees(&symbol, limit)),
+        Commands::Impact { symbol, depth, member } => out.query_for(root, &member, |e| e.navigation().impact(&symbol, depth)),
         Commands::ImpactIntersection { items, depth, member } => {
-            out.query_for(root, &member, |e| e.impact_intersection(&items, depth))
+            out.query_for(root, &member, |e| e.navigation().impact_intersection(&items, depth))
         }
-        Commands::Precedent { target, limit, member } => out.query_for(root, &member, |e| e.precedent(&target, limit)),
+        Commands::Precedent { target, limit, member } => out.query_for(root, &member, |e| e.navigation().precedent(&target, limit)),
         Commands::BranchOverlap { refs, base, merge, member } => out.query_for(root, &member, |e| {
-            e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
+            e.navigation().branch_overlap(&refs, base.as_deref(), merge.as_deref())
         }),
-        Commands::Implements { doc } => out.query(root, |e| e.implements(&doc)),
-        Commands::ReferencingDocs { symbol } => out.query(root, |e| e.referencing_docs(&symbol)),
-        Commands::Affected { files, tests_only } => out.query(root, |e| e.affected(&files, tests_only)),
+        Commands::Implements { doc } => out.query(root, |e| e.navigation().implements(&doc)),
+        Commands::ReferencingDocs { symbol } => out.query(root, |e| e.navigation().referencing_docs(&symbol)),
+        Commands::Affected { files, tests_only } => out.query(root, |e| e.navigation().affected(&files, tests_only)),
         Commands::Scan { path, no_reconcile } => {
             if path.is_some() {
                 eprintln!("logos scan: path scoping is not supported yet; scanning the project");
             }
-            out.try_query(root, |e| e.scan(!no_reconcile))
+            out.try_query(root, |e| e.quality().scan(!no_reconcile))
         }
         // The report tier (FR-IN-07, CR-095): always exit 0 — unlike
         // check/gate below, this reports and never gates. Two renderings of one
@@ -156,9 +156,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // script execs.
         Commands::QualityReport { hook_json } => {
             if hook_json {
-                out.try_query(root, |e| e.quality_report_hook_payload())
+                out.try_query(root, |e| e.quality().readouts().report_hook_payload())
             } else {
-                out.try_query(root, |e| e.quality_readout())
+                out.try_query(root, |e| e.quality().readouts().readout())
             }
         }
         // check/gate/doctor/verify project a verdict to exit 1 on failure
@@ -174,9 +174,9 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             root,
             |e| {
                 if bless {
-                    e.bless_rules(rules.as_deref(), !no_reconcile)
+                    e.quality().bless_rules(rules.as_deref(), !no_reconcile)
                 } else {
-                    e.check_rules(rules.as_deref(), !no_reconcile)
+                    e.quality().check_rules(rules.as_deref(), !no_reconcile)
                 }
             },
             allow_no_rules,
@@ -191,7 +191,7 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             if label.is_some() {
                 eprintln!("logos gate: --label is accepted but not persisted yet");
             }
-            out.report_gate(root, |e| e.gate_with_reason(threshold, save, !no_reconcile, reason.as_deref()), GateResult::exit_code)
+            out.report_gate(root, |e| e.quality().gate_with_reason(threshold, save, !no_reconcile, reason.as_deref()), GateResult::exit_code)
         }
         // ARCHITECTURE health, and it PROJECTS ITS VERDICT (FR-GV-20 AC 1:
         // "`session_end`, `check_rules`, and `health` all fail (exit 1)" on
@@ -203,55 +203,55 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // at exit 0. The read-model is still returned in full: diagnosing the
         // desync is what `health` is FOR, so the fault is reported, not raised.
         Commands::Health { no_reconcile, member } => {
-            out.report_gate_for(root, &member, |e| e.health(!no_reconcile), |r| r.ok)
+            out.report_gate_for(root, &member, |e| e.quality().health(!no_reconcile), |r| r.ok)
         }
         // CR-052 / FR-GV-18/19/20: structural-integrity guards — a corrupted or
         // drifted graph is a failure a human or CI must see, not a silent read.
-        Commands::Doctor => out.report_gate(root, |e| e.doctor(), |r| crate::violation_code(r.ok)),
-        Commands::Verify => out.report_gate(root, |e| e.verify(), |r| crate::violation_code(r.ok)),
+        Commands::Doctor => out.report_gate(root, |e| e.quality().doctor(), |r| crate::violation_code(r.ok)),
+        Commands::Verify => out.report_gate(root, |e| e.quality().verify(), |r| crate::violation_code(r.ok)),
         // The session gate (FR-GV-04/05) without an MCP host (FR-CL-06):
         // `session-start` records its snapshot (the baseline on a first run) and always exits 0;
         // `session-end` projects the regression verdict onto exit 1 the way
         // `gate` does, so a CLI-directed agent can detect a failing gate.
-        Commands::SessionStart => out.try_query(root, |e| e.session_start()),
-        Commands::SessionEnd => out.report_gate(root, |e| e.session_end(), GateResult::exit_code),
-        Commands::Evolution { limit, member } => out.try_query_for(root, &member, |e| e.evolution(limit)),
+        Commands::SessionStart => out.try_query(root, |e| e.quality().session_start()),
+        Commands::SessionEnd => out.report_gate(root, |e| e.quality().session_end(), GateResult::exit_code),
+        Commands::Evolution { limit, member } => out.try_query_for(root, &member, |e| e.quality().readouts().evolution(limit)),
         Commands::Dsm {
             granularity,
             no_reconcile,
             member,
-        } => out.try_query_for(root, &member, |e| e.dsm(granularity, !no_reconcile)),
+        } => out.try_query_for(root, &member, |e| e.quality().readouts().dsm(granularity, !no_reconcile)),
         Commands::DocGaps { limit, no_reconcile } => {
-            out.try_query(root, |e| e.doc_gaps(limit, !no_reconcile))
+            out.try_query(root, |e| e.quality().readouts().doc_gaps(limit, !no_reconcile))
         }
         // The uncapped offender listing (FR-QM-19): one `Engine` call shared
         // with its MCP twin; a bad glob or dimension is a config error (exit 2).
         Commands::Offenders { path, dimension, member } => {
             let filter = OffendersFilter::parse(path.as_deref(), dimension.as_deref())?;
-            out.try_query_for(root, &member, |e| e.offenders(&filter))
+            out.try_query_for(root, &member, |e| e.quality().readouts().offenders(&filter))
         }
         // The branch delta (FR-GV-24): one `Engine` call shared with its MCP
         // twin. Advisory — it exits 1 only when it could not measure, and
         // says on stderr whether the shadow before-state was built or reused.
         // `--branches` (FR-GV-28): the shared-budget projection, report only (exit 0).
         // `--headroom` (FR-GV-29): the room left under those budgets; exit 1 only when the base cannot be measured.
-        Commands::Review { base, headroom: true, subjects, near, member, .. } => out.report_gate_for(root, &member, |e| e.review_headroom(base.as_deref(), &subjects, near), |r| r.measured),
-        Commands::Review { base, branches, member, .. } if !branches.is_empty() => out.try_query_for(root, &member, |e| e.review_branches(base.as_deref(), &branches)),
+        Commands::Review { base, headroom: true, subjects, near, member, .. } => out.report_gate_for(root, &member, |e| e.quality().review().headroom(base.as_deref(), &subjects, near), |r| r.measured),
+        Commands::Review { base, branches, member, .. } if !branches.is_empty() => out.try_query_for(root, &member, |e| e.quality().review().branches(base.as_deref(), &branches)),
         Commands::Review { base, member, .. } => out.report_gate_for(root, &member, |e| {
-            let review = e.review(base.as_deref())?;
+            let review = e.quality().review().delta(base.as_deref())?;
             if let Some(note) = review.before_state_cache.note() { eprintln!("logos review: {note}"); }
             Ok(review)
         }, |r| r.measured),
         // The "where to start" list (FR-QM-17): one `Engine` call shared with
         // its MCP twin.
-        Commands::Improvements { member } => out.try_query_for(root, &member, |e| e.improvements()),
+        Commands::Improvements { member } => out.try_query_for(root, &member, |e| e.quality().readouts().improvements()),
         Commands::Hotspots {
             limit,
             untested,
             production_scope,
             with_findings,
             member,
-        } => out.try_query_for(root, &member, |e| e.hotspots_with_findings(limit, untested, production_scope, with_findings)),
+        } => out.try_query_for(root, &member, |e| e.history().hotspots_with_findings(limit, untested, production_scope, with_findings)),
         // The coverage evidence tier (CR-007): each sub-subcommand is one `Engine`
         // call shared with its MCP twin.
         // A run stopped by SIGINT or SIGTERM kills the tool it started — in a
@@ -260,15 +260,15 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             logos_core::jobs::stop_on_signal(logos_core::jobs::StopExit::Interrupted);
             match command {
                 CoverageCommands::Ingest { report, format } => {
-                    out.try_query(root, |e| e.coverage_ingest(&report, format.as_deref()))
+                    out.try_query(root, |e| e.coverage().ingest(&report, format.as_deref()))
                 }
-                CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage_status()),
-                CoverageCommands::Refresh { consent } => out.report_gate(root, |e| e.coverage_refresh(consent), logos_core::coverage::CoverageRunSummary::exit_code),
-                CoverageCommands::Run { tool, consent, dependency_consent } => out.report_gate(root, |e| e.coverage_run_adding(tool.as_deref(), consent, dependency_consent), logos_core::coverage::CoverageRunSummary::exit_code),
+                CoverageCommands::Status { member } => out.try_query_for(root, &member, |e| e.coverage().status()),
+                CoverageCommands::Refresh { consent } => out.report_gate(root, |e| e.coverage().refresh(consent), logos_core::coverage::CoverageRunSummary::exit_code),
+                CoverageCommands::Run { tool, consent, dependency_consent } => out.report_gate(root, |e| e.coverage().run_adding(tool.as_deref(), consent, dependency_consent), logos_core::coverage::CoverageRunSummary::exit_code),
                 // Per-user installs need no index: the engine is only opened (FR-CV-17).
                 CoverageCommands::Install { from, consent } => {
                     let request = logos_core::tools::surface::CoverageInstallRequest { from, consent };
-                    Engine::open(root).coverage_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
+                    Engine::open(root).coverage().install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
                 }
             }
         }
@@ -282,28 +282,28 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
             match command {
                 SecurityCommands::Scan { consent, install: false, scanners, paths } => {
                     let request = ScanRequest::new(scanners, paths);
-                    out.try_query(root, |e| e.security_scan_selected(consent, &request, |_| {}))
+                    out.try_query(root, |e| e.security().scan_selected(consent, &request, |_| {}))
                 }
-                SecurityCommands::Scan { consent, install: true, .. } => out.try_query(root, |e| e.security_scan_install(consent)),
+                SecurityCommands::Scan { consent, install: true, .. } => out.try_query(root, |e| e.security().scan_install(consent)),
                 // Per-user installs need no index: the engine is only opened (FR-SC-22).
                 SecurityCommands::Install { scanners, all, update, from, consent, accept_codeql_licence } => {
                     let accept_licences = accept_codeql_licence.then(|| "codeql".to_string()).into_iter().collect();
                     let request = InstallRequest { tools: Selection::named_or_all(scanners, all), update, from, consent, accept_licences };
-                    Engine::open(root).security_install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
+                    Engine::open(root).security().tools().install(&request).and_then(|done| out.print(&done).map(|()| done.exit_code()))
                 }
-                SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security_uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
-                SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security_ingest(&report)),
+                SecurityCommands::Uninstall { scanners, all } => out.print(&Engine::open(root).security().tools().uninstall(&Selection::named_or_all(scanners, all))?).map(|()| 0),
+                SecurityCommands::Ingest { report } => out.try_query(root, |e| e.security().ingest(&report)),
                 SecurityCommands::Reconfirm { fingerprint, evidence } => {
-                    out.try_query(root, |e| e.security_reconfirm_with_evidence(&fingerprint, &evidence))
+                    out.try_query(root, |e| e.security().findings().reconfirm_with_evidence(&fingerprint, &evidence))
                 }
-                SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security_status()),
+                SecurityCommands::Status { member } => out.try_query_for(root, &member, |e| e.security().status()),
                 SecurityCommands::Findings { severity, scanner, category, path, suppression, edition, scope, member } => {
                     let tokens = [severity, scanner, category, path, suppression, edition, scope];
                     let [severity, scanner, category, path, suppression, edition, scope] = tokens.each_ref().map(Option::as_deref);
                     let filter = FindingsFilter::parse(severity, scanner, category, path, suppression, edition, scope)?;
-                    out.try_query_for(root, &member, |e| e.security_findings(&filter))
+                    out.try_query_for(root, &member, |e| e.security().findings().list(&filter))
                 }
-                SecurityCommands::Bless => out.report_gate(root, Engine::security_bless, logos_core::security::SecurityBless::exit_code),
+                SecurityCommands::Bless => out.report_gate(root, |e| e.security().findings().bless(), logos_core::security::SecurityBless::exit_code),
             }
         }
         // The session-start quality-report hook (S-638): a core command, not a
@@ -317,11 +317,11 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
         // Reads telemetry.db / the store without a built graph, so `Engine::open`
         // (like the MCP twins), not the index-guarded helper (NFR-OO-05).
         Commands::Stats { window } => {
-            out.print(&Engine::open(root).stats(window))?;
+            out.print(&Engine::open(root).graph().stats(window))?;
             Ok(0)
         }
         Commands::Languages => {
-            out.print(&Engine::open(root).languages())?;
+            out.print(&Engine::open(root).graph().languages())?;
             Ok(0)
         }
         // stdout belongs to JSON-RPC until the host disconnects (S-017); the
@@ -350,6 +350,6 @@ pub(crate) fn dispatch(command: Commands, root: &Path, out: &Output, host: &Exte
 /// same core call.
 fn hook_emit(root: &Path, args: crate::HookArgs, out: &Output) -> Result<i32> {
     let engine = Engine::open(root);
-    out.print(&engine.quality_report_hook_emit(args.force)?)?;
+    out.print(&engine.quality().readouts().report_hook_emit(args.force)?)?;
     Ok(0)
 }

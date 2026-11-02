@@ -142,7 +142,7 @@ impl Fixture {
         if let Some(manifest) = manifest {
             engine = engine.with_tools_manifest(manifest);
         }
-        engine.index();
+        engine.pipeline().index();
         let engine = Arc::new(engine);
         f.router = web::router_with_intent(Arc::clone(&engine), f.intent.clone());
         f.engine = Some(engine);
@@ -888,7 +888,7 @@ async fn add_dependency_for_a_tool_missing_none_is_refused() {
 async fn an_install_while_the_project_lock_is_held_is_refused() {
     bounded(async {
         let f = Fixture::rust(false);
-        let lock_file = f.engine.as_ref().unwrap().security_lock_file().unwrap();
+        let lock_file = f.engine.as_ref().unwrap().security().lock_file().unwrap();
         let holder = logos_core::jobs::lock::Holder::here(logos_core::jobs::JobKind::SecurityScan, None);
         let held = logos_core::jobs::lock::ProjectLock::take(&lock_file, &holder).unwrap().expect("the lock is free");
         let (status, body) = f.post(INSTALL, &json!({})).await;

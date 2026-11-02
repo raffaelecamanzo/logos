@@ -99,15 +99,15 @@ fn config_apply_on_config_reconciles_to_the_new_admission_policy() {
 
     // Index under the default (wide) config: util.rs is admitted and the
     // cross-file call binds.
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed");
 
     // Save a narrowing edit through the real write seam, then Apply it.
     engine
-        .config_write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
+        .config().write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
         .expect("a valid config write succeeds");
     let outcome = engine
-        .config_apply(PolicyFile::Config)
+        .config().apply(PolicyFile::Config)
         .expect("config apply runs");
 
     match outcome {
@@ -184,10 +184,10 @@ fn config_apply_on_rules_re_evaluates_governance_without_a_reindex() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // Baseline: a clean scan with no contract finds no violations.
-    let baseline = engine.scan(false).expect("baseline scan");
+    let baseline = engine.quality().scan(false).expect("baseline scan");
     assert!(
         baseline.violations.is_empty(),
         "no contract yet, so no violations"
@@ -196,10 +196,10 @@ fn config_apply_on_rules_re_evaluates_governance_without_a_reindex() {
 
     // Save a stricter rules.toml, then Apply it.
     engine
-        .config_write(PolicyFile::Rules, LAYERED_CONTRACT)
+        .config().write(PolicyFile::Rules, LAYERED_CONTRACT)
         .expect("a valid rules write succeeds");
     let outcome = engine
-        .config_apply(PolicyFile::Rules)
+        .config().apply(PolicyFile::Rules)
         .expect("rules apply runs");
 
     match outcome {
@@ -244,12 +244,12 @@ fn config_write_without_apply_leaves_the_graph_unchanged() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(has_nodes_for_file(rt, "src/util.rs"), "util.rs is indexed");
 
     // Save a narrowing edit but DO NOT apply it.
     engine
-        .config_write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
+        .config().write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
         .expect("a valid config write succeeds");
 
     // The graph is untouched: Save runs no pipeline (FR-UI-13).
@@ -273,11 +273,11 @@ fn config_apply_on_a_transient_engine_is_an_error() {
     let engine = Engine::open(tmp.path());
 
     assert!(
-        engine.config_apply(PolicyFile::Config).is_err(),
+        engine.config().apply(PolicyFile::Config).is_err(),
         "a config apply on a transient engine fails loud (no runtime)"
     );
     assert!(
-        engine.config_apply(PolicyFile::Rules).is_err(),
+        engine.config().apply(PolicyFile::Rules).is_err(),
         "a rules apply on a transient engine fails loud (no runtime)"
     );
 }
@@ -365,13 +365,13 @@ fn config_apply_is_a_single_facade_span_on_each_path() {
     let tmp_cfg = TempDir::new().expect("temp root");
     write_cross_file_fixture(tmp_cfg.path());
     let engine_cfg = Engine::start(tmp_cfg.path()).expect("engine starts");
-    engine_cfg.index();
+    engine_cfg.pipeline().index();
     engine_cfg
-        .config_write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
+        .config().write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
         .expect("config write");
     let cfg_tools = captured_tools(|| {
         engine_cfg
-            .config_apply(PolicyFile::Config)
+            .config().apply(PolicyFile::Config)
             .expect("config apply runs");
     });
     assert_eq!(
@@ -388,13 +388,13 @@ fn config_apply_is_a_single_facade_span_on_each_path() {
     let tmp_rules = TempDir::new().expect("temp root");
     write(tmp_rules.path(), "src/lib.rs", "pub fn api() {}\n");
     let engine_rules = Engine::start(tmp_rules.path()).expect("engine starts");
-    engine_rules.index();
+    engine_rules.pipeline().index();
     engine_rules
-        .config_write(PolicyFile::Rules, LAYERED_CONTRACT)
+        .config().write(PolicyFile::Rules, LAYERED_CONTRACT)
         .expect("rules write");
     let rules_tools = captured_tools(|| {
         engine_rules
-            .config_apply(PolicyFile::Rules)
+            .config().apply(PolicyFile::Rules)
             .expect("rules apply runs");
     });
     assert_eq!(
@@ -417,7 +417,7 @@ fn config_apply_is_safe_beside_a_concurrent_writer() {
 
     let engine = Arc::new(Engine::start(tmp.path()).expect("engine starts"));
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // Apply must be safe beside a concurrent writer. The `serve` watcher issues
     // `sync` calls; here a background thread issues reconciling `scan`s — both
@@ -430,15 +430,15 @@ fn config_apply_is_safe_beside_a_concurrent_writer() {
     let handle = std::thread::spawn(move || {
         for _ in 0..20 {
             // Reconciling scan — exercises the same writer the apply uses.
-            writer.scan(true).expect("concurrent scan runs");
+            writer.quality().scan(true).expect("concurrent scan runs");
         }
     });
 
     engine
-        .config_write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
+        .config().write(PolicyFile::Config, "exclude = [\"src/util.rs\"]\n")
         .expect("config write");
     let outcome = engine
-        .config_apply(PolicyFile::Config)
+        .config().apply(PolicyFile::Config)
         .expect("config apply runs beside the concurrent writer");
     assert!(
         matches!(outcome, ConfigApplyOutcome::Reconciled { .. }),

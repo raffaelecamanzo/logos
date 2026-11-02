@@ -45,7 +45,7 @@
 //! sole provider is a fact about all of them. Every read names the members it
 //! read ([`MemberReads`]).
 //!
-//! [`sync_stamp`]: crate::Engine::sync_stamp
+//! [`sync_stamp`]: crate::Graph::sync_stamp
 //! [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
 //! [FR-WS-04]: ../../../docs/specs/requirements/FR-WS-04.md
 //! [FR-CG-09]: ../../../docs/specs/requirements/FR-CG-09.md
@@ -588,9 +588,9 @@ impl MemberContracts for crate::Engine {
     }
 
     fn contract_stamp(&self) -> u64 {
-        // The inherent `Engine::sync_stamp` returns a `SyncStamp(u64)`; the
+        // The inherent `Graph::sync_stamp` returns a `SyncStamp(u64)`; the
         // bridge caches on the bare monotonic value.
-        self.sync_stamp().0
+        self.graph().sync_stamp().0
     }
 
     fn restart_stamp(root: &Path) -> Option<u64> {

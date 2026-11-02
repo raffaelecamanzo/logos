@@ -37,7 +37,8 @@
 //!
 //! # Why every production file, and why an unreadable call site panics
 //!
-//! Today the four `traced_with` call sites all sit in `engine.rs`, but plain
+//! Today the four `traced_with` call sites all sit in `engine/navigation.rs` (in
+//! `engine.rs` until S-829 split it by feature area), but plain
 //! `traced*` calls already live in `config/workspace_tier.rs`,
 //! `federation/manifest.rs` and `pipeline/mod.rs`, and `watch/mod.rs` emits
 //! telemetry events directly. The walk once scanned `engine.rs` alone and

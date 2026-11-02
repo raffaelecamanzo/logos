@@ -328,11 +328,11 @@ fn a_recorded_dependency_consent_covers_a_later_run_for_that_command_only() {
     let engine = crate::Engine::start(&w.root).unwrap().with_scan_environment(w.env());
     // vitest will now start, so the job's run needs the execution consent for
     // it too — what the web dialog records before the job starts.
-    let refused = engine.coverage_run_reporting(None, |_| {}).expect_err("the execution consent lacks vitest");
+    let refused = engine.coverage().run_reporting(None, |_| {}).expect_err("the execution consent lacks vitest");
     assert!(format!("{refused:#}").contains("for vitest —"), "{refused:#}");
     assert!(w.manager_calls().is_empty(), "nothing is added before the execution consent");
     crate::config::record_coverage_consent(Some(&w.user), &w.root, &["vitest"], None).unwrap();
-    let summary = engine.coverage_run_reporting(None, |_| {}).expect("the job's run");
+    let summary = engine.coverage().run_reporting(None, |_| {}).expect("the job's run");
     assert_eq!(only_dependency(&summary).outcome, DependencyOutcome::Added);
     assert_eq!(w.manager_calls(), [["pnpm", "add", "-D", "@vitest/coverage-v8@3"]]);
 }
@@ -347,7 +347,7 @@ fn the_jobs_run_never_gives_the_dependency_consent() {
     w.commit_project();
     crate::config::record_coverage_consent(Some(&w.user), &w.root, &["vitest"], None).unwrap();
     let engine = crate::Engine::start(&w.root).unwrap().with_scan_environment(w.env());
-    let summary = engine.coverage_run_reporting(None, |_| {}).expect("the job's run");
+    let summary = engine.coverage().run_reporting(None, |_| {}).expect("the job's run");
     assert!(matches!(only_dependency(&summary).outcome, DependencyOutcome::Pending { .. }), "{summary:#?}");
     assert!(w.manager_calls().is_empty(), "no package manager ran");
     assert!(!w.dependency_consent_recorded());

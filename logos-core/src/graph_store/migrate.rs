@@ -4538,6 +4538,174 @@ mod tests {
         assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 44");
     }
 
+    /// Migration 45 (S-820, CR-254) appends one nullable `nodes` column, the
+    /// callable's parameter shape, and clears every hash so the next scan
+    /// re-extracts each file. Every other column, edge, shingle and ledger row
+    /// crosses unchanged.
+    #[test]
+    fn migration_45_adds_the_callable_signature_column() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..44]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'src/repo.h', 'cpp', 'h-a'), (2, 'src/lib.rs', 'rust', 'h-b');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local r'), (2, 'local s');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, has_body) VALUES
+                 (10, 1, 2, 'Repo', 1, NULL), (11, 2, 8, 'save', 1, 0);
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 1);
+             INSERT INTO shingles (node_id, hash) VALUES (11, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved) VALUES
+                 (1, 'local s', 'Repo::save', 2, 2, 3, 0);",
+        )
+        .unwrap();
+        let (nodes_before, edges_before, shingles_before) = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..45]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 45, "44 → 45, exactly one step");
+        let (nodes_after, edges_after, shingles_after) = read_graph(&conn);
+        assert_eq!(nodes_after.len(), nodes_before.len());
+        for (old, new) in nodes_before.iter().zip(&nodes_after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one nodes column added");
+            assert_eq!(&new[..old.len()], &old[..], "every pre-v45 nodes column is byte-for-byte unchanged");
+            assert_eq!(&new[old.len()..], ["NULL"], "not recorded on any existing row");
+        }
+        let last: String = conn
+            .query_row("SELECT name FROM pragma_table_info('nodes') ORDER BY cid DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, "callable_signature", "the appended column is the S-820 add");
+        assert_eq!((edges_after, shingles_after), (edges_before, shingles_before));
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let hashes: Vec<Option<String>> = conn
+            .prepare("SELECT content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(hashes, [None, None], "every hash is cleared so the next scan re-extracts");
+        // An empty shape is a shape: `f()` records `''`, never NULL.
+        assert!(conn.execute("UPDATE nodes SET callable_signature = '' WHERE id = 11", []).is_ok());
+
+        // Forward-only: re-running the full ledger never re-applies migration 45.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 45", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 45 is recorded once and never re-applied");
+        conn.execute_batch("INSERT INTO nodes_fts(nodes_fts) VALUES('integrity-check');")
+            .expect("FTS index consistent (an in-place ADD COLUMN, NFR-RA-09)");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 45");
+    }
+
+    /// Migration 46 (S-830, [CR-260] G1) changes no schema: it clears every
+    /// `files.content_hash`, so the next scan re-extracts each file and records
+    /// its Go callables' signatures in the migration-45 column. Every node,
+    /// edge, shingle and ledger row crosses byte-for-byte, a signature already
+    /// recorded included.
+    ///
+    /// [CR-260]: ../../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+    #[test]
+    fn migration_46_clears_every_hash_and_changes_no_row() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..45]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash) VALUES
+                 (1, 'zapcore/core.go', 'go', 'h-a'), (2, 'src/repo.h', 'cpp', 'h-b');
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local c'), (2, 'local s');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id, has_body, callable_signature) VALUES
+                 (10, 1, 2, 'ioCore', 1, NULL, NULL), (11, 2, 8, 'save', 2, 0, 'int,');
+             INSERT INTO edges (source, target, kind) VALUES (10, 11, 1);
+             INSERT INTO shingles (node_id, hash) VALUES (11, 111);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved) VALUES
+                 (1, 'local c', 'Core', 2, 2, 3, 0);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+        let columns_before = read_table(&conn, "pragma_table_info('nodes')", "cid");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..46]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 46, "45 → 46, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "every node, edge and shingle is unchanged");
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        assert_eq!(read_table(&conn, "pragma_table_info('nodes')", "cid"), columns_before, "no column is added");
+        let hashes: Vec<Option<String>> = conn
+            .prepare("SELECT content_hash FROM files ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(hashes, [None, None], "every hash is cleared so the next scan re-extracts");
+
+        // Forward-only: re-running the full ledger never re-applies migration 46.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 46", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 46 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 46");
+    }
+
+    /// Migration 47 (S-832, CR-261) appends one nullable `files` column, the
+    /// facade class the file's own annotation names, and clears every hash so
+    /// the next scan re-extracts each file. Every other column, the graph and
+    /// the ledger cross unchanged.
+    #[test]
+    fn migration_47_adds_the_file_facade_and_triggers_reextraction() {
+        let mut conn = contract_conn();
+        apply_migrations_from(&mut conn, &MIGRATIONS[..46]).unwrap();
+        conn.execute_batch(
+            "INSERT INTO files (id, path, language, content_hash, namespace) VALUES
+                 (1, 'src/Strings.kt', 'kotlin', 'h-a', 'app.text'), (2, 'src/lib.rs', 'rust', 'h-b', NULL);
+             INSERT INTO symbols (id, symbol) VALUES (1, 'local s'), (2, 'local l');
+             INSERT INTO nodes (id, symbol_id, kind, name, file_id) VALUES (10, 1, 7, 'slug', 1), (11, 2, 1, 'lib', 2);
+             INSERT INTO edges (source, target, kind) VALUES (11, 10, 2);
+             INSERT INTO unresolved_refs (file_id, source_symbol, target, form, kind, line, resolved) VALUES
+                 (2, 'local l', 'Slugs.slug', 2, 2, 3, 0);",
+        )
+        .unwrap();
+        let graph_before = read_graph(&conn);
+        let ledger_before = read_table(&conn, "unresolved_refs", "id");
+        let files_before = read_table(&conn, "files", "id");
+
+        apply_migrations_from(&mut conn, &MIGRATIONS[..47]).unwrap();
+        assert_eq!(current_version(&conn).unwrap(), 47, "46 → 47, exactly one step");
+        assert_eq!(read_graph(&conn), graph_before, "nodes, edges and shingles are untouched");
+        assert_eq!(read_table(&conn, "unresolved_refs", "id"), ledger_before, "the ledger is unchanged");
+        let files_after = read_table(&conn, "files", "id");
+        let hash: i64 = conn
+            .query_row("SELECT cid FROM pragma_table_info('files') WHERE name = 'content_hash'", [], |r| r.get(0))
+            .unwrap();
+        let hash = usize::try_from(hash).unwrap();
+        for (old, new) in files_before.iter().zip(&files_after) {
+            assert_eq!(new.len(), old.len() + 1, "exactly one files column added");
+            for (i, (was, is)) in old.iter().zip(new).enumerate() {
+                if i == hash {
+                    assert_eq!(is, "NULL", "every hash is cleared so the next scan re-extracts");
+                } else {
+                    assert_eq!(is, was, "every other pre-v47 files column is unchanged");
+                }
+            }
+            assert_eq!(&new[old.len()..], ["NULL"], "not recorded on any existing row");
+        }
+        let last: String = conn
+            .query_row("SELECT name FROM pragma_table_info('files') ORDER BY cid DESC LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(last, "facade", "the appended column is the S-832 add");
+        conn.execute("UPDATE files SET facade = 'Slugs' WHERE id = 1", [])
+            .expect("a facade name is admitted");
+
+        // Forward-only: re-running the full ledger never re-applies migration 47.
+        apply_migrations_from(&mut conn, MIGRATIONS).unwrap();
+        let recorded: i64 = conn
+            .query_row("SELECT count(*) FROM schema_versions WHERE version = 47", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(recorded, 1, "migration 47 is recorded once and never re-applied");
+        assert_eq!(foreign_key_violations(&conn), 0, "no FK violations after migration 47");
+    }
+
     /// Every column of `nodes`, `edges` and `shingles`, as SQLite reports them —
     /// so "unchanged" is content, not row counts.
     ///

@@ -690,7 +690,7 @@ pub fn enable(
         .map(|member| MemberReport {
             name: member.name.clone(),
             root: member.root.display().to_string(),
-            outcome: match crate::Engine::init_with(
+            outcome: match crate::Setup::init_with(
                 &member.root,
                 &InitOptions {
                     workspace_member: true,
@@ -699,7 +699,7 @@ pub fn enable(
             ) {
                 Ok(result) => MemberOutcome::Ready(result),
                 // `{err:#}` (not `{err}`/`.to_string()`) to keep the causal
-                // chain: `Engine::init_with`'s steps wrap I/O failures with
+                // chain: `Setup::init_with`'s steps wrap I/O failures with
                 // `.with_context(...)` (e.g. "writing .logos/config.toml"),
                 // so the bare Display would show only that wrapper and drop
                 // the actual underlying cause (permission denied, disk
@@ -972,7 +972,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         init_repo(&tmp.path().join("api"));
 
-        // A member "root" that is actually a plain file: `Engine::init_with`
+        // A member "root" that is actually a plain file: `Setup::init_with`
         // fails trying to create `.logos/` under it, the other member still
         // succeeds.
         let broken_root = tmp.path().join("ghost");

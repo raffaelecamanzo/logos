@@ -242,7 +242,7 @@ fn after_the_next_reconcile_the_store_equals_a_fresh_index_and_verifies() {
     project(root, FIXTURE_COORDINATE);
     install_store(root);
     let engine = Engine::start(root).unwrap();
-    engine.check_rules(None, true).unwrap();
+    engine.quality().check_rules(None, true).unwrap();
 
     assert_eq!(count(root, "symbols"), count(root, "nodes"), "one symbol row per node");
     assert!(
@@ -251,9 +251,9 @@ fn after_the_next_reconcile_the_store_equals_a_fresh_index_and_verifies() {
     );
     let fresh = TempDir::new().unwrap();
     project(fresh.path(), FIXTURE_COORDINATE);
-    Engine::start(fresh.path()).unwrap().index();
+    Engine::start(fresh.path()).unwrap().pipeline().index();
     assert_eq!(node_symbols(root), node_symbols(fresh.path()), "the migrated store is the fresh one");
-    let report = engine.verify().unwrap();
+    let report = engine.quality().verify().unwrap();
     assert!(report.ok, "verify finds no drift after the migration: {report:#?}");
 }
 
@@ -317,13 +317,13 @@ fn a_store_whose_configuration_does_not_load_is_left_as_it_was_until_it_does() {
 
 #[test]
 fn a_phase_reported_engine_start_migrates_the_store_too() {
-    // `start_with_phase_report` mirrors `start_with_configs` step for step; a
+    // `ColdStartPhases::measure` mirrors `Engine::start_with` step for step; a
     // step it missed would make the diagnostic path open a store differently.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     project(root, FIXTURE_COORDINATE);
     install_store(root);
-    drop(Engine::start_with_phase_report(root).unwrap());
+    drop(logos_core::ColdStartPhases::measure(root).unwrap());
     assert_eq!(metadata(root, SYMBOL_COORDINATE_KEY).as_deref(), Some(FIXTURE_COORDINATE));
     assert!(node_symbols(root).iter().all(|s| carries(s, FIXTURE_COORDINATE)));
 }
@@ -516,7 +516,7 @@ fn a_recorded_coordinate_over_an_empty_store_follows_a_changed_id() {
     let root = tmp.path();
     fs::create_dir_all(root.join(".logos")).unwrap();
     set_id(root, "example.com/first");
-    Engine::start(root).unwrap().index();
+    Engine::start(root).unwrap().pipeline().index();
     assert_eq!(metadata(root, SYMBOL_COORDINATE_KEY).as_deref(), Some("example.com/first"));
     assert_eq!(count(root, "symbols"), 0, "the index admitted nothing");
 
@@ -526,6 +526,6 @@ fn a_recorded_coordinate_over_an_empty_store_follows_a_changed_id() {
 
     fs::create_dir_all(root.join("src")).unwrap();
     fs::write(root.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     assert!(node_symbols(root).contains(&"logos . example.com/second . src/`lib.rs`/run().".to_string()));
 }

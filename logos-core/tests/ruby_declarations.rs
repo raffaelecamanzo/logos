@@ -464,7 +464,7 @@ fn the_indexed_file_count_includes_ruby_build_files() {
     );
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let mut files: Vec<String> = engine
         .runtime()
@@ -505,7 +505,7 @@ fn sync_equals_a_full_reindex_as_declarations_and_build_files_arrive() {
     }
     coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine starts");
-    engine_a.index();
+    engine_a.pipeline().index();
     let root = tmp_a.path().canonicalize().expect("canonical root");
     let changed: Vec<_> = edits
         .iter()
@@ -514,7 +514,7 @@ fn sync_equals_a_full_reindex_as_declarations_and_build_files_arrive() {
             root.join(rel)
         })
         .collect();
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
 
     let tmp_b = tempfile::tempdir().unwrap();
     for (rel, text) in std::iter::once(&initial[1]).chain(edits.iter()) {
@@ -522,7 +522,7 @@ fn sync_equals_a_full_reindex_as_declarations_and_build_files_arrive() {
     }
     coordinate::pin(tmp_b.path());
     let engine_b = Engine::start(tmp_b.path()).expect("engine starts");
-    engine_b.index();
+    engine_b.pipeline().index();
     let (a, b) = (
         graph_fingerprint(engine_a.runtime().unwrap()),
         graph_fingerprint(engine_b.runtime().unwrap()),

@@ -367,7 +367,7 @@ argv() {
             esac
             ;;
         gosec)
-            printf '%s\n' -fmt sarif -out "$r/out.sarif" -no-fail -quiet
+            printf '%s\n' -fmt sarif -out "$r/out.sarif" -no-fail
             case "$m" in
                 exclude-dir-name) printf '%s\n' -exclude-dir target ./... ;;
                 exclude-dir-caret) printf '%s\n' -exclude-dir '^target' ./... ;;

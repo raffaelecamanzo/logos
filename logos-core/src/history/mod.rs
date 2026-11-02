@@ -112,7 +112,7 @@ pub fn mine(root: &Path, cfg: &EffectiveHistory) -> Result<MineOutcome> {
 /// row to the series ([FR-GH-03]..[FR-GH-05], [FR-GH-09]).
 ///
 /// The temporal-tier entrypoint the surfaces ([S-048]) read through (via
-/// [`Engine::temporal_report`](crate::Engine::temporal_report)). It mines
+/// [`History::temporal_report`](crate::History::temporal_report)). It mines
 /// incrementally (lazy — only reached on a temporal read, [BR-26]), recomputes
 /// the metrics deterministically from the stored facts at the *current* HEAD and
 /// config ([BR-27], [NFR-RA-06]), and — for a real evaluation — appends one

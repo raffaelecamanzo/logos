@@ -1,5 +1,5 @@
 //! The MCP `scan` carries the [FR-QM-18] coverage warning the CLI `scan --json`
-//! does (S-523): both serialize the one `Engine::scan` result, whose warning
+//! does (S-523): both serialize the one `Quality::scan` result, whose warning
 //! comes from the shared thin-graph helper.
 //!
 //! **What it does NOT cover.** The CLI binary's own exit codes —
@@ -64,7 +64,7 @@ async fn the_mcp_scan_carries_the_helpers_one_coverage_warning() {
     write(root, "src/net/net.c", "int step(int x);\nint send(int x) { return step(x); }\n");
     let expected = {
         let engine = Engine::start(root).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         engine
             .runtime()
             .expect("runtime")

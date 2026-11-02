@@ -6,7 +6,7 @@
 //!
 //! The story it guards is a cost, not an output. Telemetry lives in a store
 //! separate from the graph ([ADR-13]), but its only public accessor is
-//! `Engine::stats(window)` — so the obvious fan-out constructs one engine per
+//! `Graph::stats(window)` — so the obvious fan-out constructs one engine per
 //! member on a single view load and undoes the warm-only-the-default policy the
 //! federated serve exists to keep. A view that produced correct figures at the
 //! cost of N engines does not satisfy this story, so the assertion here is an
@@ -20,7 +20,7 @@
 //! measurement is: walk `workspace_status` first, snapshot
 //! `engine_starts` / `reconstructions` / `resident_count` /
 //! `live_read_connections`, run the aggregate, and require every one of them to
-//! be unchanged. A fan-out through `Engine::stats` moves `engine_starts` on the
+//! be unchanged. A fan-out through `Graph::stats` moves `engine_starts` on the
 //! very first member and fails here.
 //!
 //! # Why this file is separate from `workspace_connection_budget.rs`
@@ -151,7 +151,7 @@ fn the_statistics_aggregate_adds_no_engine_and_no_connection() {
     assert_eq!(
         after, before,
         "loading the aggregate moved the workspace's engine cost; a fan-out \
-         through `Engine::stats` would show here as {} extra engine start(s) \
+         through `Graph::stats` would show here as {} extra engine start(s) \
          ([NFR-PE-10])",
         after.engine_starts.saturating_sub(before.engine_starts),
     );

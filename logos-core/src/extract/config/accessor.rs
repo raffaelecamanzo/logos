@@ -182,9 +182,9 @@ pub struct DeclaredTypes {
 /// and its `.type` companion (`extract::receiver`).
 ///
 /// Each names a declared name's node and the node whose text is its type, for
-/// a declaration the walk misreads — C#'s `var x = new T()` (the walk reads
-/// `var`), `T? x` (the walk reads `T?`, which names no type) — or never sees,
-/// a C# `foreach (T x in xs)`, whose variable carries no `name` field. The
+/// a declaration the walk misreads — a C# `T? x` field or property, which a
+/// `this.x` receiver reads (the walk reads `T?`, which names no type) — or
+/// never sees, a Scala `val`/`var` pattern. The
 /// companion is the language's type-name normalisation: it names the node
 /// whose text the simple-name rule reads, so no grammar's node kind is named
 /// here ([NFR-MA-01]). A language whose query states none — Java, and the

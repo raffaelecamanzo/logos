@@ -46,30 +46,43 @@
   name: [(identifier) (constant) (setter) (operator)] @symbol.method)
 
 ; ── Instance state (S-564, CR-179, FR-EX-26) ─────────────────────────────────
-; `@symbol.state` marks a declaration that is state of the class or module
-; around it, whatever method or block it sits in (`extract::settle_state`): it
-; is captured on its name alone, owns no scope and no reference, is a Field of
-; the nearest enclosing class or module, and is declared once per name there —
-; at its first occurrence. An `attr_*` symbol or string names `@x`, as the first
-; assignment of `@x` does, so the two are one Field. State outside a class or
-; module is no Field.
+; `@symbol.at_name` marks a field declared at its name (`extract::at_name`):
+; state of the class or module around it, whatever method or block it sits in
+; (`symbol.field_owner "enclosing"`). It is captured on its name alone, owns no
+; scope and no reference, is a Field of the nearest enclosing class or module,
+; and is declared once per name there — at its first occurrence
+; (`symbol.field_order "source"`). An `attr_*` symbol or string names `@x`
+; (`symbol.field_sigil "@"`), as the first assignment of `@x` does, so the two
+; are one Field. State outside a class or module is no Field.
 ; `attr_reader`, `attr_writer` and `attr_accessor` with no receiver: each symbol
 ; or plain string of the list.
 (call
   !receiver
   method: (identifier) @_attr
   arguments: (argument_list
-    [(simple_symbol) @symbol.field @symbol.state
-     (string . (string_content) @symbol.field @symbol.state .)])
-  (#any-of? @_attr "attr_reader" "attr_writer" "attr_accessor"))
+    [(simple_symbol) @symbol.field @symbol.at_name
+     (string . (string_content) @symbol.field @symbol.at_name .)])
+  (#any-of? @_attr "attr_reader" "attr_writer" "attr_accessor")
+  (#set! symbol.field_owner "enclosing")
+  (#set! symbol.field_order "source")
+  (#set! symbol.field_sigil "@"))
 ; An `@x = …` or `@x ||= …` assignment, and each `@x` of `@a, @b = …`.
 (assignment
-  left: (instance_variable) @symbol.field @symbol.state)
+  left: (instance_variable) @symbol.field @symbol.at_name
+  (#set! symbol.field_owner "enclosing")
+  (#set! symbol.field_order "source")
+  (#set! symbol.field_sigil "@"))
 (operator_assignment
-  left: (instance_variable) @symbol.field @symbol.state)
+  left: (instance_variable) @symbol.field @symbol.at_name
+  (#set! symbol.field_owner "enclosing")
+  (#set! symbol.field_order "source")
+  (#set! symbol.field_sigil "@"))
 (assignment
   left: (left_assignment_list
-    (instance_variable) @symbol.field @symbol.state))
+    (instance_variable) @symbol.field @symbol.at_name)
+  (#set! symbol.field_owner "enclosing")
+  (#set! symbol.field_order "source")
+  (#set! symbol.field_sigil "@"))
 
 ; ── Parameter range (S-591, CR-190, FR-EX-32) ────────────────────────────────
 ; The `@arity.*` vocabulary the extraction engine reads (`extract::arity`): a

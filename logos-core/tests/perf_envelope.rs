@@ -248,7 +248,7 @@ fn perf_envelope_full_budget() {
 
     // ── NFR-PE-02: cold index ≤ 30 s ────────────────────────────────────────
     let t = Instant::now();
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     let index_elapsed = t.elapsed();
     assert!(
         !indexed
@@ -285,10 +285,10 @@ fn perf_envelope_full_budget() {
     // ── NFR-PE-07 / AA-04: hydration cache hit on a repeat run ───────────────
     // Two hydrations with no intervening change must serve the second from the
     // resident view — a hit, no rebuild.
-    let before = engine.hydration_stats();
-    let _v1 = engine.hydrate(Granularity::File).expect("first hydrate");
-    let _v2 = engine.hydrate(Granularity::File).expect("second hydrate (no change)");
-    let after = engine.hydration_stats();
+    let before = engine.graph().hydration_stats();
+    let _v1 = engine.graph().hydrate(Granularity::File).expect("first hydrate");
+    let _v2 = engine.graph().hydrate(Granularity::File).expect("second hydrate (no change)");
+    let after = engine.graph().hydration_stats();
     report.push(Check {
         label: "NFR-PE-07 hydration cache hit on repeat",
         detail: format!("hits {} → {}", before.hits, after.hits),
@@ -313,7 +313,7 @@ fn perf_envelope_full_budget() {
         "pub fn perf_edit_marker() -> u64 {\n    perf_edit_helper()\n}\npub fn perf_edit_helper() -> u64 { 7 }\n",
     );
     let t = Instant::now();
-    let sync = engine.sync(&[root.join("src/perf_leaf.rs")]);
+    let sync = engine.pipeline().sync(&[root.join("src/perf_leaf.rs")]);
     let sync_elapsed = t.elapsed();
     assert_eq!(sync.files_added, 1, "the one new leaf file synced: {sync:?}");
     report.push(Check {
@@ -326,9 +326,9 @@ fn perf_envelope_full_budget() {
     // ── NFR-PE-04: warm aggregate scan ≤ 2 s (few dirty files) ───────────────
     // Warm the reconcile once, then time a scan whose reconcile sees nothing
     // dirty — proportional to the (empty) dirty set, not the repo.
-    let _ = engine.scan(true).expect("warm-up scan");
+    let _ = engine.quality().scan(true).expect("warm-up scan");
     let t = Instant::now();
-    let scan = engine.scan(true).expect("warm scan");
+    let scan = engine.quality().scan(true).expect("warm scan");
     let scan_elapsed = t.elapsed();
     assert!(
         scan.signal.is_some(),
@@ -365,7 +365,7 @@ fn perf_envelope_full_budget() {
     // Telemetry was genuinely on throughout (the budget was paid with
     // instrumentation): flush and confirm usage was recorded.
     drop(guard);
-    let stats = Engine::open(&root).stats(None);
+    let stats = Engine::open(&root).graph().stats(None);
     report.push(Check {
         label: "NFR-PE-01 telemetry recorded under load",
         detail: format!("{} calls", stats.calls_total),
@@ -431,18 +431,18 @@ fn run_concurrent_navigation_load(engine: &Arc<Engine>, top_id: usize) -> Vec<Du
                         let t = Instant::now();
                         match query {
                             0 => {
-                                let _ = engine.search(&name, None, Some(10));
+                                let _ = engine.navigation().search(&name, None, Some(10));
                             }
                             1 => {
-                                let _ = engine.node(&name, false);
+                                let _ = engine.navigation().node(&name, false);
                             }
                             2 => {
                                 // A hub is a genuine high-degree target (~1k
                                 // resolved callers) — the worst-case point query.
-                                let _ = engine.callers(&format!("hub_{}", id % 16), Some(50));
+                                let _ = engine.navigation().callers(&format!("hub_{}", id % 16), Some(50));
                             }
                             _ => {
-                                let _ = engine.callees(&name, Some(50));
+                                let _ = engine.navigation().callees(&name, Some(50));
                             }
                         }
                         local.push(t.elapsed());
@@ -534,7 +534,7 @@ fn cold_index_phase_baseline() {
 
     // The cold index — a fresh store, first index() is the cold path.
     let t = Instant::now();
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     let wall = t.elapsed();
     let rss_mib = peak_rss_bytes() / (1024 * 1024);
     drop(guard);
@@ -618,7 +618,7 @@ fn beyond_envelope_degrades_with_advisory_not_crash() {
     let (loc, top_id) = generate_repo(&root, goal);
 
     let engine = Engine::start(&root).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert!(
         indexed.files_indexed > 0,
         "a beyond-envelope repo still indexes correctly: {indexed:?}"
@@ -633,7 +633,7 @@ fn beyond_envelope_degrades_with_advisory_not_crash() {
     );
 
     // `status` repeats the same advisory from the recorded LOC.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         status.indexed,
         "status reports the beyond-envelope graph as indexed"
@@ -649,12 +649,12 @@ fn beyond_envelope_degrades_with_advisory_not_crash() {
 
     // Correctness is retained beyond the envelope (no wrong results, no crash):
     // a known symbol still resolves and its same-file call edge is navigable.
-    let node = engine.node(&format!("node_{top_id}"), false);
+    let node = engine.navigation().node(&format!("node_{top_id}"), false);
     assert!(
         node.warnings.is_empty() && node.node.is_some(),
         "a real symbol still resolves beyond the envelope: {node:?}"
     );
-    let callees = engine.callees(&format!("node_{top_id}"), Some(10));
+    let callees = engine.navigation().callees(&format!("node_{top_id}"), Some(10));
     let want = format!("node_{}", top_id - 1);
     assert!(
         callees.callees.iter().any(|c| c.name == want),
@@ -991,7 +991,7 @@ mod configuration_envelope {
     fn index_wall_ms(root: &Path) -> u128 {
         let engine = Engine::start(root).expect("engine starts");
         let t = Instant::now();
-        let indexed = engine.index();
+        let indexed = engine.pipeline().index();
         let elapsed = t.elapsed();
         assert!(
             indexed.files_indexed > 0 && indexed.nodes_created > 0,
@@ -1153,7 +1153,7 @@ mod configuration_envelope {
         let (_, properties) = assert_census(&root);
 
         let engine = Engine::start(&root).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let rt = engine.runtime().expect("runtime present");
 
         // Two accessor sites in the same module, bound through S-381 to two
@@ -1198,7 +1198,7 @@ mod configuration_envelope {
         write(&root, &edited_rel, &edited);
 
         let t = Instant::now();
-        let sync = engine.sync(&[root.join(&edited_rel)]);
+        let sync = engine.pipeline().sync(&[root.join(&edited_rel)]);
         let elapsed = t.elapsed();
 
         assert_eq!(sync.files_modified, 1, "one file changed: {sync:?}");

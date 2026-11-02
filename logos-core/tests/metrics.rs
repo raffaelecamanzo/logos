@@ -1,6 +1,6 @@
 //! Integration tests for the quality metrics engine's persistence half
 //! (S-018 / FR-QM-07, ADR-12, NFR-RA-06), exercised end-to-end: real
-//! extraction + resolution + annotation through [`Engine::index`], hydration
+//! extraction + resolution + annotation through [`Pipeline::index`](crate::Pipeline::index), hydration
 //! through the Engine cache, then [`logos_core::metrics::snapshot`] against
 //! the live runtime.
 //!
@@ -95,11 +95,11 @@ fn never_called() {}
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().unwrap();
     let metrics::RecordedSnapshot {
@@ -152,7 +152,7 @@ fn empty_graph_snapshot_persists_the_na_sentinel() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("an empty store hydrates an empty view");
     let rt = engine.runtime().unwrap();
     let model = metrics::snapshot(rt, &view, None, metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
@@ -194,10 +194,10 @@ fn two() {}
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let rt = engine.runtime().unwrap();
 
@@ -253,11 +253,11 @@ pub fn level_three() -> u32 {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert!(indexed.warnings.is_empty(), "{:?}", indexed.warnings);
 
     // Measurement 1 — production only.
-    let base = engine.scan(true).expect("scan runs").metrics;
+    let base = engine.quality().scan(true).expect("scan runs").metrics;
     assert!(!base.empty && base.aggregate_signal.is_some());
     assert_eq!(base.test_function_count, 0, "no tests indexed yet");
     let production_functions = base.function_count;
@@ -284,7 +284,7 @@ fn case_three() {
 }
 ",
     );
-    let with_tests = engine.scan(true).expect("scan runs").metrics;
+    let with_tests = engine.quality().scan(true).expect("scan runs").metrics;
     assert_eq!(
         with_tests.test_function_count, 3,
         "all three tests are excluded from the scope and counted (FR-QM-07)"
@@ -298,7 +298,7 @@ fn case_three() {
     // Remove the tests and re-score: the count and every metric return to the
     // production baseline (UAT-QM-07: 0 → 3 → 0).
     fs::remove_file(tmp.path().join("tests/invariance.rs")).unwrap();
-    let removed = engine.scan(true).expect("scan runs").metrics;
+    let removed = engine.quality().scan(true).expect("scan runs").metrics;
     assert_eq!(removed.test_function_count, 0, "the count returns to zero");
     assert_metrics_byte_identical(&base, &removed);
 }
@@ -333,11 +333,11 @@ fn covers_produce() {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     let rt = engine.runtime().unwrap();
 
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let metrics::RecordedSnapshot {
         id, metrics: model, ..
@@ -410,18 +410,18 @@ fn leaf() -> u32 {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     let rt = engine.runtime().unwrap();
 
     // Measurement 1 — code only.
-    let base = engine.scan(true).expect("scan runs").metrics;
+    let base = engine.quality().scan(true).expect("scan runs").metrics;
     assert!(
         !base.empty && base.aggregate_signal.is_some(),
         "the code fixture yields a real signal"
     );
     assert_eq!(documentation_node_count(rt), 0, "no docs ingested yet");
     let base_dsm = engine
-        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .quality().readouts().dsm(Some(logos_core::governance::DsmGranularity::File), true)
         .expect("dsm runs");
 
     // Add documentation: a doc tree, a doc→doc link, and — the adversarial case
@@ -453,7 +453,7 @@ See the [reference](reference.md) for details.
     );
     write(tmp.path(), "README.md", "# Project\n\nEntry is `entry`.\n");
 
-    let with_docs = engine.scan(true).expect("scan runs").metrics;
+    let with_docs = engine.quality().scan(true).expect("scan runs").metrics;
     assert!(
         documentation_node_count(rt) > 0,
         "documentation was ingested — the invariance assertion is meaningful"
@@ -468,7 +468,7 @@ See the [reference](reference.md) for details.
     // proof the new view never feeds a metric/algorithm path ([FR-DG-06],
     // [FR-QM-08], [UAT-DG-04]).
     let vis = engine
-        .hydrate(Granularity::Visualization)
+        .graph().hydrate(Granularity::Visualization)
         .expect("visualization view hydrates");
     let vis_doc_nodes = vis
         .graph()
@@ -490,7 +490,7 @@ See the [reference](reference.md) for details.
     );
     // Re-scan AFTER touching the visualization view: still byte-identical to the
     // code baseline (cycles included via acyclicity) — the view moved no metric.
-    let after_vis = engine.scan(true).expect("scan runs").metrics;
+    let after_vis = engine.quality().scan(true).expect("scan runs").metrics;
     assert_metrics_byte_identical(&base, &after_vis);
 
     // ── S-122 / FR-UI-15 metric-neutrality guard ────────────────────────────
@@ -502,9 +502,9 @@ See the [reference](reference.md) for details.
     // the presentation snapshot, never a metric/algorithm path (FR-QM-08, ADR-34).
     use logos_core::model::EdgeKind;
     use logos_core::models::navigation::{GraphGranularity, GraphLayer};
-    let _ = engine.graph_elements(None, None, Some(&[GraphLayer::Code]), None, None, false);
-    let _ = engine.graph_elements(None, None, None, Some(&[EdgeKind::Calls, EdgeKind::Imports]), None, false);
-    let _ = engine.graph_elements(
+    let _ = engine.graph().elements(None, None, Some(&[GraphLayer::Code]), None, None, false);
+    let _ = engine.graph().elements(None, None, None, Some(&[EdgeKind::Calls, EdgeKind::Imports]), None, false);
+    let _ = engine.graph().elements(
         None,
         None,
         Some(&[GraphLayer::Code, GraphLayer::Doc]),
@@ -512,8 +512,8 @@ See the [reference](reference.md) for details.
         None,
         false,
     );
-    let _ = engine.graph_elements(None, None, Some(&[]), Some(&[]), None, false);
-    let after_filtered = engine.scan(true).expect("scan runs").metrics;
+    let _ = engine.graph().elements(None, None, Some(&[]), Some(&[]), None, false);
+    let after_filtered = engine.quality().scan(true).expect("scan runs").metrics;
     assert_metrics_byte_identical(&base, &after_filtered);
 
     // ── S-124 / FR-UI-15 / ADR-36 metric-neutrality guard ───────────────────
@@ -529,10 +529,10 @@ See the [reference](reference.md) for details.
         GraphGranularity::File,
         GraphGranularity::Symbol,
     ] {
-        let _ = engine.graph_elements(None, None, None, None, Some(tier), false);
-        let _ = engine.graph_elements(None, Some(3), Some(&[GraphLayer::Code]), None, Some(tier), false);
+        let _ = engine.graph().elements(None, None, None, None, Some(tier), false);
+        let _ = engine.graph().elements(None, Some(3), Some(&[GraphLayer::Code]), None, Some(tier), false);
     }
-    let after_tiers = engine.scan(true).expect("scan runs").metrics;
+    let after_tiers = engine.quality().scan(true).expect("scan runs").metrics;
     assert_metrics_byte_identical(&base, &after_tiers);
 
     // ── S-128 / FR-UI-16 / ADR-37 metric-neutrality guard ───────────────────
@@ -543,16 +543,16 @@ See the [reference](reference.md) for details.
     // or metric path, so re-scanning after it must STILL be byte-identical to the code
     // baseline — the intent overlay is presentation-only (FR-DG-06, FR-QM-08, ADR-34,
     // ADR-37, NFR-RA-05).
-    let _ = engine.graph_elements(None, None, None, None, None, true);
-    let _ = engine.graph_elements(None, Some(3), Some(&[GraphLayer::Code, GraphLayer::Doc]), None, None, true);
-    let after_intent = engine.scan(true).expect("scan runs").metrics;
+    let _ = engine.graph().elements(None, None, None, None, None, true);
+    let _ = engine.graph().elements(None, Some(3), Some(&[GraphLayer::Code, GraphLayer::Doc]), None, None, true);
+    let after_intent = engine.quality().scan(true).expect("scan runs").metrics;
     assert_metrics_byte_identical(&base, &after_intent);
 
     // The `dsm` graph-algorithm consumer is likewise unmoved after reading the rollup
     // views: its dimension matches the code-only baseline — proof the module/file
     // rollups feed no DSM/metric path (ADR-34, FR-QM-08).
     let after_tiers_dsm = engine
-        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .quality().readouts().dsm(Some(logos_core::governance::DsmGranularity::File), true)
         .expect("dsm runs");
     assert_eq!(
         base_dsm.rows.len(),
@@ -562,7 +562,7 @@ See the [reference](reference.md) for details.
 
     // The `dsm` report (a graph-algorithm consumer) lists no documentation file.
     let with_docs_dsm = engine
-        .dsm(Some(logos_core::governance::DsmGranularity::File), true)
+        .quality().readouts().dsm(Some(logos_core::governance::DsmGranularity::File), true)
         .expect("dsm runs");
     assert!(
         with_docs_dsm.rows.iter().all(|r| !r.name.ends_with(".md")),
@@ -579,7 +579,7 @@ See the [reference](reference.md) for details.
     // (UAT-DG-04: the round trip is byte-identical in both directions).
     fs::remove_dir_all(tmp.path().join("docs")).unwrap();
     fs::remove_file(tmp.path().join("README.md")).unwrap();
-    let removed = engine.scan(true).expect("scan runs").metrics;
+    let removed = engine.quality().scan(true).expect("scan runs").metrics;
     assert_eq!(
         documentation_node_count(rt),
         0,
@@ -626,8 +626,8 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
         "pub fn a() -> u32 {\n    b() + c()\n}\npub fn b() -> u32 {\n    c()\n}\npub fn c() -> u32 {\n    1\n}\n",
     );
     let engine = Engine::start(small.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let scanned = engine.scan(false).expect("scan runs").metrics;
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let scanned = engine.quality().scan(false).expect("scan runs").metrics;
     let m = scanned.edge_count;
     assert!(m >= 1, "the fixture has intra-file edges: m = {m}");
     assert_eq!(scanned.cross_module_edge_count, Some(0), "none of them leaves its directory");
@@ -639,7 +639,7 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
     assert_eq!(scanned.acyclicity_not_applicable, Some(na.clone()), "one decision for all three");
     assert_eq!(scanned.depth_not_applicable, Some(na.clone()), "one decision for all three");
     assert_eq!(latest_graph_flags(small.path()), (Some(0), Some(0), Some(0), Some(0)), "persisted as 0s");
-    let read = engine.latest_metrics().unwrap().expect("a snapshot exists");
+    let read = engine.quality().readouts().latest_metrics().unwrap().expect("a snapshot exists");
     assert_eq!(
         (&read.modularity_not_applicable, &read.acyclicity_not_applicable, &read.depth_not_applicable),
         (&Some(na.clone()), &Some(na.clone()), &Some(na.clone())),
@@ -667,7 +667,7 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
         [],
     )
     .unwrap();
-    let v7 = engine.latest_metrics().unwrap().unwrap();
+    let v7 = engine.quality().readouts().latest_metrics().unwrap().unwrap();
     let legacy = v7.modularity_not_applicable.expect("the recorded v7 drop-out is kept");
     assert_eq!(legacy.edges, m, "decided on every edge of that row's graph");
     assert_eq!(legacy.reason, format!("{m} of 5 dependency edges — too few for community structure"));
@@ -677,7 +677,7 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
     // A row from before migration 23: every flag NULL → all three applicable.
     conn.execute("UPDATE metric_snapshots SET modularity_applicable = NULL", []).unwrap();
     assert_eq!(
-        engine.latest_metrics().unwrap().unwrap().modularity_not_applicable,
+        engine.quality().readouts().latest_metrics().unwrap().unwrap().modularity_not_applicable,
         None,
         "a NULL flag (scored under semantics ≤ 5) reads applicable"
     );
@@ -698,8 +698,8 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
          pub fn s() -> u32 {\n    4\n}\npub fn t() -> u32 {\n    5\n}\n",
     );
     let engine = Engine::start(large.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
-    let scanned = engine.scan(false).expect("scan runs").metrics;
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let scanned = engine.quality().scan(false).expect("scan runs").metrics;
     let cross = scanned.cross_module_edge_count.expect("a v8 snapshot counts them");
     assert!(cross >= metrics::MIN_CROSS_MODULE_EDGES, "fixture has {cross} ≥ 5 cross-module edges");
     assert_eq!(
@@ -710,7 +710,7 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
     // null`): an applicable dimension is a present `null`, never an omitted key,
     // on both the snapshot (`scan --json`) and the readout (`quality-report --json`).
     let snapshot_json = serde_json::to_value(&scanned).unwrap();
-    let readout_json = serde_json::to_value(engine.quality_readout().expect("readout")).unwrap();
+    let readout_json = serde_json::to_value(engine.quality().readouts().readout().expect("readout")).unwrap();
     for key in ["modularity_not_applicable", "acyclicity_not_applicable", "depth_not_applicable"] {
         assert_eq!(snapshot_json.get(key), Some(&serde_json::Value::Null), "scan --json: {key} is null");
         assert_eq!(readout_json.get(key), Some(&serde_json::Value::Null), "quality-report --json: {key} is null");
@@ -720,7 +720,7 @@ fn graph_dimension_applicability_persists_and_pre_migration_rows_read_applicable
         (Some(1), Some(1), Some(1), Some(cross as i64)),
         "persisted as 1s beside the count"
     );
-    let read = engine.latest_metrics().unwrap().unwrap();
+    let read = engine.quality().readouts().latest_metrics().unwrap().unwrap();
     assert_eq!(
         (read.modularity_not_applicable, read.acyclicity_not_applicable, read.depth_not_applicable),
         (None, None, None)
@@ -776,16 +776,16 @@ fn coverage_entries(warnings: &[String]) -> Vec<&String> {
 fn a_same_file_only_language_is_warned_once_from_one_helper_on_every_surface() {
     let tmp = same_file_only_fixture();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
 
-    let scan = engine.scan(false).expect("scan runs");
+    let scan = engine.quality().scan(false).expect("scan runs");
     let expected = helper_warnings(&engine);
     assert_eq!(expected.len(), 1, "one language qualifies: {expected:?}");
     assert!(expected[0].starts_with("coverage: c is 100% of production callables"), "{}", expected[0]);
 
-    let gate = engine.gate(None, false, false).expect("gate runs");
-    let session = engine.session_start().expect("session start runs");
-    let readout = engine.quality_readout().expect("readout runs");
+    let gate = engine.quality().gate(None, false, false).expect("gate runs");
+    let session = engine.quality().session_start().expect("session start runs");
+    let readout = engine.quality().readouts().readout().expect("readout runs");
     for (surface, warnings) in [
         ("scan", &scan.warnings),
         ("gate", &gate.warnings),
@@ -811,12 +811,12 @@ fn a_language_binding_across_files_gets_no_coverage_warning() {
     write(tmp.path(), "src/alpha/mod.rs", "pub fn a() -> u32 {\n    crate::beta::b()\n}\n");
     write(tmp.path(), "src/beta/mod.rs", "pub fn b() -> u32 {\n    1\n}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     assert!(helper_warnings(&engine).is_empty());
-    let scan = engine.scan(false).expect("scan runs");
-    let gate = engine.gate(None, false, false).expect("gate runs");
-    let session = engine.session_start().expect("session start runs");
-    let readout = engine.quality_readout().expect("readout runs");
+    let scan = engine.quality().scan(false).expect("scan runs");
+    let gate = engine.quality().gate(None, false, false).expect("gate runs");
+    let session = engine.quality().session_start().expect("session start runs");
+    let readout = engine.quality().readouts().readout().expect("readout runs");
     for warnings in [&scan.warnings, &gate.warnings, &session.warnings, &readout.warnings] {
         assert!(coverage_entries(warnings).is_empty(), "{warnings:?}");
     }

@@ -697,6 +697,30 @@ over the files that do record. The rows a relational answer's `resolution_denomi
 it out. When the share reaches 10% for a language holding at least 10% of the
 production callables, [`scan`](#scan) warns.
 
+**The Go row also says what its interface matching found.** A language whose
+types implement interfaces by method set (Go) carries `interfaces`, the figures
+of the last resolution run, stored with the graph — `status` reads them and
+computes nothing:
+
+```jsonc
+"interfaces": {
+  "in_scope": 75, "computed": 73, "implements": 436,
+  "not_computed": { "generic": 0, "unresolved_embedding": 0 }, "empty": 2
+}
+```
+
+`in_scope` is every interface of the language, and `computed + generic +
+unresolved_embedding + empty` adds up to it. `implements` counts the
+`implements` edges recorded to them. `generic` counts a generic interface,
+whether or not it declares methods of its own; `unresolved_embedding` one that
+embeds an interface outside the repository, such as `io.Writer`, whose methods
+are never guessed; `empty` one declaring no method, such as `interface{}` or a
+type-set constraint. A store indexed by an earlier version states no
+`interfaces` until its next index, which the upgrade's logos.db migration 46
+makes re-extract every file, so Go methods record the signatures they are
+matched by. Every other row, and
+the rows a relational answer's `resolution_denominator` attaches, leave it out.
+
 **Java and Rust rows — and any row with a `local-binding` call — also say why
 a call stays unbound.** The Java row (and the PHP, C#, Kotlin and Scala rows),
 the Rust row, and the row of any language with a `local-binding` call carry a
@@ -1439,7 +1463,8 @@ provider wins**; a consumer only becomes ambiguous when two providers are equall
 specific. Two members owning the same template both via `ANY` leaves the consumer
 `ambiguous` with **no edge** — Logos refuses rather than picking one. Expect the
 `ambiguous` count to be non-trivial on a real workspace: that is the refusal
-working, not a defect.
+working, not a defect. A `use` that mounts an Express router is not a provider of
+its own: the router's routes carry the mount's path instead.
 
 **Provider paths built from string constants (Java).** A Spring mapping whose
 path is a concatenation — `@GetMapping("/users/{" + USER_ID + "}")` — is folded to
@@ -1485,6 +1510,43 @@ declare link nothing; the route keeps its node. `resources`, `resource` and
 `concern` stay unexpanded: a registration inside their block sits under a path
 the file does not write, so it produces **no** route and is counted in
 `routes_not_composed`, as is one under a prefix that is not a literal.
+
+**Express routers and their mounts.** A route registered on an Express router —
+a name bound to `express.Router()`, to a `Router()` imported from `express`, or to
+`require('express').Router()` — is promoted at the path the router is mounted at.
+`app.use('/api', router)` gives `router.get('/items', h)` the route `GET /api/items`,
+and `router.get('/', h)` the route `GET /api`, as Express serves it. The mount may
+sit in the router's own file, or in a file that reaches the router through a
+`require` or `import` of the module exporting it (`module.exports = router`,
+`exports.name = router`, `export default router`, a named export). Logos follows
+that import as it binds the import itself, `tsconfig` paths and `index` files
+included. A router mounted at two paths has a route under each, and one mounted on
+a mounted router joins both paths. A `use` that mounts a router is no route of its
+own; a `use` with middleware keeps its `ANY` route. A route on a router mounted at a
+path that is not a written string (a variable, a template, an expression), or on a
+router no framework file mounts, produces **no** route and is counted in
+`routes_not_composed`. Mounts are read only in the files the framework pass reads —
+those that import the framework or receive an `app`/`router` parameter — and a
+router that reaches its mount by being returned from a function, or passed to one,
+is not followed, so its routes are counted the same way. A route registered on an
+`app` or `router` parameter keeps its written path. An Express path written as a template literal is a route in JavaScript and
+TypeScript alike, with its leading `${…}` kept in the path.
+
+**Gin route groups.** A route registered on a Gin group is promoted at the group's
+path: after `api := r.Group("/api")`, `api.GET("/items", h)` is `GET /api/items`,
+and `api.GET("/", h)` is `GET /api/`, as Gin serves it. This holds for a group used
+inline (`r.Group("/api").GET(…)`), a group nested in a group, a group after
+`Use(…)`, and the `{ … }` block a group's routes are written in. A route on a group
+whose prefix Logos cannot prove produces **no** route and is counted in
+`routes_not_composed`: a group whose path is not a written string, a
+`*gin.RouterGroup` parameter (a group handed to another file's function is refused
+there), a `range` variable, a name assigned a group after it is declared, and any
+other call made on a group. A receiver that never passes through `Group` in the
+file — `gin.Default()`, an engine parameter, a field like `s.router` — keeps its
+written path, and so does a group Logos does not recognise as one: a group kept in a
+field, returned by a helper, passed as a `gin.IRouter`, or declared at package level
+in another file of the package (`var api = r.Group("/api")` in `routes.go`, used in
+`handlers.go`). Gin's verb-first `Handle("GET", "/p", h)` promotes no route.
 
 
 - **`route-providers`** — the workspace service map: every cross-service binding
@@ -2783,8 +2845,9 @@ Depth are not applicable: `--json` gives each one's reason in `metrics`, under
 scoreable classes than `[metric_thresholds] cohesion_min_classes` (default 5),
 Cohesion is not applicable and `metrics.cohesion_not_applicable` gives its
 reason and class count. `metrics.focus_attribution` counts the Rust `impl` and Go
-receiver methods Focus could not place on a struct (`unattributed`) of all those
-that record a type (`denominator`). A language
+receiver methods Focus could not place on a struct (`unattributed`) and the Rust
+trait-impl methods it set aside (`trait_impl`), of all those that record a type
+(`denominator`). A language
 that is at least 10% of the production callables and binds no call or import
 across files earns a `coverage: …` entry in `warnings`, as it does in `gate`
 and `session-start`; it never changes the exit code. Both are explained in

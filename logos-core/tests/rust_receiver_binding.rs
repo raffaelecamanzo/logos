@@ -55,7 +55,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -275,7 +275,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         write(tmp_a.path(), rel, text);
         changed.push(root_a.join(rel));
     }
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -592,7 +592,7 @@ fn a_self_receiver_added_or_removed_on_sync_rebinds_the_call() {
 /// The Rust row of `status`.
 fn rust_row(engine: &Engine) -> LanguageResolution {
     engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "rust")
@@ -722,7 +722,7 @@ fn a_rust_rows_external_type_stays_external_in_a_workspace() {
         "use lib::Store;\npub fn other_member(x: &Store) { x.len(); }\npub fn std_type(s: &String) { s.len(); }\n",
     );
     for member in [&lib, &app] {
-        let _ = index(member).sync(&[] as &[PathBuf]);
+        let _ = index(member).pipeline().sync(&[] as &[PathBuf]);
     }
     let alone = rust_row(&Engine::start(&app).expect("engine starts"))
         .call_residue

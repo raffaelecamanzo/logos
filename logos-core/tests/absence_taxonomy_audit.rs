@@ -326,14 +326,14 @@ const CORRECTIONS: [(&str, &str, &str, &str); 3] = [
         "logos-core/src/governance/mod.rs",
         "signal or baseline is n/a (empty graph) — informational pass",
         "signal or baseline is n/a — informational pass",
-        "`gate_from_snapshot`, the read-only verdict behind `Engine::latest_gate`: \
+        "`gate_from_snapshot`, the read-only verdict behind `Readouts::latest_gate`: \
          names no cause, because this condition establishes none (R1)",
     ),
     (
         "logos-core/src/governance/mod.rs",
         "signal or baseline is n/a (empty graph) — informational pass",
         "signal or baseline is n/a — informational pass",
-        "`governance::gate`, the persisting verdict behind `Engine::gate`: the same \
+        "`governance::gate`, the persisting verdict behind `Quality::gate`: the same \
          sentence, and it was a second literal. Now one \
          `SIGNAL_OR_BASELINE_ABSENT` constant, because two paths rendering one \
          condition are a pair that can drift (R5)",

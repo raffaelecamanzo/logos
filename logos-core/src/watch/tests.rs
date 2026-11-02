@@ -126,7 +126,7 @@ fn build_output_dirs_are_ignored() {
 /// CR-054/S-213: the watcher's runtime `ignored_dirs` union is built from
 /// `config.semantics.ignored_dirs` ([`spawn`]), so a project that doesn't
 /// gitignore `.worktrees`/`.playwright-mcp` still has watcher events under
-/// them filtered before they ever reach `Engine::sync` — the same admission
+/// them filtered before they ever reach `Pipeline::sync` — the same admission
 /// divergence CR-054 targets, defended belt-and-suspenders at this layer too.
 #[test]
 fn scratch_dirs_are_ignored() {
@@ -634,16 +634,28 @@ fn the_watch_module_spawns_no_subprocess() {
         !src.contains("refresh_cmd"),
         "refresh_cmd belongs to the explicit `coverage refresh` engine path, never the watcher"
     );
-    for scanner_path in ["Orchestrator", "security_scan", "security::scan", "Selection"] {
+    for scanner_path in ["Orchestrator", "security().scan", "security::scan", "Selection"] {
         assert!(
             !src.contains(scanner_path),
             "the watcher names `{scanner_path}`: a scanner runs from `security scan` alone"
         );
     }
     assert!(
-        src.contains("security_ingest_auto"),
+        src.contains("security().ingest_auto"),
         "the watcher's SARIF path is the security auto-ingest"
     );
+    // Whitespace removed, so a wrapped chain reads as written in one line, and
+    // every façade hop counted: the watcher's only security and coverage calls
+    // are the two auto-ingests, so a façade bound to a local cannot reach a
+    // scan or a run either.
+    let code: String = src.split_whitespace().collect();
+    for facade in ["security()", "coverage()"] {
+        assert_eq!(
+            code.matches(facade).count(),
+            code.matches(&format!("{facade}.ingest_auto(")).count(),
+            "every `{facade}` hop of the watcher is its auto-ingest"
+        );
+    }
     let ingest_module = [
         ("history/security/mod.rs", include_str!("../history/security/mod.rs")),
         ("history/security/parse.rs", include_str!("../history/security/parse.rs")),
@@ -661,31 +673,37 @@ fn the_watch_module_spawns_no_subprocess() {
         let production = text.split("#[cfg(test)]\nmod tests {").next().unwrap_or(text);
         assert!(!spawns(production), "{file} is on the watcher's ingest path and must spawn nothing");
     }
-    // The engine half of that path: from the indexed-set read to the security
-    // ingest bodies, the watcher's entry included. It reaches the ingest module
-    // alone — never the scanner surface. (The one process on the path is the
-    // HEAD anchor's `git rev-parse`, in `history::miner`, as coverage's own
-    // auto-ingest has always run it; no scanner and no suite.)
+    // The engine half of that path: the indexed-set read (`engine.rs`) and
+    // the security ingest bodies up to the scan (`engine/security.rs`), the
+    // watcher's entry included. It reaches the ingest module alone — never the
+    // scanner surface. (The one process on the path is the HEAD anchor's
+    // `git rev-parse`, in `history::miner`, as coverage's own auto-ingest has
+    // always run it; no scanner and no suite.)
     let engine = include_str!("../engine.rs");
     let start = engine.find("fn evidence_indexed_paths").expect("the indexed-set read");
-    let end = start + engine[start..].find("/// `logos security scan`").expect("the scan method follows");
-    let entry = &engine[start..end];
-    assert!(entry.contains("fn security_ingest_auto"), "the watcher's engine entry is in the slice");
+    let end = start + engine[start..].find("\n}\n").expect("the indexed-set read ends");
+    let security = include_str!("../engine/security.rs");
+    let ingest = security.find("pub fn ingest(").expect("the security ingest");
+    let scan = ingest + security[ingest..].find("/// `logos security scan`").expect("the scan method follows");
+    let entry = format!("{}{}", &engine[start..end], &security[ingest..scan]);
+    let entry = entry.as_str();
+    assert!(entry.contains("fn ingest_auto"), "the watcher's engine entry is in the slice");
     assert!(!spawns(entry), "the engine's ingest path must spawn nothing");
-    for scanner_path in ["Orchestrator", "crate::security::", "security::scan"] {
+    for scanner_path in ["Orchestrator", "crate::security::", "security::scan", "self.scan"] {
         assert!(!entry.contains(scanner_path), "the engine's ingest path names `{scanner_path}`");
     }
 
     // The coverage runner (S-737): never reachable from the watcher.
-    for runner_path in ["coverage_run", "coverage_refresh", "crate::coverage", "CoverageRunner", "run_tool", "runner_status"] {
+    for runner_path in ["coverage().run", "coverage().refresh", "crate::coverage", "CoverageRunner", "run_tool", "runner_status"] {
         assert!(!src.contains(runner_path), "the watcher names `{runner_path}`: a coverage run starts only on request");
     }
-    let start = engine.find("pub fn coverage_ingest_auto").expect("the watcher's coverage entry");
-    let end = start + engine[start..].find("/// `logos coverage refresh`").expect("the explicit runs follow it");
-    let auto = &engine[start..end];
-    assert!(auto.contains("coverage_ingest_with"), "the auto-ingest reaches the ingest body");
+    let coverage = include_str!("../engine/coverage.rs");
+    let start = coverage.find("pub fn ingest_auto").expect("the watcher's coverage entry");
+    let end = start + coverage[start..].find("/// `logos coverage refresh`").expect("the explicit runs follow it");
+    let auto = &coverage[start..end];
+    assert!(auto.contains("self.ingest_with"), "the auto-ingest reaches the ingest body");
     assert!(!spawns(auto), "the engine's coverage auto-ingest must spawn nothing");
-    for runner_path in ["crate::coverage::", "coverage_run", "refresh_cmd"] {
+    for runner_path in ["crate::coverage::", "self.run", "refresh_cmd"] {
         assert!(!auto.contains(runner_path), "the coverage auto-ingest names `{runner_path}`");
     }
     // Every production file of the coverage module — read from the directory,

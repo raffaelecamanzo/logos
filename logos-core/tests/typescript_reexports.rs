@@ -35,7 +35,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -616,7 +616,7 @@ fn a_definition_added_behind_a_barrel_binds_on_sync_and_matches_a_full_index() {
         "src/lib/leaf.ts",
         "export function other() { return 0; }\nexport function format() { return ''; }\n",
     );
-    engine.sync(&["src/lib/leaf.ts".into()]);
+    engine.pipeline().sync(&["src/lib/leaf.ts".into()]);
     let synced = (edges_of(rt, EdgeKind::Calls), edges_of(rt, EdgeKind::Imports));
     assert_eq!(callers_of(rt, "src/lib/leaf.ts:format"), ["src/app.ts:app"]);
     drop(engine);
@@ -652,7 +652,7 @@ fn a_default_alias_edit_rebinds_the_default_import_on_sync_and_matches_a_full_in
         "src/root.tsx",
         "const First = () => <main />;\nconst Second = () => <aside />;\nexport default Second;\n",
     );
-    engine.sync(&["src/root.tsx".into()]);
+    engine.pipeline().sync(&["src/root.tsx".into()]);
     assert_eq!(callers_of(rt, "src/root.tsx:Second"), ["src/router.tsx:Router"]);
     assert!(callers_of(rt, "src/root.tsx:First").is_empty());
     let synced = (edges_of(rt, EdgeKind::Calls), edges_of(rt, EdgeKind::Imports));

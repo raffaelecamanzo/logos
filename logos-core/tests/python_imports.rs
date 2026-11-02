@@ -16,7 +16,8 @@
 //! binds that module's or class's member and an external one stays unbound
 //! (S-544, [FR-RS-23]), Django routes to a shared handler name bind their own
 //! integration's handler, and a one-file sync equals a full reindex
-//! ([NFR-RA-06]).
+//! ([NFR-RA-06]) — a route handler renamed, restored and deleted included
+//! (S-836).
 //!
 //! [FR-RS-14]: ../../docs/specs/requirements/FR-RS-14.md
 //! [FR-RS-23]: ../../docs/specs/requirements/FR-RS-23.md
@@ -69,7 +70,7 @@ fn indexed(fixture: fixtures::Fixture) -> (TempDir, Engine) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -621,14 +622,14 @@ fn sync_equals_a_full_reindex_after_a_relative_target_changes() {
     let rt = engine.runtime().unwrap();
     let rules = "src/werkzeug/routing/rules.py";
     write(tmp.path(), rules, "class Other:\n    pass\n");
-    engine.sync(&[rules.into()]);
+    engine.pipeline().sync(&[rules.into()]);
     assert!(
         !edges_from(rt, "src/werkzeug/routing/map.py", EdgeKind::Imports)
             .contains(&"src/werkzeug/routing/rules.py:Rule:class".to_string())
     );
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(fixtures::WERKZEUG)));
     write(tmp.path(), rules, fixtures::WERKZEUG[4].1);
-    engine.sync(&[rules.into()]);
+    engine.pipeline().sync(&[rules.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(fixtures::WERKZEUG)));
 }
 
@@ -657,7 +658,7 @@ fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
     assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
     let init = "src/zed/__init__.py";
     write(tmp.path(), init, "");
-    engine.sync(&[init.into()]);
+    engine.pipeline().sync(&[init.into()]);
     // `src/` holds a package now: `app.core` is a module under it.
     assert!(unbound_imports(rt, "src/app/cli.py").is_empty());
     assert_eq!(edges_from(rt, "tool/src/lib.rs", EdgeKind::Calls), rust_call);
@@ -665,7 +666,7 @@ fn sync_equals_a_full_reindex_when_a_package_file_moves_the_import_root() {
     all.push(init);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
     fs::remove_file(tmp.path().join(init)).unwrap();
-    engine.sync(&[init.into()]);
+    engine.pipeline().sync(&[init.into()]);
     assert_eq!(unbound_imports(rt, "src/app/cli.py"), strings(&["app::core::go"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
 }
@@ -685,7 +686,7 @@ fn sync_equals_a_full_reindex_with_a_module_beside_its_stub() {
     let rt = engine.runtime().unwrap();
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/foo.py:X:class"]));
     write(tmp.path(), "pkg/foo.py", "class X:\n    y = 1\n");
-    engine.sync(&["pkg/foo.py".into()]);
+    engine.pipeline().sync(&["pkg/foo.py".into()]);
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/foo.py:X:class"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &paths(files)));
 }
@@ -710,7 +711,7 @@ fn sync_equals_a_full_reindex_when_a_submodule_takes_over_a_reexported_name() {
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/__init__.py:pkg:module"]));
     let helper = "pkg/helper.py";
     write(tmp.path(), helper, "def h():\n    pass\n");
-    engine.sync(&[helper.into()]);
+    engine.pipeline().sync(&[helper.into()]);
     assert_eq!(edges_from(rt, "app.py", EdgeKind::Imports), strings(&["pkg/helper.py:helper:module"]));
     assert_eq!(
         edges_from(rt, "tool.py", EdgeKind::Imports),
@@ -788,7 +789,7 @@ fn sync_equals_a_full_reindex_over_alias_twins() {
         "app.py",
         "from pkg.m import X as A\nfrom pkg.m import X as B\nfrom pkg.m import X as C\n",
     );
-    engine.sync(&["app.py".into()]);
+    engine.pipeline().sync(&["app.py".into()]);
     let some = |s: &str| Some(s.to_string());
     assert_eq!(
         import_rows(rt, "app.py"),
@@ -817,28 +818,108 @@ fn sync_equals_a_full_reindex_when_a_qualified_calls_target_changes() {
         ("hc/api/models.py", "class Check:\n    pass\n\n\ndef for_project(p):\n    return p\n"),
     ] {
         write(tmp.path(), rel, text);
-        engine.sync(&[rel.into()]);
+        engine.pipeline().sync(&[rel.into()]);
         assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{rel}");
     }
     assert!(edges_from(rt, transport, EdgeKind::Calls).is_empty());
     for rel in ["hc/lib/curl.py", "hc/api/models.py"] {
         write(tmp.path(), rel, original(rel));
-        engine.sync(&[rel.into()]);
+        engine.pipeline().sync(&[rel.into()]);
         assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "{rel} restored");
     }
     assert_eq!(edges_from(rt, transport, EdgeKind::Calls).len(), 2);
-    // A route handler renamed and restored: the edges agree with a cold index.
-    // (The ledger does not yet: the framework pass keeps the deleted handler's
-    // capture-before-delete `RoutesTo` row, as it does before S-544.)
+    // A route handler renamed and restored: the whole store agrees with a cold
+    // index, the capture-before-delete ledger included (S-836; S-526's fix).
     let (views, urls) = ("hc/integrations/pd/views.py", "hc/integrations/pd/urls.py");
     write(tmp.path(), views, "def add2(request):\n    return request\n");
-    engine.sync(&[views.into()]);
-    assert_eq!(binding_facts(rt).0, cold_facts(&tmp, &files).0, "{views}");
+    engine.pipeline().sync(&[views.into()]);
+    assert_store_equals_fresh(rt, &tmp, &files, &format!("{views} renamed"));
     assert!(edges_from(rt, urls, EdgeKind::RoutesTo).is_empty());
     write(tmp.path(), views, original(views));
-    engine.sync(&[views.into()]);
-    assert_eq!(binding_facts(rt).0, cold_facts(&tmp, &files).0, "{views} restored");
+    engine.pipeline().sync(&[views.into()]);
+    assert_store_equals_fresh(rt, &tmp, &files, &format!("{views} restored"));
     assert_eq!(edges_from(rt, urls, EdgeKind::RoutesTo), strings(&["hc/integrations/pd/views.py:add:function"]));
+}
+
+/// The store a sync left, held to the store a cold index of the same tree builds:
+/// every edge first, then every ledger row — the capture-before-delete rows
+/// ([ADR-10]) a sync spends included — so a divergence names the half it is in.
+///
+/// [ADR-10]: ../../docs/specs/architecture/decisions/ADR-10.md
+fn assert_store_equals_fresh(rt: &Runtime, tmp: &TempDir, files: &[&str], label: &str) {
+    let (synced, fresh) = (binding_facts(rt), cold_facts(tmp, files));
+    assert_eq!(synced.0, fresh.0, "{label}: edges");
+    assert_eq!(synced.1, fresh.1, "{label}: ledger");
+}
+
+const PD_VIEWS: &str = "def add(request):\n    return request\n";
+const PD_VIEWS_RENAMED: &str = "def add2(request):\n    return request\n";
+const PD_URLS: &str =
+    "from django.urls import path\n\nfrom . import views\n\nurlpatterns = [path(\"add_pd/\", views.add)]\n";
+const PD_URLS_FOLLOWING: &str =
+    "from django.urls import path\n\nfrom . import views\n\nurlpatterns = [path(\"add_pd/\", views.add2)]\n";
+const PD_URLS_REPATHED: &str =
+    "from django.urls import path\n\nfrom . import views\n\nurlpatterns = [path(\"add_pd_gone/\", views.add)]\n";
+
+/// One sync of a handler's life: what it is called, the handler file's new text
+/// (`None` removes it), the URLconf's text when this run edits it in the same
+/// sync, and whether the route still links a handler once it has run.
+struct HandlerStep {
+    name: &'static str,
+    handler: Option<&'static str>,
+    urls: &'static str,
+    linked: bool,
+}
+
+/// The handler renamed, restored, deleted and restored again. `urls` is the
+/// URLconf an edited run writes alongside: it follows the rename, returns on the
+/// restore, and is re-pathed past the deletion.
+const HANDLER_LIFE: [HandlerStep; 4] = [
+    HandlerStep { name: "renamed", handler: Some(PD_VIEWS_RENAMED), urls: PD_URLS_FOLLOWING, linked: true },
+    HandlerStep { name: "restored", handler: Some(PD_VIEWS), urls: PD_URLS, linked: true },
+    HandlerStep { name: "deleted", handler: None, urls: PD_URLS_REPATHED, linked: false },
+    HandlerStep { name: "restored after the deletion", handler: Some(PD_VIEWS), urls: PD_URLS, linked: true },
+];
+
+/// S-836 ([FR-SY-10], [NFR-RA-06], CR-263): a Django handler renamed, restored,
+/// deleted (its file removed) and restored again, each in a sync of its own, with
+/// the URLconf left alone and then with it edited in the same sync, leaves the
+/// store a cold index of the same tree builds — edges and ledger, row for row.
+/// A sync that deletes the handler a route links to captures the `RoutesTo` row
+/// first, and spends it: the framework pass owns that edge (`spent_captures`).
+///
+/// [FR-SY-10]: ../../docs/specs/requirements/FR-SY-10.md
+/// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn sync_equals_a_full_reindex_when_a_django_handler_is_renamed_restored_and_deleted() {
+    let (views, urls) = ("hc/integrations/pd/views.py", "hc/integrations/pd/urls.py");
+    let files = paths(QUALIFIED_CALLS);
+    for edit_urls in [false, true] {
+        let variant = if edit_urls { "urls edited" } else { "urls unchanged" };
+        let (tmp, engine) = indexed(QUALIFIED_CALLS);
+        let rt = engine.runtime().unwrap();
+        for step in &HANDLER_LIFE {
+            let mut dirty: Vec<std::path::PathBuf> = vec![views.into()];
+            match step.handler {
+                Some(text) => write(tmp.path(), views, text),
+                None => fs::remove_file(tmp.path().join(views)).unwrap(),
+            }
+            // The URLconf is edited only on an edited run; an unchanged run
+            // starts from the original and never touches it.
+            if edit_urls {
+                write(tmp.path(), urls, step.urls);
+                dirty.push(urls.into());
+            }
+            engine.pipeline().sync(&dirty);
+            let label = format!("{variant}: {}", step.name);
+            assert_store_equals_fresh(rt, &tmp, &files, &label);
+            // An unchanged URLconf still names `views.add`, so only the original
+            // handler links; an edited one names whatever the step wrote.
+            let links = !edges_from(rt, urls, EdgeKind::RoutesTo).is_empty();
+            let expected = if edit_urls { step.linked } else { step.handler == Some(PD_VIEWS) };
+            assert_eq!(links, expected, "{label}: the route's link");
+        }
+    }
 }
 
 // ── S-545: a bare decorator is a reference ──────────────────────────────────
@@ -908,11 +989,11 @@ fn sync_equals_a_full_reindex_when_a_decorators_target_changes() {
     let rel = "hc/api/decorators.py";
     let original = DECORATORS.iter().find(|(path, _)| *path == rel).expect("fixture file").1;
     write(tmp.path(), rel, "def authorize2(f):\n    return f\n");
-    engine.sync(&[rel.into()]);
+    engine.pipeline().sync(&[rel.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "renamed");
     assert!(edges_from(rt, "hc/api/views.py", EdgeKind::Calls).is_empty());
     write(tmp.path(), rel, original);
-    engine.sync(&[rel.into()]);
+    engine.pipeline().sync(&[rel.into()]);
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files), "restored");
     assert_eq!(edges_from(rt, "hc/api/views.py", EdgeKind::Calls).len(), 2);
 }

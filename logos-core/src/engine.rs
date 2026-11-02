@@ -1,9 +1,16 @@
 //! [`Engine`] — the sole instrumented chokepoint (ADR-01, NFR-CC-01).
 //!
 //! # Design
-//! - One `impl Engine` block contains **every** public method — one per
-//!   planned tool — so tracing instrumentation attaches exactly here
-//!   (NFR-CC-01, ADR-13).
+//! - `Engine` holds the lifecycle — open, start, the watcher, the builder
+//!   settings — and the accessors to the per-process state; every operation is
+//!   a method of the feature-area façade it belongs to, reached from the engine
+//!   (`engine.security().scan(…)`, S-829, [CR-259]): [`Graph`], [`Navigation`],
+//!   [`Pipeline`], [`Quality`] (with [`Readouts`] and [`Review`]), [`History`],
+//!   [`Coverage`], [`Security`] (with [`Findings`] and [`Tools`]) and
+//!   [`Configuration`]. [`Setup`] bootstraps a project before any engine.
+//! - Each façade borrows the engine and nothing else, so a façade method is
+//!   still one call into `logos-core`, and its tracing instrumentation attaches
+//!   where that call enters (NFR-CC-01, ADR-13).
 //! - All methods return [`serde::Serialize`] read-models from [`crate::models`];
 //!   adapters (`cli`, `mcp`) translate to their wire formats without any
 //!   awareness of core internals (ADR-01, NFR-MA-02).
@@ -13,40 +20,57 @@
 //!   warnings); the quality/governance methods (S-020) return `Result` —
 //!   structural failures fail loud (ADR-14 Correctness), per-file failures
 //!   degrade inside the read-model (`INCOMPLETE` freshness, NFR-RA-11).
+//!
+//! [CR-259]: ../../../docs/requests/CR-259-engine-is-split-by-feature-area.md
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 
-use crate::hydrate::{
-    Granularity, GraphView, HydrationCache, HydrationConfig, HydrationStats, Scope, SyncStamp,
-};
-use crate::init::InitOptions;
-use crate::model::{EdgeKind, NodeKind};
-use crate::models::{
-    navigation::{
-        AffectedResult, CalleesResult, CallersResult, ContextBundle, ExploreResult, GraphElements,
-        BranchOverlapResult, GraphGranularity, GraphLayer, ImpactIntersectionResult, ImpactResult,
-        ImplementorsResult, LanguageComposition, NodeInfo, PrecedentResult, ReferencingDocsResult,
-        SearchResult,
-        StatusInfo,
-    },
-    pipeline::{IndexResult, InitResult, SyncResult},
-    quality::{
-        DocGapsReport, DoctorReport, DsmReport, EvolutionReport, GateResult, HealthInfo,
-        LanguageDescriptor, LanguageReach, LanguagesInfo, LatestHealth, MetricSnapshot,
-        QualityReadout, RulesReport, ScanResult, SessionInfo, SkippedLanguage, StatsInfo,
-        VerifyReport,
-    },
-};
-use crate::observability::{CallOutcome, Tool};
+use crate::hydrate::{HydrationCache, HydrationConfig, SyncStamp};
 use crate::runtime::{Runtime, RuntimeConfig, SharedWorkerPool};
-use crate::tools::surface;
 
-/// Thick-core engine — the single public façade over all Logos operations.
+mod config;
+mod coverage;
+mod findings;
+mod graph;
+mod history;
+mod navigation;
+mod pipeline;
+mod quality;
+mod readouts;
+mod review;
+mod security;
+mod setup;
+mod tools;
+
+pub use config::Configuration;
+pub use coverage::Coverage;
+pub use findings::Findings;
+pub use graph::Graph;
+pub use history::History;
+pub use navigation::Navigation;
+pub use pipeline::Pipeline;
+pub use quality::Quality;
+pub use readouts::Readouts;
+pub use review::Review;
+pub use security::Security;
+pub use setup::Setup;
+pub use tools::Tools;
+
+/// The target every `Engine` and façade log line is written under — the one
+/// the engine's module path named before its façades moved into modules of
+/// their own (S-829), so a `RUST_LOG` directive and the stderr lines read as
+/// before.
+const LOG_TARGET: &str = "logos_core::engine";
+
+/// Thick-core engine — the single entry point to every Logos operation: its
+/// lifecycle and the per-process state, and one accessor per feature-area
+/// façade whose methods are the operations (`engine.security().scan(…)`,
+/// S-829).
 ///
 /// Construct a *transient* engine with [`Engine::open`] (CLI one-shot commands:
 /// no live runtime), or a *long-lived* engine with [`Engine::start`] (`serve
@@ -74,7 +98,7 @@ pub struct Engine {
     /// ([ADR-04], [ADR-05], [NFR-PE-07]). Held for the Engine's lifetime so
     /// repeated aggregate runs reuse hydrated views; bounded so it stays within
     /// the RSS envelope ([NFR-PE-06], [AQ-02]). Present (but only *exercised* via
-    /// [`Engine::hydrate`], which needs the runtime) on both engine flavours.
+    /// [`Graph::hydrate`], which needs the runtime) on both engine flavours.
     hydration: HydrationCache,
     /// The in-memory `last_sync_at` clock ([ADR-04]). Advances when the graph
     /// changes (the indexing pipeline [S-010] bumps it on commit); the hydration
@@ -134,7 +158,7 @@ type ExtensionState = std::collections::HashMap<
     std::sync::Arc<dyn std::any::Any + Send + Sync>,
 >;
 
-/// What [`Engine::call_residue`]'s memo is keyed on (CR-201): every input of
+/// What [`Graph::call_residue`]'s memo is keyed on (CR-201): every input of
 /// the walk that can change while an engine lives.
 ///
 /// The graph is the revision ([FR-SY-09]); the schema version is there because
@@ -150,9 +174,8 @@ struct ResidueKey {
     schema_version: i64,
     resolution: crate::config::Resolution,
 }
-
 /// Per-phase cold-start attribution, produced by
-/// [`Engine::start_with_phase_report`] ([CR-116], [NFR-PE-05], [S-368]).
+/// [`ColdStartPhases::measure`] ([CR-116], [NFR-PE-05], [S-368]).
 ///
 /// [`Engine::start`] carries none of this timing — this struct and the function
 /// that produces it exist to answer CR-116 §3.2: whether the phases [NFR-PE-05]
@@ -211,7 +234,7 @@ pub struct ColdStartPhases {
 
 impl ColdStartPhases {
     /// Sum of every phase, including [`other`](Self::other) — reconciles with
-    /// the externally measured [`Engine::start_with_phase_report`] wall time
+    /// the externally measured [`ColdStartPhases::measure`] wall time
     /// to within the noise of the handful of `Instant::now()` calls
     /// themselves (CR-116 AC1).
     pub fn sum(&self) -> Duration {
@@ -264,6 +287,111 @@ impl ColdStartPhases {
     pub fn enumerated_phases(&self) -> Duration {
         self.registry_subtotal() + self.store_open + self.schema_migration + self.pool_startup
     }
+
+    /// [`Engine::start`], instrumented with per-phase cold-start attribution
+    /// ([CR-116], [NFR-PE-05], [S-368]).
+    ///
+    /// Mirrors [`Engine::start_with`] step for step, timing each phase with a
+    /// plain `Instant` delta rather than routing through it. `Engine::start`
+    /// carries **no** instrumentation — every `Instant` lives here — so this
+    /// diagnostic path's own overhead never lands on the measured production
+    /// cold start, and the delta between this function's wall time and
+    /// `Engine::start`'s over the same root is the instrumentation's own cost
+    /// (CR-116 R2).
+    ///
+    /// This is a *mirror*, not a refactor: the production path is never routed
+    /// through this function. The steps the two share without a phase of their
+    /// own — the worktree seed, the hook seeding and the open-time finish — are
+    /// one helper each ([`seed_worktree`], [`seed_hooks`], [`finish_start`]),
+    /// so they cannot drift apart; an edit to the rest of
+    /// [`Engine::start_with`]'s call sequence must be applied here too. S-338
+    /// (hook seeding), S-369 (the shared `--git-common-dir` resolution) and
+    /// S-704 (the coordinate migration) each have a side-effect guard
+    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`,
+    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`
+    /// and
+    /// `coordinate_migration.rs::a_phase_reported_engine_start_migrates_the_store_too`).
+    ///
+    /// [`ColdStartPhases::other`] absorbs everything that is not one of the
+    /// six phases [NFR-PE-05] enumerates — root resolution, directory
+    /// creation, worktree-seed detection/copy, governance-contract seeding
+    /// (FR-WT-06), linked-worktree git-hook seeding (CR-106), engine
+    /// construction, the coordinate migration (S-704) and the
+    /// post-construction seed-diff reconcile — so
+    /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
+    /// time to within the noise of the handful of `Instant::now()` calls
+    /// themselves, not merely "within a stated margin" by approximation.
+    ///
+    /// # Errors
+    /// Same as [`Engine::start`].
+    ///
+    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
+    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
+    /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
+    pub fn measure(root: impl AsRef<Path>) -> Result<(Engine, Self)> {
+        let mut phases = Self::default();
+
+        let t_other = Instant::now();
+        let root = crate::workspace::resolve_root(root.as_ref());
+        let logos_dir = root.join(".logos");
+        std::fs::create_dir_all(&logos_dir)
+            .with_context(|| format!("creating the .logos directory at {}", logos_dir.display()))?;
+        let db_path = logos_dir.join("logos.db");
+        let seed = seed_worktree(&root, &db_path);
+        // The hook-reachability step (CR-106, S-338) runs on every start and
+        // belongs inside the measured cold path, attributed to `other`.
+        // Omitting it here would make the attribution understate the
+        // production total by exactly this step's cost on the roots where it
+        // does work (a linked worktree with hooks installed: one
+        // `--git-common-dir` subprocess plus a readlink/symlink per managed
+        // hook), which is the wrong direction for a measurement CR-116 §3.2 is
+        // decided on. `a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
+        // (logos-core/tests/worktree_hooks.rs) is the guard that keeps the two
+        // step lists together.
+        seed_hooks(&root);
+        phases.other += t_other.elapsed();
+
+        let (runtime, runtime_timings) =
+            Runtime::open_with_config_timed(&db_path, RuntimeConfig::default()).with_context(
+                || format!("starting the execution runtime for root {}", root.display()),
+            )?;
+        phases.store_open = runtime_timings.store_connect;
+        phases.schema_migration = runtime_timings.schema_migration;
+        phases.pool_startup = runtime_timings.pool_startup;
+
+        let registry = match crate::plugin::LanguageRegistry::load_with_timings(&root) {
+            Ok((registry, reg_timings)) => {
+                phases.plugin_toml_parse = reg_timings.manifest_parse;
+                phases.query_compilation = reg_timings.query_compile;
+                phases.registry_construction = reg_timings.construction;
+                Some(registry)
+            }
+            Err(err) => {
+                tracing::warn!("could not load plugin registry at startup: {err}");
+                None
+            }
+        };
+
+        let t_seed = Instant::now();
+        let engine = Engine {
+            root,
+            runtime: Some(runtime),
+            registry,
+            hydration: HydrationCache::new(HydrationConfig::default()),
+            sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
+            nav_prologue_done: AtomicBool::new(false),
+            governance: crate::governance::GovernanceState::default(),
+            extension_state: std::sync::Mutex::default(),
+            call_residue: std::sync::Mutex::new(None),
+            call_residue_walks: AtomicU64::new(0),
+            scan_env: None,
+            tools_manifest: None,
+        };
+        finish_start(&engine, seed);
+        phases.other += t_seed.elapsed();
+
+        Ok((engine, phases))
+    }
 }
 
 impl Engine {
@@ -312,6 +440,8 @@ impl Engine {
     /// the engine is held for the process lifetime so the pools (and the derived
     /// caches layered on them) are reused across calls.
     ///
+    /// [`Engine::start_with`] under [`StartOptions::default`].
+    ///
     /// # Errors
     /// Returns an error if `.logos/` cannot be created or the runtime cannot be
     /// opened (store open/migrate, reader pool, or worker pool failure).
@@ -320,83 +450,21 @@ impl Engine {
     /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
     /// [S-369]: ../../../docs/planning/journal.md#s-369-reconcile-the-cold-start-budget-with-what-it-actually-bounds
     pub fn start(root: impl AsRef<Path>) -> Result<Self> {
-        Self::start_with_hydration_config(root, HydrationConfig::default())
+        Self::start_with(root, StartOptions::default())
     }
 
-    /// Start a long-lived engine like [`Engine::start`], but with an explicit
-    /// hydration-cache bound.
+    /// Start a long-lived engine like [`Engine::start`], under `options`: an
+    /// explicit hydration-cache bound ([`StartOptions::hydration`]) or a
+    /// budgeted share of a workspace's pools ([`StartOptions::pools`]).
     ///
-    /// This is the seam through which the deferred [AQ-02]/[AA-04] RSS-budget
-    /// decision is wired without touching call sites: when the cache ceiling is
-    /// resolved during dogfood profiling it becomes a [`HydrationConfig`] passed
-    /// here (or a default change), not a code rewrite. [`Engine::start`] uses
-    /// [`HydrationConfig::default`].
-    ///
-    /// # Errors
-    /// Same as [`Engine::start`].
-    ///
-    /// [AQ-02]: ../../../docs/specs/architecture.md#14-open-questions
-    /// [AA-04]: ../../../docs/specs/architecture.md#24-assumptions
-    pub fn start_with_hydration_config(
-        root: impl AsRef<Path>,
-        hydration: HydrationConfig,
-    ) -> Result<Self> {
-        Self::start_with_configs(root, hydration, RuntimeConfig::default())
-    }
-
-    /// Start a long-lived engine on a **budgeted share** of a workspace's
-    /// resources rather than on the ones it would size for itself ([NFR-PE-11],
-    /// [ADR-63]): exactly `read_connections` read-only connections instead of one
-    /// per core, and — when `worker_pool` is `Some` — the workspace's one shared
-    /// `rayon` pool instead of a private core-sized one.
-    ///
-    /// The seam a **workspace** uses: the [federation registry] hands every
-    /// resident member engine the share of the workspace-wide
-    /// [`WorkspaceBudget`](crate::federation::WorkspaceBudget) it is entitled
-    /// to, so N members cost a host-derived ceiling rather than `N × cores` live
-    /// connections and `N × cores` worker threads. Nothing else calls this — the
-    /// single-root path stays on [`Engine::start`] and its core-sized pools,
-    /// byte-for-byte as today ([FR-WS-03], [ADR-52]).
-    ///
-    /// A `worker_pool` of `None` builds a private pool exactly as
-    /// [`Engine::start`] does, which is what makes the sharing *injected rather
-    /// than discovered*: an engine given no pool has no way to find one.
+    /// The shared start path: resolve the root, seed a DB-less worktree, bring
+    /// up the runtime under the options' [`RuntimeConfig`], and load the plugin
+    /// substrate.
     ///
     /// # Errors
     /// Same as [`Engine::start`]; additionally, a `read_connections` of zero is
     /// rejected by the pool (no reader could serve navigation).
-    ///
-    /// [federation registry]: crate::federation::EngineRegistry
-    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
-    /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
-    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
-    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
-    pub fn start_with_pools(
-        root: impl AsRef<Path>,
-        read_connections: usize,
-        worker_pool: Option<SharedWorkerPool>,
-    ) -> Result<Self> {
-        Self::start_with_configs(
-            root,
-            HydrationConfig::default(),
-            RuntimeConfig {
-                reader_pool_size: read_connections,
-                worker_pool,
-                ..RuntimeConfig::default()
-            },
-        )
-    }
-
-    /// The shared start path behind [`start`](Self::start),
-    /// [`start_with_hydration_config`](Self::start_with_hydration_config) and
-    /// [`start_with_pools`](Self::start_with_pools): resolve the root, seed a
-    /// DB-less worktree, bring up the runtime under `runtime`, and load the
-    /// plugin substrate.
-    fn start_with_configs(
-        root: impl AsRef<Path>,
-        hydration: HydrationConfig,
-        runtime: RuntimeConfig,
-    ) -> Result<Self> {
+    pub fn start_with(root: impl AsRef<Path>, options: StartOptions) -> Result<Self> {
         // The hint resolves to the containing working-tree root ([ADR-15],
         // [FR-WT-01]): in a linked worktree, THAT worktree's root — so each
         // worktree owns its own `.logos/logos.db` and a server launched with
@@ -412,128 +480,10 @@ impl Engine {
             .with_context(|| format!("creating the .logos directory at {}", logos_dir.display()))?;
         let db_path = logos_dir.join("logos.db");
 
-        // Seed-from-main bootstrap ([ADR-15], [FR-WT-03]): first use in a
-        // DB-less linked worktree copies the primary checkout's DB; the
-        // main↔branch diff is reconciled below once the runtime and registry
-        // are up. A failed copy — or no seed at all — falls back to a fresh
-        // store, which the auto-index prologue ([FR-IX-07]) then full-indexes.
-        //
-        // [FR-WT-03]: ../../../docs/specs/requirements/FR-WT-03.md
-        // [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
-        let seed = if db_path.exists() {
-            None
-        } else {
-            // ONE `git rev-parse --git-common-dir` for both seeds (CR-116
-            // §9 item 5, S-369). The graph-store seed and the governance-contract
-            // seed below both need the primary checkout, and each used to
-            // resolve it with its own identical subprocess — pure waste on a
-            // cold path budgeted by NFR-PE-05, and the more schedule-sensitive
-            // half of it, since a process spawn varies far more than in-process
-            // work. `None` here means "no distinct primary": neither seed runs,
-            // exactly as before.
-            let primary = crate::workspace::primary_root(&root);
+        let seed = seed_worktree(&root, &db_path);
+        seed_hooks(&root);
 
-            let seed = primary
-                .clone()
-                .and_then(crate::workspace::seed_source_from_primary)
-                .and_then(
-                    |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
-                        Ok(()) => {
-                            tracing::info!(
-                                primary = %seed.primary_root.display(),
-                                head = %seed.head,
-                                "seeded the worktree store from the primary checkout (ADR-15)"
-                            );
-                            Some(seed)
-                        }
-                        Err(err) => {
-                            // seed_copy cleaned up its partial db+wal pair; the
-                            // runtime below opens a fresh store.
-                            tracing::warn!(
-                                "seed-from-main copy failed; falling back to a fresh store \
-                                 and a full index: {err:#}"
-                            );
-                            None
-                        }
-                    },
-                );
-
-            // Governance-contract seeding ([FR-WT-06], CR-112): independent of
-            // whether the graph-store copy above succeeded — a `rules.toml`
-            // carried into a DB-less worktree is worth having even if the
-            // graph seed failed, and vice versa. `.logos/` is conventionally
-            // gitignored, so without this the seeded graph would have no
-            // architecture contract and every governance evaluation inside
-            // the worktree would be vacuous. Each file is copied verbatim
-            // (never parsed or rewritten), so no copied value can become an
-            // absolute path into the primary checkout (FR-IN-06). A file the
-            // worktree already has of its own — travelled through git
-            // (FR-WT-02) or left by a prior partial seed — is left alone.
-            //
-            // Reuses the `primary` resolved above rather than re-running the
-            // identical `--git-common-dir` query (CR-116 §9 item 5, S-369).
-            if let Some(primary) = primary {
-                let contract = crate::workspace::seed_contract(&primary, &root);
-                for (name, outcome) in [
-                    ("rules.toml", contract.rules),
-                    ("config.toml", contract.config),
-                ] {
-                    match outcome {
-                        crate::workspace::ContractFileOutcome::Copied => {
-                            tracing::info!(
-                                file = name,
-                                primary = %primary.display(),
-                                "seeded the governance contract file from the primary checkout (FR-WT-06)"
-                            );
-                        }
-                        crate::workspace::ContractFileOutcome::Absent
-                        | crate::workspace::ContractFileOutcome::AlreadyPresent => {}
-                        crate::workspace::ContractFileOutcome::Failed(error) => {
-                            // Fail-soft, matching the graph-store seed above
-                            // (ADR-11): the worktree stays usable, just
-                            // without this policy file.
-                            tracing::warn!(
-                                file = name,
-                                primary = %primary.display(),
-                                error = %error,
-                                "seeding {name} from the primary checkout failed; the \
-                                 worktree's governance contract may be incomplete"
-                            );
-                        }
-                    }
-                }
-            }
-
-            seed
-        };
-
-        // Hook reachability (CR-106, [FR-IN-03], [FR-IN-06]): deliberately
-        // OUTSIDE the DB-less gate above. `core.hooksPath` is the relative
-        // `.logos/hooks`, which git resolves against *this* working tree, so a
-        // linked worktree needs its own hooks directory or no logos git hook
-        // fires in it at all — including the blocking `pre-push` gate. Gating
-        // this on "first use" would cover only worktrees created after the
-        // installation; running it every start covers a worktree that predates
-        // it too, on its next logos command. It costs one `stat` outside a
-        // linked worktree (the `.git`-is-a-file discriminator) and seeds
-        // nothing when hooks are not installed — opt-in stays opt-in.
-        //
-        // [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
-        // [FR-IN-06]: ../../../docs/specs/requirements/FR-IN-06.md
-        if let Some(seeded) = crate::hooks::seed_from_primary(&root) {
-            for warning in &seeded.warnings {
-                tracing::warn!("seeding this worktree's git hooks: {warning}");
-            }
-            if !seeded.is_empty() {
-                tracing::info!(
-                    linked = seeded.linked.len(),
-                    copied = seeded.copied.len(),
-                    "made the installed git hooks reachable from this worktree (CR-106)"
-                );
-            }
-        }
-
-        let runtime = Runtime::open_with_config(&db_path, runtime).with_context(|| {
+        let runtime = Runtime::open_with_config(&db_path, options.runtime).with_context(|| {
             format!("starting the execution runtime for root {}", root.display())
         })?;
 
@@ -554,7 +504,7 @@ impl Engine {
             root,
             runtime: Some(runtime),
             registry,
-            hydration: HydrationCache::new(hydration),
+            hydration: HydrationCache::new(options.hydration),
             sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
             nav_prologue_done: AtomicBool::new(false),
             governance: crate::governance::GovernanceState::default(),
@@ -564,210 +514,8 @@ impl Engine {
             scan_env: None,
             tools_manifest: None,
         };
-
-        // Move a store whose symbols carry another coordinate than the
-        // project's — one built before ADR-85, or a changed `[project] id` or
-        // remote — before anything syncs into it (FR-EX-35, S-704). A
-        // just-seeded worktree store migrates here too, so the diff reconcile
-        // below re-extracts under the coordinate the seed now carries.
-        engine.migrate_symbol_coordinate();
-        engine.route_shared_extensions();
-
-        // Finish the worktree bootstrap: reconcile only the main↔branch diff
-        // over the just-seeded store — O(diff-from-main), not O(repo)
-        // ([FR-WT-03]). Fail-soft by design.
-        if let Some(seed) = seed {
-            engine.reconcile_seed_diff(&seed);
-        }
-
+        finish_start(&engine, seed);
         Ok(engine)
-    }
-
-    /// [`Engine::start`], instrumented with per-phase cold-start attribution
-    /// ([CR-116], [NFR-PE-05], [S-368]).
-    ///
-    /// Mirrors [`start_with_configs`](Self::start_with_configs) step for step,
-    /// timing each phase with a plain `Instant` delta rather than routing
-    /// through it. `Engine::start` carries **no** instrumentation — every
-    /// `Instant` lives here — so this diagnostic path's own overhead never
-    /// lands on the measured production cold start, and the delta between this
-    /// function's wall time and `Engine::start`'s over the same root is the
-    /// instrumentation's own cost (CR-116 R2).
-    ///
-    /// This is a *mirror*, not a refactor: the production path is never routed
-    /// through this function. The price is that an edit to
-    /// [`start_with_configs`](Self::start_with_configs)'s call sequence must be
-    /// applied here too — S-338 (hook seeding), S-369 (the shared
-    /// `--git-common-dir` resolution) and S-704 (the coordinate migration) all
-    /// were, each with a side-effect guard
-    /// (`worktree_hooks.rs::a_phase_reported_engine_start_seeds_the_worktree_hooks_too`,
-    /// `worktree.rs::a_phase_reported_engine_start_seeds_the_store_and_the_contract_too`
-    /// and
-    /// `coordinate_migration.rs::a_phase_reported_engine_start_migrates_the_store_too`).
-    ///
-    /// [`ColdStartPhases::other`] absorbs everything that is not one of the
-    /// six phases [NFR-PE-05] enumerates — root resolution, directory
-    /// creation, worktree-seed detection/copy, governance-contract seeding
-    /// (FR-WT-06), linked-worktree git-hook seeding (CR-106), engine
-    /// construction, the coordinate migration (S-704) and the
-    /// post-construction seed-diff reconcile — so
-    /// [`ColdStartPhases::sum`] reconciles with the externally measured wall
-    /// time to within the noise of the handful of `Instant::now()` calls
-    /// themselves, not merely "within a stated margin" by approximation.
-    ///
-    /// # Errors
-    /// Same as [`Engine::start`].
-    ///
-    /// [CR-116]: ../../../docs/requests/CR-116-cold-start-budget-and-its-guard-disagree.md
-    /// [NFR-PE-05]: ../../../docs/specs/requirements/NFR-PE-05.md
-    /// [S-368]: ../../../docs/planning/journal.md#s-368-attribute-the-cold-start-cost-across-its-phases
-    pub fn start_with_phase_report(root: impl AsRef<Path>) -> Result<(Self, ColdStartPhases)> {
-        let mut phases = ColdStartPhases::default();
-
-        let t_other = Instant::now();
-        let root = crate::workspace::resolve_root(root.as_ref());
-        let logos_dir = root.join(".logos");
-        std::fs::create_dir_all(&logos_dir)
-            .with_context(|| format!("creating the .logos directory at {}", logos_dir.display()))?;
-        let db_path = logos_dir.join("logos.db");
-
-        let seed = if db_path.exists() {
-            None
-        } else {
-            // Mirrors `start_with_configs`'s single `--git-common-dir`
-            // resolution (CR-116 §9 item 5, S-369). It must stay mirrored: this
-            // twin exists to attribute the production cold path's cost, so a
-            // twin still paying for two subprocesses would over-report `other`
-            // by exactly the saving the production path made.
-            let primary = crate::workspace::primary_root(&root);
-
-            let seed = primary
-                .clone()
-                .and_then(crate::workspace::seed_source_from_primary)
-                .and_then(
-                    |seed| match crate::graph_store::seed_copy(&seed.db_path, &db_path) {
-                        Ok(()) => {
-                            tracing::info!(
-                                primary = %seed.primary_root.display(),
-                                head = %seed.head,
-                                "seeded the worktree store from the primary checkout (ADR-15)"
-                            );
-                            Some(seed)
-                        }
-                        Err(err) => {
-                            tracing::warn!(
-                                "seed-from-main copy failed; falling back to a fresh store \
-                                 and a full index: {err:#}"
-                            );
-                            None
-                        }
-                    },
-                );
-
-            if let Some(primary) = primary {
-                let contract = crate::workspace::seed_contract(&primary, &root);
-                for (name, outcome) in [
-                    ("rules.toml", contract.rules),
-                    ("config.toml", contract.config),
-                ] {
-                    match outcome {
-                        crate::workspace::ContractFileOutcome::Copied => {
-                            tracing::info!(
-                                file = name,
-                                primary = %primary.display(),
-                                "seeded the governance contract file from the primary checkout (FR-WT-06)"
-                            );
-                        }
-                        crate::workspace::ContractFileOutcome::Absent
-                        | crate::workspace::ContractFileOutcome::AlreadyPresent => {}
-                        crate::workspace::ContractFileOutcome::Failed(error) => {
-                            tracing::warn!(
-                                file = name,
-                                primary = %primary.display(),
-                                error = %error,
-                                "seeding {name} from the primary checkout failed; the \
-                                 worktree's governance contract may be incomplete"
-                            );
-                        }
-                    }
-                }
-            }
-
-            seed
-        };
-
-        // Mirrors `start_with_configs`'s hook-reachability step (CR-106,
-        // S-338), which landed in the same iteration as this twin and is
-        // deliberately OUTSIDE the DB-less gate above — so it runs on every
-        // start and belongs inside the measured cold path, attributed to
-        // `other`. Omitting it here would make the attribution understate the
-        // production total by exactly this step's cost on the roots where it
-        // does work (a linked worktree with hooks installed: one
-        // `--git-common-dir` subprocess plus a readlink/symlink per managed
-        // hook), which is the wrong direction for a measurement CR-116 §3.2 is
-        // decided on. `sprint-65`'s sprint review found it missing and added
-        // it; `a_phase_reported_engine_start_seeds_the_worktree_hooks_too`
-        // (logos-core/tests/worktree_hooks.rs) is the guard that keeps the two
-        // step lists together.
-        if let Some(seeded) = crate::hooks::seed_from_primary(&root) {
-            for warning in &seeded.warnings {
-                tracing::warn!("seeding this worktree's git hooks: {warning}");
-            }
-            if !seeded.is_empty() {
-                tracing::info!(
-                    linked = seeded.linked.len(),
-                    copied = seeded.copied.len(),
-                    "made the installed git hooks reachable from this worktree (CR-106)"
-                );
-            }
-        }
-        phases.other += t_other.elapsed();
-
-        let (runtime, runtime_timings) =
-            Runtime::open_with_config_timed(&db_path, RuntimeConfig::default()).with_context(
-                || format!("starting the execution runtime for root {}", root.display()),
-            )?;
-        phases.store_open = runtime_timings.store_connect;
-        phases.schema_migration = runtime_timings.schema_migration;
-        phases.pool_startup = runtime_timings.pool_startup;
-
-        let registry = match crate::plugin::LanguageRegistry::load_with_timings(&root) {
-            Ok((registry, reg_timings)) => {
-                phases.plugin_toml_parse = reg_timings.manifest_parse;
-                phases.query_compilation = reg_timings.query_compile;
-                phases.registry_construction = reg_timings.construction;
-                Some(registry)
-            }
-            Err(err) => {
-                tracing::warn!("could not load plugin registry at startup: {err}");
-                None
-            }
-        };
-
-        let t_seed = Instant::now();
-        let engine = Self {
-            root,
-            runtime: Some(runtime),
-            registry,
-            hydration: HydrationCache::new(HydrationConfig::default()),
-            sync_stamp: AtomicU64::new(SyncStamp::INITIAL.0),
-            nav_prologue_done: AtomicBool::new(false),
-            governance: crate::governance::GovernanceState::default(),
-            extension_state: std::sync::Mutex::default(),
-            call_residue: std::sync::Mutex::new(None),
-            call_residue_walks: AtomicU64::new(0),
-            scan_env: None,
-            tools_manifest: None,
-        };
-
-        engine.migrate_symbol_coordinate();
-        engine.route_shared_extensions();
-        if let Some(seed) = seed {
-            engine.reconcile_seed_diff(&seed);
-        }
-        phases.other += t_seed.elapsed();
-
-        Ok((engine, phases))
     }
 
     /// The live execution runtime, if this engine was created with
@@ -808,7 +556,7 @@ impl Engine {
 
     /// Spawn the debounced filesystem watcher over this engine's root
     /// ([S-022], [FR-SY-04]): each debounce window's changes coalesce into one
-    /// [`Engine::sync`] submitted through the single-writer actor ([ADR-02]).
+    /// [`Pipeline::sync`] submitted through the single-writer actor ([ADR-02]).
     ///
     /// Hold the returned [`WatchHandle`](crate::watch::WatchHandle) for the
     /// serve loop's lifetime; dropping it stops the watcher and joins its
@@ -838,1061 +586,6 @@ impl Engine {
         self.registry.as_ref()
     }
 
-    // ── Graph hydration (S-009, ADR-05) ───────────────────────────────────
-
-    /// Hydrate (or reuse the cached) petgraph view of the whole project at
-    /// `granularity` ([FR-DB-05], [FR-DB-06], [ADR-05]).
-    ///
-    /// The first call at a given `last_sync_at` reads the graph from the RO pool
-    /// and builds the petgraph; subsequent calls at the same stamp return the
-    /// cached `Arc<GraphView>` without touching SQLite ([NFR-PE-07]). Advancing
-    /// the sync stamp ([`Engine::advance_sync_stamp`]) invalidates the cache, so
-    /// the next call re-hydrates.
-    ///
-    /// # Errors
-    /// Returns an error if this is a transient [`Engine::open`] engine (hydration
-    /// needs the runtime's RO pool), or if the read fails.
-    ///
-    /// [FR-DB-05]: ../../../docs/specs/requirements/FR-DB-05.md
-    /// [FR-DB-06]: ../../../docs/specs/requirements/FR-DB-06.md
-    /// [NFR-PE-07]: ../../../docs/specs/requirements/NFR-PE-07.md
-    pub fn hydrate(&self, granularity: Granularity) -> Result<Arc<GraphView>> {
-        let runtime = self.runtime.as_ref().ok_or_else(|| {
-            anyhow!(
-                "graph hydration requires a long-lived engine (Engine::start); \
-                 a transient Engine::open engine has no read-only pool to hydrate from"
-            )
-        })?;
-        self.hydration
-            .get_or_build(runtime, Scope::Project, granularity, self.sync_stamp())
-    }
-
-    /// The current in-memory `last_sync_at` ([ADR-04]). Starts at
-    /// [`SyncStamp::INITIAL`].
-    pub fn sync_stamp(&self) -> SyncStamp {
-        SyncStamp(self.sync_stamp.load(Ordering::Acquire))
-    }
-
-    /// Advance `last_sync_at`, invalidating the hydration cache on the next
-    /// [`Engine::hydrate`] ([ADR-04]).
-    ///
-    /// The indexing pipeline ([S-010]) calls this after committing a write batch
-    /// so a re-hydration reflects the new graph state. Returns the new stamp.
-    ///
-    /// [S-010]: ../../../docs/planning/journal.md#s-010-indexing-and-incremental-sync-pipeline
-    pub fn advance_sync_stamp(&self) -> SyncStamp {
-        // fetch_add returns the previous value; the new stamp is +1.
-        SyncStamp(self.sync_stamp.fetch_add(1, Ordering::AcqRel) + 1)
-    }
-
-    /// A snapshot of hydration-cache effectiveness for `stats` ([NFR-PE-07]).
-    pub fn hydration_stats(&self) -> HydrationStats {
-        self.hydration.stats()
-    }
-
-    // ── Bootstrap ────────────────────────────────────────────────────────
-
-    /// Initialise a `.logos/` directory in `root` and create the canonical DB,
-    /// starter policy templates, and the generated `.gitignore` (FR-IN-01,
-    /// FR-IN-04).
-    ///
-    /// Idempotent and non-clobbering (DL-07): on an already-initialised
-    /// project this re-opens the store, applies any pending forward
-    /// migrations, refreshes only the managed `.gitignore` block, and never
-    /// overwrites an existing policy file.
-    ///
-    /// Equivalent to [`Engine::init_with`] with [`InitOptions::default`] —
-    /// the plain (non-`-i`) CLI contract.
-    ///
-    /// # Errors
-    /// Returns an error if `.logos/` cannot be created, the store cannot be
-    /// opened/migrated, or a Logos-owned artifact cannot be written.
-    pub fn init(root: impl AsRef<Path>) -> Result<InitResult> {
-        Self::init_with(root, &InitOptions::default())
-    }
-
-    /// [`Engine::init`] plus the optional host-integration steps selected by
-    /// `options` (S-023): `.mcp.json` MCP-server-block injection and the
-    /// managed `CLAUDE.md` steer (FR-IN-02), and the `core.hooksPath`
-    /// git-hook installer (FR-IN-03).
-    ///
-    /// Extends — does not replace — the Sprint 4 minimal bootstrap: the
-    /// store is still created/migrated through [`Engine::start`] (the
-    /// canonical create-dir + open/migrate path), then [`crate::init`] runs
-    /// the file-generation steps. Each step's outcome is reported in
-    /// [`InitResult::steps`]; targets that cannot be touched *safely*
-    /// (malformed host config, foreign `core.hooksPath`, not a git repo) are
-    /// `Skipped` with a reason, never clobbered (DL-06, DL-07).
-    ///
-    /// # Errors
-    /// Returns an error if `.logos/` cannot be created, the store cannot be
-    /// opened/migrated, or a Logos-owned artifact cannot be written.
-    pub fn init_with(root: impl AsRef<Path>, options: &InitOptions) -> Result<InitResult> {
-        Self::init_with_contributions(root, options, &[], &[])
-    }
-
-    /// [`Engine::init_with`] plus the `contributions` an extension host supplies
-    /// ([FR-DS-04], [ADR-74]): each runs after the core steps, against the same
-    /// resolved root and options, and its rows join [`InitResult::steps`].
-    /// With none it is exactly [`Engine::init_with`]. `owned_skills` are the
-    /// skill names every registered extension owns, active or not: `init` never
-    /// retires a skill copy under one of them (HF-10).
-    ///
-    /// # Errors
-    /// As [`Engine::init_with`], plus a contribution's own I/O failure.
-    ///
-    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
-    /// [ADR-74]: ../../../docs/specs/architecture/decisions/ADR-74.md
-    pub fn init_with_contributions(
-        root: impl AsRef<Path>,
-        options: &InitOptions,
-        contributions: &[std::sync::Arc<dyn crate::init::InitContribution>],
-        owned_skills: &[String],
-    ) -> Result<InitResult> {
-        crate::observability::traced(Tool::Init, || {
-            // Resolve the hint exactly as `start` will ([ADR-15], [FR-WT-01]) so
-            // the reported paths match where the store actually lands.
-            let root = &crate::workspace::resolve_root(root.as_ref());
-            let logos_dir = root.join(".logos");
-            let db_path = logos_dir.join("logos.db");
-            let existed = db_path.exists();
-            let engine = Self::start(root)?;
-            let mut steps = crate::init::run(root, options, owned_skills)?;
-            // FR-CF-10: the store records the coordinate the config `init` just
-            // completed resolves to, so `status` reads it before any index. A
-            // config that does not load is `init`'s to report, never to fail on
-            // (DL-06) — its `[project] id` row says why, and `index` fails loud.
-            match crate::config::load_config_from_root(root) {
-                Ok(config) => engine.record_project_id(&config)?,
-                Err(err) => tracing::warn!(
-                    "project id not recorded: the configuration does not load ({err})"
-                ),
-            }
-            drop(engine);
-            for contribution in contributions {
-                steps.extend(contribution.run(root, options)?);
-            }
-            Ok(InitResult {
-                logos_dir: logos_dir.display().to_string(),
-                db_path: db_path.display().to_string(),
-                message: if existed {
-                    "already initialised — store opened, pending migrations applied".to_string()
-                } else if options.workspace_member {
-                    // CR-119: true in the workspace context, unlike the plain
-                    // message below — the FR-WS-14 supervisor `init --workspace`
-                    // just spawned is already warming this member, and `logos
-                    // index` at the workspace root would build only the root.
-                    // Names `WarmStartDisclosure::STATUS_COMMAND` rather than a
-                    // second literal, so this and the workspace-level disclosure
-                    // cannot drift onto different surface names.
-                    format!(
-                        "enrolled — queued for background warming (see `{}`)",
-                        crate::federation::enable::WarmStartDisclosure::STATUS_COMMAND
-                    )
-                } else {
-                    "initialised — run `logos index` to build the code graph".to_string()
-                },
-                steps,
-            })
-        })
-    }
-
-    /// Install the optional sync git hooks for the repository at `root`
-    /// ([FR-SY-05], [FR-IN-03]): managed post-commit/post-checkout/post-merge
-    /// scripts under `.logos/hooks/` + `core.hooksPath`, non-clobbering over
-    /// foreign hook setups. The `init -i` flow (S-023) calls this for its
-    /// optional hook-install step; see [`crate::hooks`] for the contract.
-    ///
-    /// # Errors
-    /// Returns an error if `root` is not a git work tree, `git` is absent, or
-    /// the scripts cannot be written.
-    ///
-    /// [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
-    /// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
-    pub fn install_hooks(root: impl AsRef<Path>) -> Result<crate::hooks::HooksResult> {
-        crate::hooks::install(root.as_ref())
-    }
-
-    /// `logos init --uninstall` ([FR-IN-12]): remove every artefact Logos
-    /// wrote into the project — the managed blocks, the MCP, hook and plugin
-    /// enrolment entries, the scripts and skill copies with their pointers, and
-    /// the managed git hooks, unsetting `core.hooksPath` only if Logos set it
-    /// ([`crate::hooks::uninstall`]). Foreign content and `.logos/` stay, and
-    /// no store is opened or created. A second run reports every row
-    /// `Unchanged`.
-    ///
-    /// # Errors
-    /// On an I/O failure on a Logos-written file, and when git fails part-way
-    /// through removing the managed git hooks.
-    ///
-    /// [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
-    pub fn init_uninstall(root: impl AsRef<Path>) -> Result<crate::models::pipeline::UninstallResult> {
-        use crate::models::pipeline::InitAction;
-        let root = &crate::workspace::resolve_root(root.as_ref());
-        let steps = crate::init::uninstall(root)?;
-        let removed = steps.iter().any(|s| s.action != InitAction::Unchanged && s.action != InitAction::Skipped);
-        Ok(crate::models::pipeline::UninstallResult {
-            message: if removed {
-                "Logos integration removed; .logos/ is left in place (delete it to drop the index)"
-            } else {
-                "nothing of Logos's to remove; .logos/ is left in place"
-            }
-            .to_string(),
-            steps,
-        })
-    }
-
-    // ── Navigation (8 tools, FR-NV-01..09, S-013) ─────────────────────────
-    //
-    // All eight are best-effort-fresh point queries (ADR-11, NFR-DM-02): they
-    // read exclusively from the runtime's read-only pool and NEVER reconcile
-    // the working tree per call (FR-RC-05). The surface is infallible
-    // (ADR-14): a failed read degrades to an empty read-model carrying the
-    // reason in `warnings`; an unknown symbol yields an empty result plus
-    // "did you mean" suggestions (FR-NV-09) — never an error.
-
-    /// FTS5 full-text search over the code graph, optionally filtered by node
-    /// `kind`, at most `limit` (default 20) hits (FR-NV-01).
-    ///
-    /// Sub-100 ms p95 budget (NFR-PE-01); best-effort-fresh (NFR-DM-02).
-    pub fn search(
-        &self,
-        query: &str,
-        kind: Option<NodeKind>,
-        limit: Option<usize>,
-    ) -> SearchResult {
-        crate::observability::traced(Tool::Search, || {
-            crate::navigate::search(self, query, kind, limit)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("search failed: {err:#}");
-            SearchResult {
-                query: query.to_string(),
-                warnings: vec![format!("search failed: {err}")],
-                ..SearchResult::default()
-            }
-        })
-    }
-
-    /// Deterministic context bundle for a `task` description (FR-NV-02).
-    ///
-    /// One call replaces several ad-hoc reads — the token-saving thesis
-    /// (AS-02): FTS5-seed → 1-hop expand (OQ-05) → centrality rank → cap at
-    /// `max_nodes` (default 25). Code only when `include_code` is `true`.
-    pub fn context(
-        &self,
-        task: &str,
-        max_nodes: Option<usize>,
-        include_code: bool,
-    ) -> ContextBundle {
-        crate::observability::traced(Tool::Context, || {
-            crate::navigate::context(self, task, max_nodes, include_code)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("context failed: {err:#}");
-            ContextBundle {
-                task: task.to_string(),
-                warnings: vec![format!("context failed: {err}")],
-                ..ContextBundle::default()
-            }
-        })
-    }
-
-    /// Neighbourhood exploration around `query`: source grouped by file, at
-    /// most `max_files` (default 10) groups (FR-NV-03).
-    pub fn explore(&self, query: &str, max_files: Option<usize>) -> ExploreResult {
-        crate::observability::traced(Tool::Explore, || {
-            crate::navigate::explore(self, query, max_files)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("explore failed: {err:#}");
-            ExploreResult {
-                query: query.to_string(),
-                warnings: vec![format!("explore failed: {err}")],
-                ..ExploreResult::default()
-            }
-        })
-    }
-
-    /// Full node info for a single `symbol`: metadata, immediate edges, and
-    /// code opt-in (FR-NV-04).
-    pub fn node(&self, symbol: &str, include_code: bool) -> NodeInfo {
-        crate::observability::traced(Tool::Node, || crate::navigate::node(self, symbol, include_code))
-            .unwrap_or_else(|err| {
-                tracing::warn!("node failed: {err:#}");
-                NodeInfo {
-                    query: symbol.to_string(),
-                    warnings: vec![format!("node failed: {err}")],
-                    ..NodeInfo::default()
-                }
-            })
-    }
-
-    /// Direct callers of `symbol`, at most `limit` (default 50) (FR-NV-05).
-    pub fn callers(&self, symbol: &str, limit: Option<usize>) -> CallersResult {
-        crate::observability::traced_with(
-            Tool::Callers,
-            || crate::navigate::callers(self, symbol, limit),
-            CallOutcome::outcome,
-        )
-            .unwrap_or_else(|err| {
-                tracing::warn!("callers failed: {err:#}");
-                CallersResult {
-                    query: symbol.to_string(),
-                    warnings: vec![format!("callers failed: {err}")],
-                    ..CallersResult::default()
-                }
-            })
-    }
-
-    /// Direct callees of `symbol`, at most `limit` (default 50) (FR-NV-05).
-    pub fn callees(&self, symbol: &str, limit: Option<usize>) -> CalleesResult {
-        crate::observability::traced(Tool::Callees, || crate::navigate::callees(self, symbol, limit))
-            .unwrap_or_else(|err| {
-                tracing::warn!("callees failed: {err:#}");
-                CalleesResult {
-                    query: symbol.to_string(),
-                    warnings: vec![format!("callees failed: {err}")],
-                    ..CalleesResult::default()
-                }
-            })
-    }
-
-    /// Transitive impact of changing `symbol`, both directions labeled
-    /// (FR-NV-06, DL-03): upstream "breaks if changed", downstream
-    /// "depends on", bounded by `depth` (default 3).
-    pub fn impact(&self, symbol: &str, depth: Option<usize>) -> ImpactResult {
-        crate::observability::traced_with(
-            Tool::Impact,
-            || crate::navigate::impact(self, symbol, depth),
-            CallOutcome::outcome,
-        )
-            .unwrap_or_else(|err| {
-                tracing::warn!("impact failed: {err:#}");
-                ImpactResult {
-                    query: symbol.to_string(),
-                    warnings: vec![format!("impact failed: {err}")],
-                    ..ImpactResult::default()
-                }
-            })
-    }
-
-    /// Which planned work items collide, and on what ([FR-NV-11], CR-114).
-    ///
-    /// Given work items each naming the symbols it intends to change, reports
-    /// every pair whose transitive impact sets intersect (naming the shared
-    /// symbols) and every pair that is safely parallel. The payload carries its
-    /// own coverage limits ([NFR-CC-04]): impact is computed over the indexed
-    /// graph, so an unindexed surface cannot contribute an intersection.
-    ///
-    /// [FR-NV-11]: ../../../docs/specs/requirements/FR-NV-11.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// Each spec is `<id>=<symbol>[,<symbol>…]` — parsed in the core, so every
-    /// surface accepts the identical spelling and none of them parses anything
-    /// of its own ([ADR-01]). A malformed spec becomes a warning on the payload,
-    /// never an error.
-    pub fn impact_intersection(
-        &self,
-        items: &[String],
-        depth: Option<usize>,
-    ) -> ImpactIntersectionResult {
-        crate::observability::traced(Tool::ImpactIntersection, || {
-            crate::navigate::impact_intersection(self, items, depth)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("impact_intersection failed: {err:#}");
-            crate::navigate::intersection_degraded(
-                depth,
-                format!("impact_intersection failed: {err}"),
-            )
-        })
-    }
-
-    /// Nodes structurally analogous to `target` — a symbol or a
-    /// project-relative file ([FR-NV-12], CR-114).
-    ///
-    /// The precedent question a plan-driven workflow asks once scope is
-    /// settled: *which existing code plays the same structural role as the
-    /// thing I am about to write*. Analogy is three named graph facts — a
-    /// shared supertype, a shared registration, a matching call shape — and
-    /// every result names which of them it matched and through which nodes.
-    /// There is no score ([FR-NV-12] AC 1/AC 2).
-    ///
-    /// An empty answer always states its reason rather than relaxing the
-    /// notion into a guess ([FR-NV-12] AC 4, [NFR-CC-04]). `limit` defaults to
-    /// 20 and is clamped to 100.
-    ///
-    /// [FR-NV-12]: ../../../docs/specs/requirements/FR-NV-12.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn precedent(&self, target: &str, limit: Option<usize>) -> PrecedentResult {
-        crate::observability::traced_with(
-            Tool::Precedent,
-            || crate::navigate::precedent(self, target, limit),
-            CallOutcome::outcome,
-        )
-        .unwrap_or_else(|err| {
-            tracing::warn!("precedent failed: {err:#}");
-            crate::navigate::precedent_degraded(target, format!("precedent failed: {err}"))
-        })
-    }
-    /// Which git refs collide, and what a merge did not carry ([FR-NV-13],
-    /// CR-114).
-    ///
-    /// Given a set of refs, reports the symbols more than one of them modifies,
-    /// naming the refs. When `merge` names a stated merge result, also reports
-    /// the symbols and files a ref changed that the result does not carry — a
-    /// clean merge is not a complete merge. The payload carries its own coverage
-    /// limits ([NFR-CC-04]): hunks are attributed to the spans of the indexed
-    /// snapshot, so a symbol outside the indexed set cannot be reported.
-    ///
-    /// Refs are passed to git verbatim and are never interpreted here, so every
-    /// surface accepts whatever `git rev-parse` accepts ([ADR-01]). An
-    /// unresolvable ref becomes a warning on the payload, never an error.
-    ///
-    /// [FR-NV-13]: ../../../docs/specs/requirements/FR-NV-13.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-    pub fn branch_overlap(
-        &self,
-        refs: &[String],
-        base: Option<&str>,
-        merge: Option<&str>,
-    ) -> BranchOverlapResult {
-        crate::observability::traced(Tool::BranchOverlap, || {
-            crate::navigate::branch::branch_overlap(self, refs, base, merge)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("branch_overlap failed: {err:#}");
-            crate::navigate::branch::overlap_degraded(format!("branch_overlap failed: {err}"))
-        })
-    }
-
-    /// Which code implements a documentation/requirement node (FR-NV-10,
-    /// S-037): the code symbols a doc node points at over doc→code edges.
-    /// Empty (never an error) when no such edge exists; "did you mean"
-    /// suggestions when the doc node is unknown (FR-NV-09).
-    pub fn implements(&self, doc: &str) -> ImplementorsResult {
-        crate::observability::traced(Tool::Implements, || crate::navigate::implements(self, doc))
-            .unwrap_or_else(|err| {
-                tracing::warn!("implements failed: {err:#}");
-                ImplementorsResult {
-                    query: doc.to_string(),
-                    warnings: vec![format!("implements failed: {err}")],
-                    ..ImplementorsResult::default()
-                }
-            })
-    }
-
-    /// Which documents reference a code symbol (FR-NV-10, S-037): the doc
-    /// sections pointing at the symbol over doc→code edges. Empty (never an
-    /// error) when no doc references it; suggestions when the symbol is
-    /// unknown (FR-NV-09).
-    pub fn referencing_docs(&self, symbol: &str) -> ReferencingDocsResult {
-        crate::observability::traced(Tool::ReferencingDocs, || {
-            crate::navigate::referencing_docs(self, symbol)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("referencing_docs failed: {err:#}");
-            ReferencingDocsResult {
-                query: symbol.to_string(),
-                warnings: vec![format!("referencing_docs failed: {err}")],
-                ..ReferencingDocsResult::default()
-            }
-        })
-    }
-
-    /// Whole reverse-transitive closure of files affected by a changed set
-    /// (FR-CL-04, DL-08): every file depending — directly or transitively, over
-    /// calls/imports/references — on any of `files`. `tests_only` narrows the
-    /// closure to test-marked files.
-    pub fn affected(&self, files: &[String], tests_only: bool) -> AffectedResult {
-        crate::observability::traced_with(
-            Tool::Affected,
-            || crate::navigate::affected(self, files, tests_only),
-            CallOutcome::outcome,
-        )
-        .unwrap_or_else(|err| {
-            tracing::warn!("affected failed: {err:#}");
-            AffectedResult {
-                changed: files.to_vec(),
-                tests_only,
-                warnings: vec![format!("affected failed: {err}")],
-                ..AffectedResult::default()
-            }
-        })
-    }
-
-    /// Current index and sync health of the code graph (FR-NV-07): counts,
-    /// store size, resolution coverage, and the freshness statement.
-    ///
-    /// Infallible at the surface like the rest of navigation: a failed read
-    /// degrades to a **defaulted** read-model carrying the reason in
-    /// `warnings` (ADR-14). A caller that must tell that degradation apart from
-    /// a genuinely empty graph — both report `indexed: false` — needs
-    /// [`try_status`](Self::try_status) instead.
-    pub fn status(&self) -> StatusInfo {
-        self.try_status().unwrap_or_else(|err| {
-            tracing::warn!("status failed: {err:#}");
-            StatusInfo {
-                warnings: vec![format!("status failed: {err}")],
-                ..StatusInfo::default()
-            }
-        })
-    }
-
-    /// [`status`](Self::status) without the infallible degradation — the same
-    /// traced read, returning its `Err` ([FR-NV-07], [NFR-CC-04]).
-    ///
-    /// `status`'s defaulted fallback is right for a single-root surface, where
-    /// the warning is displayed beside the numbers it explains. It is wrong for
-    /// the workspace fan-out: a defaulted `StatusInfo` reports `indexed: false`,
-    /// which is indistinguishable from an honestly empty graph, so a member
-    /// whose freshness read *failed* would be labeled `deferred` — "never
-    /// attempted" — by [`federation::warm_state`](crate::federation::warm_state)
-    /// ([BR-44]). Fanning this instead folds that failure into the per-member
-    /// `error` channel, where it reads `degraded` like any other failed attempt.
-    ///
-    /// # Errors
-    /// Propagates the store/runtime fault the read hit.
-    ///
-    /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn try_status(&self) -> Result<StatusInfo> {
-        crate::observability::traced(Tool::Status, || crate::navigate::status(self))
-    }
-
-    /// [`try_status`](Self::try_status), with the facts a workspace re-reads
-    /// this member's reference classes by (S-637) — from the same read, so a
-    /// workspace `status` adds no walk for them.
-    pub(crate) fn try_status_with_reference_facts(
-        &self,
-    ) -> Result<(StatusInfo, crate::resolve::reference_classes::MemberReferenceFacts)> {
-        crate::observability::traced(Tool::Status, || crate::navigate::status_with_reference_facts(self))
-    }
-
-    /// Read-only graph-elements accessor feeding the web surface's interactive
-    /// graph canvas ([FR-UI-08], [ADR-29]): a presentation-shaped nodes+edges
-    /// snapshot of the hydrated graph, whole-graph (`seed = None`) or seed-scoped
-    /// (the seed's connected neighbourhood), bounded by a visible-element `cap`
-    /// (default 250) with the elided remainder reported, never silently dropped
-    /// ([NFR-CC-04]).
-    ///
-    /// `layers` / `edge_types` are the optional **server-side re-budgeting
-    /// filters** (S-122, [FR-UI-15]): when present they narrow the candidate set
-    /// *before* the degree-rank+truncate, so deselecting a layer or edge type
-    /// backfills the freed visible budget with previously-elided nodes of the
-    /// remaining scope (the graph stays full, not merely smaller). `None` ⇒ no
-    /// filter (all layers / all edge types); an empty slice ⇒ filter everything
-    /// out (the honest empty graph). See [`navigate::graph_elements`] for the exact
-    /// re-budgeting semantics.
-    ///
-    /// `granularity` is the optional **semantic cluster-zoom tier** (S-124,
-    /// [FR-UI-15], [ADR-36]): `module`/`file`/`symbol` select the existing
-    /// module-rollup / file-rollup / visualization hydration view ([ADR-34]). `None`
-    /// is the symbol tier — the pre-S-124 behaviour. The rollup tiers are the code
-    /// subgraph (docs/artifacts excluded, [FR-DG-06]) and feed no metric path, so
-    /// every tier is metric-neutral ([FR-QM-08]).
-    ///
-    /// `intent_overlay` is the **bounded documentation-intent overlay** (S-128,
-    /// [FR-UI-16], [ADR-37]): `false` (the default) is byte-identical to the
-    /// pre-S-128 snapshot; `true` admits the governing-doc nodes adjacent (via the
-    /// existing `DocReference`/`TracesTo` edges) to the kept code nodes up to a
-    /// separate reserved budget computed outside the structural ranking, so the
-    /// overlay can never starve the code anchors (the [CR-014] doc-flooding guard).
-    /// Presentation-only over the visualization view — metric-neutral and read-only.
-    ///
-    /// A **pure reader** over the cached hydrated view — no compute-and-persist;
-    /// calling it once or repeatedly mutates no store, the read-only discipline
-    /// [ADR-28] established for `latest_*` and [ADR-29] extends to the graph
-    /// ([FR-UI-03]). Consumed only by the [web-surface]; CLI/MCP are unaffected.
-    ///
-    /// [FR-UI-08]: ../../../docs/specs/requirements/FR-UI-08.md
-    /// [FR-UI-15]: ../../../docs/specs/requirements/FR-UI-15.md
-    /// [FR-UI-16]: ../../../docs/specs/requirements/FR-UI-16.md
-    /// [FR-UI-03]: ../../../docs/specs/requirements/FR-UI-03.md
-    /// [FR-DG-06]: ../../../docs/specs/requirements/FR-DG-06.md
-    /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [ADR-29]: ../../../docs/specs/architecture/decisions/ADR-29.md
-    /// [ADR-34]: ../../../docs/specs/architecture/decisions/ADR-34.md
-    /// [ADR-36]: ../../../docs/specs/architecture/decisions/ADR-36.md
-    /// [ADR-37]: ../../../docs/specs/architecture/decisions/ADR-37.md
-    /// [CR-014]: ../../../docs/requests/CR-014-context-seed-doc-flooding.md
-    /// [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
-    /// [`navigate::graph_elements`]: crate::navigate::graph_elements
-    pub fn graph_elements(
-        &self,
-        seed: Option<&str>,
-        cap: Option<usize>,
-        layers: Option<&[GraphLayer]>,
-        edge_types: Option<&[EdgeKind]>,
-        granularity: Option<GraphGranularity>,
-        intent_overlay: bool,
-    ) -> GraphElements {
-        crate::observability::traced(Tool::GraphElements, || {
-            crate::navigate::graph_elements(
-                self,
-                seed,
-                cap,
-                layers,
-                edge_types,
-                granularity,
-                intent_overlay,
-            )
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("graph_elements failed: {err:#}");
-            GraphElements {
-                seed: seed.map(str::to_string),
-                granularity: granularity.unwrap_or_default(),
-                warnings: vec![format!("graph_elements failed: {err}")],
-                ..GraphElements::default()
-            }
-        })
-    }
-
-    // ── Pipeline (2 triggers) ─────────────────────────────────────────────
-
-    /// Full re-index of the project (FR-IX-01..06).
-    ///
-    /// discover → extract → resolve → annotate → persist (ADR-10). Requires a
-    /// long-lived [`Engine::start`] engine (it submits write batches to the
-    /// writer actor). Infallible at the surface (ADR-14 defers typed errors): a
-    /// failure is logged to stderr and returned as an [`IndexResult`] carrying
-    /// the reason in `warnings` rather than panicking.
-    pub fn index(&self) -> IndexResult {
-        match crate::observability::traced(Tool::Index, || self.run_index()) {
-            Ok(result) => result,
-            Err(err) => degraded_index(&err),
-        }
-    }
-
-    /// Incremental sync over the given changed `paths` (FR-SY-01..06).
-    ///
-    /// Capture-before-delete ensures cross-file links rebind (ADR-10). Same
-    /// infallible-surface posture as [`index`](Self::index): a failure is logged
-    /// and surfaced in the [`SyncResult`] `warnings`.
-    pub fn sync(&self, paths: &[PathBuf]) -> SyncResult {
-        match crate::observability::traced(Tool::Sync, || self.run_sync(paths)) {
-            Ok(result) => result,
-            Err(err) => degraded_sync(&err),
-        }
-    }
-
-    /// Auto-index on first evaluation (FR-IX-07): if the graph has never been
-    /// indexed, run a full [`index`](Self::index) before serving; otherwise a
-    /// no-op.
-    ///
-    /// This is the prologue a navigation/query call runs so the very first
-    /// evaluation against an un-indexed project transparently builds the graph.
-    /// Navigation methods (S-013) call this before reading; it is exposed now so
-    /// the auto-index contract is in place and testable. Returns the
-    /// [`IndexResult`] of the index that ran, or a zero-valued result when the
-    /// graph was already populated.
-    pub fn ensure_indexed(&self) -> IndexResult {
-        match crate::observability::traced(Tool::EnsureIndexed, || self.run_ensure_indexed()) {
-            Ok(Some(result)) => result,
-            Ok(None) => IndexResult::default(),
-            Err(err) => degraded_index(&err),
-        }
-    }
-
-    // ── Quality / Governance (10 tools, S-020) ───────────────────────────
-    //
-    // All ten are guaranteed-fresh aggregate evaluations (ADR-11,
-    // NFR-DM-02): each reconciles the working tree first (O(changed),
-    // FR-RC-01/02) unless told not to (FR-RC-04), and every result carries
-    // the FR-RC-03 freshness line. Unlike the infallible navigation surface,
-    // these return `Result` — a structural failure (store fault, invalid
-    // rules.toml, broken config) fails loud (ADR-14 Correctness; the typed
-    // `CoreError` enum itself lands with S-026), while per-file degradations
-    // ride inside the read-model as an `INCOMPLETE` stamp + warnings
-    // (NFR-RA-11, Degraded).
-
-    /// Full architecture-quality scan: reconcile-then-score (ADR-11).
-    ///
-    /// Returns the 0–10000 geometric-mean signal (ADR-12), the rule
-    /// violations, and persists a `metric_snapshots` row (FR-GV-09).
-    /// `reconcile = false` is the `--no-reconcile` escape hatch (FR-RC-04).
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure: transient engine, store
-    /// fault, invalid `rules.toml` (a [`ConfigError`](crate::config::ConfigError),
-    /// usage exit 2), or a failed write batch.
-    pub fn scan(&self, reconcile: bool) -> Result<ScanResult> {
-        self.governance.record_scan(reconcile);
-        crate::observability::traced(Tool::Scan, || crate::governance::scan(self, reconcile))
-    }
-
-    /// Re-scan with the same parameters as the last [`scan`](Self::scan)
-    /// (ADR-11); behaves like a default scan when none ran yet.
-    ///
-    /// # Errors
-    /// Same as [`scan`](Self::scan).
-    pub fn rescan(&self) -> Result<ScanResult> {
-        let reconcile = self.governance.last_scan_reconcile();
-        crate::observability::traced(Tool::Rescan, || crate::governance::scan(self, reconcile))
-    }
-
-    /// Gate check (FR-GV-04/05, BR-10): compute a fresh snapshot (always
-    /// persisted, FR-GV-09), then either upsert it as the baseline (`save`)
-    /// or fail iff `current < baseline − ε` (ε ≈ 1.0 absorbs float noise on
-    /// the integer signal). `threshold` adds an explicit floor. No baseline
-    /// → informational pass. Under a `rules.toml [review]` table (FR-GV-25)
-    /// a compare fails on a gating branch-delta entry, and on the aggregate
-    /// only past `drift_budget`.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure (transient engine, store
-    /// fault, failed write batch).
-    pub fn gate(&self, threshold: Option<u32>, save: bool, reconcile: bool) -> Result<GateResult> {
-        self.gate_with_reason(threshold, save, reconcile, None)
-    }
-
-    /// [`gate`](Self::gate) with the `--reason` a `save` records beside the
-    /// baseline, and the attribution of the change it blesses (FR-GV-16,
-    /// FR-GV-26). Under a `rules.toml [review]` table a drop past a numeric
-    /// `drift_budget` requires one.
-    ///
-    /// # Errors
-    /// As [`gate`](Self::gate); a `save` past the drift budget without a
-    /// reason is a [`ConfigError`](crate::config::ConfigError) (usage exit 2),
-    /// and the baseline stays as it was.
-    pub fn gate_with_reason(
-        &self,
-        threshold: Option<u32>,
-        save: bool,
-        reconcile: bool,
-        reason: Option<&str>,
-    ) -> Result<GateResult> {
-        crate::observability::traced(Tool::Gate, || {
-            crate::governance::gate(self, threshold, save, reconcile, reason, &crate::security::SecurityGateEvidence(self))
-        })
-    }
-
-    /// Architecture-rules compliance report against `rules.toml` (FR-GV-02):
-    /// constraints, layer ordering (unassigned files exempt), and
-    /// boundaries; re-materialises the derived policy graph each run
-    /// (BR-12, idempotent). `rules_path` overrides the default
-    /// `<root>/.logos/rules.toml` (`check --rules FILE`).
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure; an invalid contract is a
-    /// [`ConfigError`](crate::config::ConfigError) (usage exit 2).
-    pub fn check_rules(&self, rules_path: Option<&Path>, reconcile: bool) -> Result<RulesReport> {
-        crate::observability::traced(Tool::CheckRules, || {
-            crate::governance::check_rules(self, rules_path, reconcile, &crate::security::SecurityGateEvidence(self))
-        })
-    }
-
-    /// The ratchet's bless command (`check --bless`, [FR-GV-23]): write every
-    /// current offender of a `ratchet = true` constraint to the checked-in
-    /// `.logos/rules-baseline.json` — sorted and deterministic, untouched when
-    /// unchanged — then return the [`check_rules`](Self::check_rules) report
-    /// against the set just written. The only writer of that file: `check`
-    /// and `scan` only read it, and `gate` never touches it.
-    ///
-    /// # Errors
-    /// As [`check_rules`](Self::check_rules); a failed write of the blessed set
-    /// is a [`ConfigError`](crate::config::ConfigError) (usage exit 2).
-    ///
-    /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
-    pub fn bless_rules(&self, rules_path: Option<&Path>, reconcile: bool) -> Result<RulesReport> {
-        crate::observability::traced(Tool::BlessRules, || {
-            crate::governance::bless_rules(self, rules_path, reconcile, &crate::security::SecurityGateEvidence(self))
-        })
-    }
-
-    /// Signal evolution over stored snapshots (FR-GV-06): the most recent
-    /// `limit` (default 30) `metric_snapshots` rows with per-metric deltas.
-    /// Reports history — does not reconcile (BR-03).
-    ///
-    /// # Errors
-    /// Returns an error for a transient engine or on a read failure.
-    pub fn evolution(&self, limit: Option<u32>) -> Result<EvolutionReport> {
-        crate::observability::traced(Tool::Evolution, || crate::governance::evolution(self, limit))
-    }
-
-    /// Dependency structure matrix (FR-GV-07): cell `(i, j)` counts dep
-    /// edges `i → j`; rows ordered by layer order then name; module
-    /// granularity by default.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure.
-    pub fn dsm(
-        &self,
-        granularity: Option<crate::governance::DsmGranularity>,
-        reconcile: bool,
-    ) -> Result<DsmReport> {
-        crate::observability::traced(Tool::Dsm, || {
-            crate::governance::dsm(self, granularity, reconcile)
-        })
-    }
-
-    /// Documentation-gap analysis (FR-GV-14): exported functions/methods
-    /// referenced by no `DocSection` over `DocReference` edges, capped at
-    /// `limit` (default 50), always carrying the reference-presence caveat.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure.
-    pub fn doc_gaps(&self, limit: Option<u32>, reconcile: bool) -> Result<DocGapsReport> {
-        crate::observability::traced(Tool::DocGaps, || {
-            crate::governance::doc_gaps(self, limit, reconcile)
-        })
-    }
-
-    /// ARCHITECTURE health check — DB presence/size, schema version, FTS
-    /// coherence, structural integrity, the [FR-GV-20] admission tripwire, and
-    /// graph counts. For INDEX freshness see [`status`](Self::status).
-    ///
-    /// [FR-GV-20]: ../../../docs/specs/requirements/FR-GV-20.md
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure (an FTS desync is *reported*
-    /// in the read-model, not an error — `health` exists to diagnose it).
-    pub fn health(&self, reconcile: bool) -> Result<HealthInfo> {
-        crate::observability::traced(Tool::Health, || crate::governance::health(self, reconcile))
-    }
-
-    /// The fast **structural-integrity + admission-tripwire** check (CR-052,
-    /// [FR-GV-18]; S-215, [FR-GV-20]; [NFR-RA-13], [ADR-46]/[ADR-48]): asserts
-    /// one node per `symbol_id` and zero orphan rows, and flags every indexed
-    /// file the *current* admission rules would reject — in O(a handful of
-    /// indexed queries) plus O(files) matcher work, no reindex — returning the
-    /// `doctor` verdict. A pure read of the persisted graph — it does not
-    /// reconcile. The CLI exits 1 on `!report.ok`, and the same verdict
-    /// hard-fails `session_end` / `check_rules`.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure (a missing graph runtime).
-    ///
-    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
-    /// [FR-GV-20]: ../../../docs/specs/requirements/FR-GV-20.md
-    /// [NFR-RA-13]: ../../../docs/specs/requirements/NFR-RA-13.md
-    /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
-    /// [ADR-48]: ../../../docs/specs/architecture/decisions/ADR-48.md
-    pub fn doctor(&self) -> Result<DoctorReport> {
-        crate::observability::traced(Tool::Doctor, || crate::governance::doctor(self))
-    }
-
-    /// The on-demand **deep** consistency check (CR-052, [FR-GV-19], [NFR-RA-06],
-    /// [ADR-46]): reindex the project into a throwaway shadow store via the
-    /// always-purge [`index`](Self::index) path and diff node/edge/file counts +
-    /// symbol sets against the live graph, reporting drift with a capped sample of
-    /// leaked/orphaned symbols and of the lost/extra edges (CR-236), and
-    /// embedding the fast structural + admission check ([FR-GV-18], [FR-GV-20]).
-    /// Catches the Channel-B orphans (files the
-    /// live store retains but a fresh index drops) the fast `doctor` cannot see.
-    ///
-    /// The live store is opened read-only for the census and never mutated; the
-    /// shadow store is torn down (db + `-wal`/`-shm`) on completion. On-demand
-    /// only — a full reindex is seconds-to-minutes, so `verify` is never on a hot
-    /// path. The CLI exits 1 on `!report.ok`.
-    ///
-    /// # Errors
-    /// Returns an error on a transient engine, an unloadable plugin registry, or a
-    /// failed shadow reindex / read.
-    ///
-    /// [FR-GV-19]: ../../../docs/specs/requirements/FR-GV-19.md
-    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [ADR-46]: ../../../docs/specs/architecture/decisions/ADR-46.md
-    pub fn verify(&self) -> Result<VerifyReport> {
-        crate::observability::traced(Tool::Verify, || crate::governance::verify(self))
-    }
-
-    /// Begin a quality session (FR-GV-04): compute a fresh snapshot and, on a
-    /// first run only, save it as the baseline `session_end` compares against —
-    /// an existing gate or security baseline is never moved (CR-238), except a
-    /// gate baseline that no longer compares (other metric semantics or
-    /// thresholds), which it resets before the edits ([FR-GV-10]).
-    ///
-    /// [FR-GV-10]: ../../../docs/specs/requirements/FR-GV-10.md
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure.
-    pub fn session_start(&self) -> Result<SessionInfo> {
-        crate::observability::traced(Tool::SessionStart, || {
-            crate::governance::session_start(self, &crate::security::SecurityGateEvidence(self))
-        })
-    }
-
-    /// End the quality session (FR-GV-05): re-score and compare to the
-    /// baseline — the MCP spelling of a bare `gate`, `[review]` policy included.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure.
-    pub fn session_end(&self) -> Result<GateResult> {
-        crate::observability::traced(Tool::SessionEnd, || {
-            crate::governance::gate(self, None, false, true, None, &crate::security::SecurityGateEvidence(self))
-        })
-    }
-
-    // ── Observability ─────────────────────────────────────────────────────
-
-    /// Aggregated usage/perf stats from `telemetry.db` over a trailing window
-    /// of `window_days` (default 7, [FR-OB-04]): per-tool/surface call counts,
-    /// latency p50/p95/p99, and the estimated reads + tokens saved by
-    /// navigation — the dogfood metric ([NFR-OO-03]), honestly an estimate.
-    ///
-    /// Works on both engine flavours (it reads `telemetry.db` directly, not
-    /// the graph runtime). A project with no telemetry yet degrades to a
-    /// zeroed read-model carrying the reason in `warnings` (ADR-14 posture).
-    ///
-    /// [FR-OB-04]: ../../../docs/specs/requirements/FR-OB-04.md
-    /// [NFR-OO-03]: ../../../docs/specs/requirements/NFR-OO-03.md
-    pub fn stats(&self, window_days: Option<u32>) -> StatsInfo {
-        let mut info = crate::observability::traced(Tool::Stats, || {
-            crate::observability::stats(&self.root, window_days)
-        })
-        .unwrap_or_else(|err| {
-            tracing::warn!("stats failed: {err:#}");
-            // An unreadable store degrades like a missing one ([FR-OB-11]): the
-            // window the caller asked for is echoed, and the attribution coverage
-            // limits are still stated. They are structural — properties of
-            // `daily_rollup`'s schema, not of the data — so they hold whether or
-            // not the store could be read, and a surface rendering them must not
-            // fall silent on exactly the payload least worth trusting
-            // ([NFR-CC-04]).
-            let window_days =
-                window_days.unwrap_or(crate::observability::DEFAULT_STATS_WINDOW_DAYS);
-            StatsInfo {
-                window_days,
-                attribution_coverage: crate::observability::attribution_coverage(window_days),
-                warnings: vec![format!("stats failed: {err}")],
-                ..StatsInfo::default()
-            }
-        });
-        // Per-relation-class cross-artifact binding counts (CR-011, FR-OB-04,
-        // FR-CG-11) are a live-graph property, not telemetry: read the ledger
-        // best-effort from `logos.db` and merge. A missing or unreadable graph
-        // leaves the map empty — the stats surface stays infallible (ADR-14).
-        match self.artifact_binding_counts() {
-            Ok(by_relation) => info.artifact_bindings = by_relation,
-            Err(err) => tracing::debug!("artifact binding counts unavailable: {err:#}"),
-        }
-        info
-    }
-
-    /// Per-relation-class cross-artifact binding counts read from the live graph
-    /// ledger (CR-011, [FR-CG-11]) — the `stats` surface's artifact half.
-    ///
-    /// Works on both engine flavours by opening `logos.db` read-only (like
-    /// [`stats`](Engine::stats) reads `telemetry.db`), independent of the graph
-    /// runtime. An un-indexed project (no `logos.db`) yields an empty map, not an
-    /// error.
-    ///
-    /// # Errors
-    /// Returns an error only if an existing store is unreadable/corrupt; the
-    /// caller degrades that to an empty map.
-    ///
-    /// [FR-CG-11]: ../../../docs/specs/requirements/FR-CG-11.md
-    fn artifact_binding_counts(
-        &self,
-    ) -> Result<std::collections::BTreeMap<String, crate::models::pipeline::RelationCoverage>> {
-        let db_path = self.root.join(".logos").join("logos.db");
-        if !db_path.is_file() {
-            return Ok(std::collections::BTreeMap::new());
-        }
-        let store = crate::graph_store::SqliteGraphStore::open_readonly(&db_path)?;
-        Ok(crate::resolve::coverage(&store)?.by_relation)
-    }
-
-    /// Registered languages from the plugin substrate (FR-PL-06).
-    ///
-    /// A long-lived [`Engine::start`] engine maps from the
-    /// [`LanguageRegistry`](crate::plugin::LanguageRegistry) cached at startup
-    /// (ADR-04, NFR-PE-05) — no per-call descriptor parse / query recompile. A
-    /// transient [`Engine::open`] engine has no cached registry, so it loads one
-    /// on demand (resolving any on-disk query overrides under
-    /// `<root>/.logos/plugins/`).
-    ///
-    /// A load failure (a malformed descriptor, or a user-supplied override query
-    /// that fails to compile) is reported to stderr naming the
-    /// file (FR-PL-02) and surfaced in [`LanguagesInfo::load_error`] rather than
-    /// a panic, since the Engine surface is infallible until error types land
-    /// (ADR-14). The failure is named in the read-model itself (S-340,
-    /// [NFR-CC-04]) rather than degraded to an empty-but-healthy-looking
-    /// listing — the failure mode that hid the [FR-WS-08] capture gap: a
-    /// registry-wide load failure and a project with no plugins at all were
-    /// otherwise indistinguishable.
-    ///
-    /// [FR-WS-08]: ../../../docs/specs/requirements/FR-WS-08.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    pub fn languages(&self) -> LanguagesInfo {
-        use crate::plugin::LanguageRegistry;
-
-        crate::observability::traced_infallible(Tool::Languages, || {
-            // Prefer the cached registry (the started-engine path); fall back
-            // to a fresh load for a transient engine that holds none.
-            if let Some(registry) = self.registry.as_ref() {
-                return Self::languages_from(registry);
-            }
-
-            match LanguageRegistry::load(&self.root) {
-                Ok(registry) => Self::languages_from(&registry),
-                Err(err) => {
-                    tracing::warn!("could not load plugin registry: {err}");
-                    LanguagesInfo {
-                        load_error: Some(err.to_string()),
-                        ..LanguagesInfo::default()
-                    }
-                }
-            }
-        })
-    }
-
-    // ── Internal helpers (private) ────────────────────────────────────────
-
-    /// Map a loaded [`LanguageRegistry`](crate::plugin::LanguageRegistry) into the
-    /// `languages` read-model — the loaded grammars plus any ABI-skipped ones.
-    fn languages_from(registry: &crate::plugin::LanguageRegistry) -> LanguagesInfo {
-        let languages = registry
-            .iter()
-            .map(|plugin| {
-                let semantics = plugin.semantics();
-                LanguageDescriptor {
-                    name: plugin.name().to_string(),
-                    extensions: plugin.extensions().to_vec(),
-                    // Artifact plugins (CR-010) claim basenames and are flagged as
-                    // the third class, so `logos languages` lists their filename
-                    // claims alongside extensions ([FR-PL-06], [FR-CG-04]).
-                    filenames: plugin.filenames().to_vec(),
-                    artifact: plugin.is_artifact(),
-                    module_separator: semantics.module_separator.clone(),
-                    capabilities: plugin.capabilities().to_vec(),
-                    abi_version: semantics.abi_version as u32,
-                    overridden_capabilities: plugin.overridden_capabilities().to_vec(),
-                    reach: plugin.reach().map(|r| LanguageReach {
-                        level: r.level.as_str().to_string(),
-                        cross_file: r
-                            .cross_file
-                            .iter()
-                            .map(|c| c.as_str().to_string())
-                            .collect(),
-                    }),
-                    note: plugin.note().map(str::to_string),
-                }
-            })
-            .collect();
-
-        let skipped = registry
-            .skipped()
-            .iter()
-            .map(|s| SkippedLanguage {
-                name: s.name.clone(),
-                reason: s.reason.to_string(),
-            })
-            .collect();
-
-        LanguagesInfo {
-            languages,
-            skipped,
-            load_error: None,
-        }
-    }
-
     /// The resolved worktree root (ADR-15).
     ///
     /// Public so a chat surface a build composes ([web-surface], S-170) can
@@ -1905,1304 +598,6 @@ impl Engine {
     /// [ADR-41]: ../../../docs/specs/architecture/decisions/ADR-41.md
     pub fn root(&self) -> &Path {
         &self.root
-    }
-
-    /// The **lazy** git-history mining trigger ([FR-GH-02], [ADR-22]): resolve
-    /// the effective `[history]` config, then mine `history.db` incrementally.
-    ///
-    /// This is the seam the temporal surfaces ([S-048]) call on a read — and the
-    /// *only* path that mines. It is deliberately **absent** from
-    /// `gate`/`session_start`/`session_end` ([Self::gate]), `sync` ([Self::sync]),
-    /// and every navigation method, so those paths run no history mining and no
-    /// git subprocess beyond the existing HEAD tag ([BR-26], [FR-GH-02]
-    /// acceptance).
-    ///
-    /// It is `pub` — the api-facade-facing library seam, returning the
-    /// [`MineOutcome`](crate::history::MineOutcome) `Serialize` read-model per the
-    /// [ADR-01] Engine convention. It is **not** an MCP tool: tools are
-    /// registered explicitly in the `mcp` crate, so the `logos:*` tool-set is
-    /// unchanged until [S-048] wires the surface.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected git/store failure or invalid
-    /// `rules.toml`; the expected degraded states ride inside the
-    /// [`MineOutcome`](crate::history::MineOutcome) ([NFR-RA-05]).
-    ///
-    /// [FR-GH-02]: ../../../docs/specs/requirements/FR-GH-02.md
-    /// [ADR-01]: ../../../docs/specs/architecture/decisions/ADR-01.md
-    /// [ADR-22]: ../../../docs/specs/architecture/decisions/ADR-22.md
-    /// [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
-    /// [S-048]: ../../../docs/planning/journal.md#s-048-hotspot-ranking-and-temporal-reporting-surfaces
-    pub fn ensure_history_mined(&self) -> Result<crate::history::MineOutcome> {
-        let rules = crate::config::load_rules_from_root(&self.root)?;
-        crate::history::mine(&self.root, &rules.history.effective())
-    }
-
-    /// The temporal-tier read seam ([FR-GH-03]..[FR-GH-05], [FR-GH-09]): lazily
-    /// mine (via the same [`ensure_history_mined`](Self::ensure_history_mined)
-    /// trigger), then compute the per-file temporal metrics and append a snapshot
-    /// row, returning the [`TemporalReport`](crate::history::TemporalReport)
-    /// `Serialize` read-model ([ADR-01]).
-    ///
-    /// Like `ensure_history_mined` this is `pub` (the api-facade-facing library
-    /// seam the hotspot surface [S-048] ranks from) and deliberately **off** the
-    /// gate/sync/navigation paths ([BR-26]). Output is a pure function of the tree
-    /// at HEAD + the effective `[history]` config ([BR-27], [NFR-RA-06]); a
-    /// degraded repository rides inside the report as `n/a`, never an error
-    /// ([NFR-RA-05]). The `logos:*` MCP tool-set is unchanged until [S-048] wires
-    /// the surface.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected git/store failure, an invalid
-    /// `rules.toml`, or a non-compiling `[history] defect_patterns`.
-    ///
-    /// [FR-GH-03]: ../../../docs/specs/requirements/FR-GH-03.md
-    /// [FR-GH-05]: ../../../docs/specs/requirements/FR-GH-05.md
-    /// [FR-GH-09]: ../../../docs/specs/requirements/FR-GH-09.md
-    /// [BR-27]: ../../../docs/specs/software-spec.md#322-git-history-analytics
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    /// [S-048]: ../../../docs/planning/journal.md#s-048-hotspot-ranking-and-temporal-reporting-surfaces
-    pub fn temporal_report(&self) -> Result<crate::history::TemporalReport> {
-        let rules = crate::config::load_rules_from_root(&self.root)?;
-        crate::history::temporal_report(&self.root, &rules.history.effective())
-    }
-
-    /// The hotspot surface ([FR-GH-06]): rank indexed files by
-    /// `churn rank × structural-complexity rank` — a **Rust-side join** of the
-    /// temporal tier's churn (`history.db`, [`temporal_report`](Self::temporal_report))
-    /// against per-file aggregated cyclomatic complexity (`logos.db`), never an
-    /// SQL `ATTACH` across the two stores ([ADR-22], [BR-26]). `limit` caps the
-    /// returned board (`logos hotspots --limit N`).
-    ///
-    /// The CLI `hotspots` subcommand and the MCP `hotspots` tool both reach this
-    /// through [`hotspots_with_findings`](Self::hotspots_with_findings), of which
-    /// this is the filter-off form ([NFR-CC-01]) — they share its `Serialize`
-    /// read-model byte-for-byte ([FR-GH-06] CLI/MCP parity). Like
-    /// [`temporal_report`](Self::temporal_report) it is lazy and **off** the
-    /// gate/sync/navigation paths ([BR-26]); a degraded repository rides inside
-    /// the report as `n/a` + notice, never an error ([FR-GH-08], [NFR-RA-05]).
-    ///
-    /// `production_scope = true` applies the optional production-scope filter
-    /// ([CR-076]): whole test files (`is_test`-only, [FR-AN-05]) are dropped
-    /// from the candidate set before ranking. `false` (the default) is
-    /// byte-identical to the pre-[CR-076] whole-repo board — the filter is
-    /// opt-in and never moves the gate ([BR-26]).
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected git/store failure, an invalid
-    /// `rules.toml`, a non-compiling `[history] defect_patterns`, or — once a
-    /// security report is stored — an invalid `.logos/security-ignore.toml`
-    /// (exit 2).
-    ///
-    /// [FR-GH-06]: ../../../docs/specs/requirements/FR-GH-06.md
-    /// [FR-GH-08]: ../../../docs/specs/requirements/FR-GH-08.md
-    /// [ADR-22]: ../../../docs/specs/architecture/decisions/ADR-22.md
-    /// [BR-26]: ../../../docs/specs/software-spec.md#322-git-history-analytics
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
-    /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
-    pub fn hotspots(
-        &self,
-        limit: Option<usize>,
-        untested: bool,
-        production_scope: bool,
-    ) -> Result<crate::history::HotspotReport> {
-        self.hotspots_with_findings(limit, untested, production_scope, false)
-    }
-
-    /// [`hotspots`](Self::hotspots) with the findings filter ([FR-SC-14]):
-    /// `with_findings = true` ranks the hotspots carrying a fresh unsuppressed
-    /// security finding ahead of those without, highest severity first. Every
-    /// board carries the findings column when a scan is stored, with or without
-    /// the filter.
-    ///
-    /// # Errors
-    /// As [`hotspots`](Self::hotspots).
-    ///
-    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
-    pub fn hotspots_with_findings(
-        &self,
-        limit: Option<usize>,
-        untested: bool,
-        production_scope: bool,
-        with_findings: bool,
-    ) -> Result<crate::history::HotspotReport> {
-        crate::observability::traced(Tool::Hotspots, || {
-            // Churn axis: the temporal tier (mines lazily, computes per file).
-            let temporal = self.temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested, production_scope, with_findings)
-        })
-    }
-
-    /// Join a temporal report with the complexity, coverage and findings axes
-    /// into the ranked [`HotspotReport`](crate::history::HotspotReport). The
-    /// complexity (`logos.db`), coverage and findings (`history.db`) reads are
-    /// pure point queries —
-    /// this is the shared, **read-only** core of both [`hotspots`](Self::hotspots)
-    /// (which mines first) and [`latest_hotspots`](Self::latest_hotspots) (which
-    /// reads the last-mined facts). Never an `ATTACH` across the two stores
-    /// ([ADR-22], [BR-26], [BR-28]).
-    ///
-    /// `production_scope` gates the optional whole-test-file exclusion
-    /// ([CR-076](../../../docs/requests/CR-076-hotspots-production-scope-filter.md)):
-    /// the `is_test` verdict ([FR-AN-05]) is read from the same `nodes`/
-    /// `functions` rows already fetched for the complexity axis, so enabling
-    /// the filter costs one extra point query (`test_node_ids`), never a new
-    /// store read shape.
-    fn rank_hotspots(
-        &self,
-        temporal: crate::history::TemporalReport,
-        limit: Option<usize>,
-        untested: bool,
-        production_scope: bool,
-        with_findings: bool,
-    ) -> Result<crate::history::HotspotReport> {
-        // Complexity axis: per-file Σ cyclomatic_complexity from logos.db,
-        // read in Rust — joined here, never via a cross-DB ATTACH (BR-26).
-        // A transient engine with no graph runtime contributes no
-        // complexity, so every file is honestly excluded (NFR-RA-05). The
-        // same rows feed the production-scope candidate-set filter (CR-076).
-        let (complexity, test_only_files) = match self.runtime() {
-            Some(rt) => {
-                let (nodes, functions, test_node_ids) = rt.submit_read(|store| {
-                    Ok((
-                        store.all_nodes()?,
-                        store.function_metrics()?,
-                        store.test_node_ids()?,
-                    ))
-                })?;
-                let complexity = crate::history::aggregate_complexity(&nodes, &functions);
-                let test_ids: std::collections::HashSet<_> = test_node_ids.into_iter().collect();
-                let test_only_files = crate::history::test_only_files(&nodes, &functions, &test_ids);
-                (complexity, test_only_files)
-            }
-            None => (
-                std::collections::BTreeMap::new(),
-                std::collections::BTreeSet::new(),
-            ),
-        };
-        // Coverage axis ([FR-CV-07]): the latest snapshot, freshness-resolved
-        // against the current tree. `None` = no coverage ingested → the
-        // labeled static-reachability fallback ([FR-GV-08]). Read from
-        // `history.db` only — never an `ATTACH` to `logos.db` ([BR-28]).
-        let coverage = crate::history::coverage::read_latest(&self.root)?.map(|view| {
-            view.files
-                .iter()
-                .map(|f| {
-                    (
-                        f.path.clone(),
-                        crate::history::FileCoverage {
-                            fresh: f.fresh,
-                            coverage_bp: f.coverage_bp().unwrap_or(0),
-                        },
-                    )
-                })
-                .collect()
-        });
-        // Findings axis ([FR-SC-14]): counted findings per path (fresh per finding,
-        // unsuppressed, production code: `history::security::counts`) from the
-        // security read model and the suppression labeller, each finding's code
-        // scope by this graph ([FR-SC-28]). `None` = no report stored → no
-        // findings column.
-        let findings = crate::history::path_findings(&self.root, today_utc(), |stored| {
-            crate::security::context::code_scopes(self, stored)
-        })?;
-        Ok(crate::history::rank_with_findings(
-            temporal,
-            &complexity,
-            coverage.as_ref(),
-            limit,
-            untested,
-            production_scope,
-            &test_only_files,
-            crate::history::FindingsOverlay { by_path: findings.as_ref(), with_findings },
-        ))
-    }
-
-    // ── Read-only read-model accessors (S-082, CR-018, ADR-28) ──────────────
-    //
-    // The non-persisting twins of the evaluate-and-persist `scan`/`gate`/
-    // `hotspots` paths, consumed **only** by the [web-surface] Health, Overview,
-    // Metrics, Hotspots, and Commits views so a dashboard GET reflects the last
-    // persisted snapshot and never triggers an evaluate-and-persist write
-    // ([FR-UI-03], [ADR-28]). The CLI/MCP `scan`/`gate`/`hotspots` methods above
-    // are unchanged — they keep persisting on purpose.
-    //
-    // [web-surface]: ../../../docs/specs/architecture/components/web-surface.md
-    // [FR-UI-03]: ../../../docs/specs/requirements/FR-UI-03.md
-    // [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-
-    /// The most-recent **persisted** metric snapshot, or `None` on a
-    /// never-`scan`-ned store — a pure read that computes and persists nothing
-    /// ([ADR-28]). Backs the dashboard's Metrics/Health metric breakdown; on
-    /// `None` the view renders the honest "run `logos scan`" empty state
-    /// ([NFR-CC-04]).
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine (no runtime) or a store-read
-    /// failure — never from compute (there is none).
-    pub fn latest_metrics(&self) -> Result<Option<MetricSnapshot>> {
-        crate::observability::traced(Tool::LatestMetrics, || {
-            Ok(crate::governance::latest_metrics(self)?.map(|s| s.metrics))
-        })
-    }
-
-    /// The read-only twin of [`scan`](Self::scan): the last persisted snapshot's
-    /// metric breakdown, the worst-offender lists persisted with it
-    /// ([FR-QM-15]) and the read-only temporal tier, or `None` when no snapshot
-    /// exists ([ADR-28]). Reads the last row — no reconcile, no score, no
-    /// persist; carries no violations (those are not persisted on the snapshot).
-    /// A snapshot written before the lists were persisted reports them as
-    /// [`recorded: false`](crate::models::quality::WorstOffenders::recorded).
-    ///
-    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine or a store-read failure.
-    pub fn latest_scan(&self) -> Result<ScanResult> {
-        crate::observability::traced(Tool::LatestScan, || crate::governance::latest_scan(self))
-    }
-
-    /// The read-only gate **verdict** ([ADR-28]): compare the last persisted
-    /// snapshot to the saved baseline without computing or persisting one. Backs
-    /// the dashboard's Health verdict band; mirrors [`gate`](Self::gate)'s
-    /// comparison (BR-10) but never re-baselines or writes.
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine or a store-read failure.
-    pub fn latest_gate(&self) -> Result<GateResult> {
-        crate::observability::traced(Tool::LatestGate, || crate::governance::latest_gate(self))
-    }
-
-    /// **One** read of the last persisted snapshot, projected into the Health
-    /// bundle's gate verdict *and* its scan result ([FR-UI-04], [CR-135] §3.2) —
-    /// the scan result carrying the worst-offender lists persisted with that
-    /// same snapshot ([FR-QM-15]).
-    ///
-    /// The pair a caller that wants both fields must use.
-    /// [`latest_gate`](Self::latest_gate) and [`latest_scan`](Self::latest_scan)
-    /// remain for callers that want one, and project from this same seam — but
-    /// calling *both* takes two reads of the same logical row in two
-    /// transactions, and a `scan` committing between them yields a bundle whose
-    /// two halves describe different generations with nothing in the payload
-    /// saying so. This takes the read once, so that window does not exist.
-    ///
-    /// Like its two halves it computes nothing and persists nothing ([ADR-28]).
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine or a store-read failure.
-    ///
-    /// [FR-UI-04]: ../../../docs/specs/requirements/FR-UI-04.md
-    /// [FR-QM-15]: ../../../docs/specs/requirements/FR-QM-15.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [CR-135]: ../../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
-    pub fn latest_health(&self) -> Result<LatestHealth> {
-        crate::observability::traced(Tool::LatestHealth, || crate::governance::latest_health(self))
-    }
-
-    /// **Every** offender the last snapshot recorded, uncapped, narrowed by a
-    /// path glob and a dimension ([FR-QM-19]): each with its symbol id, the
-    /// measure its value counts, the value and the threshold it met, in the
-    /// order the capped lists use. Equality's entries, the functions above the
-    /// mean complexity, are no offenders and are listed only when `filter`
-    /// names their dimension. The single entry point behind the CLI
-    /// `offenders` and the MCP `offenders` tool, so the two serialize one
-    /// value ([NFR-CC-01]).
-    ///
-    /// A pure read of the last snapshot ([ADR-28]): no reconcile, no score, no
-    /// write, so the signal, the gate and the capped lists are untouched and a
-    /// rerun over an unchanged store is byte-identical ([NFR-RA-06]). With no
-    /// snapshot, or one written before the uncapped list was persisted, the
-    /// listing is `recorded: false` with the reason — never an empty "clean"
-    /// list ([NFR-CC-04]).
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine or a store-read failure.
-    ///
-    /// [FR-QM-19]: ../../../docs/specs/requirements/FR-QM-19.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    pub fn offenders(
-        &self,
-        filter: &crate::governance::OffendersFilter,
-    ) -> Result<crate::models::quality::OffenderListing> {
-        crate::observability::traced(Tool::Offenders, || crate::governance::offender_listing(self, filter))
-    }
-
-    /// The **branch delta** ([FR-GV-24]): every offender and every `check`
-    /// violation, classified `new`, `worsened`, `improved`, `resolved` or
-    /// `unchanged` per symbol against the merge-base of `HEAD` and `base` (the
-    /// repository's default branch when `None`), each with its value before
-    /// and after, its threshold and its language's trust label, plus the
-    /// near-clone groups the branch introduced. The single entry point behind
-    /// the CLI `review` and the MCP `review` tool ([NFR-CC-01]).
-    ///
-    /// The before-state is the snapshot recorded at the merge-base, else a
-    /// shadow index of that tree cached by commit under `.logos/review-cache/`
-    /// — never another commit ([ADR-82]). The after-state is the graph as last
-    /// synced, its derived annotations re-materialised under the current
-    /// contract as `check` does; nothing is reconciled and no snapshot or
-    /// violation set is recorded, so `check` and `gate` are untouched and a
-    /// rerun is byte-identical ([NFR-RA-06]). A
-    /// base that does not resolve answers `measured: false` with the reason.
-    ///
-    /// # Errors
-    /// Returns an error on a transient engine, a store fault, an invalid
-    /// `rules.toml`, or a failed shadow index.
-    ///
-    /// [FR-GV-24]: ../../../docs/specs/requirements/FR-GV-24.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
-    pub fn review(&self, base: Option<&str>) -> Result<crate::models::quality::BranchReview> {
-        crate::observability::traced(Tool::Review, || {
-            crate::governance::branch_review(self, base, |merge_base| self.review_security_evidence(merge_base))
-        })
-    }
-
-    /// The **shared-budget projection** ([FR-GV-28], S-757): each of
-    /// `branches`' deltas against `base` (the default branch when `None`),
-    /// summed and projected onto every declared `[constraints]` budget and a
-    /// numeric `[review] drift_budget`, listing each limit the combined merge
-    /// would exceed with every branch's share. Report only. The single entry
-    /// point behind `logos review --branches` and the MCP `review` tool's
-    /// `branches` ([NFR-CC-01]).
-    ///
-    /// Every side is a committed tree, shadow-indexed once per commit and
-    /// cached under `.logos/review-cache/` ([ADR-82]); the live graph and
-    /// `HEAD` are not measured, so a rerun is byte-identical ([NFR-RA-06]). A
-    /// branch that cannot be measured is named and left out of the sum.
-    ///
-    /// # Errors
-    /// Returns an error on a transient engine, a store fault or an invalid
-    /// `rules.toml`.
-    ///
-    /// [FR-GV-28]: ../../../docs/specs/requirements/FR-GV-28.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [ADR-82]: ../../../docs/specs/architecture/decisions/ADR-82.md
-    pub fn review_branches(
-        &self,
-        base: Option<&str>,
-        branches: &[String],
-    ) -> Result<crate::models::quality::BranchesProjection> {
-        crate::observability::traced(Tool::Review, || crate::governance::branches_review(self, base, branches))
-    }
-
-    /// The room left under every budget [`review_branches`](Self::review_branches)
-    /// projects ([FR-GV-29], S-798): each subject's value on the base commit,
-    /// its allowance and its headroom, and the margin under a numeric `[review]
-    /// drift_budget`. The single entry point behind `logos review --headroom`
-    /// and the MCP `review` tool's `headroom` ([NFR-CC-01]).
-    ///
-    /// The base and its measurement are `review_branches`'s — the same commit,
-    /// the same cache entry — and neither the working tree nor `HEAD` is
-    /// measured, so a rerun is byte-identical ([NFR-RA-06]). `subjects` are
-    /// project-relative paths and symbol names; `near` keeps the subjects
-    /// whose headroom is at most that.
-    ///
-    /// # Errors
-    /// Returns an error on a transient engine, a store fault or an invalid
-    /// `rules.toml`.
-    ///
-    /// [FR-GV-29]: ../../../docs/specs/requirements/FR-GV-29.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    pub fn review_headroom(
-        &self,
-        base: Option<&str>,
-        subjects: &[String],
-        near: Option<u64>,
-    ) -> Result<crate::models::quality::HeadroomReport> {
-        crate::observability::traced(Tool::Review, || crate::governance::headroom_review(self, base, subjects, near))
-    }
-
-    /// The security evidence the branch review classifies ([FR-SC-18], S-686):
-    /// every stored finding of each scanner's latest report as
-    /// [`security_findings`](Self::security_findings) lists it unfiltered (its
-    /// suppression, OWASP categories and graph context), each scanner's latest
-    /// snapshot, and the reports recorded at `merge_base` with their categories
-    /// and context. Read here so governance never opens `history.db`; the
-    /// merge-base tree is never scanned. Untraced: it is part of `review`.
-    ///
-    /// [FR-SC-18]: ../../../docs/specs/requirements/FR-SC-18.md
-    fn review_security_evidence(&self, merge_base: &str) -> Result<crate::governance::SecurityEvidence> {
-        // Every code scope, and no scope asked for: the delta keeps test code
-        // as any other finding ([BR-98]).
-        let filter = crate::security::FindingsFilter::default();
-        let current = crate::security::findings(
-            &self.root,
-            &self.scan_environment(),
-            self.tools_manifest(),
-            &filter,
-            today_utc(),
-            crate::security::no_test_symbols,
-            |listed| crate::security::context::contexts(self, listed),
-        )?;
-        let latest = crate::history::security::latest_snapshots(&self.root)?;
-        let base = crate::history::security::read_at(&self.root, merge_base)?;
-        let base_owasp = crate::history::security::classify(&base.findings, filter.edition, &[] as &[&str])
-            .findings
-            .into_iter()
-            .map(|c| c.categories)
-            .collect();
-        let base_contexts = crate::security::context::contexts(self, &base.findings.iter().collect::<Vec<_>>())?;
-        Ok(crate::governance::SecurityEvidence { current, latest, base, base_owasp, base_contexts })
-    }
-
-    /// The **"where to start"** list the last snapshot recorded ([FR-QM-17]): the
-    /// ranked fix units, each with its estimated recoverable signal points, and
-    /// the per-member outlier labels. The single entry point behind the CLI
-    /// `improvements` and the MCP `improvements` tool; `GET /api/v1/health`
-    /// carries the same value as `scan.where_to_start`, read through
-    /// [`latest_health`](Self::latest_health) — so every surface serialises one
-    /// value ([NFR-CC-01]).
-    ///
-    /// A pure read of the last snapshot ([ADR-28]): no reconcile, no score, no
-    /// write, advisory and never gated ([BR-61]). A never-scanned store, or a
-    /// snapshot written before the ranking was persisted, reads
-    /// [`recorded: false`](crate::models::quality::WhereToStart::recorded) — never
-    /// an empty "clean" list ([NFR-CC-04]); a recorded empty list means no single
-    /// unit recovers a whole point.
-    ///
-    /// # Errors
-    /// Returns an error only on a transient engine or a store-read failure.
-    ///
-    /// [FR-QM-17]: ../../../docs/specs/requirements/FR-QM-17.md
-    /// [BR-61]: ../../../docs/specs/software-spec.md#311-quality-metrics
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    pub fn improvements(&self) -> Result<crate::models::quality::WhereToStart> {
-        crate::observability::traced(Tool::Improvements, || {
-            Ok(crate::governance::latest_metrics(self)?.map(|s| s.where_to_start).unwrap_or_default())
-        })
-    }
-
-    /// The **non-persisting** quality readout for the report tier ([FR-IN-07],
-    /// [CR-095]): a freshly computed signal, the blessed baseline and their
-    /// delta, plus the last recorded `check_rules` findings — with **no write**.
-    ///
-    /// Distinct from both neighbours by design. [`gate`](Self::gate) computes the
-    /// same signal but *persists* it ([FR-GV-09]), which is wrong for a hook that
-    /// fires at every session boundary: it would take the graph-DB write lock and
-    /// grow the [FR-GV-06] `evolution` series on every `/clear`.
-    /// [`latest_gate`](Self::latest_gate) writes nothing but reports the *last
-    /// persisted* signal rather than computing one. This computes fresh and
-    /// writes nothing.
-    ///
-    /// It never reconciles (a write), so `freshness` is always assumed-fresh, and
-    /// its violations are the last recorded run's — see [`QualityReadout`] for
-    /// why re-evaluating them read-only is not possible. Those findings are
-    /// dated and attributed to the `HEAD` they were measured at from the
-    /// [FR-GV-21] run marker, whose absence is reported as "no rule check has run"
-    /// and never as a clean bill of health ([CR-096]).
-    /// The message list is bounded by the rendering cap
-    /// ([`governance::readout`](crate::governance::readout)); the true total
-    /// always rides `violation_count`, so a truncated list can say what it
-    /// dropped. The cap is not a caller's parameter: it is a property of the
-    /// readout, and letting a surface choose it would let two surfaces disagree
-    /// about the same read-model.
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure (transient engine, store fault,
-    /// invalid `rules.toml`).
-    ///
-    /// [FR-GV-06]: ../../../docs/specs/requirements/FR-GV-06.md
-    /// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
-    /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
-    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
-    pub fn quality_readout(&self) -> Result<QualityReadout> {
-        crate::observability::traced(Tool::QualityReadout, || {
-            crate::governance::quality_readout(self, crate::governance::readout::message_cap())
-        })
-    }
-
-    /// The agent-host session-start hook payload ([FR-IN-07], [CR-095]): a
-    /// [`quality_readout`](Self::quality_readout) rendered into the JSON object
-    /// the host consumes — a user-visible `systemMessage` plus agent-visible
-    /// `additionalContext`.
-    ///
-    /// Composed here rather than in the hook script because a malformed payload
-    /// makes the host discard the readout entirely, and correct JSON escaping is
-    /// `serde_json`'s job, not `sed`'s. Writes nothing, per
-    /// [`quality_readout`](Self::quality_readout).
-    ///
-    /// # Errors
-    /// Returns an error on a structural failure (transient engine, store fault,
-    /// invalid `rules.toml`).
-    ///
-    /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
-    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
-    pub fn quality_report_hook_payload(&self) -> Result<crate::governance::readout::HookPayload> {
-        Ok(crate::governance::readout::session_start_payload(
-            &self.quality_readout()?,
-        ))
-    }
-
-    /// The read-only twin of [`temporal_report`](Self::temporal_report): recompute
-    /// the per-file temporal metrics from the **already-mined** facts at the
-    /// stored cursor, **without mining and without appending a snapshot**
-    /// ([ADR-28], [CR-018]). Backs the dashboard's Commits view (and the Health
-    /// temporal tier) so a GET reflects the last `logos hotspots`/`scan` mine.
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected store-read failure or a
-    /// non-compiling `[history] defect_patterns`.
-    ///
-    /// [CR-018]: ../../../docs/requests/CR-018-web-dashboard-write-on-read.md
-    pub fn latest_temporal_report(&self) -> Result<crate::history::TemporalReport> {
-        crate::observability::traced(Tool::LatestTemporalReport, || {
-            let rules = crate::config::load_rules_from_root(&self.root)?;
-            crate::history::latest_temporal_report(&self.root, &rules.history.effective())
-        })
-    }
-
-    /// The read-only twin of [`hotspots`](Self::hotspots): rank the
-    /// last-mined temporal facts (via [`latest_temporal_report`](Self::latest_temporal_report))
-    /// against the complexity and coverage axes, **without** mining or appending
-    /// a snapshot ([ADR-28], [CR-018]). Backs the dashboard's Hotspots view (and
-    /// the Coverage view's untested-hotspots join) so a GET never writes. Shares
-    /// the optional `production_scope` filter ([CR-076]) with [`hotspots`](Self::hotspots).
-    ///
-    /// # Errors
-    /// Returns an error only on an unexpected git/store failure, a
-    /// non-compiling `[history] defect_patterns`, or — once a security report is
-    /// stored — an invalid `.logos/security-ignore.toml` (exit 2).
-    ///
-    /// [CR-076]: ../../../docs/requests/CR-076-hotspots-production-scope-filter.md
-    pub fn latest_hotspots(
-        &self,
-        limit: Option<usize>,
-        untested: bool,
-        production_scope: bool,
-    ) -> Result<crate::history::HotspotReport> {
-        self.latest_hotspots_with_findings(limit, untested, production_scope, false)
-    }
-
-    /// [`latest_hotspots`](Self::latest_hotspots) with the findings filter
-    /// ([FR-SC-14]), the read-only twin of
-    /// [`hotspots_with_findings`](Self::hotspots_with_findings).
-    ///
-    /// # Errors
-    /// As [`latest_hotspots`](Self::latest_hotspots).
-    ///
-    /// [FR-SC-14]: ../../../docs/specs/requirements/FR-SC-14.md
-    pub fn latest_hotspots_with_findings(
-        &self,
-        limit: Option<usize>,
-        untested: bool,
-        production_scope: bool,
-        with_findings: bool,
-    ) -> Result<crate::history::HotspotReport> {
-        crate::observability::traced(Tool::LatestHotspots, || {
-            let temporal = self.latest_temporal_report()?;
-            self.rank_hotspots(temporal, limit, untested, production_scope, with_findings)
-        })
-    }
-
-    /// The per-project **language composition** ([FR-UI-10], [CR-021]): the
-    /// languages actually present in the indexed graph, each with its graph
-    /// node/symbol count and contributing-file count, in deterministic order
-    /// (node count descending, then language ascending — [NFR-RA-06]). Distinct
-    /// from [`languages`](Self::languages), which lists every *registered*
-    /// grammar regardless of project use — here a registered-but-unused grammar
-    /// is absent. Backs the Dashboard's project-only Languages card ([FR-UI-09]).
-    ///
-    /// A pure reader that computes-and-persists nothing ([ADR-28], [FR-UI-03]):
-    /// it opens `logos.db` read-only — so, like [`latest_*`](Self::latest_metrics)
-    /// it works on both engine flavours and never touches the writer — and an
-    /// un-indexed root (no `logos.db`) returns an empty composition the view
-    /// renders as its honest empty state ([NFR-CC-04]).
-    ///
-    /// # Errors
-    /// Returns an error only when an existing `logos.db` is unreadable or at the
-    /// wrong schema version; an absent store is the empty (un-indexed) case, not
-    /// an error.
-    ///
-    /// [FR-UI-10]: ../../../docs/specs/requirements/FR-UI-10.md
-    /// [FR-UI-09]: ../../../docs/specs/requirements/FR-UI-09.md
-    /// [FR-UI-03]: ../../../docs/specs/requirements/FR-UI-03.md
-    /// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    /// [CR-021]: ../../../docs/requests/CR-021-dashboard-redesign-quality-coverage-rollups.md
-    pub fn language_composition(&self) -> Result<LanguageComposition> {
-        crate::observability::traced(Tool::LanguageComposition, || {
-            let db_path = self.root.join(".logos").join("logos.db");
-            if !db_path.is_file() {
-                // Un-indexed root: an empty composition, not an error ([FR-UI-10]).
-                return Ok(LanguageComposition::default());
-            }
-            let store = crate::graph_store::SqliteGraphStore::open_readonly(&db_path)?;
-            use crate::graph_store::GraphStore;
-            Ok(LanguageComposition {
-                languages: store.language_composition()?,
-            })
-        })
-    }
-
-    /// Ingest an external coverage report into the evidence store ([FR-CV-01]..
-    /// [FR-CV-04]): the `logos coverage ingest <report>` subcommand and the MCP
-    /// `coverage_ingest` twin behind this one `api` entrypoint ([NFR-CC-01]).
-    ///
-    /// `format` is the `--format` flag (`"lcov"`/`"cobertura"`/`"jacoco"`/`"gocover"`); `None`
-    /// auto-detects from content. Supplies the indexed-file set the report-path
-    /// mapper binds against from a `logos.db` graph read **here at the `api`
-    /// layer** — the evidence store is never `ATTACH`-ed to the canonical graph
-    /// ([BR-28]). Coverage is advisory: this never moves the gate ([BR-28]).
-    ///
-    /// # Errors
-    /// Returns an error (mapping to a non-zero exit) when `--format` is an
-    /// unknown token, the report is unreadable / unrecognized / malformed (atomic
-    /// rejection, no partial write), `root` has no resolvable HEAD, or
-    /// `rules.toml` is invalid. Per-file outcomes (unmatched, stale-rejected,
-    /// idempotent no-op) ride inside the returned summary, never errors.
-    ///
-    /// [FR-CV-01]: ../../../docs/specs/requirements/FR-CV-01.md
-    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    pub fn coverage_ingest(
-        &self,
-        report_path: &Path,
-        format: Option<&str>,
-    ) -> Result<crate::history::IngestSummary> {
-        crate::observability::traced(Tool::CoverageIngest, || {
-            let format_override = Self::parse_coverage_format(format)?;
-            // One `config.toml` read resolves the `[coverage_ingest]` table that
-            // both the format default and the provenance hash derive from — never
-            // two reads that could disagree if the file changes mid-call.
-            let ingest_cfg = crate::config::load_config_from_root(&self.root)?
-                .coverage_ingest
-                .effective();
-            self.coverage_ingest_with(report_path, format_override, &ingest_cfg)
-        })
-    }
-
-    /// Resolve a `--format`-style token (`"lcov"`/`"cobertura"`/`"jacoco"`/`"gocover"`) into a
-    /// [`CoverageFormat`](crate::history::CoverageFormat); `None` means content
-    /// auto-detection. Shared by the manual, automatic, and refresh ingest paths so
-    /// the unknown-token error is identical across all three ([NFR-CC-01]).
-    ///
-    /// # Errors
-    /// Errors on an unrecognized token.
-    fn parse_coverage_format(
-        token: Option<&str>,
-    ) -> Result<Option<crate::history::CoverageFormat>> {
-        match token {
-            Some(token) => Ok(Some(crate::history::CoverageFormat::from_flag(token).ok_or_else(
-                || anyhow!("unknown coverage --format {token:?} (expected lcov, cobertura, jacoco or gocover)"),
-            )?)),
-            None => Ok(None),
-        }
-    }
-
-    /// The shared ingest body behind both [`Engine::coverage_ingest`] and
-    /// [`Engine::coverage_ingest_auto`]: it takes an already-resolved
-    /// [`EffectiveCoverageIngest`](crate::config::EffectiveCoverageIngest) so a
-    /// single `config.toml` read drives both the format selection and the snapshot
-    /// provenance hash (no time-of-check/time-of-use skew, [FR-CV-09]). Not
-    /// `traced` itself — each public caller owns the span, so an auto-ingest emits
-    /// exactly one telemetry record, not a nested pair.
-    ///
-    /// The `[coverage]` table ([FR-CV-09], `rules.toml`) and `[coverage_ingest]`
-    /// table (`config.toml`) are folded together into the snapshot's config hash
-    /// ([ADR-38]).
-    fn coverage_ingest_with(
-        &self,
-        report_path: &Path,
-        format_override: Option<crate::history::CoverageFormat>,
-        ingest_cfg: &crate::config::EffectiveCoverageIngest,
-    ) -> Result<crate::history::IngestSummary> {
-        let rules = crate::config::load_rules_from_root(&self.root)?;
-        let cfg = rules.coverage.effective();
-        let indexed_paths = self.evidence_indexed_paths()?;
-        crate::history::coverage::ingest(
-            &self.root,
-            report_path,
-            format_override,
-            &cfg,
-            ingest_cfg,
-            &indexed_paths,
-        )
-    }
-
-    /// The indexed-file set an evidence report's paths bind against, supplied
-    /// at the api layer from a graph read so `history.db` is never `ATTACH`-ed to
-    /// the canonical graph ([BR-28], [ADR-79]). A transient or empty graph yields
-    /// an empty set, so every report path is honestly reported unmatched. Shared
-    /// by the coverage and security ingests — one binder, one indexed set.
-    ///
-    /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
-    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
-    fn evidence_indexed_paths(&self) -> Result<Vec<String>> {
-        Ok(match self.runtime() {
-            Some(rt) => rt
-                .submit_read(|store| store.indexed_files())?
-                .into_iter()
-                .map(|f| f.path)
-                .collect(),
-            None => Vec::new(),
-        })
-    }
-
-    /// Ingest a security report (SARIF 2.1.0, from any tool) into the evidence
-    /// store ([FR-SC-01]..[FR-SC-03], [ADR-79]): parsed and validated before any
-    /// write, findings bound to indexed files by longest unique suffix, anchored
-    /// to HEAD and the scanner, keyed by fingerprint, and secret-class messages
-    /// redacted before the write. A byte-identical re-ingest at the same HEAD is a
-    /// no-op reported `already_ingested`. Security evidence is not gate input
-    /// here: nothing reads it on the gate path.
-    ///
-    /// # Errors
-    /// Returns an error (a non-zero exit on a surface) when the report is
-    /// unreadable, not SARIF, or malformed — the defect is named and nothing is
-    /// written — or `root` has no resolvable HEAD. Per-finding outcomes ride in
-    /// the returned summary.
-    ///
-    /// [FR-SC-01]: ../../../docs/specs/requirements/FR-SC-01.md
-    /// [FR-SC-03]: ../../../docs/specs/requirements/FR-SC-03.md
-    /// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
-    pub fn security_ingest(&self, report_path: &Path) -> Result<crate::history::SecurityIngestSummary> {
-        crate::observability::traced(Tool::SecurityIngest, || self.security_ingest_untraced(report_path, None))
-    }
-
-    /// The ingest body behind [`Engine::security_ingest`],
-    /// [`Engine::security_ingest_auto`] and [`Engine::security_scan`]. Not
-    /// `traced`: each public caller owns the span.
-    fn security_ingest_untraced(
-        &self,
-        report_path: &Path,
-        scope: Option<crate::history::security::IngestScope<'_>>,
-    ) -> Result<crate::history::SecurityIngestSummary> {
-        let indexed_paths = self.evidence_indexed_paths()?;
-        crate::history::security::ingest_scoped(&self.root, report_path, &indexed_paths, scope)
-    }
-
-    /// Watcher-driven **automatic** security ingest ([FR-SC-06]): ingest the
-    /// SARIF report the watcher saw change under `.logos/security/`, through the
-    /// same path as [`Engine::security_ingest`] — a local read, parse and store,
-    /// **never** a scanner run. Its own span, so a watcher ingest is told apart
-    /// from one the user asked for, as [`Engine::coverage_ingest_auto`] is.
-    ///
-    /// Only a regular file is read: `.logos/security/` can hold what a
-    /// repository committed, and a symbolic link to a FIFO would block the one
-    /// sync worker for good, or one to `/dev/zero` grow its read without end.
-    ///
-    /// # Errors
-    /// As [`Engine::security_ingest`], or when `artifact` is not a regular file
-    /// (a symbolic link, FIFO or device); the watcher degrades them to a warning.
-    ///
-    /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
-    pub fn security_ingest_auto(&self, artifact: &Path) -> Result<crate::history::SecurityIngestSummary> {
-        crate::observability::traced(Tool::SecurityIngestAuto, || {
-            let kind = std::fs::symlink_metadata(artifact)
-                .with_context(|| format!("reading {}", artifact.display()))?
-                .file_type();
-            if !kind.is_file() {
-                return Err(anyhow!(
-                    "{} is not a regular file; the watcher ingests a report only from one",
-                    artifact.display()
-                ));
-            }
-            self.security_ingest_untraced(artifact, None)
-        })
-    }
-
-    /// `logos security scan` / `security_scan` ([FR-SC-06], [FR-SC-07]): run
-    /// every installed, enabled scanner and ingest each report it writes under
-    /// `.logos/security/`, after checking the project's recorded consent. With
-    /// `consent`, the scanners the record does not name yet are added to it.
-    /// The payload is one outcome per registered scanner
-    /// ([`crate::security::scan`]).
-    ///
-    /// # Errors
-    /// Exit 2 for a missing consent (naming `--consent` and the scanners it
-    /// lacks) or an invalid repository or user config — nothing is started
-    /// then. A scanner's own failure is its `failed` outcome, never an error.
-    ///
-    /// [FR-SC-06]: ../../../docs/specs/requirements/FR-SC-06.md
-    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
-    pub fn security_scan(&self, consent: bool) -> Result<crate::security::SecurityScanSummary> {
-        self.security_scan_selected(consent, &crate::security::ScanRequest::full(), |_| {})
-    }
-
-    /// [`security_scan`](Self::security_scan), with each scanner's start and
-    /// settled outcome handed to `progress` as it happens — the web UI's scan
-    /// job ([FR-SC-15]), which runs it on a job thread, so a cancel kills the
-    /// scanner running and starts nothing after it.
-    ///
-    /// # Errors
-    /// As [`security_scan`](Self::security_scan), and the jobs module's
-    /// `Cancelled` when the job was cancelled.
-    ///
-    /// [FR-SC-15]: ../../../docs/specs/requirements/FR-SC-15.md
-    pub fn security_scan_reporting(
-        &self,
-        consent: bool,
-        progress: impl FnMut(&crate::security::ScanProgress),
-    ) -> Result<crate::security::SecurityScanSummary> {
-        self.security_scan_selected(consent, &crate::security::ScanRequest::full(), progress)
-    }
-
-    /// `logos security scan --scanner … --path …` ([FR-SC-17]): the scan the
-    /// two methods above run, over the scanners and paths `request` names.
-    /// Each path is confined to the project root before any process starts; a
-    /// path-capable scanner's report replaces its findings only within the
-    /// paths. Every scan goes through here, progress and cancel included, and
-    /// holds the project's scan-or-install lock while it runs (S-758).
-    ///
-    /// # Errors
-    /// As [`security_scan_reporting`](Self::security_scan_reporting), exit
-    /// 2 for an unregistered scanner name or a refused path, and the lock's
-    /// `Busy` — naming the scan or install running — while another surface or
-    /// process holds the lock: nothing is started then.
-    ///
-    /// [FR-SC-17]: ../../../docs/specs/requirements/FR-SC-17.md
-    pub fn security_scan_selected(
-        &self,
-        consent: bool,
-        request: &crate::security::ScanRequest,
-        mut progress: impl FnMut(&crate::security::ScanProgress),
-    ) -> Result<crate::security::SecurityScanSummary> {
-        crate::observability::traced(Tool::SecurityScan, || {
-            self.security_exclusively(crate::security::RunKind::SecurityScan, || {
-                crate::security::scan(
-                    &self.root,
-                    &self.scan_environment(),
-                    self.tools_manifest(),
-                    consent,
-                    request,
-                    &mut progress,
-                    |report, scope| self.security_ingest_untraced(report, scope),
-                )
-            })
-        })
-    }
-
-    /// The installed, enabled scanners this project's scan consent does not
-    /// name yet ([FR-SC-07]): what [`security_scan`](Self::security_scan)
-    /// without `consent` would refuse over, and what the web UI's consent
-    /// dialog lists. Starts no process.
-    ///
-    /// # Errors
-    /// Exit 2 for an invalid config or consent record.
-    ///
-    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
-    pub fn security_consent_pending(&self) -> Result<Vec<&'static str>> {
-        crate::security::consent_pending(&self.root, &self.scan_environment(), self.tools_manifest())
-    }
-
-    /// Record this project's scan consent ([FR-SC-07]) for exactly `scanners`
-    /// — the ones the web UI's consent dialog showed and the user accepted —
-    /// in the user-level `security-consent.toml`, never in the repository.
-    ///
-    /// # Errors
-    /// Exit 2 when there is no user-level directory or the record is invalid;
-    /// an I/O error writing it.
-    ///
-    /// [FR-SC-07]: ../../../docs/specs/requirements/FR-SC-07.md
-    pub fn security_record_consent(&self, scanners: &[&str]) -> Result<()> {
-        crate::config::record_scan_consent(self.scan_environment().user_dir.as_deref(), &self.root, scanners)?;
-        Ok(())
-    }
-
-    /// `logos security scan --install` ([FR-SC-22]): install the default
-    /// scanners this project has not disabled and that are missing — under
-    /// the per-user install consent — then [scan](Self::security_scan). With
-    /// `consent`, both the install consent and the project's scan consent
-    /// are recorded for what is missing. CLI only: no MCP tool installs. The
-    /// install and the scan hold the project's scan-or-install lock throughout
-    /// (S-758).
-    ///
-    /// # Errors
-    /// Exit 2 for a missing install consent (nothing is downloaded then), a
-    /// missing scan consent, or an invalid config. One tool's failed install
-    /// is its outcome; the scan runs over what is installed. The lock's `Busy`
-    /// while another scan or install holds it.
-    ///
-    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
-    pub fn security_scan_install(&self, consent: bool) -> Result<surface::SecurityScanInstall> {
-        self.security_exclusively(crate::security::RunKind::ToolInstall, || {
-            let install = surface::install_for_scan(&self.root, &self.scan_environment(), self.tools_manifest(), consent)?;
-            let scan = self.security_scan(consent)?;
-            Ok(surface::SecurityScanInstall { install, scan })
-        })
-    }
-
-    /// `logos security install` ([FR-SC-22]): install the requested scanners
-    /// that have no usable copy — not the user's own, at or above the
-    /// manifest's minimum — after checking the per-user, per-tool-version
-    /// install consent ([`crate::tools::surface::install`]). CLI only. Holds
-    /// the project's scan-or-install lock while it runs (S-758) — in a
-    /// project whose `.logos` is a directory. Anywhere else no scan can run:
-    /// with no `.logos` none has, and a symlinked one refuses every scan. So
-    /// there the install takes no lock and writes nothing, as before.
-    ///
-    /// # Errors
-    /// Exit 2 for a missing consent (naming each tool, version, source and
-    /// size; nothing is downloaded), an unknown tool, a platform without
-    /// managed installs or no tools directory. The lock's `Busy` while
-    /// another scan or install of the project holds it.
-    ///
-    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
-    pub fn security_install(
-        &self,
-        request: &surface::InstallRequest,
-    ) -> Result<surface::SecurityInstall> {
-        self.tool_install_locked(|| surface::install(&self.root, &self.scan_environment(), self.tools_manifest(), request))
-    }
-
-    /// `logos security uninstall` ([FR-SC-22]): remove the managed copies of
-    /// the selected scanners, never a copy the user installed, and report
-    /// those that stay ([`crate::tools::surface::uninstall`]). CLI only.
-    ///
-    /// # Errors
-    /// Exit 2 for an unknown tool, a platform without managed installs or no
-    /// tools directory.
-    ///
-    /// [FR-SC-22]: ../../../docs/specs/requirements/FR-SC-22.md
-    pub fn security_uninstall(
-        &self,
-        tools: &crate::security::Selection,
-    ) -> Result<surface::SecurityUninstall> {
-        surface::uninstall(&self.root, &self.scan_environment(), self.tools_manifest(), tools)
-    }
-
-    /// The Security page's Install, Update or Install & scan ([FR-SC-24],
-    /// S-747): ready to run once the consent dialog answered every line it
-    /// needs, else the plan the dialog shows
-    /// ([`crate::tools::surface::admit_install`]). Decides on recorded state
-    /// only: it starts no process, not even a copy's version probe, and
-    /// writes nothing (S-766).
-    ///
-    /// # Errors
-    /// Exit 2 for an unknown or unoffered tool, a platform without managed
-    /// installs, no tools directory, or an invalid config.
-    ///
-    /// [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
-    pub fn security_install_admit(
-        &self,
-        ask: &surface::InstallAsk,
-    ) -> Result<surface::InstallAdmission> {
-        surface::admit_install(&self.root, &self.scan_environment(), self.tools_manifest(), ask)
-    }
-
-    /// The `tool-install` job's work ([FR-SC-24]): the admitted install, then
-    /// — with `scan` — the full [scan](Self::security_scan_reporting) without
-    /// recording consent, each step handed to `progress`. Run on a job thread,
-    /// a cancel stops the download, leaves no partial tool and reports the
-    /// tools installed by then ([`crate::tools::surface::install_job`]). The
-    /// web UI's job already holds the project's lock; called anywhere else,
-    /// this takes it.
-    ///
-    /// # Errors
-    /// As [`security_install`](Self::security_install) and the scan, and the
-    /// jobs module's `Cancelled` when the job was cancelled.
-    ///
-    /// [FR-SC-24]: ../../../docs/specs/requirements/FR-SC-24.md
-    pub fn security_install_job(
-        &self,
-        request: &surface::InstallRequest,
-        scan: bool,
-        mut progress: impl FnMut(&surface::InstallStep<'_>),
-    ) -> Result<surface::SecurityInstallJob> {
-        self.security_exclusively(crate::security::RunKind::ToolInstall, || {
-            let mut run_scan = |step: &mut dyn FnMut(&crate::security::ScanProgress)| self.security_scan_reporting(false, step);
-            let scan: Option<surface::ScanRun<'_>> = if scan { Some(&mut run_scan) } else { None };
-            surface::install_job(&self.root, &self.scan_environment(), self.tools_manifest(), request, scan, &mut progress)
-        })
-    }
-
-    /// `logos security status` / `security_status` ([FR-SC-08]): each
-    /// registered scanner's one state — not installed, disabled, never run,
-    /// not applicable (nothing for it to scan here, S-769), stale, or fresh
-    /// with its count of fresh, unsuppressed findings in production code and
-    /// the rest by why, test code among them (S-795) — the copy in use with its version
-    /// and any `update_available`, the install command for a missing scanner,
-    /// a failed last scan's log and one-line cause, and the consent state
-    /// ([`crate::security::status`]). Runs no scanner beyond its version
-    /// probe, and not that for a scanner with nothing to scan.
-    ///
-    /// # Errors
-    /// Exit 2 for an invalid config, consent record or ignore file; otherwise
-    /// only a store failure.
-    ///
-    /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
-    pub fn security_status(&self) -> Result<crate::security::SecurityStatus> {
-        self.security_status_probing(crate::security::VersionProbes::Every, true)
-    }
-
-    /// [`security_status`](Self::security_status) with the version probes
-    /// `probes` allows — a page read probes only consented scanners, each
-    /// binary once per process (HF-3) — and each row's ignored-paths coverage
-    /// only when `coverage` asks for it, since it walks the tree. Whether an
-    /// installed gosec or Bandit with no stored report is `not_applicable`
-    /// walks it whatever `coverage` says, stopping at the first file it reads.
-    ///
-    /// # Errors
-    /// As [`security_status`](Self::security_status).
-    pub(crate) fn security_status_probing(
-        &self,
-        probes: crate::security::VersionProbes,
-        coverage: bool,
-    ) -> Result<crate::security::SecurityStatus> {
-        crate::observability::traced(Tool::SecurityStatus, || {
-            crate::security::status(&self.root, &self.scan_environment(), self.tools_manifest(), today_utc(), probes, coverage, |f| {
-                crate::security::context::in_test_symbols(self, f)
-            })
-        })
-    }
-
-    /// `logos security findings` / `security_findings` ([FR-SC-08]): the
-    /// stored findings with their OWASP categories ([S-664]) and suppression
-    /// ([S-666]), narrowed by `filter` ([`crate::security::findings`]), each in
-    /// the graph context this engine computes from logos.db — enclosing
-    /// symbol, route reachability and blast radius, each labelled
-    /// ([FR-SC-13], [`crate::security::context`]) — and with its code scope by
-    /// this graph ([`crate::security::ScopeFilter`], S-795): `filter`'s scope keeps
-    /// production code unless it names another, and the payload states how
-    /// many the scope hid. Starts no scanner.
-    ///
-    /// # Errors
-    /// Exit 2 for an invalid config or ignore file; otherwise only a store
-    /// failure.
-    ///
-    /// [FR-SC-08]: ../../../docs/specs/requirements/FR-SC-08.md
-    /// [FR-SC-13]: ../../../docs/specs/requirements/FR-SC-13.md
-    /// [S-664]: ../../../docs/planning/journal.md#s-664-findings-are-classified-by-owasp-top-10-2025-and-2021
-    /// [S-666]: ../../../docs/planning/journal.md#s-666-suppressions-live-in-a-committed-ignore-file-with-a-reason-and-an-expiry
-    pub fn security_findings(
-        &self,
-        filter: &crate::security::FindingsFilter,
-    ) -> Result<crate::security::SecurityFindings> {
-        crate::observability::traced(Tool::SecurityFindings, || {
-            crate::security::findings(
-                &self.root,
-                &self.scan_environment(),
-                self.tools_manifest(),
-                filter,
-                today_utc(),
-                |stored| crate::security::context::in_test_symbols(self, stored),
-                |listed| crate::security::context::contexts(self, listed),
-            )
-        })
-    }
-
-    /// The web UI's Security page ([FR-SC-09]): the
-    /// [status](Self::security_status) matrix, every stored finding in graph
-    /// context ([`security_findings`](Self::security_findings), unfiltered,
-    /// every code scope, each finding labelled with its own),
-    /// the same findings classified under both OWASP editions so the page
-    /// switches edition without a refetch ([FR-SC-04]), and — only with a
-    /// `rules.toml [security]` table — the verdict `check` reaches on it
-    /// ([FR-SC-10]). One status readout serves the matrix and the gate band.
-    /// Starts no scanner beyond the version probe of a scanner the project's
-    /// scan consent names, once per process for each binary
-    /// ([`VersionProbes::Consented`](crate::security::VersionProbes::Consented)):
-    /// the page is a read a cross-site page can trigger.
-    ///
-    /// # Errors
-    /// As [`security_status`](Self::security_status) and
-    /// [`security_findings`](Self::security_findings), and an invalid
-    /// `.logos/rules.toml` (exit 2).
-    ///
-    /// [FR-SC-04]: ../../../docs/specs/requirements/FR-SC-04.md
-    /// [FR-SC-09]: ../../../docs/specs/requirements/FR-SC-09.md
-    /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
-    pub fn security_page(&self) -> Result<crate::security::SecurityPage> {
-        let status = self.security_status_probing(crate::security::VersionProbes::Consented, true)?;
-        let gate = crate::security::SecurityGateEvidence(self).band(&status)?;
-        let findings = self.security_findings(&crate::security::FindingsFilter::default())?;
-        Ok(crate::security::SecurityPage {
-            counts: crate::security::FindingTally::of(&findings.findings),
-            findings,
-            editions: crate::security::editions(
-                &self.root,
-                &self.scan_environment(),
-                self.tools_manifest(),
-                today_utc(),
-                |stored| crate::security::context::in_test_symbols(self, stored),
-            )?,
-            status,
-            gate,
-        })
-    }
-
-    /// The Dashboard's Security widget ([FR-UI-09], S-789): the stored security
-    /// state in a handful of figures ([`SecuritySummary`](crate::security::SecuritySummary)) —
-    /// the counted and left-out findings as the Security page states them, the
-    /// `[security]` gate band, the newest stored scan, the scanners whose last
-    /// scan failed, and the consent record. **Stored-only**: the status is read
-    /// with [`VersionProbes::Never`](crate::security::VersionProbes::Never), so
-    /// no scanner process starts — not even a version probe — and nothing is
-    /// written ([ADR-28]); a Dashboard load is a read a cross-site page can
-    /// trigger. Test code is classified by this graph, as the page does.
-    ///
-    /// # Errors
-    /// As [`security_page`](Self::security_page): an invalid config, consent
-    /// record, ignore file or `.logos/rules.toml`, or a store failure.
-    ///
-    /// [FR-UI-09]: ../../../docs/specs/requirements/FR-UI-09.md
-    /// [ADR-28]: ../../../docs/specs/architecture/decisions/ADR-28.md
-    pub fn security_summary(&self) -> Result<crate::security::SecuritySummary> {
-        let status = self.security_status_probing(crate::security::VersionProbes::Never, false)?;
-        let gate = crate::security::SecurityGateEvidence(self).band(&status)?;
-        crate::security::summary(
-            &self.root,
-            &self.scan_environment(),
-            self.tools_manifest(),
-            today_utc(),
-            status,
-            gate,
-            |stored| crate::security::context::in_test_symbols(self, stored),
-        )
-    }
-
-    /// Suppress from the Security page ([FR-SC-12]): add an entry for
-    /// `selector` — one finding's fingerprint, a path glob with its
-    /// narrowing ([S-770]), or a rule of one scanner in every file ([S-814]) — to `.logos/security-ignore.toml` with `reason` and
-    /// an optional `expires` date written `YYYY-MM-DD`
-    /// ([`crate::history::security::suppress`]). Touches no store: the next
-    /// [`security_findings`](Self::security_findings) labels the findings from
-    /// the file.
-    ///
-    /// # Errors
-    /// Exit 2 and no write for a blank reason, a malformed or already
-    /// suppressed selector, a path glob covering the whole project, an expiry
-    /// that is not a date or is in the past, or an ignore file that is
-    /// malformed or hand-spelled; a failed atomic write.
-    ///
-    /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
-    /// [S-770]: ../../../docs/planning/journal.md#s-770-a-suppression-can-cover-a-path
-    /// [S-814]: ../../../docs/planning/journal.md#s-814-a-rule-can-be-suppressed-project-wide-with-a-reason
-    pub fn security_suppress(
-        &self,
-        selector: crate::history::security::Selector,
-        reason: &str,
-        expires: Option<&str>,
-    ) -> Result<crate::history::security::IgnoreWrite> {
-        let expires = expires.map(crate::history::security::parse_expires).transpose()?;
-        crate::history::security::suppress(&self.root, selector, reason, expires, today_utc())
-    }
-
-    /// [`security_suppress`](Self::security_suppress) that records the
-    /// `evidence` its reason rests on ([FR-SC-32], [S-818]): each of `evidence`
-    /// — a symbol identity, a canonical symbol or a bare name that names one
-    /// symbol — with the hash of its exact source span now, and, for a
-    /// fingerprint selector, the finding's own enclosing symbol when it binds
-    /// one. The entry then suppresses only while every one holds. No `evidence`
-    /// is `security_suppress`: an entry that reads "no evidence recorded".
-    ///
-    /// # Errors
-    /// As [`security_suppress`](Self::security_suppress); and exit 2 and no
-    /// write for evidence that names no symbol, several (listing them), or one
-    /// the index is behind.
-    ///
-    /// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
-    /// [S-818]: ../../../docs/planning/journal.md#s-818-a-suppression-records-its-evidence-and-re-opens-when-the-evidence-changes
-    pub fn security_suppress_with_evidence(
-        &self,
-        selector: crate::history::security::Selector,
-        reason: &str,
-        expires: Option<&str>,
-        evidence: &[String],
-    ) -> Result<crate::history::security::IgnoreWrite> {
-        crate::history::security::suppress_recording(
-            &self.root,
-            selector,
-            reason,
-            expires,
-            today_utc(),
-            evidence,
-            &|finding| self.enclosing_identity(finding),
-        )
-    }
-
-    /// The identity of the symbol that encloses `finding` in this engine's
-    /// graph, or `None` when it binds none ([`crate::security::context`]).
-    fn enclosing_identity(&self, finding: &crate::history::SecurityFinding) -> Result<Option<String>> {
-        let nodes = crate::security::context::enclosing_symbols(self, &[finding])?;
-        Ok(nodes.into_iter().next().flatten().map(|node| node.identity().to_string()))
-    }
-
-    /// `logos security reconfirm <fingerprint>` / `security_reconfirm` / the
-    /// Security page's Re-confirm ([FR-SC-32], [S-818]): re-record the hash of
-    /// every evidence symbol of the entry that suppresses the finding with this
-    /// `fingerprint` (or is the entry for it), keeping its reason and expiry —
-    /// the verdict re-read against the code as it is now and confirmed. The
-    /// findings it covers are suppressed again. A write to the ignore file, so
-    /// guarded as one ([FR-IN-14]).
-    ///
-    /// # Errors
-    /// Exit 2 and no write when no entry or stored finding carries the
-    /// fingerprint, no entry suppresses the finding, the entry records no
-    /// evidence, an evidence symbol no longer exists (suppress again with other
-    /// evidence), the index is behind a file, or the ignore file is malformed
-    /// or hand-spelled; a failed write.
-    ///
-    /// [FR-SC-32]: ../../../docs/specs/requirements/FR-SC-32.md
-    /// [FR-IN-14]: ../../../docs/specs/requirements/FR-IN-14.md
-    /// [S-818]: ../../../docs/planning/journal.md#s-818-a-suppression-records-its-evidence-and-re-opens-when-the-evidence-changes
-    pub fn security_reconfirm(&self, fingerprint: &str) -> Result<crate::history::security::IgnoreWrite> {
-        self.security_reconfirm_with_evidence(fingerprint, &[])
-    }
-
-    /// [`security_reconfirm`](Self::security_reconfirm) naming the symbols the
-    /// verdict now rests on: with `evidence`, the entry records exactly those
-    /// symbols (each as [`security_suppress_with_evidence`](Self::security_suppress_with_evidence)
-    /// pins it, the finding's enclosing symbol included) in place of the ones it
-    /// recorded — the way to give an entry that records none its evidence, or to
-    /// swap a symbol that was deleted. Without, every recorded symbol is
-    /// re-recorded as it is now.
-    ///
-    /// # Errors
-    /// As [`security_reconfirm`](Self::security_reconfirm), and for `evidence`
-    /// that names no symbol, several, or one the index is behind.
-    pub fn security_reconfirm_with_evidence(
-        &self,
-        fingerprint: &str,
-        evidence: &[String],
-    ) -> Result<crate::history::security::IgnoreWrite> {
-        let enclosing = |finding: &crate::history::SecurityFinding| self.enclosing_identity(finding);
-        crate::history::security::reconfirm_entry(&self.root, fingerprint, today_utc(), evidence, &enclosing)
-    }
-
-    /// Remove the entry for `selector` ([FR-SC-12],
-    /// [`crate::history::security::unsuppress`]); the findings it suppressed
-    /// count again.
-    ///
-    /// # Errors
-    /// Exit 2 and no write when no entry carries `selector` or the ignore
-    /// file is malformed or hand-spelled; a failed write.
-    ///
-    /// [FR-SC-12]: ../../../docs/specs/requirements/FR-SC-12.md
-    pub fn security_unsuppress(
-        &self,
-        selector: crate::history::security::Selector,
-    ) -> Result<crate::history::security::IgnoreWrite> {
-        crate::history::security::unsuppress(&self.root, selector)
-    }
-
-    /// `logos security bless` ([FR-SC-25]): write the security ratchet's
-    /// baseline findings — fingerprint, rule id and project-relative path,
-    /// sorted — to the checked-in `.logos/security-baseline.json`, which the
-    /// ratchet then reads in place of the set `gate --save` records in the
-    /// gitignored `history.db`, so a CI clone reads only new findings as new.
-    /// Its only writer; runs no scanner. Exit 5 and no write when a
-    /// `[security]` table's required scan is missing
-    /// ([`SecurityBless::exit_code`](crate::security::SecurityBless::exit_code)).
-    ///
-    /// # Errors
-    /// Exit 2 for an invalid `.logos/rules.toml`, config or ignore file, or a
-    /// failed write; otherwise only a store failure.
-    ///
-    /// [FR-SC-25]: ../../../docs/specs/requirements/FR-SC-25.md
-    pub fn security_bless(&self) -> Result<crate::security::SecurityBless> {
-        crate::security::SecurityGateEvidence(self).bless()
     }
 
     /// This engine with the security surfaces looking in `env` instead of the
@@ -3226,1053 +621,271 @@ impl Engine {
         self
     }
 
-    pub(crate) fn tools_manifest(&self) -> &crate::tools::Manifest {
-        self.tools_manifest
-            .as_ref()
-            .unwrap_or_else(|| crate::tools::Manifest::builtin())
+    // ── The feature-area façades (S-829) ─────────────────────────────────
+
+    /// The code graph's state: hydrated views, the sync clock, the index's
+    /// status and inventory.
+    pub fn graph(&self) -> Graph<'_> {
+        Graph { engine: self }
     }
 
-    pub(crate) fn scan_environment(&self) -> crate::security::ScanEnvironment {
-        self.scan_env
-            .clone()
-            .unwrap_or_else(crate::security::ScanEnvironment::from_process)
+    /// The navigation tools (FR-NV-01..13) and the runtime they read through.
+    pub fn navigation(&self) -> Navigation<'_> {
+        Navigation { engine: self }
     }
 
-    /// This project's scan-or-install lock file (S-758), its directory
-    /// created: what the web UI's jobs hold for as long as they run
-    /// (`AnalysisJobs::start_exclusive`) and peek at before a start records
-    /// anything.
-    ///
-    /// # Errors
-    /// A symlinked `.logos` or `.logos/security`, or the directory cannot be
-    /// created.
-    pub fn security_lock_file(&self) -> Result<PathBuf> {
-        crate::security::lock_file(&self.root)
+    /// The indexing pipeline: `index`, `sync`, `ensure_indexed`.
+    pub fn pipeline(&self) -> Pipeline<'_> {
+        Pipeline { engine: self }
     }
 
-    /// Run `f` holding the project's scan-or-install lock as a `kind`, or
-    /// straight away on the thread that already holds it
-    /// ([`crate::security::exclusively`]).
-    fn security_exclusively<T>(&self, kind: crate::security::RunKind, f: impl FnOnce() -> Result<T>) -> Result<T> {
-        crate::security::exclusively(&self.root, kind, f)
+    /// The quality and governance evaluations, with the readouts and the
+    /// branch review beneath them.
+    pub fn quality(&self) -> Quality<'_> {
+        Quality { engine: self }
     }
 
-    /// Watcher-driven **automatic** coverage ingest ([FR-CV-10], [ADR-38]): ingest
-    /// the coverage `artifact` the watcher observed change, through the same path
-    /// as [`Engine::coverage_ingest`] — a local file read + parse + store, **never**
-    /// a test run ([NFR-SE-01]). The `[coverage_ingest].format` override is honored
-    /// (default `auto` content-detection).
-    ///
-    /// This is **non-load-bearing** ([ADR-11], [FR-SY-06]): the watcher treats any
-    /// error (a half-written artifact mid-CI-run, a malformed report, a missing
-    /// HEAD) as a warning and never blocks the sync. Reusing the manual ingest path
-    /// keeps a single atomic-rejection contract — a bad artifact leaves the store
-    /// byte-identical ([NFR-RA-05]).
-    ///
-    /// # Errors
-    /// The same loud errors as [`Engine::coverage_ingest`] (unreadable/unrecognized/
-    /// malformed report, no resolvable HEAD, invalid config). The watcher degrades
-    /// them to a warning at the call site.
-    ///
-    /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
-    /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
-    /// [ADR-11]: ../../../docs/specs/architecture/decisions/ADR-11.md
-    /// [FR-SY-06]: ../../../docs/specs/requirements/FR-SY-06.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    pub fn coverage_ingest_auto(&self, artifact: &Path) -> Result<crate::history::IngestSummary> {
-        crate::observability::traced(Tool::CoverageIngestAuto, || {
-            // One config read drives both the configured format and the snapshot
-            // hash — the same `ingest_cfg` instance flows into both, so the parse
-            // format and the recorded provenance can never disagree.
-            let ingest_cfg = crate::config::load_config_from_root(&self.root)?
-                .coverage_ingest
-                .effective();
-            let format_override = Self::parse_coverage_format(ingest_cfg.format_override())?;
-            self.coverage_ingest_with(artifact, format_override, &ingest_cfg)
-        })
+    /// The git-history surfaces: mining, the temporal report, the hotspots.
+    pub fn history(&self) -> History<'_> {
+        History { engine: self }
     }
 
-    /// `logos coverage refresh` / `coverage_refresh` ([FR-CV-10] as modified
-    /// by CR-234): the custom entry of [`coverage_run`](Self::coverage_run) —
-    /// `coverage run --tool custom` — run under its own name. The configured
-    /// `[coverage_ingest].refresh_cmd` runs through `sh -c` in the project
-    /// root, only under the project's coverage execution consent, which pins
-    /// its exact text ([FR-CV-13]); then the artifact it wrote or rewrote is
-    /// ingested.
-    ///
-    /// # Errors
-    /// An error when no `refresh_cmd` is configured; exit 2 — naming
-    /// `--consent` and showing the command verbatim — when its consent is
-    /// missing or its text changed and `consent` is false. Nothing is spawned
-    /// then. The command's own failure is its outcome in the payload.
-    ///
-    /// [FR-CV-10]: ../../../docs/specs/requirements/FR-CV-10.md
-    /// [FR-CV-13]: ../../../docs/specs/requirements/FR-CV-13.md
-    pub fn coverage_refresh(&self, consent: bool) -> Result<crate::coverage::CoverageRunSummary> {
-        crate::observability::traced(Tool::CoverageRefresh, || {
-            let request = crate::coverage::RunRequest {
-                tool: Some(crate::coverage::consent::CUSTOM_TOOL),
-                consent,
-                entry: "logos coverage refresh",
-                dependency_consent: false,
-            };
-            self.coverage_run_untraced(&request)
-        })
+    /// The coverage evidence surfaces: ingest, run, status, install.
+    pub fn coverage(&self) -> Coverage<'_> {
+        Coverage { engine: self }
     }
 
-    /// The coverage run ([FR-CV-14], S-737) with no dependency consent —
-    /// `logos coverage run` is [`coverage_run_adding`](Self::coverage_run_adding),
-    /// and MCP `coverage_run` the job's [`coverage_run_reporting`](Self::coverage_run_reporting):
-    /// run every enabled, installed coverage tool in registry order,
-    /// then the custom entry when a `refresh_cmd` is configured — or only
-    /// `tool` — and ingest each report into the HEAD snapshot as its tool
-    /// ends ([`crate::coverage::run`]). With `consent`, what the project's
-    /// execution consent does not cover yet is recorded first. Explicit only:
-    /// the watcher, timers and read paths never start a run ([ADR-87] §4).
-    /// Advisory: a run never moves the gate ([BR-28]).
-    ///
-    /// # Errors
-    /// Exit 2, with nothing started, for an invalid config, an unregistered
-    /// tool, or a missing consent without `consent`; an error, also with
-    /// nothing started, for `custom` with no `refresh_cmd`. One tool's failure
-    /// is its outcome, never an error.
-    ///
-    /// [FR-CV-14]: ../../../docs/specs/requirements/FR-CV-14.md
-    /// [ADR-87]: ../../../docs/specs/architecture/decisions/ADR-87.md
-    /// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
-    pub fn coverage_run(&self, tool: Option<&str>, consent: bool) -> Result<crate::coverage::CoverageRunSummary> {
-        self.coverage_run_adding(tool, consent, false)
+    /// The security surfaces, with the findings and the scanner tools beneath
+    /// them.
+    pub fn security(&self) -> Security<'_> {
+        Security { engine: self }
     }
 
-    /// [`coverage_run`](Self::coverage_run), and with `dependency_consent`
-    /// (`logos coverage run --dependency-consent`, S-749) the project's
-    /// dependency consent recorded for each missing coverage dev dependency's
-    /// command before the project's own package manager adds it
-    /// ([FR-CV-18]). Without it, a dependency the consent does not name yet is
-    /// reported in the summary with the consent statement, and nothing is
-    /// added. Logos never commits the change.
+    /// The checked-in policy files: read, write, apply.
+    pub fn config(&self) -> Configuration<'_> {
+        Configuration { engine: self }
+    }
+}
+
+/// How [`Engine::start_with`] starts an engine: the hydration-cache bound and
+/// the runtime's pools. The default is [`Engine::start`]'s — the default cache
+/// bound and core-sized pools.
+#[derive(Debug, Clone, Default)]
+pub struct StartOptions {
+    /// The bounded petgraph hydration cache's configuration ([ADR-04],
+    /// [ADR-05]).
+    pub hydration: HydrationConfig,
+    /// The runtime's pools: the read-only connections and the worker pool.
+    pub runtime: RuntimeConfig,
+}
+
+impl StartOptions {
+    /// An explicit hydration-cache bound.
     ///
-    /// # Errors
-    /// As [`coverage_run`](Self::coverage_run). A refused or failed addition
-    /// is its outcome in the payload, never an error.
+    /// This is the seam through which the deferred [AQ-02]/[AA-04] RSS-budget
+    /// decision is wired without touching call sites: when the cache ceiling is
+    /// resolved during dogfood profiling it becomes a [`HydrationConfig`] passed
+    /// here (or a default change), not a code rewrite. [`Engine::start`] uses
+    /// [`HydrationConfig::default`].
     ///
-    /// [FR-CV-18]: ../../../docs/specs/requirements/FR-CV-18.md
-    pub fn coverage_run_adding(
-        &self,
-        tool: Option<&str>,
-        consent: bool,
-        dependency_consent: bool,
-    ) -> Result<crate::coverage::CoverageRunSummary> {
-        crate::observability::traced(Tool::CoverageRun, || {
-            let entry = crate::coverage::RUN_ENTRY;
-            self.coverage_run_untraced(&crate::coverage::RunRequest { tool, consent, entry, dependency_consent })
-        })
+    /// [AQ-02]: ../../../docs/specs/architecture.md#14-open-questions
+    /// [AA-04]: ../../../docs/specs/architecture.md#24-assumptions
+    pub fn hydration(hydration: HydrationConfig) -> Self {
+        Self { hydration, ..Self::default() }
     }
 
-    /// The run behind [`coverage_run`](Self::coverage_run) and
-    /// [`coverage_refresh`](Self::coverage_refresh): each report goes through
-    /// the one ingest body, with the `[coverage_ingest]` table the run loaded
-    /// — one config read for the whole run. Not `traced`: each caller owns
-    /// the span.
-    fn coverage_run_untraced(&self, request: &crate::coverage::RunRequest<'_>) -> Result<crate::coverage::CoverageRunSummary> {
-        self.coverage_run_progress(request, |_| {})
-    }
-
-    /// [`coverage_run_untraced`](Self::coverage_run_untraced), each tool's
-    /// start and settled part handed to `progress` as it happens.
-    fn coverage_run_progress(
-        &self,
-        request: &crate::coverage::RunRequest<'_>,
-        progress: impl FnMut(&crate::coverage::RunProgress),
-    ) -> Result<crate::coverage::CoverageRunSummary> {
-        crate::coverage::run(&self.root, &self.scan_environment(), request, progress, |report, format, ingest_cfg| {
-            self.coverage_ingest_with(report, format, ingest_cfg)
-        })
-    }
-
-    /// [`coverage_run`](Self::coverage_run) with each tool's start and
-    /// settled outcome handed to `progress` as it happens: what the
-    /// `coverage-run` job runs ([`crate::coverage::job`], S-738), on a job
-    /// thread, so a cancel kills the tool running and starts nothing after it.
-    /// Never records consent: [`coverage_run_admit`](Self::coverage_run_admit)
-    /// does, before the job starts. The dependency consent only a terminal
-    /// records, so a missing coverage dev dependency is added here only when
-    /// an earlier `--dependency-consent` named its command (S-749).
+    /// A **budgeted share** of a workspace's resources rather than the ones an
+    /// engine would size for itself ([NFR-PE-11], [ADR-63]): exactly
+    /// `read_connections` read-only connections instead of one per core, and —
+    /// when `worker_pool` is `Some` — the workspace's one shared `rayon` pool
+    /// instead of a private core-sized one.
     ///
-    /// # Errors
-    /// As [`coverage_run`](Self::coverage_run) without `consent`.
-    pub(crate) fn coverage_run_reporting(
-        &self,
-        tool: Option<&str>,
-        progress: impl FnMut(&crate::coverage::RunProgress),
-    ) -> Result<crate::coverage::CoverageRunSummary> {
-        crate::observability::traced(Tool::CoverageRun, || {
-            let request =
-                crate::coverage::RunRequest { tool, consent: false, entry: crate::coverage::RUN_ENTRY, dependency_consent: false };
-            self.coverage_run_progress(&request, progress)
-        })
-    }
-
-    /// `logos coverage install` ([FR-CV-17], S-748): install the managed
-    /// coverage tools that are missing — `cargo-llvm-cov` — and add
-    /// `llvm-tools-preview` to the user's toolchain with their own `rustup`,
-    /// under the install consent ([`crate::tools::surface::coverage_install`]).
-    /// CLI only: no MCP tool installs.
+    /// The seam a **workspace** uses: the [federation registry] hands every
+    /// resident member engine the share of the workspace-wide
+    /// [`WorkspaceBudget`](crate::federation::WorkspaceBudget) it is entitled
+    /// to, so N members cost a host-derived ceiling rather than `N × cores` live
+    /// connections and `N × cores` worker threads. Nothing else calls this — the
+    /// single-root path stays on [`Engine::start`] and its core-sized pools,
+    /// byte-for-byte as today ([FR-WS-03], [ADR-52]).
     ///
-    /// # Errors
-    /// Exit 2 for a missing consent (naming each line; nothing is downloaded
-    /// and no `rustup` runs), a platform without managed installs or no tools
-    /// directory. The lock's `Busy` while another scan or install of the
-    /// project holds it.
+    /// A `worker_pool` of `None` builds a private pool exactly as
+    /// [`Engine::start`] does, which is what makes the sharing *injected rather
+    /// than discovered*: an engine given no pool has no way to find one.
     ///
-    /// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
-    pub fn coverage_install(
-        &self,
-        request: &crate::tools::surface::CoverageInstallRequest,
-    ) -> Result<crate::tools::surface::CoverageInstall> {
-        self.tool_install_locked(|| {
-            crate::tools::surface::coverage_install(&self.root, &self.scan_environment(), self.tools_manifest(), request)
-        })
-    }
-
-    /// The install a Coverage page **Install** readies before its run
-    /// ([FR-CV-17], S-750): [`coverage_install`](Self::coverage_install)
-    /// without consent — the page's dialog recorded it
-    /// ([`crate::coverage::job::admit_prepared`]), so a line it did not
-    /// accept is refused — each step handed to `progress`. Run on the
-    /// `coverage-run` job's thread, a cancel kills the download, unpack or
-    /// `rustup` going and leaves no partial tool.
-    ///
-    /// # Errors
-    /// As [`coverage_install`](Self::coverage_install).
-    ///
-    /// [FR-CV-17]: ../../../docs/specs/requirements/FR-CV-17.md
-    pub fn coverage_install_job(
-        &self,
-        mut progress: impl FnMut(&crate::tools::surface::CoverageInstallStep<'_>),
-    ) -> Result<crate::tools::surface::CoverageInstall> {
-        let request = crate::tools::surface::CoverageInstallRequest { from: None, consent: false };
-        self.tool_install_locked(|| {
-            let (root, env) = (&self.root, self.scan_environment());
-            crate::tools::surface::coverage_install_reporting(root, &env, self.tools_manifest(), &request, &mut progress)
-        })
-    }
-
-    /// Run a per-user `install` — `security install`, `coverage install` —
-    /// holding the project's scan-or-install lock as a tool install, or
-    /// unlocked in a project with no `.logos` yet: a per-user install needs no
-    /// index, and the lock file lives under it.
-    fn tool_install_locked<T>(&self, install: impl FnOnce() -> Result<T>) -> Result<T> {
-        if !std::fs::symlink_metadata(self.root.join(".logos")).is_ok_and(|m| m.is_dir()) {
-            return crate::security::unlocked(install);
-        }
-        self.security_exclusively(crate::security::RunKind::ToolInstall, install)
-    }
-
-    /// Admit a run of `tool` — every tool when `None` — against this
-    /// project's coverage execution consent before a `coverage-run` job starts
-    /// it ([FR-CV-13], S-738). `answer` is the web UI's consent dialog: when it
-    /// accepts everything the consent lacks — every tool, and the custom
-    /// command's exact current text — exactly that is recorded and the run may
-    /// start (`None`); when it accepts less, nothing is recorded and what is
-    /// pending is returned, to be asked again. `answer` `None` is a surface
-    /// that cannot give the consent (MCP): a run the consent does not cover is
-    /// refused as `coverage run` without `--consent` refuses it. Starts no
-    /// process.
-    ///
-    /// # Errors
-    /// Exit 2, naming `logos coverage run --consent`, for a refused run;
-    /// otherwise as [`coverage_run`](Self::coverage_run), the consent aside,
-    /// and an I/O error recording the consent.
-    ///
-    /// [FR-CV-13]: ../../../docs/specs/requirements/FR-CV-13.md
-    pub(crate) fn coverage_run_admit(
-        &self,
-        tool: Option<&str>,
-        answer: Option<&crate::coverage::consent::ConsentAnswer<'_>>,
-    ) -> Result<Option<crate::coverage::consent::PendingConsent>> {
-        use crate::coverage::consent;
-        let env = self.scan_environment();
-        let pending = crate::coverage::consent_pending(&self.root, &env, tool)?;
-        match answer {
-            _ if pending.is_empty() => Ok(None),
-            None => Err(consent::refused(&pending, crate::coverage::RUN_ENTRY).into()),
-            Some(answer) if !pending.accepted_by(answer) => Ok(Some(pending)),
-            Some(_) => {
-                consent::record(env.user_dir.as_deref(), &self.root, &pending)?;
-                Ok(None)
-            }
+    /// [federation registry]: crate::federation::EngineRegistry
+    /// [NFR-PE-11]: ../../../docs/specs/requirements/NFR-PE-11.md
+    /// [FR-WS-03]: ../../../docs/specs/requirements/FR-WS-03.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [ADR-63]: ../../../docs/specs/architecture/decisions/ADR-63.md
+    pub fn pools(read_connections: usize, worker_pool: Option<SharedWorkerPool>) -> Self {
+        Self {
+            runtime: RuntimeConfig { reader_pool_size: read_connections, worker_pool, ..RuntimeConfig::default() },
+            ..Self::default()
         }
     }
+}
 
-    /// The coverage status surface ([FR-CV-05], [FR-CV-06]): per-file freshness
-    /// (fresh value / stale label / `n/a`, hash-based against the snapshot anchor)
-    /// plus the overall freshness fraction and snapshot provenance. The
-    /// `logos coverage status` subcommand and the MCP `coverage_status` twin share
-    /// this one `api` entrypoint byte-for-byte ([NFR-CC-01]).
-    ///
-    /// With no coverage ingested, the evidence reads `n/a` with a one-line
-    /// notice — never an error ([FR-CV-06]). The evidence comes from
-    /// `history.db` alone ([BR-28]); advisory, never moves the gate.
-    ///
-    /// The payload also carries the coverage runner's state (S-737): each
-    /// tool's one state — detected, else its last run, else never run — and
-    /// the execution consent ([`crate::coverage::runner_status`]). Detection
-    /// asks a tool outside the project for its version; it runs nothing the
-    /// project supplies.
-    ///
-    /// # Errors
-    /// Exit 2 for an invalid repository or user-level config or consent
-    /// record; otherwise only an unexpected store failure.
-    ///
-    /// [FR-CV-05]: ../../../docs/specs/requirements/FR-CV-05.md
-    /// [FR-CV-06]: ../../../docs/specs/requirements/FR-CV-06.md
-    pub fn coverage_status(&self) -> Result<crate::history::CoverageStatus> {
-        self.coverage_status_probing(crate::coverage::Probes::Every)
+/// Seed-from-main bootstrap ([ADR-15], [FR-WT-03]): first use in a DB-less
+/// linked worktree copies the primary checkout's DB; the main↔branch diff is
+/// reconciled by [`finish_start`] once the runtime and registry are up. A failed
+/// copy — or no seed at all — falls back to a fresh store, which the auto-index
+/// prologue ([FR-IX-07]) then full-indexes. Returns the seed copied, if any.
+///
+/// Both start paths — [`Engine::start_with`] and the phase-reported
+/// [`ColdStartPhases::measure`] — run this one step, so the attribution times
+/// exactly the production cold path's seeding.
+///
+/// [FR-WT-03]: ../../../docs/specs/requirements/FR-WT-03.md
+/// [FR-IX-07]: ../../../docs/specs/requirements/FR-IX-07.md
+fn seed_worktree(root: &Path, db_path: &Path) -> Option<crate::workspace::SeedSource> {
+    if db_path.exists() {
+        return None;
     }
+    // ONE `git rev-parse --git-common-dir` for both seeds (CR-116
+    // §9 item 5, S-369). The graph-store seed and the governance-contract
+    // seed below both need the primary checkout, and each used to
+    // resolve it with its own identical subprocess — pure waste on a
+    // cold path budgeted by NFR-PE-05, and the more schedule-sensitive
+    // half of it, since a process spawn varies far more than in-process
+    // work. `None` here means "no distinct primary": neither seed runs,
+    // exactly as before.
+    let primary = crate::workspace::primary_root(root);
 
-    /// [`coverage_status`](Self::coverage_status) with the version probes
-    /// `probes` allows: the web Coverage page reads with
-    /// [`Probes::Never`](crate::coverage::Probes::Never), since a page read is
-    /// on the serve path, which starts no tool process ([ADR-38]).
-    ///
-    /// # Errors
-    /// As [`coverage_status`](Self::coverage_status).
-    ///
-    /// [ADR-38]: ../../../docs/specs/architecture/decisions/ADR-38.md
-    pub fn coverage_status_probing(&self, probes: crate::coverage::Probes) -> Result<crate::history::CoverageStatus> {
-        crate::observability::traced(Tool::CoverageStatus, || {
-            let mut status = crate::history::coverage::status(&self.root)?;
-            status.runner = Some(crate::coverage::runner_status(&self.root, &self.scan_environment(), probes)?);
-            Ok(status)
-        })
-    }
-
-    /// [`coverage_status`](Self::coverage_status)'s evidence without the
-    /// runner state: the Dashboard's read, which probes no tool — a JVM
-    /// build tool's version command takes seconds.
-    ///
-    /// # Errors
-    /// Only an unexpected store failure.
-    pub fn coverage_evidence(&self) -> Result<crate::history::CoverageStatus> {
-        crate::observability::traced(Tool::CoverageStatus, || crate::history::coverage::status(&self.root))
-    }
-
-    /// The per-language call residue `status` reports ([FR-RS-09]), walked at
-    /// most once per graph revision, schema version and `[resolution]` section
-    /// (CR-201, [`ResidueKey`]).
-    ///
-    /// The revision-keyed memo shape the wiki's native tier also follows (now
-    /// in the wiki extension's crate): read the key, answer a hit
-    /// from the memo, and on a miss run
-    /// [`call_residue_by_language`](crate::resolve::call_residue_by_language) on
-    /// the read-only pool and keep its answer. The key is read **before** the
-    /// walk, and every writer advances the revision only after its rows commit,
-    /// so a walk that overlaps a write is cached under the older revision and the
-    /// next call misses — never the reverse. A failed read caches nothing.
-    ///
-    /// # Errors
-    /// Returns an error for a transient or registry-less engine, or when the
-    /// graph cannot be read.
-    ///
-    /// [FR-RS-09]: ../../../docs/specs/requirements/FR-RS-09.md
-    pub(crate) fn call_residue(
-        &self,
-        resolution: &crate::config::Resolution,
-    ) -> Result<ResidueByLanguage> {
-        let runtime = self.nav_runtime_no_prologue()?;
-        let registry = self
-            .registry()
-            .context("an engine without its language registry states no call residue")?;
-        let key = runtime.submit_read(|store| {
-            Ok(ResidueKey {
-                graph_revision: store.graph_revision()?,
-                schema_version: store.store_health()?.schema_version,
-                resolution: resolution.clone(),
-            })
-        })?;
-
-        {
-            let cache = self.call_residue.lock().expect("call-residue cache lock");
-            if let Some((cached_key, residues)) = cache.as_ref() {
-                if *cached_key == key {
-                    return Ok(residues.clone());
-                }
-            }
-        }
-
-        self.call_residue_walks.fetch_add(1, Ordering::Relaxed);
-        let policy = key.resolution.policy;
-        let residues = runtime.submit_read(move |store| {
-            crate::resolve::call_residue_by_language(store, registry, policy)
-        })?;
-        let mut cache = self.call_residue.lock().expect("call-residue cache lock");
-        *cache = Some((key, residues.clone()));
-        Ok(residues)
-    }
-
-    /// How many residue walks [`call_residue`](Self::call_residue) has run.
-    #[cfg(test)]
-    pub(crate) fn call_residue_walks(&self) -> u64 {
-        self.call_residue_walks.load(Ordering::Relaxed)
-    }
-
-    /// Materialize the Claude Code **session-start** quality-report hook
-    /// ([FR-IN-07], [FR-GV-02], [FR-GV-05], [ADR-49], [CR-095], CLI-only
-    /// surface): a marker-tagged hook script plus a non-clobbering merge into the
-    /// project's **shared** `.claude/settings.json`, and a sweep of the retired
-    /// SessionEnd entry and its orphaned script. When a session starts, resumes,
-    /// or is reopened by `/clear`, the hook surfaces the current quality signal,
-    /// the blessed baseline and their delta, and the last recorded rule
-    /// violations as a non-blocking readout ([FR-GV-05]); `force` re-emits it.
-    ///
-    /// Pure local filesystem I/O behind `logos hook --emit [--force]` (the
-    /// `init -i` step runs the same engine through [`crate::init`]). Installing
-    /// the hook performs **no** LLM call and opens **no** network connection
-    /// ([NFR-SE-01]) — it only shells out to `logos quality-report`, whose
-    /// read-model is computed without persisting a snapshot
-    /// ([`Self::quality_readout`]).
-    ///
-    /// [FR-IN-07]: ../../../docs/specs/requirements/FR-IN-07.md
-    /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
-    /// [FR-GV-05]: ../../../docs/specs/requirements/FR-GV-05.md
-    /// [NFR-SE-01]: ../../../docs/specs/requirements/NFR-SE-01.md
-    /// [ADR-49]: ../../../docs/specs/architecture/decisions/ADR-49.md
-    /// [CR-095]: ../../../docs/requests/CR-095-session-start-quality-readout.md
-    pub fn quality_report_hook_emit(&self, force: bool) -> Result<crate::hooks::HookEmitSummary> {
-        crate::observability::traced(Tool::WikiQualityReportHookEmit, || {
-            crate::hooks::materialize_quality_report_hook(&self.root, force)
-        })
-    }
-
-    // ── Config write-back (S-096, CR-025, ADR-31) ────────────────────────────
-
-    /// Read both checked-in policy files for this engine's root — raw content +
-    /// parsed model ([FR-UI-12], [CR-025]): the read half of the validated
-    /// config-write seam the web config editor builds on.
-    ///
-    /// A pure read of `.logos/config.toml` and `.logos/rules.toml`; it touches no
-    /// graph store, so it works on both engine flavours (a transient
-    /// [`Engine::open`] engine is enough). An absent file is reported
-    /// `exists = false` with the effective default model, not an error
-    /// ([NFR-DM-04]).
-    ///
-    /// `workspace_root` is the federation root the caller already resolved —
-    /// `None` in single-root mode, never a discovered one. It reaches only the
-    /// read-model's [`effective_chat`](crate::config::ConfigReadModel::effective_chat)
-    /// and [`effective_wiki`](crate::config::ConfigReadModel::effective_wiki)
-    /// slices ([FR-WS-30], S-448, Sprint 77 HF-1); the literal documents are this
-    /// root's alone.
-    ///
-    /// # Errors
-    /// A present-but-invalid policy file fails loud through the load path — an
-    /// unknown key, a non-compiling glob, or an out-of-range value is a
-    /// [`ConfigError`](crate::config::ConfigError) (usage exit 2).
-    ///
-    /// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
-    /// [CR-025]: ../../../docs/requests/CR-025-interactive-config-editing.md
-    /// [NFR-DM-04]: ../../../docs/specs/requirements/NFR-DM-04.md
-    /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
-    pub fn config_read(
-        &self,
-        workspace_root: Option<&Path>,
-    ) -> Result<crate::config::ConfigReadModel> {
-        crate::observability::traced(Tool::ConfigRead, || {
-            Ok(crate::config::read_documents(&self.root, workspace_root)?)
-        })
-    }
-
-    /// Validate an edited policy-file `candidate` against the **existing** load
-    /// path and, only if valid, replace the file **atomically**
-    /// (write-temp-then-rename) — the write half of the config-editor seam
-    /// ([FR-UI-12], [ADR-31]).
-    ///
-    /// `candidate` is the full candidate TOML document. It is run through the
-    /// same `#[serde(deny_unknown_fields)]` parse + glob/range validation the CLI
-    /// loader runs ([FR-CF-01]/[FR-CF-03]) — no new validation is invented — so an
-    /// invalid edit is rejected with **no partial write** and the file is left
-    /// byte-identical ([NFR-RA-07]). A [`PolicyFile::Rules`](crate::config::PolicyFile)
-    /// write additionally stamps a provenance comment and is validated *with* the
-    /// stamp, so the written contract still parses via the standard load path
-    /// ([BR-35]).
-    ///
-    /// Like [`config_read`](Self::config_read) this is pure filesystem I/O over
-    /// the resolved root and needs no graph runtime. Save alone runs no pipeline —
-    /// reindex/re-eval is a separate explicit action ([FR-UI-13]).
-    ///
-    /// # Errors
-    /// A [`ConfigError`](crate::config::ConfigError) (usage exit 2) for an invalid
-    /// candidate, or [`ConfigError::Write`](crate::config::ConfigError::Write) if
-    /// the atomic write itself fails (the original file is unchanged).
-    ///
-    /// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
-    /// [FR-UI-13]: ../../../docs/specs/requirements/FR-UI-13.md
-    /// [FR-CF-01]: ../../../docs/specs/requirements/FR-CF-01.md
-    /// [FR-CF-03]: ../../../docs/specs/requirements/FR-CF-03.md
-    /// [NFR-RA-07]: ../../../docs/specs/requirements/NFR-RA-07.md
-    /// [ADR-31]: ../../../docs/specs/architecture/decisions/ADR-31.md
-    /// [BR-35]: ../../../docs/specs/software-spec.md#326-web-ui
-    pub fn config_write(
-        &self,
-        file: crate::config::PolicyFile,
-        candidate: &str,
-    ) -> Result<crate::config::ConfigWriteOutcome> {
-        crate::observability::traced(Tool::ConfigWrite, || {
-            let outcome = match file {
-                crate::config::PolicyFile::Config => {
-                    crate::config::write_config(&self.root, candidate)?
-                }
-                crate::config::PolicyFile::Rules => {
-                    crate::config::write_rules(&self.root, candidate)?
-                }
-            };
-            Ok(outcome)
-        })
-    }
-
-    /// Write (or clear) the chat API key in the gitignored `.logos/secrets.toml`
-    /// via the same validated atomic write the policy files use (S-169,
-    /// [FR-CF-06], [NFR-SE-07]).
-    ///
-    /// `api_key` is the raw key the Config editor posted; a blank value clears it.
-    /// The key writes to `secrets.toml` (never the checked-in `config.toml`), and
-    /// the returned [`SecretWriteOutcome`](crate::config::SecretWriteOutcome)
-    /// carries only the **masked** new state (presence + last-4) — the raw key is
-    /// never echoed back ([NFR-SE-07]). Like the policy write-back this is pure
-    /// filesystem I/O and runs no pipeline.
-    ///
-    /// # Errors
-    /// A [`ConfigError`](crate::config::ConfigError) (usage exit 2) if an existing
-    /// `secrets.toml` does not parse, or
-    /// [`ConfigError::Write`](crate::config::ConfigError::Write) if the atomic
-    /// write itself fails (the original file is unchanged).
-    ///
-    /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
-    /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
-    pub fn config_write_secret(
-        &self,
-        api_key: &str,
-    ) -> Result<crate::config::SecretWriteOutcome> {
-        crate::observability::traced(Tool::ConfigWriteSecret, || {
-            Ok(crate::config::write_secret(&self.root, api_key)?)
-        })
-    }
-
-    /// Apply a validated config edit ([FR-UI-13], [ADR-31]): act on the new
-    /// policy the editor just saved through [`config_write`](Self::config_write).
-    /// This is the **explicit Apply** action — Save alone runs no pipeline, so
-    /// the engine's derived state changes only when this is invoked.
-    ///
-    /// - [`PolicyFile::Config`](crate::config::PolicyFile::Config) runs
-    ///   reconcile/index through the [pipeline-orchestrator], reusing the
-    ///   existing admission-fingerprint reconciliation ([FR-SY-07]) so the graph
-    ///   reflects the new admission policy — purging now-unadmitted files,
-    ///   O(changed), not a full reindex.
-    /// - [`PolicyFile::Rules`](crate::config::PolicyFile::Rules) re-runs the
-    ///   [governance-engine] scan against the *unchanged* graph (`reconcile =
-    ///   false`, no reindex) so the gate / quality views reflect the new
-    ///   contract — a rules change alters governance evaluation, not graph
-    ///   admission. Like every scan it persists a `metric_snapshots` row and
-    ///   refreshes the violation set ([FR-GV-09]), so the dashboard's
-    ///   latest-scan view reflects the new contract after Apply.
-    ///
-    /// The whole apply is a **single** instrumented façade span: it dispatches
-    /// to the *inner* reconcile/scan seams (`run_reconcile`,
-    /// [`crate::governance::scan`]) rather than the already-traced public
-    /// [`index`](Self::index)/[`scan`](Self::scan), so it emits exactly one
-    /// `config_apply` telemetry record and never nests a second façade span
-    /// ([NFR-CC-01]). It runs on the engine pool, not the surface thread — every
-    /// mutation routes through the writer actor, which serializes it against a
-    /// running `serve` watcher ([ADR-02], [ADR-31]).
-    ///
-    /// # Errors
-    /// Returns an error for a transient [`Engine::open`] engine (no runtime), or
-    /// on a structural reconcile/scan failure ([ADR-14] fail-loud); per-file
-    /// degradations ride inside the summary's `warnings`/`files_failed`.
-    ///
-    /// [pipeline-orchestrator]: ../../../docs/specs/architecture/components/pipeline-orchestrator.md
-    /// [governance-engine]: ../../../docs/specs/architecture/components/governance-engine.md
-    /// [FR-UI-13]: ../../../docs/specs/requirements/FR-UI-13.md
-    /// [FR-SY-07]: ../../../docs/specs/requirements/FR-SY-07.md
-    /// [FR-GV-09]: ../../../docs/specs/requirements/FR-GV-09.md
-    /// [NFR-CC-01]: ../../../docs/specs/requirements/NFR-CC-01.md
-    /// [ADR-02]: ../../../docs/specs/architecture/decisions/ADR-02.md
-    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
-    /// [ADR-31]: ../../../docs/specs/architecture/decisions/ADR-31.md
-    pub fn config_apply(
-        &self,
-        file: crate::config::PolicyFile,
-    ) -> Result<crate::config::ConfigApplyOutcome> {
-        use crate::config::{ConfigApplyOutcome, PolicyFile};
-        crate::observability::traced(Tool::ConfigApply, || match file {
-            PolicyFile::Config => {
-                let outcome = self.run_reconcile()?;
-                Ok(ConfigApplyOutcome::Reconciled {
-                    reconciled_files: outcome.reconciled_files,
-                    full_index: outcome.full_index,
-                    unresolved_refs: outcome.resolution.refs_unresolved,
-                    files_failed: outcome.files_failed,
-                    warnings: outcome.warnings,
-                    notes: outcome.notes,
-                })
-            }
-            PolicyFile::Rules => {
-                // No reindex: a rules change alters governance evaluation, not
-                // graph admission ([FR-UI-13]). Re-evaluate against the current
-                // graph (`reconcile = false`) through the inner scan body — not
-                // the traced public `scan` — so the apply stays one façade span.
-                // Going through the inner body also deliberately skips
-                // `record_scan`: an apply is not an operator-triggered scan and
-                // must not become the parameters a later `rescan` replays.
-                let scan = crate::governance::scan(self, false)?;
-                Ok(ConfigApplyOutcome::Reevaluated {
-                    signal: scan.signal,
-                    violations: scan.violations.len(),
-                    freshness: scan.freshness,
-                    warnings: scan.warnings,
-                })
-            }
-        })
-    }
-
-    /// The runtime a navigation tool reads through, after the **one-time**
-    /// auto-index prologue ([FR-IX-07]): the very first navigation call on a
-    /// never-indexed graph transparently builds it; every later call skips the
-    /// check entirely (memoised), so the steady-state freshness contract is
-    /// exactly [ADR-11]'s "never reconcile per call" ([FR-RC-05]).
-    ///
-    /// A failed prologue (e.g. no plugin registry) is logged by
-    /// [`ensure_indexed`](Self::ensure_indexed)'s degradation path and **not**
-    /// retried — navigation still serves whatever graph exists, best-effort.
-    ///
-    /// # Errors
-    /// Returns an error for a transient [`Engine::open`] engine (no RO pool).
-    pub(crate) fn nav_runtime(&self) -> Result<&Runtime> {
-        let runtime = self.nav_runtime_no_prologue()?;
-        if !self.nav_prologue_done.swap(true, Ordering::AcqRel) {
-            // Degrades internally (warnings + stderr), never panics; an
-            // actual index advances the sync stamp itself. A racing second
-            // caller sees `true` and proceeds WITHOUT waiting for the index
-            // to finish — deliberate: best-effort-fresh ([ADR-11]) allows
-            // serving whatever graph exists at read time.
-            let _ = self.ensure_indexed();
-            // [FR-SY-08]/[ADR-20] (S-041): the one-time prologue also runs the
-            // fingerprint-gated config-change purge before serving, so a read
-            // after a config narrowing never surfaces now-unadmitted symbols.
-            // A scoped exception to [FR-RC-05] — it purges on a *detected*
-            // config change at most once per change, not a per-call working-
-            // tree reconcile. When `ensure_indexed` above ran a full index it
-            // already recorded the fingerprint, so this gates to a no-op (one
-            // comparison, no discovery walk). Degrades like the auto-index
-            // prologue: logged, never fatal — navigation still serves.
-            self.run_prologue_purge();
-        }
-        Ok(runtime)
-    }
-
-    /// The navigation runtime *without* the auto-index prologue — for `status`
-    /// (which must report an unindexed graph, not silently build one) and for
-    /// follow-up reads inside a tool that already ran the prologue. Public for
-    /// the extensions that read the graph over `&Engine` without forcing an
-    /// index — the wiki's anchor resolution ([FR-DS-04]).
-    ///
-    /// # Errors
-    /// Returns an error for a transient [`Engine::open`] engine (no RO pool).
-    ///
-    /// [FR-DS-04]: ../../../docs/specs/requirements/FR-DS-04.md
-    pub fn nav_runtime_no_prologue(&self) -> Result<&Runtime> {
-        self.runtime.as_ref().ok_or_else(|| {
-            anyhow!(
-                "navigation requires a long-lived engine (Engine::start); a transient \
-                 Engine::open engine has no read-only pool to serve reads (ADR-02)"
-            )
-        })
-    }
-
-    /// The governance engine's in-process state ([S-020]).
-    ///
-    /// [S-020]: ../../../docs/planning/journal.md#s-020-governance-engine-and-quality-gate
-    pub(crate) fn governance(&self) -> &crate::governance::GovernanceState {
-        &self.governance
-    }
-
-    /// Run the [ADR-11] pre-evaluation reconcile (S-020): discover → blake3
-    /// dirty-detect → sync the dirty set, O(changed) ([FR-RC-01], [FR-RC-02]),
-    /// then advance the sync stamp so hydrated views reflect the reconciled
-    /// graph.
-    ///
-    /// # Errors
-    /// Returns an error for a transient engine or on a structural reconcile
-    /// failure ([ADR-14] fail-loud); per-file failures degrade inside the
-    /// outcome ([NFR-RA-11]).
-    ///
-    /// [FR-RC-01]: ../../../docs/specs/requirements/FR-RC-01.md
-    /// [FR-RC-02]: ../../../docs/specs/requirements/FR-RC-02.md
-    /// [NFR-RA-11]: ../../../docs/specs/requirements/NFR-RA-11.md
-    pub(crate) fn run_reconcile(&self) -> Result<crate::pipeline::ReconcileOutcome> {
-        let (runtime, registry, config) = self.pipeline_ctx()?;
-        let outcome = crate::pipeline::reconcile(runtime, registry, &self.root, &config)?;
-        // The reconcile may have written; invalidate hydrated views so the
-        // score sees the fresh graph (ADR-04). The FR-NV-07 last-full-index
-        // stamp is not touched here: a full-index degrade reaches it through
-        // `pipeline::index`, which writes the durable `project_metadata` row
-        // itself (CR-130).
-        self.advance_sync_stamp();
-        Ok(outcome)
-    }
-
-    /// Resolve the live runtime, the cached plugin registry, and the on-disk
-    /// config — the three inputs every pipeline operation needs.
-    ///
-    /// # Errors
-    /// Returns an error if this is a transient [`Engine::open`] engine (no
-    /// runtime), if the plugin registry failed to load, or if `config.toml` is
-    /// present but invalid.
-    pub(crate) fn pipeline_ctx(
-        &self,
-    ) -> Result<(
-        &Runtime,
-        &crate::plugin::LanguageRegistry,
-        crate::config::Config,
-    )> {
-        let runtime = self.runtime.as_ref().context(
-            "graph operations require a started engine (Engine::start), not a transient one",
-        )?;
-        let registry = self
-            .registry
-            .as_ref()
-            .context("the plugin registry failed to load; cannot extract any files")?;
-        let config = crate::config::load_config_from_root(&self.root)?;
-        Ok((runtime, registry, config))
-    }
-
-    /// The zero-admission diagnostic for this engine's root ([FR-IX-13]) — the
-    /// single seam `status` ([FR-NV-07]) and `doctor` ([FR-GV-18]) both go
-    /// through, so the two persisted-graph surfaces and the `index` that produced
-    /// the graph cannot classify the same root differently.
-    ///
-    /// `admitted` is the indexed file count the calling surface reports — the same
-    /// post-admission quantity `index` derives from — so at a parent folder of
-    /// sibling repositories all three read `0` and render the identical line.
-    ///
-    /// **An empty store is not the same claim as an empty walk.** `index` knows it
-    /// admitted nothing because it just walked; `status` and `doctor` deliberately
-    /// do not walk (`status` uses the no-prologue runtime so it *reports* an
-    /// unindexed graph rather than silently building one, and `doctor` is a pure
-    /// read). So `admitted == 0` alone is also true of every root that has simply
-    /// never been indexed, where an ordinary repository with one top-level
-    /// submodule would be told it "looks like a parent folder of sibling
-    /// repositories" — the confidently-wrong instruction [`derive`]'s own contract
-    /// calls worse than the silence [FR-IX-13] exists to fix ([NFR-CC-04]), and
-    /// contradicting the `run `logos index`` remedy `status` prints in the same
-    /// payload. The persisted graph revision closes that gap: [FR-SY-09]/[ADR-32]
-    /// advance it once at the end of every **completed** index — including a
-    /// zero-admission one — and it reads `0` before the first, so `> 0` is exactly
-    /// "an index has run and this is what it produced". With it, the two surfaces
-    /// answer `index`'s question rather than a different one, which is what makes
-    /// the parity real instead of coincidental.
-    ///
-    /// **Infallible and advisory** ([ADR-14]): a failed revision read, a
-    /// missing/invalid `config.toml`, or an unreadable root yields `None` and a
-    /// logged warning rather than an error. That is what keeps the promise the
-    /// diagnostic makes — it never changes a command's exit code, so it must not
-    /// be able to fail one. The guards are ordered by cost: the free
-    /// [`admits_diagnosis`](crate::config::ZeroAdmissionDiagnostic::admits_diagnosis)
-    /// test, then one point query, then the config load, then the depth-1 prune
-    /// walk, and last — inside [`derive`] itself, reached only by a root about to
-    /// be diagnosed — the workspace-manifest probe that suppresses advice the
-    /// operator has already taken. An ordinary indexed root pays nothing beyond
-    /// the first ([NFR-PE-08]).
-    ///
-    /// [FR-IX-13]: ../../../docs/specs/requirements/FR-IX-13.md
-    /// [FR-NV-07]: ../../../docs/specs/requirements/FR-NV-07.md
-    /// [FR-GV-18]: ../../../docs/specs/requirements/FR-GV-18.md
-    /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
-    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
-    /// [NFR-PE-08]: ../../../docs/specs/requirements/NFR-PE-08.md
-    /// [ADR-14]: ../../../docs/specs/architecture/decisions/ADR-14.md
-    /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
-    /// [`derive`]: crate::config::ZeroAdmissionDiagnostic::derive
-    pub(crate) fn zero_admission_diagnostic(
-        &self,
-        admitted: u64,
-    ) -> Option<crate::config::ZeroAdmissionDiagnostic> {
-        // A count beyond `usize` cannot be zero, so saturating is exact here:
-        // `admits_diagnosis` rejects it either way.
-        let admitted = usize::try_from(admitted).unwrap_or(usize::MAX);
-        if !crate::config::admits_zero_admission_diagnosis(admitted) {
-            return None;
-        }
-        if !self.has_completed_an_index() {
-            return None;
-        }
-        let config = crate::config::load_config_from_root(&self.root)
-            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
-            .ok()?;
-        crate::config::zero_admission_diagnostic(&self.root, &config, admitted)
-            .inspect_err(|err| tracing::warn!("zero-admission diagnostic skipped: {err:#}"))
-            .ok()
-            .flatten()
-    }
-
-    /// Whether a **completed** index has ever run against this store, read from
-    /// the persisted graph revision ([FR-SY-09], [ADR-32]): `0` before the first
-    /// index, advanced once at the end of every completed one.
-    ///
-    /// Distinguishes "the walk admitted nothing" from "nothing has walked yet" —
-    /// two states an empty store renders identically. A transient engine or a
-    /// failed read answers `false`: this only ever gates an advisory, so the safe
-    /// direction is silence.
-    ///
-    /// [FR-SY-09]: ../../../docs/specs/requirements/FR-SY-09.md
-    /// [ADR-32]: ../../../docs/specs/architecture/decisions/ADR-32.md
-    fn has_completed_an_index(&self) -> bool {
-        self.runtime
-            .as_ref()
-            .and_then(|runtime| {
-                runtime
-                    .submit_read(|store| store.graph_revision())
-                    .inspect_err(|err| {
-                        tracing::warn!("zero-admission diagnostic skipped: {err:#}");
-                    })
-                    .ok()
-            })
-            .is_some_and(|revision| revision > 0)
-    }
-
-    /// Record this project's resolved identity coordinate in the store
-    /// ([FR-CF-10], S-702) — the step `init` runs after completing `config.toml`.
-    ///
-    /// # Errors
-    /// A transient engine, or a failed write.
-    ///
-    /// [FR-CF-10]: ../../../docs/specs/requirements/FR-CF-10.md
-    fn record_project_id(&self, config: &crate::config::Config) -> Result<()> {
-        let runtime = self.runtime.as_ref().context(
-            "recording the project id requires a started engine (Engine::start)",
-        )?;
-        crate::pipeline::record_project_id(runtime, &self.root, config)
-    }
-
-    /// Fallible body of [`index`](Self::index).
-    fn run_index(&self) -> Result<IndexResult> {
-        let (runtime, registry, config) = self.pipeline_ctx()?;
-        let mut result = crate::pipeline::index(runtime, registry, &self.root, &config)?;
-        // Invalidate the hydration cache so the next hydrate() reflects the new
-        // graph state ([ADR-04], [ADR-05], [S-009]).
-        self.advance_sync_stamp();
-        // FR-WS-02 root-scope note (CR-119): a root carrying a workspace
-        // manifest is one project among N — `index` here builds only the root,
-        // never the members (BR-44, NFR-PE-06 forbid a member fan-out from this
-        // command). Advisory only: pushed to `notes`, never `warnings`, so it
-        // cannot trip a CI parser or move the FR-CL-03 exit code, and a root
-        // without a manifest is byte-identical to today (`notes` stays empty
-        // and is elided from the serialized report).
-        if self.root.join(crate::federation::MANIFEST_FILENAME).is_file() {
-            result.notes.push(format!(
-                "note: this root carries a workspace manifest ({}) — `index` built the \
-                 root project only ({} files); members are indexed independently by the \
-                 background warm started by `logos init --workspace` (see `logos workspace \
-                 status`).",
-                crate::federation::MANIFEST_FILENAME,
-                result.files_indexed,
-            ));
-        }
-        Ok(result)
-    }
-
-    /// Fallible body of [`sync`](Self::sync).
-    fn run_sync(&self, paths: &[PathBuf]) -> Result<SyncResult> {
-        let (runtime, registry, config) = self.pipeline_ctx()?;
-        // A public `Engine::sync` carries a *partial* changed-file set (the
-        // debounced watcher batch, a git hook, or an explicit CLI `sync`), so it
-        // reconciles only those paths and never sweeps files outside the set
-        // (CR-052 / FR-SY-10). The full-stored-set disk-deletion sweep is reserved
-        // for the full-walk `reconcile` path (`run_reconcile`).
-        let result = crate::pipeline::sync(
-            runtime,
-            registry,
-            &self.root,
-            &config,
-            paths,
-            crate::pipeline::SyncScope::Partial,
-        )?;
-        self.advance_sync_stamp();
-        Ok(result)
-    }
-
-    /// Apply the main↔branch diff over a just-seeded store ([FR-WT-03],
-    /// [ADR-15]): compute the paths differing from the primary checkout's HEAD
-    /// (committed branch work + dirty working tree + untracked files) and run
-    /// one incremental sync over exactly that set.
-    ///
-    /// Fail-soft: a failed diff or sync is logged and surfaced to telemetry
-    /// (the `worktree_seed` tool record, [FR-WT-03]'s observability
-    /// criterion), never fatal — the seeded graph is at worst stale by the
-    /// diff, and the next evaluation's reconcile backstop ([ADR-11]) catches
-    /// up. A registry-less engine degrades the same way.
-    ///
-    /// [FR-WT-03]: ../../../docs/specs/requirements/FR-WT-03.md
-    fn reconcile_seed_diff(&self, seed: &crate::workspace::SeedSource) {
-        let outcome = crate::observability::traced(Tool::WorktreeSeed, || {
-            let paths = crate::workspace::diff_from_primary(&self.root, &seed.head)?;
-            if paths.is_empty() {
-                return Ok(SyncResult::default());
-            }
-            self.run_sync(&paths)
-        });
-        match outcome {
-            Ok(result) => tracing::info!(
-                files_added = result.files_added,
-                files_modified = result.files_modified,
-                files_removed = result.files_removed,
-                "diff-reconciled the seeded store against the worktree (FR-WT-03)"
-            ),
-            Err(err) => tracing::warn!(
-                "diff-reconcile after seeding failed; the next evaluation's \
-                 reconcile backstop (ADR-11) will catch up: {err:#}"
-            ),
-        }
-    }
-
-    /// Migrate the store to the project's coordinate when its symbols carry
-    /// another ([FR-EX-35], S-704) — the open-time step
-    /// [`start_with_configs`](Self::start_with_configs) runs after the runtime
-    /// is up and before any sync. A static schema migration could not: the
-    /// coordinate comes from the configuration and the repository, not the
-    /// store.
-    ///
-    /// Fail-soft, like [`reconcile_seed_diff`](Self::reconcile_seed_diff): a
-    /// configuration that does not load or a migration that fails is logged
-    /// and the store stays as it was, consistent under its old coordinate —
-    /// every sync renders the coordinate the store records — and the next open
-    /// tries again. The configuration error is `index`'s to report.
-    ///
-    /// [FR-EX-35]: ../../../docs/specs/requirements/FR-EX-35.md
-    fn migrate_symbol_coordinate(&self) {
-        let Some(runtime) = self.runtime.as_ref() else {
-            return;
-        };
-        let migrated = crate::config::load_config_from_root(&self.root)
-            .map_err(anyhow::Error::from)
-            .and_then(|config| crate::pipeline::migrate_symbol_coordinate(runtime, &self.root, &config));
-        match migrated {
-            Ok(None) => {}
-            Ok(Some(migrated)) => tracing::info!(
-                from = migrated.from.as_deref().unwrap_or("."),
-                to = %migrated.to,
-                symbols = migrated.changes.symbols_rewritten,
-                orphans_removed = migrated.changes.orphan_symbols_removed,
-                files_to_re_extract = migrated.changes.files_invalidated,
-                "migrated the store's symbols to the project coordinate (FR-EX-35)"
-            ),
-            Err(err) => tracing::warn!(
-                "the store's symbols were not migrated to the project coordinate; it keeps \
-                 its recorded one until the next open: {err:#}"
-            ),
-        }
-    }
-
-    /// Read `.h` by the plugin the store's graph was built with (S-582,
-    /// [FR-PL-07]) — the decision the last index or sync recorded — so a
-    /// process that runs neither, a `callers` or a `status`, routes a header
-    /// as the graph does. A store recording none keeps the default, C++.
-    ///
-    /// Fail-soft, like [`migrate_symbol_coordinate`](Self::migrate_symbol_coordinate):
-    /// an unreadable record keeps the default, and the next index or sync
-    /// decides again from the files it reads.
-    ///
-    /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
-    fn route_shared_extensions(&self) {
-        let (Some(runtime), Some(registry)) = (self.runtime.as_ref(), self.registry.as_ref()) else {
-            return;
-        };
-        if let Err(err) = crate::pipeline::route_shared_extensions(runtime, registry) {
-            tracing::warn!("the recorded `.h` reader could not be read; C++ reads `.h` until the next sync: {err:#}");
-        }
-    }
-
-    /// Fallible body of [`ensure_indexed`](Self::ensure_indexed).
-    fn run_ensure_indexed(&self) -> Result<Option<IndexResult>> {
-        let (runtime, registry, config) = self.pipeline_ctx()?;
-        let result = crate::pipeline::ensure_indexed(runtime, registry, &self.root, &config)?;
-        if result.is_some() {
-            self.advance_sync_stamp();
-        }
-        Ok(result)
-    }
-
-    /// Run the navigation-prologue config-change purge ([FR-SY-08], [ADR-20],
-    /// S-041) and degrade fail-soft, mirroring [`ensure_indexed`].
-    ///
-    /// Gated on the durable admission fingerprint: an unchanged config is one
-    /// read and no discovery walk; a narrowed config purges the now-unadmitted
-    /// stored nodes through the single-writer actor and records the new
-    /// fingerprint so the purge runs at most once per change. When something was
-    /// purged, the hydration cache is invalidated so the read it precedes
-    /// reflects the smaller graph ([ADR-04]). A failure is logged and swallowed
-    /// — navigation is best-effort ([ADR-11]); the next governance reconcile
-    /// catches up.
-    ///
-    /// [FR-SY-08]: ../../../docs/specs/requirements/FR-SY-08.md
-    fn run_prologue_purge(&self) {
-        let outcome = crate::observability::traced(Tool::NavProloguePurge, || {
-            let (runtime, registry, config) = self.pipeline_ctx()?;
-            crate::pipeline::purge_on_config_change(runtime, registry, &self.root, &config)
-        });
-        match outcome {
-            Ok(0) => {}
-            Ok(purged) => {
-                // Nodes were removed; invalidate hydrated views so the read this
-                // prologue precedes reflects the purge ([ADR-04]).
-                self.advance_sync_stamp();
+    let seed = primary
+        .clone()
+        .and_then(crate::workspace::seed_source_from_primary)
+        .and_then(|seed| match crate::graph_store::seed_copy(&seed.db_path, db_path) {
+            Ok(()) => {
                 tracing::info!(
-                    purged,
-                    "navigation prologue purged now-unadmitted nodes after a config change \
-                     (FR-SY-08, ADR-20)"
+                    primary = %seed.primary_root.display(),
+                    head = %seed.head,
+                    "seeded the worktree store from the primary checkout (ADR-15)"
+                );
+                Some(seed)
+            }
+            Err(err) => {
+                // seed_copy cleaned up its partial db+wal pair; the
+                // runtime opens a fresh store.
+                tracing::warn!(
+                    "seed-from-main copy failed; falling back to a fresh store \
+                     and a full index: {err:#}"
+                );
+                None
+            }
+        });
+
+    // Reuses the `primary` resolved above rather than re-running the
+    // identical `--git-common-dir` query (CR-116 §9 item 5, S-369).
+    if let Some(primary) = primary {
+        seed_contract(&primary, root);
+    }
+    seed
+}
+
+/// Governance-contract seeding ([FR-WT-06], CR-112): independent of whether
+/// the graph-store copy succeeded — a `rules.toml` carried into a DB-less
+/// worktree is worth having even if the graph seed failed, and vice versa.
+/// `.logos/` is conventionally gitignored, so without this the seeded graph
+/// would have no architecture contract and every governance evaluation inside
+/// the worktree would be vacuous. Each file is copied verbatim (never parsed
+/// or rewritten), so no copied value can become an absolute path into the
+/// primary checkout (FR-IN-06). A file the worktree already has of its own —
+/// travelled through git (FR-WT-02) or left by a prior partial seed — is left
+/// alone.
+///
+/// [FR-WT-06]: ../../../docs/specs/requirements/FR-WT-06.md
+fn seed_contract(primary: &Path, root: &Path) {
+    let contract = crate::workspace::seed_contract(primary, root);
+    for (name, outcome) in [("rules.toml", contract.rules), ("config.toml", contract.config)] {
+        match outcome {
+            crate::workspace::ContractFileOutcome::Copied => {
+                tracing::info!(
+                    file = name,
+                    primary = %primary.display(),
+                    "seeded the governance contract file from the primary checkout (FR-WT-06)"
                 );
             }
-            Err(err) => tracing::warn!(
-                "navigation-prologue config-change purge failed; the next governance \
-                 reconcile (ADR-11) will catch up: {err:#}"
-            ),
+            crate::workspace::ContractFileOutcome::Absent | crate::workspace::ContractFileOutcome::AlreadyPresent => {}
+            crate::workspace::ContractFileOutcome::Failed(error) => {
+                // Fail-soft, matching the graph-store seed (ADR-11): the
+                // worktree stays usable, just without this policy file.
+                tracing::warn!(
+                    file = name,
+                    primary = %primary.display(),
+                    error = %error,
+                    "seeding {name} from the primary checkout failed; the \
+                     worktree's governance contract may be incomplete"
+                );
+            }
         }
     }
 }
 
-/// Log a pipeline failure and degrade to an [`IndexResult`] carrying the reason,
-/// honouring the infallible-surface posture (ADR-14 defers typed errors).
+/// Hook reachability (CR-106, [FR-IN-03], [FR-IN-06]): deliberately OUTSIDE
+/// [`seed_worktree`]'s DB-less gate. `core.hooksPath` is the relative
+/// `.logos/hooks`, which git resolves against *this* working tree, so a linked
+/// worktree needs its own hooks directory or no logos git hook fires in it at
+/// all — including the blocking `pre-push` gate. Gating this on "first use"
+/// would cover only worktrees created after the installation; running it every
+/// start covers a worktree that predates it too, on its next logos command. It
+/// costs one `stat` outside a linked worktree (the `.git`-is-a-file
+/// discriminator) and seeds nothing when hooks are not installed — opt-in stays
+/// opt-in.
 ///
-/// Reached only when the pipeline **itself** failed: since S-513 a file whose
-/// facts cannot be persisted fails alone inside the pipeline and never lands
-/// here ([FR-EH-05]). A failed pipeline is a correctness failure, not an empty
-/// success, so the result is marked [`failed`](IndexResult::failed) — the CLI
-/// exits 1 on it ([FR-CL-03]) — rather than reading as a run that indexed
-/// nothing.
-///
-/// [FR-EH-05]: ../../../docs/specs/requirements/FR-EH-05.md
-/// [FR-CL-03]: ../../../docs/specs/requirements/FR-CL-03.md
-fn degraded_index(err: &anyhow::Error) -> IndexResult {
-    tracing::warn!("index failed: {err:#}");
-    IndexResult {
-        warnings: vec![format!("index failed: {err}")],
-        failed: true,
-        ..IndexResult::default()
+/// [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
+/// [FR-IN-06]: ../../../docs/specs/requirements/FR-IN-06.md
+fn seed_hooks(root: &Path) {
+    if let Some(seeded) = crate::hooks::seed_from_primary(root) {
+        for warning in &seeded.warnings {
+            tracing::warn!("seeding this worktree's git hooks: {warning}");
+        }
+        if !seeded.is_empty() {
+            tracing::info!(
+                linked = seeded.linked.len(),
+                copied = seeded.copied.len(),
+                "made the installed git hooks reachable from this worktree (CR-106)"
+            );
+        }
     }
 }
 
-/// Log a sync failure and degrade to a [`SyncResult`] carrying the reason —
-/// marked [`failed`](SyncResult::failed), as [`degraded_index`] explains.
-fn degraded_sync(err: &anyhow::Error) -> SyncResult {
-    tracing::warn!("sync failed: {err:#}");
-    SyncResult {
-        warnings: vec![format!("sync failed: {err}")],
-        failed: true,
-        ..SyncResult::default()
+/// The open-time steps every start runs once `engine` is assembled. Move a
+/// store whose symbols carry another coordinate than the project's — one built
+/// before ADR-85, or a changed `[project] id` or remote — before anything syncs
+/// into it (FR-EX-35, S-704); a just-seeded worktree store migrates here too,
+/// so the diff reconcile re-extracts under the coordinate the seed now carries.
+/// Then read `.h` as the store's graph was built, and finish the worktree
+/// bootstrap: reconcile only the main↔branch diff over the just-seeded store —
+/// O(diff-from-main), not O(repo) ([FR-WT-03]). Fail-soft by design.
+///
+/// [FR-WT-03]: ../../../docs/specs/requirements/FR-WT-03.md
+fn finish_start(engine: &Engine, seed: Option<crate::workspace::SeedSource>) {
+    let pipeline: Pipeline<'_> = engine.pipeline();
+    pipeline.migrate_symbol_coordinate();
+    pipeline.route_shared_extensions();
+    if let Some(seed) = seed {
+        pipeline.reconcile_seed_diff(&seed);
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+/// The indexed-file set an evidence report's paths bind against, supplied
+/// at the api layer from a graph read so `history.db` is never `ATTACH`-ed to
+/// the canonical graph ([BR-28], [ADR-79]). A transient or empty graph yields
+/// an empty set, so every report path is honestly reported unmatched. Shared
+/// by the coverage and security ingests — one binder, one indexed set.
+///
+/// [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
+/// [BR-28]: ../../../docs/specs/software-spec.md#323-coverage-test-evidence
+fn evidence_indexed_paths(engine: &Engine) -> Result<Vec<String>> {
+    Ok(match engine.runtime() {
+        Some(rt) => rt
+            .submit_read(|store| store.indexed_files())?
+            .into_iter()
+            .map(|f| f.path)
+            .collect(),
+        None => Vec::new(),
+    })
+}
 
 /// Today's date in UTC, from the system clock — the "today" suppression
 /// expiry is judged against. Read here, at the surface layer, and passed down:
@@ -4296,6 +909,18 @@ fn utc_date_of(instant: std::time::SystemTime) -> chrono::NaiveDate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
+
+    use crate::models::navigation::{
+        CalleesResult, CallersResult, ContextBundle, ExploreResult, ImpactResult, ImplementorsResult, NodeInfo,
+        ReferencingDocsResult, SearchResult, StatusInfo,
+    };
+    use crate::models::pipeline::{IndexResult, InitResult, SyncResult};
+    use crate::models::quality::{
+        DocGapsReport, DsmReport, EvolutionReport, GateResult, HealthInfo, LanguagesInfo, RulesReport, ScanResult,
+        SessionInfo, StatsInfo,
+    };
+    use crate::observability::Tool;
 
     /// The two security reads are classed as quality verdicts and the scan and
     /// ingests as engine-internal (S-667) — what `stats` attributes the calls
@@ -4449,8 +1074,8 @@ mod tests {
     }
 
     /// The config write-back seam round-trips through the façade (S-096,
-    /// [FR-UI-12]): `config_read` returns content + parsed model, a valid
-    /// `config_write` is reflected on the next read, and an invalid candidate
+    /// [FR-UI-12]): `config().read` returns content + parsed model, a valid
+    /// `config().write` is reflected on the next read, and an invalid candidate
     /// returns a typed [`ConfigError`](crate::config::ConfigError) leaving the
     /// file byte-identical. Exercised over a transient [`Engine::open`] engine —
     /// the seam is pure filesystem I/O and needs no graph runtime.
@@ -4463,18 +1088,20 @@ mod tests {
 
         // A valid write is reflected on the next read.
         engine
-            .config_write(PolicyFile::Config, "max_file_size = 4096\n")
+            .config()
+            .write(PolicyFile::Config, "max_file_size = 4096\n")
             .expect("a valid config write succeeds");
-        let docs = engine.config_read(None).expect("config_read");
+        let docs = engine.config().read(None).expect("config_read");
         assert_eq!(docs.config.parsed.max_file_size, 4096);
         assert!(docs.config.content.contains("max_file_size = 4096"));
 
         // A rules write carries the provenance stamp and still parses on read.
         let written = engine
-            .config_write(PolicyFile::Rules, "[constraints]\nmax_cc = 9\n")
+            .config()
+            .write(PolicyFile::Rules, "[constraints]\nmax_cc = 9\n")
             .expect("a valid rules write succeeds");
         assert!(written.provenance_stamped);
-        let docs = engine.config_read(None).expect("config_read after rules write");
+        let docs = engine.config().read(None).expect("config_read after rules write");
         assert_eq!(
             docs.rules.parsed.constraints.max_cc,
             Some(crate::config::Budget::Absolute(9))
@@ -4484,7 +1111,8 @@ mod tests {
         // An invalid candidate is rejected with a typed error; the file is intact.
         let before = std::fs::read_to_string(tmp.path().join(".logos/config.toml")).unwrap();
         let err = engine
-            .config_write(PolicyFile::Config, "unknown_key = true\n")
+            .config()
+            .write(PolicyFile::Config, "unknown_key = true\n")
             .expect_err("an invalid candidate is rejected");
         assert!(
             err.downcast_ref::<crate::config::ConfigError>().is_some(),
@@ -4495,6 +1123,68 @@ mod tests {
             before, after,
             "the rejected write leaves the file byte-identical"
         );
+    }
+
+    /// Every navigation tool degrades on a transient engine to its own
+    /// read-model, still naming what it was asked, with one warning
+    /// `<tool> failed: <reason>` (ADR-14) — the text each tool's own fallback
+    /// wrote before S-829 routed them through one degrade path.
+    #[test]
+    fn each_navigation_tool_degrades_with_its_own_warning_and_query() {
+        let engine = Engine::open("/tmp");
+        let nav = engine.navigation();
+        let reason = "failed: navigation requires a long-lived engine";
+        let expect = |tool: &str, warnings: &[String]| {
+            assert_eq!(warnings.len(), 1, "{tool}: {warnings:?}");
+            assert!(warnings[0].starts_with(&format!("{tool} {reason}")), "{tool}: {warnings:?}");
+        };
+        let r = nav.search("q", None, None);
+        assert_eq!(r.query, "q");
+        expect("search", &r.warnings);
+        let r = nav.context("q", None, false);
+        assert_eq!(r.task, "q");
+        expect("context", &r.warnings);
+        let r = nav.explore("q", None);
+        assert_eq!(r.query, "q");
+        expect("explore", &r.warnings);
+        let r = nav.node("q", false);
+        assert_eq!(r.query, "q");
+        expect("node", &r.warnings);
+        let r = nav.callers("q", None);
+        assert_eq!(r.query, "q");
+        expect("callers", &r.warnings);
+        let r = nav.callees("q", None);
+        assert_eq!(r.query, "q");
+        expect("callees", &r.warnings);
+        let r = nav.impact("q", None);
+        assert_eq!(r.query, "q");
+        expect("impact", &r.warnings);
+        let r = nav.implements("q");
+        assert_eq!(r.query, "q");
+        expect("implements", &r.warnings);
+        let r = nav.referencing_docs("q");
+        assert_eq!(r.query, "q");
+        expect("referencing_docs", &r.warnings);
+        let r = nav.affected(&["a.rs".to_string()], true);
+        assert_eq!((r.changed.as_slice(), r.tests_only), (["a.rs".to_string()].as_slice(), true));
+        expect("affected", &r.warnings);
+    }
+
+    /// The config reads and the secret write keep their typed
+    /// [`ConfigError`](crate::config::ConfigError) through the façade's one
+    /// conversion: a surface maps it to a usage error (exit 2, HTTP 422) only
+    /// by downcasting.
+    #[test]
+    fn config_read_and_secret_write_keep_the_typed_config_error() {
+        let tmp = tempfile::TempDir::new().expect("temp root");
+        std::fs::create_dir_all(tmp.path().join(".logos")).expect(".logos");
+        std::fs::write(tmp.path().join(".logos/config.toml"), "unknown_key = true\n").expect("config.toml");
+        std::fs::write(tmp.path().join(".logos/secrets.toml"), "not toml [\n").expect("secrets.toml");
+        let engine = Engine::open(tmp.path());
+        let read = engine.config().read(None).expect_err("an invalid config.toml fails the read");
+        assert!(read.downcast_ref::<crate::config::ConfigError>().is_some(), "read: {read:#}");
+        let secret = engine.config().write_secret("k").expect_err("an unparseable secrets.toml fails the write");
+        assert!(secret.downcast_ref::<crate::config::ConfigError>().is_some(), "write_secret: {secret:#}");
     }
 
     /// A transient [`Engine::open`] engine holds no live runtime — the
@@ -4515,7 +1205,7 @@ mod tests {
     #[test]
     fn index_on_a_transient_engine_degrades_gracefully() {
         let engine = Engine::open("/tmp");
-        let result = engine.index();
+        let result = engine.pipeline().index();
         assert_eq!(result.files_indexed, 0, "no runtime → nothing indexed");
         assert!(
             result.warnings.iter().any(|w| w.contains("failed")),
@@ -4526,10 +1216,10 @@ mod tests {
         // (FR-EH-05): the CLI exits 1 on `failed`.
         assert!(result.failed, "a failed pipeline is marked failed");
         // `sync` and `ensure_indexed` share the same degradation path.
-        let synced = engine.sync(&[PathBuf::from("a.rs")]);
+        let synced = engine.pipeline().sync(&[PathBuf::from("a.rs")]);
         assert!(synced.warnings.iter().any(|w| w.contains("failed")));
         assert!(synced.failed, "a failed sync pipeline is marked failed");
-        let ensured = engine.ensure_indexed();
+        let ensured = engine.pipeline().ensure_indexed();
         assert!(ensured.warnings.iter().any(|w| w.contains("failed")));
     }
 
@@ -4549,9 +1239,9 @@ mod tests {
             db_path: tmp.path().join(".logos/logos.db"),
             head: "0123456789abcdef0123456789abcdef01234567".to_string(),
         };
-        engine.reconcile_seed_diff(&seed); // must not panic or error out
+        engine.pipeline().reconcile_seed_diff(&seed); // must not panic or error out
 
-        let status = engine.status();
+        let status = engine.graph().status();
         assert!(
             status.warnings.is_empty(),
             "the degradation is a log line, not a read-model fault: {status:?}"
@@ -4567,14 +1257,14 @@ mod tests {
         assert_send_sync::<Engine>();
     }
 
-    /// `Engine::languages()` lists the Rust grammar with its full descriptor
+    /// `Graph::languages()` lists the Rust grammar with its full descriptor
     /// through the public facade (FR-PL-06). Exercises the read-model mapping
     /// (including the `skipped` list) that the CLI/MCP surfaces emit.
     #[cfg(feature = "lang-rust")]
     #[test]
     fn languages_lists_rust_with_descriptor() {
         let tmp = std::env::temp_dir(); // no overrides under here
-        let info = Engine::open(&tmp).languages();
+        let info = Engine::open(&tmp).graph().languages();
 
         let rust = info
             .languages
@@ -4628,7 +1318,7 @@ mod tests {
         let reg = LanguageRegistry::load_from(&entries, AbiRange::runtime(), None, &mut |_| {})
             .expect("the synthetic artifact grammar loads");
 
-        let info = Engine::languages_from(&reg);
+        let info = graph::languages_from(&reg);
         let docker = info
             .languages
             .iter()

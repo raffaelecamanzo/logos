@@ -49,11 +49,11 @@ const FILTER_POOL: usize = 200;
 /// query's only verbs — no grammar, no free-text DSL ([ADR-35]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
-    /// Direct callers of the target symbol (`Engine::callers`).
+    /// Direct callers of the target symbol (`Navigation::callers`).
     Callers,
-    /// Direct callees of the target symbol (`Engine::callees`).
+    /// Direct callees of the target symbol (`Navigation::callees`).
     Callees,
-    /// Transitive impact of the target symbol, both directions (`Engine::impact`).
+    /// Transitive impact of the target symbol, both directions (`Navigation::impact`).
     Impact,
 }
 
@@ -230,7 +230,7 @@ fn run_filter(engine: &Engine, params: &HashMap<String, String>) -> QueryRespons
     // refining does not starve the ranked top-`QUERY_LIMIT`; the `kind` filter is
     // native to `search`, so it needs no widening.
     let limit = if layer.is_some() || file.is_some() { FILTER_POOL } else { QUERY_LIMIT };
-    let result = engine.search(text, kind, Some(limit));
+    let result = engine.navigation().search(text, kind, Some(limit));
     let matched: Vec<&SymbolRef> = result
         .hits
         .iter()
@@ -274,17 +274,17 @@ fn run_relation(engine: &Engine, raw_verb: &str, target: &str) -> QueryResponse 
     // read-model outlives it.
     let (resolved, hits, total, suggestions, warnings, denominator) = match verb {
         Verb::Callers => {
-            let r = engine.callers(target, Some(QUERY_LIMIT));
+            let r = engine.navigation().callers(target, Some(QUERY_LIMIT));
             let (name, hits) = (resolved_name(r.resolved.as_ref()), rank_hits(&r.callers));
             (name, hits, r.total, r.suggestions, r.warnings, r.resolution_denominator)
         }
         Verb::Callees => {
-            let r = engine.callees(target, Some(QUERY_LIMIT));
+            let r = engine.navigation().callees(target, Some(QUERY_LIMIT));
             let (name, hits) = (resolved_name(r.resolved.as_ref()), rank_hits(&r.callees));
             (name, hits, r.total, r.suggestions, r.warnings, r.resolution_denominator)
         }
         Verb::Impact => {
-            let r = engine.impact(target, None);
+            let r = engine.navigation().impact(target, None);
             let nodes = impact_nodes(&r);
             let total = nodes.len() as u32;
             let hits = rank_hits(nodes);
@@ -411,7 +411,7 @@ mod tests {
             std::fs::write(path, body).unwrap();
         }
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.index();
+        engine.pipeline().index();
         let note = |target: &str| {
             let params: HashMap<String, String> = [("verb", "callers-of"), ("target", target)]
                 .into_iter()

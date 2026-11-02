@@ -65,7 +65,7 @@ fn indexed_repo() -> TempDir {
             &format!("fix: b v{n}"),
         );
     }
-    Engine::start(repo).expect("engine starts").index();
+    Engine::start(repo).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -212,8 +212,8 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // Establish a persisted baseline + a recorded check, then freeze the counts.
-    engine.gate(None, true, true).expect("baseline saved");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().gate(None, true, true).expect("baseline saved");
+    engine.quality().check_rules(None, true).expect("check runs");
     let snapshots_before = metric_snapshot_count(tmp.path());
     let violations_before = violation_count(tmp.path());
     let marker_before = check_run_state(tmp.path());
@@ -222,9 +222,9 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
     assert_marker_coverage(&marker_before);
 
     // Several readouts back to back — the shape a /clear-heavy session produces.
-    let first = engine.quality_readout().expect("readout");
+    let first = engine.quality().readouts().readout().expect("readout");
     for _ in 0..3 {
-        engine.quality_readout().expect("readout");
+        engine.quality().readouts().readout().expect("readout");
     }
 
     assert_eq!(
@@ -246,7 +246,7 @@ fn quality_readout_computes_fresh_and_writes_nothing() {
 
     // Fresh computation, not a replay of the last persisted snapshot: the signal
     // is present and agrees with what the persisting gate reports.
-    let gate = engine.latest_gate().expect("read-only verdict");
+    let gate = engine.quality().readouts().latest_gate().expect("read-only verdict");
     assert_eq!(
         first.signal, gate.signal,
         "the readout's freshly computed signal agrees with the recorded one on an unchanged tree"
@@ -273,7 +273,7 @@ fn quality_readout_never_fabricates_a_clean_check() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert!(
         readout.violations.is_none(),
         "no check has run — the readout reports nothing recorded, not zero violations"
@@ -334,7 +334,7 @@ fn head_sha(repo: &Path) -> String {
 /// instead — every assertion below is about this record's content.
 fn check_record(engine: &Engine) -> logos_core::models::quality::CheckRun {
     engine
-        .quality_readout()
+        .quality().readouts().readout()
         .expect("readout")
         .check
         .expect("the readout knows of a check run")
@@ -348,7 +348,7 @@ fn check_record(engine: &Engine) -> logos_core::models::quality::CheckRun {
 fn a_recorded_clean_check_is_reported_as_clean_with_its_head() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     assert_eq!(
         violation_count(tmp.path()),
@@ -391,11 +391,11 @@ fn a_breaching_check_records_a_count_that_matches_its_own_output() {
     write_breaching_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     let reported = report.violations.len() as i64;
     assert!(reported > 0, "the max_cc = 0 contract is breached by the fixture");
 
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     let record = readout.check.expect("a run is known of");
     assert_eq!(
         record.recorded_count,
@@ -427,7 +427,7 @@ fn a_breaching_check_records_a_count_that_matches_its_own_output() {
 fn a_commit_after_the_check_marks_the_finding_as_measured_against_another_tree() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     let checked_at_head = head_sha(tmp.path());
     let before = check_record(&engine);
@@ -469,14 +469,14 @@ fn a_pre_migration_store_dates_its_rows_without_a_marker() {
     let tmp = indexed_repo();
     write_breaching_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
     let rows_before = violation_count(tmp.path());
     assert!(rows_before > 0, "the fixture recorded findings to date");
 
     drop_check_run_marker(tmp.path());
     assert_eq!(check_run_state(tmp.path()).0, 0, "the marker is gone; the rows are not");
 
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     let record = readout.check.expect("the rows still date their own run");
     assert_eq!(
         record.recorded_count, None,
@@ -501,7 +501,7 @@ fn a_marker_disagreeing_with_its_rows_is_warned_about_not_resolved() {
     let tmp = indexed_repo();
     write_breaching_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
     assert!(violation_count(tmp.path()) > 0, "findings are stored");
 
     // Forge a clean marker over a table that holds findings.
@@ -509,7 +509,7 @@ fn a_marker_disagreeing_with_its_rows_is_warned_about_not_resolved() {
     conn.execute("UPDATE check_run SET violation_count = 0 WHERE id = 1", [])
         .expect("forge a clean marker");
 
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert!(
         readout.warnings.iter().any(|w| w.contains("disagrees with itself")),
         "the disagreement is surfaced: {:?}",
@@ -531,14 +531,14 @@ fn a_corrupted_run_timestamp_is_named_never_panicked_on() {
     let tmp = indexed_repo();
     write_breaching_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     let conn = Connection::open(tmp.path().join(".logos/logos.db")).expect("open logos.db");
     conn.execute("UPDATE check_run SET ran_at = ?1 WHERE id = 1", [i64::MIN])
         .expect("corrupt the marker's timestamp");
 
     // The assertion is that this returns at all — the pre-fix code panicked.
-    let readout = engine.quality_readout().expect("a corrupt timestamp is not an error");
+    let readout = engine.quality().readouts().readout().expect("a corrupt timestamp is not an error");
     let record = readout.check.expect("the run is still known of");
     assert_eq!(
         record.age_seconds,
@@ -547,7 +547,7 @@ fn a_corrupted_run_timestamp_is_named_never_panicked_on() {
     );
 
     // And the rendering names it rather than counting a hundred million days.
-    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let payload = engine.quality().readouts().report_hook_payload().expect("payload renders");
     let context = payload.hook_specific_output.additional_context;
     assert!(
         context.contains("implausibly old"),
@@ -567,7 +567,7 @@ fn repeated_readouts_leave_the_marker_unchanged() {
     let tmp = indexed_repo();
     write_breaching_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     let marker_before = check_run_state(tmp.path());
     let violations_before = violation_count(tmp.path());
@@ -576,8 +576,8 @@ fn repeated_readouts_leave_the_marker_unchanged() {
     assert_marker_coverage(&marker_before);
 
     for _ in 0..5 {
-        engine.quality_readout().expect("readout");
-        engine.quality_report_hook_payload().expect("hook payload");
+        engine.quality().readouts().readout().expect("readout");
+        engine.quality().readouts().report_hook_payload().expect("hook payload");
     }
 
     assert_eq!(
@@ -652,7 +652,7 @@ fn rendered_violations_line(engine: &Engine) -> String {
 /// carrying the state would fail on a real store and not only on a constructed
 /// read-model.
 fn rendered_violations_both_channels(engine: &Engine) -> (String, String) {
-    let payload = engine.quality_report_hook_payload().expect("payload renders");
+    let payload = engine.quality().readouts().report_hook_payload().expect("payload renders");
     let summary = payload
         .system_message
         .split(" · ")
@@ -686,7 +686,7 @@ fn a_real_run_with_no_contract_renders_as_that_state_not_as_clean() {
         "the fixture must genuinely have no contract, or this proves nothing"
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     let (summary, line) = rendered_violations_both_channels(&engine);
     for channel in [&summary, &line] {
@@ -713,7 +713,7 @@ fn a_real_run_over_a_contract_authoring_zero_rules_is_its_own_state() {
     let tmp = indexed_repo();
     write_contract_authoring_zero_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert!(
         report.rules_present,
         "the fixture must genuinely carry a contract, or this is arm (a) again"
@@ -745,7 +745,7 @@ fn a_real_clean_run_states_its_denominator() {
     let tmp = indexed_repo();
     write_satisfied_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let report = engine.check_rules(None, true).expect("check runs");
+    let report = engine.quality().check_rules(None, true).expect("check runs");
     assert!(report.violations.is_empty(), "the fixture passes its own contract");
     assert!(
         report.checked_rules > 0,
@@ -775,7 +775,7 @@ fn a_pre_migration_marker_renders_as_unknown_never_clean_and_never_zero() {
     let tmp = indexed_repo();
     write_satisfied_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
     assert!(
         rendered_violations_line(&engine).contains("clean"),
         "the store must read as clean BEFORE the columns are blanked, or the \
@@ -812,12 +812,12 @@ fn the_rendered_violations_line_names_no_command_on_a_real_store() {
     let mut lines = Vec::new();
     let (summary, context) = rendered_violations_both_channels(&engine);
     lines.extend([summary, context]);
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
     let (summary, context) = rendered_violations_both_channels(&engine);
     lines.extend([summary, context]);
     write_satisfied_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine restarts with the contract");
-    engine.scan(true).expect("scan runs and writes the marker too");
+    engine.quality().scan(true).expect("scan runs and writes the marker too");
     let (summary, context) = rendered_violations_both_channels(&engine);
     lines.extend([summary, context]);
 
@@ -851,7 +851,7 @@ fn rendering_every_evaluated_set_state_persists_nothing() {
         let tmp = indexed_repo();
         prepare(tmp.path());
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        engine.check_rules(None, true).expect("check runs");
+        engine.quality().check_rules(None, true).expect("check runs");
 
         let marker_before = check_run_state(tmp.path());
         assert_eq!(marker_before.0, 1, "every one of these states records a marker");
@@ -860,8 +860,8 @@ fn rendering_every_evaluated_set_state_persists_nothing() {
         let snapshots_before = metric_snapshot_count(tmp.path());
 
         for _ in 0..3 {
-            engine.quality_readout().expect("readout");
-            engine.quality_report_hook_payload().expect("hook payload");
+            engine.quality().readouts().readout().expect("readout");
+            engine.quality().readouts().report_hook_payload().expect("hook payload");
         }
 
         assert_eq!(
@@ -879,13 +879,13 @@ fn rendering_every_evaluated_set_state_persists_nothing() {
     let tmp = indexed_repo();
     write_satisfied_rules(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
     blank_the_evaluated_set(tmp.path());
     let marker_before = check_run_state(tmp.path());
     assert_marker_coverage(&marker_before);
 
     for _ in 0..3 {
-        engine.quality_report_hook_payload().expect("hook payload");
+        engine.quality().readouts().report_hook_payload().expect("hook payload");
     }
     assert_eq!(
         check_run_state(tmp.path()),
@@ -907,13 +907,13 @@ fn never_scanned_store_reads_empty_and_writes_nothing() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     assert!(
-        engine.latest_metrics().unwrap().is_none(),
+        engine.quality().readouts().latest_metrics().unwrap().is_none(),
         "a never-scanned store has no persisted snapshot"
     );
-    let scan = engine.latest_scan().unwrap();
+    let scan = engine.quality().readouts().latest_scan().unwrap();
     assert!(scan.metrics.empty, "no snapshot → the empty sentinel, never zeros");
     assert!(scan.signal.is_none(), "no fabricated signal");
-    let gate = engine.latest_gate().unwrap();
+    let gate = engine.quality().readouts().latest_gate().unwrap();
     assert!(gate.signal.is_none());
     assert!(gate.passed, "no snapshot cannot regress — informational pass");
     assert!(
@@ -925,11 +925,11 @@ fn never_scanned_store_reads_empty_and_writes_nothing() {
     // The temporal read-only twins on a never-mined store: a headless `n/a`
     // report and an empty board, computed without mining or persisting
     // ([NFR-RA-05], [ADR-28]).
-    let temporal = engine.latest_temporal_report().unwrap();
+    let temporal = engine.history().latest_temporal_report().unwrap();
     assert!(temporal.head_sha.is_none(), "never-mined → headless n/a report");
     assert!(temporal.files.is_empty(), "no in-window facts → no files, never fabricated");
     assert!(
-        engine.latest_hotspots(Some(50), false, false).unwrap().files.is_empty(),
+        engine.history().latest_hotspots(Some(50), false, false).unwrap().files.is_empty(),
         "never-mined → empty hotspot board"
     );
 
@@ -954,12 +954,12 @@ fn latest_metrics_reflects_last_snapshot_without_writing() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let scanned = engine.scan(false).expect("scan persists one snapshot");
+    let scanned = engine.quality().scan(false).expect("scan persists one snapshot");
     let before = metric_snapshot_count(tmp.path());
     assert_eq!(before, 1, "scan wrote exactly one snapshot");
 
     let latest = engine
-        .latest_metrics()
+        .quality().readouts().latest_metrics()
         .unwrap()
         .expect("a snapshot now exists");
     // Every figure traces to the persisted snapshot ([NFR-RA-05]): the read-only
@@ -980,13 +980,13 @@ fn latest_metrics_reflects_last_snapshot_without_writing() {
     );
 
     // latest_scan composes the same metrics; its signal matches.
-    assert_eq!(engine.latest_scan().unwrap().signal, scanned.metrics.aggregate_signal);
+    assert_eq!(engine.quality().readouts().latest_scan().unwrap().signal, scanned.metrics.aggregate_signal);
 
     // Repeated read-only calls write nothing.
     for _ in 0..3 {
-        engine.latest_metrics().unwrap();
-        engine.latest_scan().unwrap();
-        engine.latest_gate().unwrap();
+        engine.quality().readouts().latest_metrics().unwrap();
+        engine.quality().readouts().latest_scan().unwrap();
+        engine.quality().readouts().latest_gate().unwrap();
     }
     assert_eq!(
         metric_snapshot_count(tmp.path()),
@@ -1003,10 +1003,10 @@ fn latest_gate_compares_to_baseline_without_writing() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.gate(None, true, true).expect("gate --save sets a baseline");
+    engine.quality().gate(None, true, true).expect("gate --save sets a baseline");
     let after_save = metric_snapshot_count(tmp.path());
 
-    let verdict = engine.latest_gate().expect("read-only verdict");
+    let verdict = engine.quality().readouts().latest_gate().expect("read-only verdict");
     assert!(verdict.passed, "the snapshot holds its own freshly-saved baseline");
     assert_eq!(verdict.signal, verdict.baseline_signal, "current == baseline");
     assert_eq!(
@@ -1024,10 +1024,10 @@ fn latest_gate_without_saved_baseline_is_informational_pass() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    engine.scan(false).expect("scan persists a snapshot but saves no baseline");
+    engine.quality().scan(false).expect("scan persists a snapshot but saves no baseline");
     let after_scan = metric_snapshot_count(tmp.path());
 
-    let verdict = engine.latest_gate().expect("read-only verdict");
+    let verdict = engine.quality().readouts().latest_gate().expect("read-only verdict");
     assert!(verdict.passed, "no baseline cannot regress — informational pass");
     assert!(verdict.baseline_signal.is_none(), "there is no baseline to compare against");
     assert!(
@@ -1070,9 +1070,9 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     )
     .expect("write a test-bearing source file");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
-        .gate(None, true, true)
+        .quality().gate(None, true, true)
         .expect("gate --save persists a snapshot and a baseline");
 
     // Record a real `check` result, so the no-write assertions below compare
@@ -1081,7 +1081,7 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     // nothings cannot notice a write — the same false green review already hit
     // on the [FR-QM-08] exclusion count a few lines above.
     write_breaching_rules(tmp.path());
-    engine.check_rules(None, true).expect("check runs");
+    engine.quality().check_rules(None, true).expect("check runs");
 
     let before = metric_snapshot_count(tmp.path());
     let violations_before = violation_count(tmp.path());
@@ -1096,16 +1096,16 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
         "the fixture recorded findings, so 'unchanged' below is a real comparison"
     );
 
-    let health = engine.latest_health().expect("the Health pair");
+    let health = engine.quality().readouts().latest_health().expect("the Health pair");
 
     assert_eq!(
         serde_json::to_string(&health.gate).unwrap(),
-        serde_json::to_string(&engine.latest_gate().unwrap()).unwrap(),
+        serde_json::to_string(&engine.quality().readouts().latest_gate().unwrap()).unwrap(),
         "the bundled verdict is the standalone verdict — one seam, one source"
     );
     assert_eq!(
         serde_json::to_string(&health.scan).unwrap(),
-        serde_json::to_string(&engine.latest_scan().unwrap()).unwrap(),
+        serde_json::to_string(&engine.quality().readouts().latest_scan().unwrap()).unwrap(),
         "the bundled scan is the standalone scan — one seam, one source"
     );
 
@@ -1146,7 +1146,7 @@ fn latest_health_projects_one_snapshot_into_both_fields() {
     // have cleared the last real `check` result and stamped a fabricated
     // recorded-clean marker over it ([FR-GV-21], [BR-41]).
     for _ in 0..3 {
-        engine.latest_health().unwrap();
+        engine.quality().readouts().latest_health().unwrap();
     }
     assert_eq!(
         metric_snapshot_count(tmp.path()),
@@ -1178,7 +1178,7 @@ fn never_scanned_store_health_pair_is_empty_on_both_sides() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let health = engine.latest_health().expect("the Health pair");
+    let health = engine.quality().readouts().latest_health().expect("the Health pair");
 
     assert!(
         health.scan.metrics.empty,
@@ -1489,8 +1489,8 @@ fn the_health_path_reads_the_snapshot_exactly_once() {
 fn cli_scan_still_persists_each_call() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.scan(false).unwrap();
-    engine.scan(false).unwrap();
+    engine.quality().scan(false).unwrap();
+    engine.quality().scan(false).unwrap();
     assert_eq!(
         metric_snapshot_count(tmp.path()),
         2,
@@ -1511,14 +1511,14 @@ fn latest_temporal_reads_never_append_a_snapshot() {
 
     // Prime the mine the way the CLI does — this is allowed to persist.
     engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("hotspots mines + appends one temporal snapshot");
     let primed = temporal_snapshot_count(tmp.path());
     assert!(primed >= 1, "the CLI hotspots read appended a temporal snapshot");
 
     // The read-only twin reflects the same per-file figures …
-    let read_only = engine.latest_temporal_report().unwrap();
-    let persisting = engine.temporal_report().unwrap(); // appends another, on purpose
+    let read_only = engine.history().latest_temporal_report().unwrap();
+    let persisting = engine.history().temporal_report().unwrap(); // appends another, on purpose
     assert_eq!(
         serde_json::to_string(&read_only.files).unwrap(),
         serde_json::to_string(&persisting.files).unwrap(),
@@ -1533,9 +1533,9 @@ fn latest_temporal_reads_never_append_a_snapshot() {
 
     // … and repeated read-only temporal/hotspot reads append nothing.
     for _ in 0..3 {
-        engine.latest_temporal_report().unwrap();
-        engine.latest_hotspots(Some(50), false, false).unwrap();
-        engine.latest_hotspots(Some(20), true, false).unwrap();
+        engine.history().latest_temporal_report().unwrap();
+        engine.history().latest_hotspots(Some(50), false, false).unwrap();
+        engine.history().latest_hotspots(Some(20), true, false).unwrap();
     }
     assert_eq!(
         temporal_snapshot_count(tmp.path()),
@@ -1551,8 +1551,8 @@ fn latest_hotspots_matches_the_persisting_board() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let persisting = engine.hotspots(Some(50), false, false).unwrap();
-    let read_only = engine.latest_hotspots(Some(50), false, false).unwrap();
+    let persisting = engine.history().hotspots(Some(50), false, false).unwrap();
+    let read_only = engine.history().latest_hotspots(Some(50), false, false).unwrap();
     assert_eq!(
         serde_json::to_string(&persisting.files).unwrap(),
         serde_json::to_string(&read_only.files).unwrap(),
@@ -1579,7 +1579,7 @@ fn language_composition_on_unindexed_root_is_empty() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     assert!(
-        engine.language_composition().unwrap().languages.is_empty(),
+        engine.graph().language_composition().unwrap().languages.is_empty(),
         "a never-indexed root has no indexed nodes → empty composition"
     );
 }
@@ -1593,7 +1593,7 @@ fn language_composition_reflects_the_indexed_graph_without_writing() {
     let tmp = indexed_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let comp = engine.language_composition().unwrap();
+    let comp = engine.graph().language_composition().unwrap();
     assert_eq!(comp.languages.len(), 1, "the fixture indexes only rust files");
     let rust = &comp.languages[0];
     assert_eq!(rust.language, "rust");
@@ -1606,14 +1606,14 @@ fn language_composition_reflects_the_indexed_graph_without_writing() {
 
     // The composition lists only languages the project actually uses, unlike the
     // registry listing which surfaces every loaded grammar (FR-PL-06).
-    let registered = engine.languages();
+    let registered = engine.graph().languages();
     assert!(
         registered.languages.len() > comp.languages.len(),
         "more grammars are registered than the project uses"
     );
     // A healthy cached-registry load (the `Engine::start` path) must never carry
     // a load failure (S-340) — pins the common path so a future edit to
-    // `Engine::languages_from` can't silently regress it.
+    // `languages_from` (engine/graph.rs) can't silently regress it.
     assert!(
         registered.load_error.is_none(),
         "a healthy load must not report load_error, got {:?}",
@@ -1625,7 +1625,7 @@ fn language_composition_reflects_the_indexed_graph_without_writing() {
     let before = logos_db_bytes(tmp.path());
     let snapshots_before = metric_snapshot_count(tmp.path());
     for _ in 0..3 {
-        engine.language_composition().unwrap();
+        engine.graph().language_composition().unwrap();
     }
     assert_eq!(
         logos_db_bytes(tmp.path()),

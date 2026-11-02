@@ -54,7 +54,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -495,7 +495,7 @@ fn a_synced_edit_equals_a_fresh_index_of_the_edited_tree() {
     let engine_a = index(tmp_a.path());
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     fs::write(tmp_a.path().join("zapcore/core.go"), SYNC_AFTER).unwrap();
-    engine_a.sync(&[root_a.join("zapcore/core.go")]);
+    engine_a.pipeline().sync(&[root_a.join("zapcore/core.go")]);
 
     let tmp_b = tree(&[("zapcore/core.go", SYNC_AFTER)]);
     let engine_b = index(tmp_b.path());

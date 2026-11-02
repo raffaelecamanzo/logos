@@ -112,7 +112,7 @@ pub const GRAPH_REVISION_KEY: &str = "graph_revision";
 /// [FR-NV-07], [FR-IX-12]).
 ///
 /// Unix seconds, decimal, as text. The durable successor to the in-process
-/// `AtomicU64` the [`status`](crate::Engine::status) read-model used to read:
+/// `AtomicU64` the [`status`](crate::Graph::status) read-model used to read:
 /// that counter could only ever be set by the process that did the indexing, so
 /// every read-only `status` / `workspace status` reported `null` on a fully
 /// indexed project ([CR-130] §2.2). Written by the index pipeline beside the
@@ -184,7 +184,7 @@ pub const DECLARED_TYPES_EXTRACTED_KEY: &str = "declared_types_extracted";
 
 /// The `project_metadata` key recording the project's resolved identity
 /// coordinate ([FR-CF-10], [ADR-85], S-702) — `[project] id`, else its derived
-/// default — read back by [`status`](crate::Engine::status).
+/// default — read back by [`status`](crate::Graph::status).
 ///
 /// Written by `logos init`, by every full [`index`](crate::pipeline::index)
 /// and by the coordinate migration an engine runs when it opens a store whose
@@ -248,6 +248,18 @@ pub const SYMBOL_COORDINATE_KEY: &str = "symbol_coordinate";
 ///
 /// [FR-PL-07]: ../../../docs/specs/requirements/FR-PL-07.md
 pub const SHARED_OWNERS_KEY: &str = "shared_extension_owners";
+
+/// The `project_metadata` key under which each resolution run stores its
+/// method-set pass's figures (S-830, [FR-RS-18]): a JSON object from each
+/// method-set language's name to its
+/// [`InterfaceFigures`](crate::models::navigation::InterfaceFigures), written
+/// in the run's write batch beside the `Implements` edges it reconciles, and
+/// removed by a run with no such language in scope. `status` reads it onto
+/// those languages' rows. Absent on a store no run has written it to since
+/// S-830.
+///
+/// [FR-RS-18]: ../../../docs/specs/requirements/FR-RS-18.md
+pub const METHOD_SET_FIGURES_KEY: &str = "method_set_figures";
 
 /// A row read back from the `nodes` table, mapped to model types.
 ///
@@ -484,6 +496,16 @@ pub struct NewNode<'a> {
     ///
     /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
     pub type_arity: Option<u32>,
+    /// A callable's parameter shape (S-820, [CR-254]) — the
+    /// `nodes.callable_signature` column, migration 45 — or, for a plugin
+    /// declaring the `@signature.*` captures, its parameter and result types
+    /// and the type parameters a declaration binds (S-830, [CR-260]: Go's
+    /// `([]byte)(int,error)`, a generic interface's `[T]`). `None` for every
+    /// node neither reading records one for.
+    ///
+    /// [CR-254]: ../../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+    /// [CR-260]: ../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+    pub callable_signature: Option<&'a str>,
 }
 
 impl<'a> NewNode<'a> {
@@ -516,6 +538,7 @@ impl<'a> NewNode<'a> {
             signature: false,
             uninherited: false,
             type_arity: None,
+            callable_signature: None,
         }
     }
 }
@@ -618,6 +641,15 @@ pub struct FileRecord {
     pub path: String,
     /// The content hash stored at the last index, if one was recorded.
     pub content_hash: Option<String>,
+    /// The facade class the file's own annotation names (S-832, [FR-RS-31];
+    /// migration 47, `files.facade`): Kotlin's `@file:JvmName("Slugs")`.
+    /// `None` for a file that declares none, and for one not re-extracted
+    /// since the migration. Read through
+    /// [`GraphStore::file_facades`].
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub facade: Option<String>,
 }
 
 /// One file whose latest persistence attempt failed — a row of the migration-27
@@ -820,12 +852,18 @@ pub struct UnboundCodeTarget {
 pub struct DeclaredNameSources {
     /// Every node name, repeats included — the universe built from it is a set.
     pub names: Vec<String>,
-    /// Every distinct `(alias, target)` pair of the reported ledger, ordered —
-    /// the local name an import introduces, beside what it imports.
+    /// Every distinct `(alias, target)` pair of the reported ledger's `Imports`
+    /// rows, ordered — the local name an import introduces, beside what it
+    /// imports. Another kind's alias (a call's receiver, a binder marker) names
+    /// nothing a file declares, and is not collected (S-835).
     pub aliases: Vec<(String, String)>,
     /// Every indexed file's path, with its declared namespace when it records
     /// one.
     pub files: Vec<(String, Option<String>)>,
+    /// The `(path, facade)` of every file recording a declared facade (S-832,
+    /// `files.facade`), read in the same snapshot as the files: what the
+    /// universe's layout names those files' facades by.
+    pub facades: Vec<(String, String)>,
 }
 
 /// Count `row` in `invocations` under its declaration and `target` when it is
@@ -1677,7 +1715,7 @@ pub struct ViolationRow {
 }
 
 /// The singleton `check_run` marker ([FR-GV-21], S-313, [CR-096]): the record
-/// that a [`check_rules`](crate::Engine::check_rules) run **happened**.
+/// that a [`check_rules`](crate::Quality::check_rules) run **happened**.
 ///
 /// `violations` is replaced wholesale per run ([FR-GV-02] idempotence), so a
 /// run that finds nothing leaves a table byte-identical to a project that was
@@ -1748,8 +1786,8 @@ pub struct CheckRunRow {
     /// Which operation wrote this marker: [`CHECK_RUN_OP_CHECK`] or
     /// [`CHECK_RUN_OP_SCAN`] (S-437, [CR-140] §3.1).
     ///
-    /// [`scan`](crate::Engine::scan) shares the write site with
-    /// [`check_rules`](crate::Engine::check_rules) — it replaces the violation
+    /// [`scan`](crate::Quality::scan) shares the write site with
+    /// [`check_rules`](crate::Quality::check_rules) — it replaces the violation
     /// set wholesale too — so the marker alone could not say which run it
     /// describes, and a consumer that attributed it to one of them was
     /// guessing.
@@ -1761,7 +1799,7 @@ pub struct CheckRunRow {
     pub operation: Option<String>,
 }
 
-/// [`CheckRunRow::operation`] for a [`check_rules`](crate::Engine::check_rules)
+/// [`CheckRunRow::operation`] for a [`check_rules`](crate::Quality::check_rules)
 /// run — the enforce leg ([FR-GV-02]).
 ///
 /// The spelling is pinned by migration 21's `CHECK (operation IN
@@ -1771,7 +1809,7 @@ pub struct CheckRunRow {
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md
 pub const CHECK_RUN_OP_CHECK: &str = "check";
 
-/// [`CheckRunRow::operation`] for a [`scan`](crate::Engine::scan) run — the
+/// [`CheckRunRow::operation`] for a [`scan`](crate::Quality::scan) run — the
 /// report leg, which replaces the violation set wholesale and so writes the
 /// marker too ([FR-GV-09]).
 ///
@@ -2036,6 +2074,15 @@ pub struct NodeItemFacts {
     pub variants: Option<String>,
     /// Whether the node is a required signature (`nodes.signature`).
     pub signature: bool,
+    /// A callable's parameter shape (S-820, [CR-254];
+    /// `nodes.callable_signature`, migration 45): what the binder pairs a C/C++
+    /// prototype with its definition in another file by — and a Go callable's
+    /// or generic type's signature (S-830, [CR-260]), what the method-set pass
+    /// matches a method against an interface's spec by.
+    ///
+    /// [CR-254]: ../../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+    /// [CR-260]: ../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+    pub callable_signature: Option<String>,
 }
 
 /// The fields needed to record one impl block's header (S-606, [CR-202] F1;
@@ -2153,7 +2200,8 @@ pub struct DetectorPrefix {
 /// The receiver parameters the incremental footprint probe
 /// ([`GraphStore::has_framework_footprint`]) looks for (S-541): every name a
 /// loaded language declares in its `[framework_candidacy] receiver_parameters`,
-/// bound in a file of one of those languages' `extensions`. Scoped to the
+/// bound in a file of one of those languages — one of their `extensions`, or
+/// an exact file name they claim (`files`, S-840). Scoped to the
 /// declaring languages because `app` and `router` are ordinary parameter names
 /// in every language: a Python `def init_app(app)` must not put a
 /// framework-free repository on the whole-graph pass at every sync.
@@ -2163,6 +2211,10 @@ pub struct ReceiverParameters {
     pub names: Vec<String>,
     /// The file extensions (no dot) of the languages declaring any of them.
     pub extensions: Vec<String>,
+    /// The exact extension-less file names (`Gemfile`) those languages claim
+    /// beside their extensions (S-840): a file of the same name, at any depth,
+    /// is a file of the language as one of its extensions is.
+    pub files: Vec<String>,
 }
 
 /// The fields needed to insert a reference-ledger row (S-011).
@@ -2522,7 +2574,8 @@ pub trait GraphStore {
 
     /// The associated-item facts of every node carrying any (S-606,
     /// [FR-EX-34]) — the `nodes.receiver_mode`, `nodes.variants` and
-    /// `nodes.signature` columns, ordered by node id. The
+    /// `nodes.signature` columns, and a callable's parameter shape
+    /// (`nodes.callable_signature`, S-820), ordered by node id. The
     /// [`node_arities`](GraphStore::node_arities) shape, empty by default — only
     /// the SQLite store implements it — so a non-SQLite or test store records
     /// none.
@@ -2662,6 +2715,21 @@ pub trait GraphStore {
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     fn file_namespaces(&self) -> Result<Vec<(String, String)>> {
         Ok(Vec::new())
+    }
+
+    /// The `(path, facade)` of every file carrying a recorded declared facade
+    /// (S-832, [FR-RS-31]) — the `files.facade` column, ordered by path, read
+    /// off [`indexed_files`](GraphStore::indexed_files). The binder's facade
+    /// classes read it through
+    /// [`PackageLayout::with_file_facades`](crate::resolve::package_key::PackageLayout::with_file_facades).
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    fn file_facades(&self) -> Result<Vec<(String, String)>> {
+        Ok(self
+            .indexed_files()?
+            .into_iter()
+            .filter_map(|f| Some((f.path, f.facade?)))
+            .collect())
     }
 
     /// Stream **every** edge in the graph, ordered by `(source, target, kind)`.
@@ -3246,7 +3314,7 @@ impl SqliteGraphStore {
     /// which `open` (via [`from_connection`](Self::from_connection)) times as
     /// one indivisible call. `open` is untouched, so this diagnostic path's own
     /// cost never lands on the production cold-start path — used only by
-    /// [`Engine::start_with_phase_report`](crate::Engine::start_with_phase_report).
+    /// [`ColdStartPhases::measure`](crate::ColdStartPhases::measure).
     ///
     /// # Errors
     /// As [`open`](Self::open).
@@ -3793,6 +3861,7 @@ impl GraphStore for SqliteGraphStore {
         self.neighbours(id, SQL_NEIGHBOURS_OUT)
     }
 
+
     fn counts(&self) -> Result<StoreCounts> {
         // The reference ledger is counted without its capture-before-delete
         // rows (`form <> ?1`, [`RefForm::Symbol`]): each duplicates a reference
@@ -4002,9 +4071,10 @@ impl GraphStore for SqliteGraphStore {
     }
 
     fn reference_population(&self) -> Result<ReferencePopulation> {
-        let (doc, symbol) = (
+        let (doc, symbol, imports) = (
             i64::from(EdgeKind::DocReference.as_i32()),
             i64::from(RefForm::Symbol.as_i32()),
+            i64::from(EdgeKind::Imports.as_i32()),
         );
         // One snapshot for every read, for `resolution_by_language`'s reason: a
         // sync committing between two autocommit reads would take the ledger
@@ -4015,24 +4085,28 @@ impl GraphStore for SqliteGraphStore {
             None
         };
         let mut population = ReferencePopulation::default();
-        // The files first: each one's path and namespace for the universe, and
-        // its language, interned once so the ledger scan below keys a row by an
+        // The files first: each one's path, namespace and declared facade for
+        // the universe, and its language, interned once so the ledger scan below keys a row by an
         // index rather than joining `files` per row.
         let mut languages: Vec<Option<String>> = vec![None];
         let mut language_of: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
         let mut files = self
             .conn
-            .prepare_cached("SELECT id, path, namespace, language FROM files")?;
+            .prepare_cached("SELECT id, path, namespace, language, facade FROM files")?;
         for file in files.query_map([], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })? {
-            let (id, path, namespace, language) = file.context("reading the indexed files")?;
+            let (id, path, namespace, language, facade) = file.context("reading the indexed files")?;
             language_of.insert(id, intern(&mut languages, language));
+            if let Some(facade) = facade {
+                population.names.facades.push((path.clone(), facade));
+            }
             population.names.files.push((path, namespace));
         }
         // The whole reported ledger in ONE plain scan — no join and no
@@ -4040,7 +4114,7 @@ impl GraphStore for SqliteGraphStore {
         // ledger: the halves' counts (every row), the unbound code targets
         // (a target repeats across call sites — `clone`, `map` — so each is
         // classified once per language and kind, and allocated once), and the
-        // aliases with their targets. A capture-before-delete row
+        // import rows' aliases with their targets. A capture-before-delete row
         // (`RefForm::Symbol`) is no reference of this readout (S-598).
         let mut ledger = self.conn.prepare_cached(
             "SELECT file_id, kind, resolved, target, alias, payload, source_symbol \
@@ -4081,6 +4155,13 @@ impl GraphStore for SqliteGraphStore {
             } else if kind != doc && !local_value {
                 tally(unbound.entry((language, kind)).or_default(), target);
                 tally_invocation(&mut invocations, row, target)?;
+            }
+            // Only an import's alias is a name its file declares (S-835): a
+            // call row's alias is its receiver's name or a marker, which
+            // declares nothing — `requests` of `requests.get()` would make the
+            // import of an external `requests` read as a possible internal name.
+            if kind != imports {
+                continue;
             }
             if let rusqlite::types::ValueRef::Text(alias) = row.get_ref(4)? {
                 aliases.insert((String::from_utf8_lossy(alias).into_owned(), target.to_string()));
@@ -4241,8 +4322,9 @@ impl GraphStore for SqliteGraphStore {
     fn node_item_facts(&self) -> Result<Vec<NodeItemFacts>> {
         // ORDER BY id keeps the read deterministic ([NFR-RA-06]).
         let mut stmt = self.conn.prepare_cached(
-            "SELECT id, receiver_mode, variants, signature FROM nodes \
-             WHERE receiver_mode IS NOT NULL OR variants IS NOT NULL OR signature IS NOT NULL ORDER BY id",
+            "SELECT id, receiver_mode, variants, signature, callable_signature FROM nodes \
+             WHERE receiver_mode IS NOT NULL OR variants IS NOT NULL OR signature IS NOT NULL \
+                OR callable_signature IS NOT NULL ORDER BY id",
         )?;
         let raws = stmt
             .query_map([], |row| {
@@ -4251,12 +4333,13 @@ impl GraphStore for SqliteGraphStore {
                     row.get::<_, Option<i32>>(1)?,
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting node item facts")?;
         raws.into_iter()
-            .map(|(id, mode, variants, signature)| {
+            .map(|(id, mode, variants, signature, callable_signature)| {
                 let receiver_mode = mode.map(ReceiverMode::try_from).transpose().map_err(|e| {
                     anyhow!("corrupt receiver mode for node {}: {e}; rebuild advised (NFR-RA-08)", id.0)
                 })?;
@@ -4265,6 +4348,7 @@ impl GraphStore for SqliteGraphStore {
                     receiver_mode,
                     variants,
                     signature: signature.is_some(),
+                    callable_signature,
                 })
             })
             .collect()
@@ -4699,13 +4783,14 @@ impl GraphStore for SqliteGraphStore {
     fn indexed_files(&self) -> Result<Vec<FileRecord>> {
         let mut stmt = self
             .conn
-            .prepare_cached("SELECT id, path, content_hash FROM files ORDER BY path")?;
+            .prepare_cached("SELECT id, path, content_hash, facade FROM files ORDER BY path")?;
         let rows = stmt
             .query_map([], |row| {
                 Ok(FileRecord {
                     id: row.get(0)?,
                     path: row.get(1)?,
                     content_hash: row.get(2)?,
+                    facade: row.get(3)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -4956,9 +5041,9 @@ impl GraphStore for SqliteGraphStore {
         //    Express router module's `app`, S-541), in a file of a declaring
         //    language? The pass's other candidacy rule, read from the same
         //    recorded bindings it reads, as an EXISTS that stops at the first hit.
-        if !receivers.names.is_empty() && !receivers.extensions.is_empty() {
+        if !receivers.names.is_empty() && !(receivers.extensions.is_empty() && receivers.files.is_empty()) {
             let names = vec!["?"; receivers.names.len()].join(", ");
-            let paths = vec!["f.path GLOB ?"; receivers.extensions.len()].join(" OR ");
+            let paths = vec!["f.path GLOB ?"; receivers.extensions.len() + 2 * receivers.files.len()].join(" OR ");
             let sql = format!(
                 "SELECT EXISTS(SELECT 1 FROM local_bindings b JOIN files f ON f.id = b.file_id \
                  WHERE b.kind = ? AND b.name IN ({names}) AND ({paths}))"
@@ -4971,7 +5056,11 @@ impl GraphStore for SqliteGraphStore {
                         .extensions
                         .iter()
                         .map(|e| rusqlite::types::Value::Text(format!("*.{e}"))),
-                );
+                )
+                .chain(receivers.files.iter().flat_map(|file| {
+                    let literal = glob_literal(file);
+                    [literal.clone(), format!("*/{literal}")].map(rusqlite::types::Value::Text)
+                }));
             let has_receiver: bool = self
                 .conn
                 .query_row(&sql, rusqlite::params_from_iter(params), |row| {
@@ -6094,11 +6183,12 @@ impl BatchWriter<'_> {
     /// Write an existing file row in place, keeping its id stable so the
     /// row's identity survives a re-extract: its `language` and `content_hash`,
     /// and what the extraction read about the file itself — the namespace it
-    /// declares (S-518, [FR-RS-13]; `None` for a file keyed by its path) and
-    /// whether its parse held an ERROR or MISSING node (S-571, [FR-IX-14]).
-    /// Written on every persist, so a file that stops declaring a namespace
-    /// has its old one cleared, and a file whose damage is repaired reads
-    /// clean again.
+    /// declares (S-518, [FR-RS-13]; `None` for a file keyed by its path), the
+    /// facade class its own annotation names (S-832; `None` for one naming
+    /// none) and whether its parse held an ERROR or MISSING node (S-571,
+    /// [FR-IX-14]). Written on every persist, so a file that stops declaring a
+    /// namespace or a facade has its old one cleared, and a file whose damage
+    /// is repaired reads clean again.
     ///
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     /// [FR-IX-14]: ../../../docs/specs/requirements/FR-IX-14.md
@@ -6111,11 +6201,13 @@ impl BatchWriter<'_> {
         language: Option<&str>,
         content_hash: Option<&str>,
         namespace: Option<&str>,
+        facade: Option<&str>,
         parse_damaged: bool,
     ) -> Result<()> {
         self.write_one(
-            "UPDATE files SET language = ?2, content_hash = ?3, namespace = ?4, parse_damaged = ?5 WHERE id = ?1",
-            rusqlite::params![file_id, language, content_hash, namespace, parse_damaged],
+            "UPDATE files SET language = ?2, content_hash = ?3, namespace = ?4, parse_damaged = ?5, facade = ?6 \
+             WHERE id = ?1",
+            rusqlite::params![file_id, language, content_hash, namespace, parse_damaged, facade],
             "updating file row",
         )
     }
@@ -6167,13 +6259,15 @@ impl BatchWriter<'_> {
     /// Remove a durable `project_metadata` key, if present ([CR-130]).
     ///
     /// The deleting twin of [`set_project_metadata`](Self::set_project_metadata),
-    /// for a fact that can stop being true of a graph. Its one caller is the
-    /// index pipeline's [`LAST_FULL_INDEX_AT_KEY`] stamp: a full index that
+    /// for a fact that can stop being true of a graph. Its callers are the
+    /// index pipeline's [`LAST_FULL_INDEX_AT_KEY`] stamp — a full index that
     /// leaves the store empty has no graph to date, and a timestamp left behind
-    /// would date a graph that no longer exists — the readout-honesty failure
-    /// [CR-130] removes ([NFR-CC-04]). Idempotent: deleting an absent key is a
-    /// no-op, not an error, which is what lets that caller clear unconditionally
-    /// without first probing for the row.
+    /// would date a graph that no longer exists, the readout-honesty failure
+    /// [CR-130] removes ([NFR-CC-04]) — and the method-set figures
+    /// ([`METHOD_SET_FIGURES_KEY`], S-830), which a resolution run with no
+    /// method-set language in scope removes. Idempotent: deleting an absent key
+    /// is a no-op, not an error, which is what lets a caller clear
+    /// unconditionally without first probing for the row.
     ///
     /// [CR-130]: ../../../docs/requests/CR-130-a-readout-names-a-remediation-that-cannot-apply.md
     /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
@@ -7627,8 +7721,8 @@ macro_rules! node_insert_sql {
                                 derived, exported, cyclomatic_complexity, line_count, fingerprint, \
                                 test_evidence, body, max_nesting_depth, has_body, body_tokens, \
                                 self_type, param_min, param_max, takes_self, receiver_mode, variants, signature, \
-                                uninherited, type_arity) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25) ",
+                                uninherited, type_arity, callable_signature) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26) ",
             $on_conflict
         )
     };
@@ -7665,6 +7759,7 @@ fn execute_node_insert(conn: &Connection, node: &NewNode<'_>, sql: &str) -> rusq
             node.signature.then_some(1i64),
             node.uninherited.then_some(1i64),
             node.type_arity,
+            node.callable_signature,
         ],
     )
 }
@@ -7736,7 +7831,8 @@ fn insert_node(conn: &Connection, node: &NewNode<'_>) -> Result<NodeId> {
              variants = excluded.variants, \
              signature = excluded.signature, \
              uninherited = excluded.uninherited, \
-             type_arity = excluded.type_arity"
+             type_arity = excluded.type_arity, \
+             callable_signature = excluded.callable_signature"
         ),
     )
     .context("upserting node")?;
@@ -7756,6 +7852,12 @@ fn insert_edge(conn: &Connection, source: NodeId, target: NodeId, kind: EdgeKind
     )
     .context("inserting edge")?;
     Ok(())
+}
+
+/// `text` as a `GLOB` pattern that matches exactly itself: the three
+/// metacharacters each in a one-character class.
+fn glob_literal(text: &str) -> String {
+    text.replace('[', "[[]").replace('*', "[*]").replace('?', "[?]")
 }
 
 fn delete_node(conn: &Connection, id: NodeId) -> Result<usize> {

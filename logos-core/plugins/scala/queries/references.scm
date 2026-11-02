@@ -295,39 +295,48 @@
 (instance_expression
   (template_body) @ref.receiver.anonymous)
 
-; Receiver typing (S-576, CR-183, FR-RS-37, FR-RS-10) — Java's typing markers
-; (`extract::receiver`), recording no row of their own. Where the file proves a
-; member call's receiver type `T`, its Method row is retyped to the Path-form
-; `T::ship` and keeps its `other` shape: it is a call on an instance of `T`,
-; not the written `T.ship()`, so it binds among `T`'s own members and up its
-; proven supertypes — and, where `T` has a companion `object`, among the
-; class's methods, never the object's (the plugin's `companion_objects`);
-; anything unproven keeps its `other` row (`no-receiver-evidence`):
+; Receiver typing (S-576, CR-183, FR-RS-37, FR-RS-10; scope-precise since
+; S-824, CR-256) — the vocabulary Rust, TypeScript, Python, PHP, Kotlin, C++ and
+; C# speak (`extract::receiver`), recording no row of its own. Where the one
+; binding of a member call's receiver name in scope at the call proves its type
+; `T`, its Method row is retyped to the Path-form `T::ship` and keeps its `other`
+; shape: it is a call on an instance of `T`, not the written `T.ship()`, so it
+; binds among `T`'s own members and up its proven supertypes — and, where `T`
+; has a companion `object`, among the class's methods, never the object's (the
+; plugin's `companion_objects`); anything unproven keeps its `other` row
+; (`no-receiver-evidence`):
 ;
-;   @ref.receiver.name     — `order.ship()`: the one type the file declares
-;                            the name with, where it is declared in scope at
-;                            the call — a class parameter, a member `val`/`var`
-;                            the enclosing class, object or trait defines (an
-;                            abstract `val` is no field), or a parameter or
-;                            local of the method. A capitalised
-;                            receiver is an object's Path row above, never this
-;                            marker.
-;   @ref.receiver.field    — `this.order.ship()`: the class parameter or member
-;                            `val`/`var` `order` the enclosing class declares
-;                            itself.
-;   @ref.receiver.declared — a `val`/`var` (`pattern:`, which the declaration
-;                            walk does not read as a name): with a `.type`
-;                            companion its declared type, or the class of a
-;                            `new T(…)` it is initialised with; with
-;                            `.untyped`, none (`val got = make()`), which
-;                            refuses the name.
-;   @ref.receiver.unproven — a name bound where no type is read — a lambda or
-;                            pattern variable, a generator's, a `val (a, b)` or
-;                            `val a, b`, a `given`, a `new T { … }` value — or
-;                            declared with a type whose simple name is not the
-;                            type (`a.b.Order`, whose simple name the imports
-;                            may re-qualify to another type; `=> a.b.Order`,
-;                            `A with b.C`, `x.type`). Refused in the whole file.
+;   @ref.receiver.variable — `order.ship()`, `order.ship[T]()`: a one-name
+;                            receiver. A capitalised one is an object's Path
+;                            row above, never this marker.
+;   @ref.receiver.binding  — each name a declaration binds, and where:
+;                            `.scope` the `def`, extension or `given` a
+;                            parameter belongs to, the lambda whose parameter
+;                            it is (`x =>`, `(x: T) =>`, `implicit x =>`, Scala
+;                            3's `xs.map: x =>`), the `case` whose pattern
+;                            binds it, the `catch` of a brace-less `catch case
+;                            e =>`, the `for` whose generator or definition
+;                            binds it, the block a local `def` sits in, the
+;                            body a self-type alias names, the `new T { … }`
+;                            or `given … with` body a member of it sits in,
+;                            and a local class's body a member `def` or
+;                            `object` of it sits in;
+;                            `.after` a local `val`, `var` or `given`'s block
+;                            or `case` body, after it;
+;                            `.member` a class parameter's, and a member `val`,
+;                            `var` or `given`'s class, object, trait or enum —
+;                            only where that type is the call's own (never a
+;                            nested type, a companion or a `new T { … }` body).
+;                            A pattern binds every name it spells.
+;   @ref.receiver.proof    — the binding's type: `.type` a declared `T` or
+;                            `T[A]` (read `T`), `.literal` `val x = new T`,
+;                            `new T(…)` or `new T[A](…)`. A binding with no
+;                            proof — `val got = make()`, an untyped lambda
+;                            parameter, a pattern or generator variable, a
+;                            `given`, `val (a, b)`, `new T { … }`, a type that
+;                            is not one simple name (`a.b.Order`, `=> Order`,
+;                            `Order*`, `A with B`, `x.type`) — proves nothing,
+;                            and hides every other binding of its name.
 ;
 ; A type parameter (`class Box[T](t: T)`, `def f[A](a: A)`) is no type, and an
 ; inherited member is not in scope: `t.ship()` and a call on a member a base
@@ -342,21 +351,226 @@
 ; - on a class with a companion `object`, a typed row binds among the pair's
 ;   methods that take an instance receiver alone, and climbs no supertype: a
 ;   method the class inherits is a miss there;
-; - a name is in scope at a call where the outermost callable around it
-;   declares it anywhere — a nested `def`'s or a lambda's typed parameter
-;   included — and `this.x` reads the file's field declarations, a local
-;   class's parameters not among them (the mechanism's rules, shared with Java
-;   and C#).
+; - two bindings of a name in scope prove nothing, so a parameter or local
+;   that shadows a member refuses the call rather than picking the nearer one;
+; - a member an outer type, a companion or a base class declares is not in
+;   scope, and neither is a top-level `val`; an abstract `val`/`var` and a
+;   typed `case e: T` pattern prove nothing; `new T(a)(b)` proves nothing;
+; - a call on a lowercase `object` the file declares (`util.send()`) is typed
+;   by no binding, and keeps its `other` row;
+; - `this.x` reads the file's field declarations, a local class's parameters
+;   not among them (the `field` marker, shared with Java).
 ((call_expression
   function: (field_expression
-    value: (identifier) @ref.receiver.name))
-  (#not-match? @ref.receiver.name "^(this|super|[A-Z][A-Za-z0-9_]*)$"))
+    value: (identifier) @ref.receiver.variable))
+  (#not-match? @ref.receiver.variable "^(this|super|[A-Z][A-Za-z0-9_]*)$"))
 ((call_expression
   function: (generic_function
     function: (field_expression
-      value: (identifier) @ref.receiver.name)))
-  (#not-match? @ref.receiver.name "^(this|super|[A-Z][A-Za-z0-9_]*)$"))
+      value: (identifier) @ref.receiver.variable)))
+  (#not-match? @ref.receiver.variable "^(this|super|[A-Z][A-Za-z0-9_]*)$"))
 
+; Parameters: of a `def` (every parameter list), an extension, a `given`.
+(function_definition
+  (parameters (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(extension_definition
+  (parameters (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+(given_definition
+  (parameters (parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.scope
+
+; Class parameters and members: in the type's own members.
+(class_definition
+  (class_parameters (class_parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  (class_parameters (class_parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(enum_definition
+  (class_parameters (class_parameter name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(class_definition
+  body: (template_body (val_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(class_definition
+  body: (template_body (var_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(class_definition
+  body: (template_body (val_declaration (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(class_definition
+  body: (template_body (var_declaration (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(class_definition
+  body: (template_body (given_definition name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(object_definition
+  body: (template_body (val_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(object_definition
+  body: (template_body (var_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(object_definition
+  body: (template_body (given_definition name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  body: (template_body (val_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  body: (template_body (var_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  body: (template_body (val_declaration (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  body: (template_body (var_declaration (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(trait_definition
+  body: (template_body (given_definition name: (identifier) @ref.receiver.binding))) @ref.receiver.binding.member
+(enum_definition
+  body: (enum_body (val_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+(enum_definition
+  body: (enum_body (var_definition pattern: (_) @ref.receiver.binding))) @ref.receiver.binding.member
+
+; A `new T { … }` or `given … with` body's members: that body, whose instance
+; has no name.
+(instance_expression
+  (template_body (val_definition pattern: (_) @ref.receiver.binding)) @ref.receiver.binding.scope)
+(instance_expression
+  (template_body (var_definition pattern: (_) @ref.receiver.binding)) @ref.receiver.binding.scope)
+(instance_expression
+  (template_body (given_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope)
+(with_template_body (val_definition pattern: (_) @ref.receiver.binding)) @ref.receiver.binding.scope
+(with_template_body (var_definition pattern: (_) @ref.receiver.binding)) @ref.receiver.binding.scope
+(with_template_body (given_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+; Their member `def`s and `object`s, and a local class, object or trait's:
+; that body. Each hides the name from a parameter or local of the callable
+; around it; a named type's own are no binding, since no callable's binding
+; reaches its members.
+(instance_expression
+  (template_body
+    [(function_definition name: (identifier) @ref.receiver.binding)
+     (function_declaration name: (identifier) @ref.receiver.binding)
+     (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)
+(with_template_body
+  [(function_definition name: (identifier) @ref.receiver.binding)
+   (function_declaration name: (identifier) @ref.receiver.binding)
+   (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope
+(block
+  [(class_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)
+   (object_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)
+   (trait_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)])
+(indented_block
+  [(class_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)
+   (object_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)
+   (trait_definition body: (template_body
+     [(function_definition name: (identifier) @ref.receiver.binding)
+      (function_declaration name: (identifier) @ref.receiver.binding)
+      (object_definition name: (identifier) @ref.receiver.binding)]) @ref.receiver.binding.scope)])
+
+; Locals, from their definition to the end of their block or `case` body; a
+; local `def` or `object`, in its whole block.
+(block (val_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(block (var_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(block (given_definition name: (identifier) @ref.receiver.binding) @ref.receiver.binding.after)
+(indented_block (val_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(indented_block (var_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(indented_block (given_definition name: (identifier) @ref.receiver.binding) @ref.receiver.binding.after)
+(case_clause (val_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(case_clause (var_definition pattern: (_) @ref.receiver.binding) @ref.receiver.binding.after)
+(case_clause (given_definition name: (identifier) @ref.receiver.binding) @ref.receiver.binding.after)
+(block (function_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(indented_block (function_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(block (object_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+(indented_block (object_definition name: (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+
+; Lambda, `case`, `catch`, `for` and self-type names: their construct. A
+; lambda's `parameters:` field holds `implicit` before its name, and a field
+; pattern matches the field's first node alone.
+(lambda_expression parameters: (_) @ref.receiver.binding) @ref.receiver.binding.scope
+(lambda_expression "implicit" . (identifier) @ref.receiver.binding) @ref.receiver.binding.scope
+(colon_argument lambda_start: (_) @ref.receiver.binding) @ref.receiver.binding.scope
+(case_clause pattern: (_) @ref.receiver.binding) @ref.receiver.binding.scope
+(catch_clause pattern: (_) @ref.receiver.binding) @ref.receiver.binding.scope
+(for_expression
+  (enumerators (enumerator . (_) @ref.receiver.binding))) @ref.receiver.binding.scope
+(template_body (self_type . (identifier) @ref.receiver.binding)) @ref.receiver.binding.scope
+
+; A declared type that is one simple name, or one generic one (`T[A]` reads
+; `T`); `new T`, `new T(…)`, `new T[A](…)` with no body. A type parameter is
+; refused where the binding is declared.
+(parameter
+  name: (identifier) @ref.receiver.proof
+  type: (type_identifier) @ref.receiver.proof.type)
+(parameter
+  name: (identifier) @ref.receiver.proof
+  type: (generic_type type: (type_identifier) @ref.receiver.proof.type))
+(class_parameter
+  name: (identifier) @ref.receiver.proof
+  type: (type_identifier) @ref.receiver.proof.type)
+(class_parameter
+  name: (identifier) @ref.receiver.proof
+  type: (generic_type type: (type_identifier) @ref.receiver.proof.type))
+(binding
+  name: (identifier) @ref.receiver.proof
+  type: (type_identifier) @ref.receiver.proof.type)
+(binding
+  name: (identifier) @ref.receiver.proof
+  type: (generic_type type: (type_identifier) @ref.receiver.proof.type))
+(val_definition
+  pattern: (identifier) @ref.receiver.proof
+  type: (type_identifier) @ref.receiver.proof.type)
+(val_definition
+  pattern: (identifier) @ref.receiver.proof
+  type: (generic_type type: (type_identifier) @ref.receiver.proof.type))
+(var_definition
+  pattern: (identifier) @ref.receiver.proof
+  type: (type_identifier) @ref.receiver.proof.type)
+(var_definition
+  pattern: (identifier) @ref.receiver.proof
+  type: (generic_type type: (type_identifier) @ref.receiver.proof.type))
+(val_definition
+  !type
+  pattern: (identifier) @ref.receiver.proof
+  value: (instance_expression
+    .
+    [(type_identifier) @ref.receiver.proof.literal
+     (generic_type type: (type_identifier) @ref.receiver.proof.literal)]
+    .))
+(val_definition
+  !type
+  pattern: (identifier) @ref.receiver.proof
+  value: (instance_expression
+    .
+    [(type_identifier) @ref.receiver.proof.literal
+     (generic_type type: (type_identifier) @ref.receiver.proof.literal)]
+    .
+    (arguments)
+    .))
+(var_definition
+  !type
+  pattern: (identifier) @ref.receiver.proof
+  value: (instance_expression
+    .
+    [(type_identifier) @ref.receiver.proof.literal
+     (generic_type type: (type_identifier) @ref.receiver.proof.literal)]
+    .))
+(var_definition
+  !type
+  pattern: (identifier) @ref.receiver.proof
+  value: (instance_expression
+    .
+    [(type_identifier) @ref.receiver.proof.literal
+     (generic_type type: (type_identifier) @ref.receiver.proof.literal)]
+    .
+    (arguments)
+    .))
+
+; `this.order.ship()`: the class parameter or member `val`/`var` `order` the
+; enclosing class declares itself (`@ref.receiver.field`), read through the
+; file's declarations — a `val`/`var` is a `pattern:`, which the declaration
+; walk does not read as a name, so `@ref.receiver.declared` states it: with a
+; `.type` companion its declared type, or the class of a `new T(…)` it is
+; initialised with; with `.untyped`, none (`val got = make()`).
 ((call_expression
   function: (field_expression
     value: (field_expression
@@ -395,102 +609,6 @@
   value: (instance_expression
     [(type_identifier) @ref.receiver.declared.type
      (generic_type type: (type_identifier) @ref.receiver.declared.type)]))
-
-(val_definition
-  pattern: (identifier) @ref.receiver.unproven
-  value: (instance_expression (template_body)))
-(var_definition
-  pattern: (identifier) @ref.receiver.unproven
-  value: (instance_expression (template_body)))
-(val_definition pattern: (identifiers (identifier) @ref.receiver.unproven))
-(var_definition pattern: (identifiers (identifier) @ref.receiver.unproven))
-(lambda_expression parameters: (identifier) @ref.receiver.unproven)
-; `implicit request =>`: the `parameters:` field's first node is the keyword,
-; and a field pattern matches the first alone.
-(lambda_expression "implicit" . (identifier) @ref.receiver.unproven)
-(binding !type name: (identifier) @ref.receiver.unproven)
-(tuple_pattern (identifier) @ref.receiver.unproven)
-(case_clause pattern: (identifier) @ref.receiver.unproven)
-; Scala 3's brace-less `catch case e =>`, which is no `case_clause`.
-(catch_clause pattern: (identifier) @ref.receiver.unproven)
-; Every variable of `R(_, a, b)`: its `pattern:` fields repeat, and a field
-; pattern would match the first alone.
-(case_class_pattern (identifier) @ref.receiver.unproven)
-(typed_pattern pattern: (identifier) @ref.receiver.unproven)
-(capture_pattern name: (identifier) @ref.receiver.unproven)
-(infix_pattern left: (identifier) @ref.receiver.unproven)
-(infix_pattern right: (identifier) @ref.receiver.unproven)
-(named_pattern (identifier) @ref.receiver.unproven)
-(repeat_pattern pattern: (identifier) @ref.receiver.unproven)
-(given_definition name: (identifier) @ref.receiver.unproven)
-; A self-type alias names the instance (`class Inner { outer => … }`).
-(self_type . (identifier) @ref.receiver.unproven)
-(enumerator . (identifier) @ref.receiver.unproven)
-; An interpolated-string pattern binds each `$name` it spells (`case s"#$id"`):
-; in a pattern position only, since in an expression it is a use.
-(case_clause pattern: (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(catch_clause pattern: (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(case_class_pattern (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(infix_pattern left: (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(infix_pattern right: (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(val_definition pattern: (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-(enumerator . (interpolated_string_expression
-  (interpolated_string (interpolation (identifier) @ref.receiver.unproven))))
-
-; A declared type that is not one simple name, or one generic one: every type
-; form but `type_identifier` and `generic_type` over one, on each declaration
-; that carries a `type:`.
-(parameter
-  name: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (lazy_parameter_type)
-         (repeated_parameter_type) (annotated_type) (tuple_type) (named_tuple_type)
-         (structural_type) (literal_type) (match_type) (type_lambda) (applied_constructor_type)
-         (wildcard)])
-(class_parameter
-  name: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (lazy_parameter_type)
-         (repeated_parameter_type) (annotated_type) (tuple_type) (named_tuple_type)
-         (structural_type) (literal_type) (match_type) (type_lambda) (applied_constructor_type)
-         (wildcard)])
-(binding
-  name: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (lazy_parameter_type)
-         (repeated_parameter_type) (annotated_type) (tuple_type) (named_tuple_type)
-         (structural_type) (literal_type) (match_type) (type_lambda) (applied_constructor_type)
-         (wildcard)])
-(val_declaration
-  name: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (annotated_type)
-         (tuple_type) (named_tuple_type) (structural_type) (literal_type) (match_type)
-         (type_lambda) (applied_constructor_type) (wildcard)])
-(var_declaration
-  name: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (annotated_type)
-         (tuple_type) (named_tuple_type) (structural_type) (literal_type) (match_type)
-         (type_lambda) (applied_constructor_type) (wildcard)])
-(val_definition
-  pattern: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (annotated_type)
-         (tuple_type) (named_tuple_type) (structural_type) (literal_type) (match_type)
-         (type_lambda) (applied_constructor_type) (wildcard)])
-(var_definition
-  pattern: (identifier) @ref.receiver.unproven
-  type: [(stable_type_identifier) (generic_type type: (stable_type_identifier)) (singleton_type)
-         (projected_type) (function_type) (compound_type) (infix_type) (annotated_type)
-         (tuple_type) (named_tuple_type) (structural_type) (literal_type) (match_type)
-         (type_lambda) (applied_constructor_type) (wildcard)])
 
 ; An own-field access `this.x` (the bound cohesion input). Over-capturing a
 ; `this.m()` method call here is harmless: with no Field named `m` in the class,

@@ -125,7 +125,7 @@ async fn the_workspace_coverage_read_starts_no_tool() {
         assert_eq!(calls(&rec), 0, "the workspace coverage read starts no tool");
 
         // The control: a probing read asks the stub for its version.
-        Engine::start(root.join("api")).expect("api engine").coverage_status().expect("a probing status");
+        Engine::start(root.join("api")).expect("api engine").coverage().status().expect("a probing status");
         assert_eq!(calls(&rec), 1, "the stub is found, and a probing read asks it once");
     })
     .await

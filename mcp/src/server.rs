@@ -234,9 +234,9 @@ impl LogosMcp {
         let reconcile = !p.no_reconcile.unwrap_or(false);
         self.run_result(tool, None, move |e| {
             if bless {
-                e.bless_rules(None, reconcile)
+                e.quality().bless_rules(None, reconcile)
             } else {
-                e.check_rules(None, reconcile)
+                e.quality().check_rules(None, reconcile)
             }
         })
         .await
@@ -729,6 +729,13 @@ pub struct DefaultMemberParams {
     pub repo: Option<serde_json::Value>,
 }
 
+/// `call` on the default member alone, run as [`LogosMcp::run_result`] runs it once [`default_member_only`] refused a `repo`.
+async fn on_default_member<T: serde::Serialize + Send + 'static>(server: &LogosMcp, tool: &str, repo: Option<serde_json::Value>,
+    call: impl FnOnce(&Engine) -> anyhow::Result<T> + Send + 'static) -> Result<CallToolResult, ErrorData> {
+    default_member_only(tool, repo)?;
+    server.run_result(tool, None, call).await
+}
+
 /// Refuse a `repo` given to a tool that acts on the default member only, so a
 /// caller who named another member is never answered — or gated — for the
 /// default one instead (FR-WS-42).
@@ -764,7 +771,7 @@ impl LogosMcp {
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let kind = parse_kind(p.kind.as_deref())?;
-        self.run("search", p.repo.clone(), move |e| e.search(&p.query, kind, p.limit))
+        self.run("search", p.repo.clone(), move |e| e.navigation().search(&p.query, kind, p.limit))
             .await
     }
 
@@ -776,7 +783,7 @@ impl LogosMcp {
         Parameters(p): Parameters<ContextParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run("context", p.repo.clone(), move |e| {
-            e.context(&p.task, p.max_nodes, p.include_code.unwrap_or(false))
+            e.navigation().context(&p.task, p.max_nodes, p.include_code.unwrap_or(false))
         })
         .await
     }
@@ -788,7 +795,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ExploreParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("explore", p.repo.clone(), move |e| e.explore(&p.query, p.max_files))
+        self.run("explore", p.repo.clone(), move |e| e.navigation().explore(&p.query, p.max_files))
             .await
     }
 
@@ -800,7 +807,7 @@ impl LogosMcp {
         Parameters(p): Parameters<NodeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run("node", p.repo.clone(), move |e| {
-            e.node(&p.symbol, p.include_code.unwrap_or(false))
+            e.navigation().node(&p.symbol, p.include_code.unwrap_or(false))
         })
         .await
     }
@@ -810,7 +817,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EdgeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("callers", p.repo.clone(), move |e| e.callers(&p.symbol, p.limit))
+        self.run("callers", p.repo.clone(), move |e| e.navigation().callers(&p.symbol, p.limit))
             .await
     }
 
@@ -819,7 +826,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EdgeParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("callees", p.repo.clone(), move |e| e.callees(&p.symbol, p.limit))
+        self.run("callees", p.repo.clone(), move |e| e.navigation().callees(&p.symbol, p.limit))
             .await
     }
 
@@ -830,7 +837,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<ImpactParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("impact", p.repo.clone(), move |e| e.impact(&p.symbol, p.depth))
+        self.run("impact", p.repo.clone(), move |e| e.navigation().impact(&p.symbol, p.depth))
             .await
     }
 
@@ -842,7 +849,7 @@ impl LogosMcp {
         Parameters(p): Parameters<ImpactIntersectionParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run("impact_intersection", p.repo.clone(), move |e| {
-            e.impact_intersection(&p.items, p.depth)
+            e.navigation().impact_intersection(&p.items, p.depth)
         })
         .await
     }
@@ -854,7 +861,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<PrecedentParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run("precedent", p.repo.clone(), move |e| e.precedent(&p.target, p.limit))
+        self.run("precedent", p.repo.clone(), move |e| e.navigation().precedent(&p.target, p.limit))
             .await
     }
 
@@ -866,7 +873,7 @@ impl LogosMcp {
         Parameters(p): Parameters<BranchOverlapParams>,
     ) -> Result<CallToolResult, ErrorData> {
         self.run("branch_overlap", p.repo.clone(), move |e| {
-            e.branch_overlap(&p.refs, p.base.as_deref(), p.merge.as_deref())
+            e.navigation().branch_overlap(&p.refs, p.base.as_deref(), p.merge.as_deref())
         })
         .await
     }
@@ -875,7 +882,7 @@ impl LogosMcp {
         description = "INDEX health: file/node/edge counts, store size, freshness of the index vs the working tree (FR-NV-07), and reference resolution: `internal_resolution` is the bound code references over those that could be internal, a lower bound, with the provably external ones counted beside it; doc references are stated apart in `doc_resolution` (FR-RS-49). For ARCHITECTURE health use the health tool."
     )]
     async fn status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
-        self.run("status", p.repo, |e| e.status()).await
+        self.run("status", p.repo, |e| e.graph().status()).await
     }
 
     // — Quality (9): wired to the governance engine (S-020, FR-MC-01). Each
@@ -893,13 +900,12 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         default_member_only("scan", p.repo)?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("scan", None, move |e| e.scan(reconcile)).await
+        self.run_result("scan", None, move |e| e.quality().scan(reconcile)).await
     }
 
     #[tool(description = "Re-scan with the same parameters as the last scan (ADR-11). Under a workspace it acts on the default member only: it takes no `repo`.")]
     async fn rescan(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("rescan", p.repo)?;
-        self.run_result("rescan", None, |e| e.rescan()).await
+        on_default_member(self, "rescan", p.repo, |e| e.quality().rescan()).await
     }
 
     #[tool(
@@ -929,7 +935,7 @@ impl LogosMcp {
         &self,
         Parameters(p): Parameters<EvolutionParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.run_result("evolution", p.repo.clone(), move |e| e.evolution(p.limit))
+        self.run_result("evolution", p.repo.clone(), move |e| e.quality().readouts().evolution(p.limit))
             .await
     }
 
@@ -939,7 +945,7 @@ impl LogosMcp {
     async fn dsm(&self, Parameters(p): Parameters<DsmParams>) -> Result<CallToolResult, ErrorData> {
         let granularity = parse_granularity(p.granularity.as_deref())?;
         let reconcile = !p.no_reconcile.unwrap_or(false);
-        self.run_result("dsm", p.repo.clone(), move |e| e.dsm(granularity, reconcile))
+        self.run_result("dsm", p.repo.clone(), move |e| e.quality().readouts().dsm(granularity, reconcile))
             .await
     }
 
@@ -949,7 +955,7 @@ impl LogosMcp {
     async fn offenders(&self, Parameters(p): Parameters<OffendersParams>) -> Result<CallToolResult, ErrorData> {
         let filter = OffendersFilter::parse(p.path.as_deref(), p.dimension.as_deref())
             .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
-        self.run_result("offenders", p.repo, move |e| e.offenders(&filter)).await
+        self.run_result("offenders", p.repo, move |e| e.quality().readouts().offenders(&filter)).await
     }
 
     #[tool(
@@ -959,12 +965,12 @@ impl LogosMcp {
         if p.headroom == Some(true) {
             let (subjects, near) = (p.subjects.unwrap_or_default(), p.near);
             if p.branches.as_ref().is_some_and(|b| !b.is_empty()) { return Err(ErrorData::invalid_params("`headroom` and `branches` are exclusive", None)); }
-            return self.run_result("review", p.repo, move |e| e.review_headroom(p.base.as_deref(), &subjects, near)).await;
+            return self.run_result("review", p.repo, move |e| e.quality().review().headroom(p.base.as_deref(), &subjects, near)).await;
         }
         if p.subjects.is_some() || p.near.is_some() { return Err(ErrorData::invalid_params("`subjects` and `near` need `headroom: true`", None)); }
         match p.branches.filter(|b| !b.is_empty()) {
-            Some(branches) => self.run_result("review", p.repo, move |e| e.review_branches(p.base.as_deref(), &branches)).await,
-            None => self.run_result("review", p.repo, move |e| e.review(p.base.as_deref())).await,
+            Some(branches) => self.run_result("review", p.repo, move |e| e.quality().review().branches(p.base.as_deref(), &branches)).await,
+            None => self.run_result("review", p.repo, move |e| e.quality().review().delta(p.base.as_deref())).await,
         }
     }
 
@@ -972,7 +978,7 @@ impl LogosMcp {
         description = "Where to start (FR-QM-17): the ranked fix units the last snapshot recorded — at most 10 classes, functions, exact-duplicate groups and near-clone groups, each with its dimension(s), its `points` and the `outliers` measures it is labelled on — plus the per-member outlier labels of each measure. `points` is an ESTIMATE under a single-unit counterfactual (the signal recomputed with that one unit's contribution removed, minus the current signal), and `basis` says so. Advisory: it never enters the signal, the gate or `check`. Ordered by points descending, then dimension, then node_id; byte-stable. Each unit's and label's node_id is an identity a re-index keeps (CR-238): a class's or function's is its symbol id without the repository coordinate, which node and impact resolve; a group's is `duplicate_group:` or `clone_group:` and a digest of its sorted member identities, the same while its member set is. node_id is null on a snapshot recorded before it was. A pure read: run scan first to measure. recorded:false means no snapshot recorded a ranking (never scanned, or one that predates it); recorded:true with no units means no single unit recovers a whole point, never that the code is clean."
     )]
     async fn improvements(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
-        self.run_result("improvements", p.repo, |e| e.improvements()).await
+        self.run_result("improvements", p.repo, |e| e.quality().readouts().improvements()).await
     }
 
     // — Temporal tier (1): the non-gated git-history surface (CR-006,
@@ -991,7 +997,7 @@ impl LogosMcp {
         let production_scope = p.production_scope.unwrap_or(false);
         let with_findings = p.with_findings.unwrap_or(false);
         self.run_result("hotspots", p.repo.clone(), move |e| {
-            e.hotspots_with_findings(p.limit, untested, production_scope, with_findings)
+            e.history().hotspots_with_findings(p.limit, untested, production_scope, with_findings)
         })
         .await
     }
@@ -1010,7 +1016,7 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         default_member_only("coverage_ingest", p.repo.take())?;
         self.run_result("coverage_ingest", None, move |e| {
-            e.coverage_ingest(std::path::Path::new(&p.report), p.format.as_deref())
+            e.coverage().ingest(std::path::Path::new(&p.report), p.format.as_deref())
         })
         .await
     }
@@ -1024,7 +1030,7 @@ impl LogosMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let jobs = Arc::clone(&self.jobs);
         self.run_result("coverage_status", p.repo, move |e| {
-            let mut status = e.coverage_status()?;
+            let mut status = e.coverage().status()?;
             status.job = jobs.snapshot(JobKind::CoverageRun, e.root());
             Ok(status)
         })
@@ -1036,7 +1042,7 @@ impl LogosMcp {
     )]
     async fn coverage_refresh(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
         default_member_only("coverage_refresh", p.repo)?;
-        self.run_result("coverage_refresh", None, |e| e.coverage_refresh(false))
+        self.run_result("coverage_refresh", None, |e| e.coverage().refresh(false))
             .await
     }
 
@@ -1067,7 +1073,7 @@ impl LogosMcp {
             return Err(ErrorData::invalid_params(refusal, None));
         }
         let request = logos_core::security::ScanRequest::new(p.scanners.unwrap_or_default(), p.paths.unwrap_or_default());
-        self.run_result("security_scan", None, move |e| e.security_scan_selected(false, &request, |_| {})).await
+        self.run_result("security_scan", None, move |e| e.security().scan_selected(false, &request, |_| {})).await
     }
 
     #[tool(
@@ -1075,7 +1081,7 @@ impl LogosMcp {
     )]
     async fn security_ingest(&self, Parameters(mut p): Parameters<SecurityIngestParams>) -> Result<CallToolResult, ErrorData> {
         default_member_only("security_ingest", p.repo.take())?;
-        self.run_result("security_ingest", None, move |e| e.security_ingest(std::path::Path::new(&p.report)))
+        self.run_result("security_ingest", None, move |e| e.security().ingest(std::path::Path::new(&p.report)))
             .await
     }
 
@@ -1085,7 +1091,7 @@ impl LogosMcp {
     async fn security_reconfirm(&self, Parameters(mut p): Parameters<SecurityReconfirmParams>) -> Result<CallToolResult, ErrorData> {
         default_member_only("security_reconfirm", p.repo.take())?;
         let evidence = p.evidence.unwrap_or_default();
-        self.run_result("security_reconfirm", None, move |e| e.security_reconfirm_with_evidence(&p.fingerprint, &evidence))
+        self.run_result("security_reconfirm", None, move |e| e.security().findings().reconfirm_with_evidence(&p.fingerprint, &evidence))
             .await
     }
 
@@ -1093,7 +1099,7 @@ impl LogosMcp {
         description = "Security status (FR-SC-08): each registered scanner's one state — not_installed, disabled, never_run, not_applicable (installed, but nothing it reads is in the project: no scan is missing), stale (HEAD moved or a file changed) or fresh with its count of fresh, unsuppressed findings in production code, the rest stated apart as suppressed, not_fresh, test (in test code), dev (on a dev-only dependency its lockfile marks: \"N more in dev-only dependencies\"; still gated, FR-SC-30) and needs_review (its scanner marks it low-confidence: \"N more need review\"; still gated, FR-SC-31), and merged (one advisory another scanner also reports on the same lockfile, package and version, counted once on its first reporter's row, FR-SC-29); never_run and fresh with 0 findings are different states. A scanner whose last scan failed names its `last_failure` log and `last_failure_cause`. Each installed scanner names the copy in use (override, path or managed), its version and update_available when this release pins a newer managed version. A missing scanner Logos can install names `logos security install <scanner>`: installing needs the user's consent, so no MCP tool installs — the user runs that command in a terminal. Each installed scanner a scan would start states `ignored_paths` for a whole-project scan of the tree now: `excluded`, or `scanned` with a `coverage_note` and its `coverage_kind` (unproven, history, whole_project or partial) (FR-SC-26). Also the consent state: the scanners consented to, and the ones the next scan will ask for; and `suppressions`, every entry of .logos/security-ignore.toml (a fingerprint, a path glob narrowed by rule and scanner, or a rule-wide entry: a rule and its scanner, in every file) with `suppressed`, the findings it suppresses now, expired, orphaned or out of date (an evidence symbol changed: `out_of_date` names it) flagged. Dependency-Check's row alone carries `nvd_api_key`: set when NVD_API_KEY is set where Logos runs (for MCP, in the environment `logos serve` was started with) or the user's own extra_args supply a key, else not_set — never the key (FR-SC-27)."
     )]
     async fn security_status(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
-        self.run_result("security_status", p.repo, |e| e.security_status()).await
+        self.run_result("security_status", p.repo, |e| e.security().status()).await
     }
 
     #[tool(
@@ -1110,47 +1116,42 @@ impl LogosMcp {
             p.scope.as_deref(),
         )
         .map_err(|err| ErrorData::invalid_params(err.to_string(), None))?;
-        self.run_result("security_findings", p.repo, move |e| e.security_findings(&filter)).await
+        self.run_result("security_findings", p.repo, move |e| e.security().findings().list(&filter)).await
     }
 
     #[tool(
         description = "ARCHITECTURE health: DB integrity, schema version, FTS coherence, structural integrity, admission-tripwire drift, graph counts. For INDEX freshness use the status tool."
     )]
     async fn health(&self, Parameters(p): Parameters<RepoParams>) -> Result<CallToolResult, ErrorData> {
-        self.run_result("health", p.repo, |e| e.health(true)).await
+        self.run_result("health", p.repo, |e| e.quality().health(true)).await
     }
 
     #[tool(
         description = "Fast graph structural-integrity check (FR-GV-18/FR-GV-20, NFR-RA-13): asserts one node per symbol_id and zero orphan rows (dangling file/edge/shingle), and flags every indexed file the current admission rules (gitignore, nested-.git boundary, ignored_dirs, globs) would reject — in a handful of indexed queries plus O(files) matcher work, no reindex. `ok:false` with named faults and a capped `unadmitted_sample` on drift — the always-on guard that also hard-fails session_end/check_rules. For a deep reindex-diff see verify. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn doctor(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("doctor", p.repo)?;
-        self.run_result("doctor", None, |e| e.doctor()).await
+        on_default_member(self, "doctor", p.repo, |e| e.quality().doctor()).await
     }
 
     #[tool(
         description = "Deep graph consistency check (FR-GV-19, NFR-RA-06): reindexes the project into a throwaway shadow store via the always-purge index path, then diffs node/edge/file counts and symbol sets against the live graph. Reports `ok:false` with live-vs-reindex deltas and a capped sample of leaked (live-only) / orphaned (reindex-only) symbols, and embeds the fast structural + admission check (FR-GV-20). Catches Channel-B orphans (files the live store retains but a fresh index drops) that doctor cannot. On-demand only — a full reindex is seconds-to-minutes; the live store is read-only and the shadow store is torn down on completion. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn verify(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("verify", p.repo)?;
-        self.run_result("verify", None, |e| e.verify()).await
+        on_default_member(self, "verify", p.repo, |e| e.quality().verify()).await
     }
 
     #[tool(
         description = "Begin a quality session (FR-GV-04): call this BEFORE making changes. It records the session's snapshot and saves the quality baseline (and, under a rules.toml [security] table, the security baseline) only when none exists: it never moves an existing one — only `gate --save` does — except a quality baseline that no longer compares (saved under other metric semantics or thresholds), which it resets before the edits and reports as `baseline_reset`. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn session_start(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("session_start", p.repo)?;
-        self.run_result("session_start", None, |e| e.session_start())
-            .await
+        on_default_member(self, "session_start", p.repo, |e| e.quality().session_start()).await
     }
 
     #[tool(
         description = "End the quality session (FR-GV-05): re-score and compare to the baseline; fails on aggregate regression beyond epsilon. Under a rules.toml [review] table it fails on gating branch-delta entries and on a drop past drift_budget instead, and `attribution` breaks the change from the baseline into per-dimension contributions with their driving symbols. `baseline_reason` is the reason the baseline was blessed with. Under a workspace it acts on the default member only: it takes no `repo`."
     )]
     async fn session_end(&self, Parameters(p): Parameters<DefaultMemberParams>) -> Result<CallToolResult, ErrorData> {
-        default_member_only("session_end", p.repo)?;
-        self.run_result("session_end", None, |e| e.session_end()).await
+        on_default_member(self, "session_end", p.repo, |e| e.quality().session_end()).await
     }
 }
 

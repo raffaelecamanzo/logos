@@ -48,7 +48,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -270,14 +270,16 @@ fun top(block: () -> Int) {
     );
 }
 
-/// FR-RS-31, NFR-RA-05: two extensions of one name in scope bind neither, and
-/// a call on a value never binds a top-level function that is no extension.
+/// FR-RS-31, NFR-RA-05: two extensions of one name in scope whose receiver
+/// type both apply bind neither, while the receiver's proven type tells a
+/// `String` extension from an `Int` one (S-833); a call on a value never binds
+/// a top-level function that is no extension.
 #[test]
 fn an_ambiguous_extension_and_a_plain_function_named_by_a_receiver_call_stay_unbound() {
     let caller = "src/main/kotlin/app/web/Ctl.kt";
     let tmp = tree(&[
         ("src/main/kotlin/app/a/Text.kt", "package app.a\n\nfun String.pretty(): String = this\n"),
-        ("src/main/kotlin/app/b/Numbers.kt", "package app.b\n\nfun Int.pretty(): String = \"\"\n"),
+        ("src/main/kotlin/app/b/Numbers.kt", "package app.b\n\nfun String.pretty(): String = \"\"\n"),
         (
             "src/main/kotlin/app/web/Same.kt",
             "package app.web\n\nfun String.shout(): String = this\nfun Int.shout(): String = \"\"\nfun find(): Int = 0\nfun String.collectList(): Int = 0\n",
@@ -308,10 +310,15 @@ class Repo
     let rt = engine.runtime().unwrap();
     // `collectList` is imported from a library: the import is in force, and
     // the same-package extension of its name is never reached past it.
-    assert!(edges(rt, caller, EdgeKind::Calls).is_empty(), "{:?}", edges(rt, caller, EdgeKind::Calls));
-    // Each receiver's type is proven (S-563): the rows are typed, and unbound.
+    assert_eq!(
+        edges(rt, caller, EdgeKind::Calls),
+        strings(&["src/main/kotlin/app/web/Ctl.kt:run@8 -> src/main/kotlin/app/web/Same.kt:shout@3"])
+    );
+    // Each receiver's type is proven (S-563): the rows are typed, and the
+    // ambiguous, missing and library ones unbound.
     let rows = calls(rt, caller);
-    for target in ["String::pretty", "String::shout", "Repo::find", "String::collectList"] {
+    assert!(rows.contains(&("String::shout".to_string(), RefForm::Path, Some(ReceiverShape::Other), true)), "{rows:?}");
+    for target in ["String::pretty", "Repo::find", "String::collectList"] {
         assert!(
             rows.contains(&(target.to_string(), RefForm::Path, Some(ReceiverShape::Other), false)),
             "{target}: {rows:?}"
@@ -324,7 +331,7 @@ class Repo
         kotlin_residue(&engine),
         vec![
             (CallResidueReason::ExternalType, 1),
-            (CallResidueReason::OverloadAmbiguous, 2),
+            (CallResidueReason::OverloadAmbiguous, 1),
             (CallResidueReason::SupertypeUnreached, 1),
         ]
     );
@@ -333,7 +340,7 @@ class Repo
 /// Every call-residue reason the Kotlin row states, with its count, sorted.
 fn kotlin_residue(engine: &Engine) -> Vec<(CallResidueReason, u64)> {
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "kotlin")
@@ -578,12 +585,14 @@ class Boot {
     assert!(edges(rt, kotlin, EdgeKind::Imports).is_empty(), "{:?}", edges(rt, kotlin, EdgeKind::Imports));
 }
 
-/// FR-RS-31, NFR-RA-05: a bare call reaches an extension only from inside an
-/// extension's body, whose `this` may be its receiver, and never one named like
-/// a member — koin's `single { X(get()) }` calls the lambda receiver's member
+/// FR-RS-31, NFR-RA-05: a bare call reaches an extension only through an
+/// implicit receiver the graph sees — an extension's body, whose `this` may be
+/// its receiver, or a class of the extension's receiver type (S-833) — so
+/// `Holder` reaches no `KoinTest` extension; and never one named like a
+/// member — koin's `single { X(get()) }` calls the lambda receiver's member
 /// `Scope.get()`, never the same-package `fun KoinTest.get()`.
 #[test]
-fn a_bare_call_binds_an_extension_only_from_an_extension_body_and_never_past_a_member() {
+fn a_bare_call_binds_an_extension_only_through_an_implicit_receiver_and_never_past_a_member() {
     let file = "src/main/kotlin/app/di/Di.kt";
     let tmp = tree(&[(
         file,
@@ -1000,7 +1009,7 @@ fn a_facade_call_no_function_admits_is_no_applicable_overload() {
     let engine = index(tmp.path());
     assert!(edges(engine.runtime().unwrap(), java, EdgeKind::Calls).is_empty());
     let residue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "java")
@@ -1028,7 +1037,7 @@ fn sync_equals_reindex_when_a_facades_file_is_deleted() {
     assert_eq!(edges(rt, java, EdgeKind::Imports), vec![format!("{java}:Boot@1 -> {utils}:Utils@1")]);
     let root = tmp.path().canonicalize().expect("canonicalize root");
     fs::remove_file(root.join(utils)).unwrap();
-    engine.sync(&[root.join(utils)]);
+    engine.pipeline().sync(&[root.join(utils)]);
     let fresh = tree(&files[1..]);
     let engine_b = index(fresh.path());
     assert_eq!(graph_fingerprint(rt), graph_fingerprint(engine_b.runtime().unwrap()));
@@ -1059,7 +1068,7 @@ fn sync_equals_reindex_for_top_level_extension_companion_and_facade_edits() {
             root_a.join(rel)
         })
         .collect();
-    engine_a.sync(&changed);
+    engine_a.pipeline().sync(&changed);
     let rt_a = engine_a.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -1099,9 +1108,861 @@ class Child : Base() {
     assert_eq!(edges(rt_a, child, EdgeKind::Calls), vec![format!("{child}:a@4 -> {child}:make@6")]);
     write(tmp_a.path(), base, after);
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
-    engine_a.sync(&[root_a.join(base)]);
+    engine_a.pipeline().sync(&[root_a.join(base)]);
     assert_eq!(edges(rt_a, child, EdgeKind::Calls), vec![format!("{child}:a@4 -> {base}:make@4")]);
     let tmp_b = tree(&[(base, after), (child, child_text)]);
     let engine_b = index(tmp_b.path());
     assert_eq!(graph_fingerprint(rt_a), graph_fingerprint(engine_b.runtime().unwrap()));
+}
+
+// ── S-833: an extension binds only through a receiver of its type ────────────
+
+/// FR-RS-31, FR-RS-32, NFR-RA-05 (S-833): a call on a proven receiver reaches
+/// an extension only when the extension's receiver type is the proven type or
+/// an in-repository supertype of it — `d.format("x")` on a `LocalDate` never
+/// binds `fun LocalDateTime.format`, while `s.toSlug()` on a `String` still
+/// binds `fun String.toSlug()`, and a `Box` reaches its superclass's and its
+/// interface's extensions but never an unrelated class's.
+#[test]
+fn a_proven_receiver_reaches_only_an_extension_of_its_type_or_a_supertype() {
+    let ext = "src/main/kotlin/app/time/Ext.kt";
+    let caller = "src/main/kotlin/app/time/Use.kt";
+    let tmp = tree(&[
+        (
+            ext,
+            "\
+package app.time
+
+import java.time.LocalDateTime
+
+fun LocalDateTime.format(f: String): String = f
+
+fun String.toSlug(): String = this
+
+fun Base.lift(): Int = 1
+
+fun Named.greet(): Int = 2
+
+fun Other.boxed(): Int = 3
+",
+        ),
+        (
+            caller,
+            "\
+package app.time
+
+import java.time.LocalDate
+
+open class Base
+
+interface Named
+
+class Box : Base(), Named
+
+class Other
+
+fun dated(d: LocalDate): String = d.format(\"x\")
+
+fun slug(s: String): String = s.toSlug()
+
+fun lifted(b: Box): Int = b.lift() + b.greet()
+
+fun unrelated(b: Box): Int = b.boxed()
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, caller, EdgeKind::Calls),
+        strings(&[
+            &format!("{caller}:lifted@17 -> {ext}:greet@11"),
+            &format!("{caller}:lifted@17 -> {ext}:lift@9"),
+            &format!("{caller}:slug@15 -> {ext}:toSlug@7"),
+        ])
+    );
+    // The typed rows stay typed, and unbound.
+    let rows = calls(rt, caller);
+    for target in ["LocalDate::format", "Box::boxed"] {
+        assert!(
+            rows.contains(&(target.to_string(), RefForm::Path, Some(ReceiverShape::Other), false)),
+            "{target}: {rows:?}"
+        );
+    }
+}
+
+/// FR-RS-31, NFR-RA-05 (S-833): a receiver whose type nothing proves reaches an
+/// extension only when the extension's receiver type is a class of the
+/// repository — only there can "no member of the name" be checked. mixit's
+/// `Base64.getDecoder().decode(s)` never binds `fun ServerRequest.decode`, nor
+/// an untyped lambda parameter `fun String.toSlug()`, while one calling
+/// `fun Repo.audit()` on an in-repository `Repo` still binds.
+#[test]
+fn an_unproven_receiver_reaches_only_an_extension_of_a_repository_class() {
+    let ext = "src/main/kotlin/app/web/Ext.kt";
+    let caller = "src/main/kotlin/app/web/Ctl.kt";
+    let tmp = tree(&[
+        (
+            ext,
+            "\
+package app.web
+
+import org.springframework.web.reactive.function.server.ServerRequest
+
+fun ServerRequest.decode(s: String): String = s
+
+fun String.toSlug(): String = this
+
+fun Repo.audit(): Int = 0
+",
+        ),
+        (
+            caller,
+            "\
+package app.web
+
+class Repo
+
+class Ctl {
+    fun decoded(s: String): ByteArray = java.util.Base64.getDecoder().decode(s)
+
+    fun slugs(xs: List<String>) {
+        xs.forEach { x -> x.toSlug() }
+    }
+
+    fun audits(xs: List<Repo>) {
+        xs.forEach { r -> r.audit() }
+    }
+}
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, caller, EdgeKind::Calls),
+        strings(&[&format!("{caller}:audits@12 -> {ext}:audit@9")])
+    );
+    let rows = calls(rt, caller);
+    for target in ["decode", "toSlug"] {
+        assert!(
+            rows.contains(&(target.to_string(), RefForm::Method, Some(ReceiverShape::Other), false)),
+            "{target}: {rows:?}"
+        );
+    }
+}
+
+/// FR-RS-31, FR-RS-12, NFR-RA-05 (S-833): inside a class `Box`, whose implicit
+/// `this` is a `Box`, a bare `twice()` binds `fun Box.twice()` when no member
+/// answers — and so does a bare call inside a subclass of an in-repository
+/// `Base` reach `fun Base.up()`. A member of the class or of its
+/// in-repository supertype wins over the extension; a class whose base the
+/// graph does not hold may inherit the name, and an unrelated class reaches
+/// no other class's extension.
+#[test]
+fn a_bare_call_inside_a_class_reaches_its_own_extension_when_no_member_answers() {
+    let ext = "src/main/kotlin/app/box/Ext.kt";
+    let file = "src/main/kotlin/app/box/Box.kt";
+    let tmp = tree(&[
+        (
+            ext,
+            "\
+package app.box
+
+fun Box.twice(): Int = 2
+
+fun Base.up(): Int = 1
+
+fun Mem.again(): Int = 2
+
+fun Q.pp(): Int = 2
+
+fun Ctl.render(): Int = 0
+
+fun Box.boxOnly(): Int = 0
+",
+        ),
+        (
+            file,
+            "\
+package app.box
+
+import org.springframework.Controller
+
+class Box {
+    fun size(): Int = twice()
+}
+
+open class Base
+
+class Sub : Base() {
+    fun run(): Int = up()
+}
+
+class Mem {
+    fun again(): Int = 1
+    fun run(): Int = again()
+}
+
+open class P {
+    fun pp(): Int = 1
+}
+
+class Q : P() {
+    fun run(): Int = pp()
+}
+
+class Ctl : Controller() {
+    fun run(): Int = render()
+}
+
+class Holder {
+    fun build(): Int = boxOnly()
+}
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, file, EdgeKind::Calls),
+        strings(&[
+            &format!("{file}:run@12 -> {ext}:up@5"),
+            &format!("{file}:run@17 -> {file}:again@16"),
+            &format!("{file}:run@25 -> {file}:pp@21"),
+            &format!("{file}:size@6 -> {ext}:twice@3"),
+        ])
+    );
+}
+
+/// NFR-RA-06 (S-833): a sync of `edit` binds what a fresh index of the final
+/// tree binds; the synced caller's `Calls` edges are returned.
+fn synced_caller_edges(initial: &[(&'static str, &'static str)], edit: (&'static str, &'static str), caller: &str) -> Vec<String> {
+    let tmp_a = tree(initial);
+    let engine_a = index(tmp_a.path());
+    let rt_a = engine_a.runtime().unwrap();
+    assert!(edges(rt_a, caller, EdgeKind::Calls).is_empty(), "{:?}", edges(rt_a, caller, EdgeKind::Calls));
+    write(tmp_a.path(), edit.0, edit.1);
+    let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
+    engine_a.pipeline().sync(&[root_a.join(edit.0)]);
+    let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
+    final_state.insert(edit.0, edit.1);
+    let files: Vec<(&str, &str)> = final_state.into_iter().collect();
+    let tmp_b = tree(&files);
+    let engine_b = index(tmp_b.path());
+    assert_eq!(graph_fingerprint(rt_a), graph_fingerprint(engine_b.runtime().unwrap()));
+    edges(rt_a, caller, EdgeKind::Calls)
+}
+
+/// NFR-RA-06 (S-833): an unproven receiver's extension `fun Repo.audit()`
+/// binds once a class `Repo` is declared in another file — a name the row
+/// `audit` does not spell — and a sync of that file binds what a fresh index
+/// of the final tree binds.
+#[test]
+fn sync_equals_reindex_when_an_extensions_receiver_class_is_declared() {
+    let ext = "src/main/kotlin/app/web/Ext.kt";
+    let caller = "src/main/kotlin/app/web/Ctl.kt";
+    let declared = "src/main/kotlin/app/web/Repo.kt";
+    let initial = [
+        (ext, "package app.web\n\nfun Repo.audit(): Int = 0\n"),
+        (
+            caller,
+            "\
+package app.web
+
+class Ctl {
+    fun audits(xs: List<Any>) {
+        xs.forEach { r -> r.audit() }
+    }
+}
+",
+        ),
+        (declared, "package app.web\n\nfun unrelated(): Int = 0\n"),
+    ];
+    let edit = (declared, "package app.web\n\nclass Repo\n");
+    assert_eq!(
+        synced_caller_edges(&initial, edit, caller),
+        strings(&[&format!("{caller}:audits@4 -> {ext}:audit@3")])
+    );
+}
+
+/// NFR-RA-06 (S-833): a bare call inside a subclass reaches its base's
+/// extension `fun Base.up()` once the base is declared in another file, and a
+/// sync of that file binds what a fresh index of the final tree binds.
+#[test]
+fn sync_equals_reindex_when_a_subclass_gains_the_extensions_base() {
+    let ext = "src/main/kotlin/app/web/Ext.kt";
+    let caller = "src/main/kotlin/app/web/Sub.kt";
+    let declared = "src/main/kotlin/app/web/Base.kt";
+    let initial = [
+        (ext, "package app.web\n\nfun Base.up(): Int = 1\n"),
+        (caller, "package app.web\n\nclass Sub : Base() {\n    fun run(): Int = up()\n}\n"),
+        (declared, "package app.web\n\nfun unrelated(): Int = 0\n"),
+    ];
+    let edit = (declared, "package app.web\n\nopen class Base\n");
+    assert_eq!(
+        synced_caller_edges(&initial, edit, caller),
+        strings(&[&format!("{caller}:run@4 -> {ext}:up@3")])
+    );
+}
+
+/// NFR-RA-05 (S-833 review): an extension of a nested type records only the
+/// type's last segment — `fun Box.Companion.make()` records `Companion`, `fun
+/// Bar.Builder.build()` records `Builder` — so a nested class's simple name
+/// never makes it the extension's receiver: a bare call inside another class's
+/// companion or a same-named nested class, with or without a supertype, and a
+/// call on a proven `Foo.Builder`, bind no such extension.
+#[test]
+fn a_nested_types_simple_name_never_makes_it_an_extensions_receiver() {
+    let ext = "src/main/kotlin/app/c/Ext.kt";
+    let file = "src/main/kotlin/app/c/Use.kt";
+    let tmp = tree(&[
+        (ext, "package app.c\n\nfun Box.Companion.make(): Int = 1\n\nfun Bar.Builder.build(): Int = 1\n"),
+        (
+            file,
+            "\
+package app.c
+
+import lib.factory.*
+
+open class Factory
+
+class Box {
+    companion object {
+        fun other(): Int = 0
+    }
+}
+
+class A {
+    companion object {
+        fun x(): Int = make()
+    }
+}
+
+class B {
+    companion object : Factory() {
+        fun y(): Int = make()
+    }
+}
+
+class Bar {
+    class Builder
+}
+
+class Foo {
+    class Builder {
+        fun b(): Int = build()
+    }
+}
+
+fun built(f: Foo.Builder): Int = f.build()
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(edges(rt, file, EdgeKind::Calls).is_empty(), "{:?}", edges(rt, file, EdgeKind::Calls));
+}
+
+/// FR-RS-31, NFR-RA-05 (S-833 review): a member wins over an extension, and
+/// where the call might sit inside a lambda whose receiver the graph does not
+/// read, a callable member of the name on any class of the family keeps the
+/// call off the extension — on a proven receiver, inside the extended class,
+/// and inside a subclass of it alike.
+#[test]
+fn a_member_of_the_name_on_any_class_keeps_every_receiver_off_the_extension() {
+    let ext = "src/main/kotlin/app/d/Ext.kt";
+    let file = "src/main/kotlin/app/d/Use.kt";
+    let tmp = tree(&[
+        (ext, "package app.d\n\nfun Box.twice(): Int = 2\n\nfun Base.up(): Int = 1\n\nfun Box.lift(): Int = 3\n"),
+        (
+            file,
+            "\
+package app.d
+
+class Other {
+    fun twice(): Int = 0
+    fun up(): Int = 0
+    fun lift(): Int = 0
+}
+
+class Box {
+    fun size(): Int = twice()
+}
+
+open class Base
+
+class Sub : Base() {
+    fun run(): Int = up()
+}
+
+fun lifted(b: Box): Int = b.lift()
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(edges(rt, file, EdgeKind::Calls).is_empty(), "{:?}", edges(rt, file, EdgeKind::Calls));
+}
+
+/// FR-RS-31, FR-RS-32 (S-833 review): an extension of a grandparent type is
+/// reached through every level of the receiver's in-repository ancestry — on a
+/// proven `C` and from inside `C` alike.
+#[test]
+fn an_extension_of_a_grandparent_is_reached_through_the_whole_ancestry() {
+    let ext = "src/main/kotlin/app/e/Ext.kt";
+    let file = "src/main/kotlin/app/e/Use.kt";
+    let tmp = tree(&[
+        (ext, "package app.e\n\nfun A.top(): Int = 1\n"),
+        (
+            file,
+            "\
+package app.e
+
+open class A
+
+open class B : A()
+
+class C : B() {
+    fun r(): Int = top()
+}
+
+fun use(c: C): Int = c.top()
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, file, EdgeKind::Calls),
+        strings(&[&format!("{file}:r@8 -> {ext}:top@3"), &format!("{file}:use@11 -> {ext}:top@3")])
+    );
+}
+
+/// NFR-RA-05 (S-833 review): an unproven receiver reaches an extension only
+/// through a class of the source's own family — a Python `class Repo` never
+/// makes Kotlin's `fun Repo.audit()` reachable from an untyped receiver.
+#[test]
+fn another_familys_class_never_makes_an_unproven_extension_reachable() {
+    let caller = "src/main/kotlin/app/f/Ctl.kt";
+    let mut files = vec![
+        ("src/main/kotlin/app/f/Ext.kt", "package app.f\n\nfun Repo.audit(): Int = 0\n"),
+        (
+            caller,
+            "\
+package app.f
+
+class Ctl {
+    fun audits(xs: List<Any>) {
+        xs.forEach { r -> r.audit() }
+    }
+}
+",
+        ),
+    ];
+    if cfg!(feature = "lang-python") {
+        files.push(("py/repo.py", "class Repo:\n    def other(self):\n        return 1\n"));
+    }
+    let tmp = tree(&files);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(edges(rt, caller, EdgeKind::Calls).is_empty(), "{:?}", edges(rt, caller, EdgeKind::Calls));
+    assert!(
+        calls(rt, caller).contains(&("audit".to_string(), RefForm::Method, Some(ReceiverShape::Other), false)),
+        "{:?}",
+        calls(rt, caller)
+    );
+}
+
+// ── S-834: a bare call inside a lambda with a receiver ──────────────────────
+
+/// The package's top-level functions, a class and an extension of a
+/// repository class the receiver lambdas below name bare (S-834).
+const LAMBDA_TOP: (&str, &str) = (
+    "src/main/kotlin/app/lam/Top.kt",
+    "package app.lam\n\nfun append(s: String) {}\n\nfun log(s: String) {}\n\nclass Thing\n\nclass Repo\n\nfun Repo.audit() {}\n",
+);
+
+const LAMBDAS: &str = "src/main/kotlin/app/lam/Lambdas.kt";
+
+/// `buildString { … }` and a DSL builder (`module { single { … } }`) take a
+/// lambda whose receiver nothing in the file proves; `let`, `forEach` and `map`
+/// take one with no receiver; `Holder` declares its own `append`; `local`
+/// declares a local `log`, which Kotlin reads before any implicit receiver;
+/// `audits` names an extension of the repository class `Repo`, which no
+/// receiver in scope is.
+const LAMBDAS_TEXT: &str = "\
+package app.lam
+
+fun built(): String = buildString { append(\"x\") }
+fun dsl() { module { single { log(\"x\") } } }
+fun made(): String = buildString { Thing(); append(\"y\") }
+fun viaLet(s: String) { s.let { log(it) } }
+fun viaForEach(xs: List<String>) { xs.forEach { log(it) } }
+fun viaMap(xs: List<String>) = xs.map { log(it) }
+fun plain() { log(\"z\") }
+
+class Holder {
+    fun append(s: String) {}
+    fun keeps() = buildString { append(\"w\") }
+}
+
+fun local(): String {
+    fun log(s: String) {}
+    return buildString { log(\"q\") }
+}
+
+fun audits(): String = buildString { audit() }
+";
+
+/// FR-RS-31 (S-834, CR-261 K4): a bare call inside a lambda S-563 marks as
+/// rebinding `this`, whose receiver nothing proves, binds no top-level,
+/// imported or package function — before the change `buildString { append(…) }`
+/// bound the top-level `append`. A trailing lambda of a non-receiver function,
+/// a constructor call, a member of the enclosing class and a local function are
+/// read as before. An extension is a top-level function too: `buildString {
+/// audit() }` never reaches `fun Repo.audit()`, whose receiver no implicit
+/// receiver in scope is (review of S-834).
+#[test]
+fn a_bare_call_inside_an_unproven_receiver_lambda_binds_no_top_level_function() {
+    let top = LAMBDA_TOP.0;
+    let tmp = tree(&[LAMBDA_TOP, (LAMBDAS, LAMBDAS_TEXT)]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, LAMBDAS, EdgeKind::Calls),
+        strings(&[
+            &format!("{LAMBDAS}:keeps@13 -> {LAMBDAS}:append@12"),
+            &format!("{LAMBDAS}:local@16 -> {LAMBDAS}:log@17"),
+            &format!("{LAMBDAS}:plain@9 -> {top}:log@5"),
+            &format!("{LAMBDAS}:viaForEach@7 -> {top}:log@5"),
+            &format!("{LAMBDAS}:viaLet@6 -> {top}:log@5"),
+            &format!("{LAMBDAS}:viaMap@8 -> {top}:log@5"),
+        ])
+    );
+    assert_eq!(
+        edges(rt, LAMBDAS, EdgeKind::Instantiates),
+        strings(&[&format!("{LAMBDAS}:made@5 -> {top}:Thing@7")])
+    );
+    // The refused rows keep the bare call's shape: a sync re-reads them.
+    let refused = calls(rt, LAMBDAS)
+        .into_iter()
+        .filter(|row| row == &("append".to_string(), RefForm::Path, None, false))
+        .count();
+    assert_eq!(refused, 2, "{:?}", calls(rt, LAMBDAS));
+}
+
+/// FR-RS-31 (S-834): the refused call states why — `no-receiver-evidence`, the
+/// reason a call on a receiver of unproven type carries. `buildString` itself,
+/// a library function, records its own reason either way.
+#[test]
+fn a_bare_call_an_unproven_receiver_lambda_refuses_records_no_receiver_evidence() {
+    let file = "src/main/kotlin/app/lam/Built.kt";
+    let control = "src/main/kotlin/app/lam/Control.kt";
+    let tmp = tree(&[LAMBDA_TOP, (file, "package app.lam\n\nfun built(): String = buildString { append(\"x\") }\n")]);
+    let engine = index(tmp.path());
+    let tmp_control = tree(&[LAMBDA_TOP, (control, "package app.lam\n\nfun built(): String = buildString { }\n")]);
+    let engine_control = index(tmp_control.path());
+    let mut expected = kotlin_residue(&engine_control);
+    match expected.iter_mut().find(|(reason, _)| *reason == CallResidueReason::NoReceiverEvidence) {
+        Some((_, n)) => *n += 1,
+        None => expected.push((CallResidueReason::NoReceiverEvidence, 1)),
+    }
+    expected.sort();
+    assert_eq!(kotlin_residue(&engine), expected);
+}
+
+/// FR-RS-31 (S-834, review of I3-INT): a bare call an unproven receiver lambda
+/// refuses records the lambda's reason alone. Its own bind's miss — here an
+/// argument count the top-level `one` does not admit — is not the row's
+/// reason, so the row reads `no-receiver-evidence`, never `no-applicable-overload`.
+#[test]
+fn a_refused_bare_call_records_no_receiver_evidence_not_its_own_bind_miss() {
+    let file = "src/main/kotlin/app/lam/Arity.kt";
+    let control = "src/main/kotlin/app/lam/Control.kt";
+    let one = "package app.lam\n\nfun one(s: String) {}\n\n";
+    let tmp = tree(&[(file, &format!("{one}fun a(): String = buildString {{ one(\"a\", \"b\") }}\n"))]);
+    let engine = index(tmp.path());
+    let tmp_control = tree(&[(control, &format!("{one}fun a(): String = buildString {{ }}\n"))]);
+    let engine_control = index(tmp_control.path());
+    let mut expected = kotlin_residue(&engine_control);
+    match expected.iter_mut().find(|(reason, _)| *reason == CallResidueReason::NoReceiverEvidence) {
+        Some((_, n)) => *n += 1,
+        None => expected.push((CallResidueReason::NoReceiverEvidence, 1)),
+    }
+    expected.sort();
+    assert_eq!(kotlin_residue(&engine), expected);
+}
+
+/// FR-RS-31 (S-834, review of I3-INT): when a proven receiver whose whole
+/// hierarchy the repository holds declares no such member, the bare call
+/// inside its lambda reads as the same bare call outside it — the receiver
+/// type's own miss is not carried into the bare call's reason.
+#[test]
+fn a_proven_receivers_miss_is_not_the_bare_calls_reason() {
+    let file = "src/main/kotlin/app/lam/Proven.kt";
+    let order = "package app.lam\n\nclass Order {\n    fun ship() {}\n}\n\n";
+    let inside = format!("{order}fun a(o: Order) {{ with(o) {{ nothere() }} }}\n");
+    let outside = format!("{order}fun a(o: Order) {{ with(o) {{ }} }}\n\nfun b() {{ nothere() }}\n");
+    let tmp = tree(&[(file, &inside)]);
+    let tmp_outside = tree(&[(file, &outside)]);
+    assert_eq!(kotlin_residue(&index(tmp.path())), kotlin_residue(&index(tmp_outside.path())));
+}
+
+/// FR-RS-31 (S-834 review): the enclosing class's own companion is the
+/// class's scope, not a top-level function: a bare call to its member inside
+/// an unproven receiver lambda binds it, as one to an instance member does —
+/// and as `Builder().apply { create() }` reaches the companion's `create`
+/// (configuration.md, `companion_name`). Another class's companion member,
+/// imported, is an imported function: refused.
+#[test]
+fn an_unproven_receiver_lambda_keeps_the_enclosing_classs_companion_members() {
+    let file = "src/main/kotlin/app/lam/Comp.kt";
+    let other = "src/main/kotlin/app/other/Config.kt";
+    let tmp = tree(&[
+        (other, "package app.other\n\nclass Config {\n    companion object {\n        fun media() {}\n    }\n}\n"),
+        (
+            file,
+            "\
+package app.lam
+
+import app.other.Config.Companion.media
+
+class Comp {
+    companion object {
+        fun make() {}
+    }
+    fun inst() {}
+    fun outside() { make() }
+    fun unproven() = buildString { make(); inst(); media() }
+    fun applied() = Builder().apply { make() }
+}
+
+class Builder
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, file, EdgeKind::Calls),
+        strings(&[
+            &format!("{file}:applied@12 -> {file}:make@7"),
+            &format!("{file}:outside@10 -> {file}:make@7"),
+            &format!("{file}:unproven@11 -> {file}:inst@9"),
+            &format!("{file}:unproven@11 -> {file}:make@7"),
+        ])
+    );
+}
+
+/// FR-RS-44 / FR-RS-31 (S-834 review): a bare call through a local value is
+/// decided by that binding (S-594) inside a receiver lambda too — it keeps its
+/// `local-binding` reason, never the receiver lambda's.
+#[test]
+fn a_call_through_a_local_value_inside_a_receiver_lambda_stays_the_local_binding() {
+    let file = "src/main/kotlin/app/lam/Local.kt";
+    let control = "src/main/kotlin/app/lam/Control.kt";
+    let tmp = tree(&[(file, "package app.lam\n\nfun lv(): String {\n    val audit = { }\n    return buildString { audit() }\n}\n")]);
+    let engine = index(tmp.path());
+    let tmp_control = tree(&[(control, "package app.lam\n\nfun lv(): String {\n    return buildString { }\n}\n")]);
+    let engine_control = index(tmp_control.path());
+    let mut expected = kotlin_residue(&engine_control);
+    expected.push((CallResidueReason::LocalBinding, 1));
+    expected.sort();
+    assert_eq!(kotlin_residue(&engine), expected);
+}
+
+// ── `@file:JvmName` names the facade (S-832, CR-261 K2) ──────────────────────
+
+const SLUGS: (&str, &str) = (
+    "src/main/kotlin/app/text/Strings.kt",
+    "@file:JvmName(\"Slugs\")\n\npackage app.text\n\nfun slug(s: String): String = s.lowercase()\n",
+);
+
+/// The Java caller of the facade tests: each facade call in a method of its
+/// own, so an edge that survives a sync it should not is visible by source.
+const FACADE_CALLER: (&str, &str) = (
+    "src/main/java/app/boot/Boot.java",
+    "\
+package app.boot;
+
+import app.text.Slugs;
+import app.text.StringsKt;
+
+class Boot {
+    void declared() {
+        Slugs.slug(\"x\");
+    }
+
+    void derived() {
+        StringsKt.slug(\"y\");
+    }
+}
+",
+);
+
+/// FR-RS-31 (S-832): a file's `@file:JvmName("Slugs")` names its facade, so
+/// Java's `Slugs.slug("x")` binds and `StringsKt.slug(…)` no longer does; the
+/// import of the declared facade binds the file and the derived one nothing.
+/// A file without the annotation keeps `<Stem>Kt`, another file annotation
+/// (`@file:Suppress("Gone")`) names nothing, and the qualified
+/// `@file:kotlin.jvm.JvmName("Routes")` names its facade too. Each call sits
+/// in a method of its own, so each binding is told apart by its source.
+#[test]
+fn a_jvm_name_annotation_names_the_files_facade_and_the_stem_name_no_longer_binds() {
+    let java = "src/main/java/app/boot/Calls.java";
+    let plain = "src/main/kotlin/app/text/Plain.kt";
+    let paths = "src/main/kotlin/app/text/Paths.kt";
+    let tmp = tree(&[
+        SLUGS,
+        (plain, "@file:Suppress(\"Gone\")\n\npackage app.text\n\nfun plain(): Int = 0\n"),
+        (paths, "@file:kotlin.jvm.JvmName(\"Routes\")\n\npackage app.text\n\nfun route(): Int = 1\n"),
+        (
+            java,
+            "\
+package app.boot;
+
+import app.text.Slugs;
+import app.text.StringsKt;
+import app.text.PlainKt;
+import app.text.Routes;
+
+class Calls {
+    void declared() {
+        Slugs.slug(\"x\");
+    }
+
+    void derived() {
+        StringsKt.slug(\"y\");
+    }
+
+    void plain() {
+        PlainKt.plain();
+    }
+
+    void gone() {
+        Gone.plain();
+    }
+
+    void routes() {
+        Routes.route();
+    }
+}
+",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert_eq!(
+        edges(rt, java, EdgeKind::Calls),
+        strings(&[
+            &format!("{java}:declared@9 -> {}:slug@5", SLUGS.0),
+            &format!("{java}:plain@17 -> {plain}:plain@5"),
+            &format!("{java}:routes@25 -> {paths}:route@5"),
+        ])
+    );
+    // The imports share one source, so their rows are read one by one.
+    let java_rel = java.to_string();
+    let mut imports: Vec<(String, bool)> = rt
+        .submit_read(move |store| {
+            let files: HashMap<i64, String> = store.indexed_files()?.into_iter().map(|f| (f.id, f.path)).collect();
+            Ok(store
+                .unresolved_refs()?
+                .into_iter()
+                .filter(|r| r.kind == EdgeKind::Imports && r.file_id.and_then(|id| files.get(&id)) == Some(&java_rel))
+                .map(|r| (r.target, r.resolved))
+                .collect())
+        })
+        .expect("read runs");
+    imports.sort();
+    assert_eq!(
+        imports,
+        vec![
+            ("app::text::PlainKt".to_string(), true),
+            ("app::text::Routes".to_string(), true),
+            ("app::text::Slugs".to_string(), true),
+            ("app::text::StringsKt".to_string(), false),
+        ]
+    );
+}
+
+/// FR-RS-43 (S-832): the residue `status` states walks the facade the file
+/// declares, as the binder does — the unbound `StringsKt.slug(…)` is classified
+/// with a reason, never read as bindable and left unclassified.
+#[test]
+fn the_call_residue_walks_the_declared_facade() {
+    let tmp = tree(&[SLUGS, FACADE_CALLER]);
+    let engine = index(tmp.path());
+    let residue = engine
+        .graph().status()
+        .resolution_by_language
+        .into_iter()
+        .find(|row| row.language == "java")
+        .and_then(|row| row.call_residue)
+        .expect("the java row states its call residue");
+    let reasons: u64 = residue.reasons.values().sum();
+    assert_eq!((residue.unbound, residue.unclassified, reasons), (1, 0, 1), "{residue:?}");
+}
+
+/// FR-RS-31, NFR-RA-05 (S-832): two files declaring one facade bind neither,
+/// as two files deriving one do — koin's `KoinWaitExt.kt` and
+/// `KoinWaitExt.jvm.kt` both declare `KoinWaitExtKt`, which before the
+/// annotation was read named the first file alone.
+#[test]
+fn two_files_declaring_one_facade_bind_neither() {
+    let java = "src/main/java/app/boot/Wait.java";
+    let tmp = tree(&[
+        (
+            "src/commonMain/kotlin/app/core/KoinWaitExt.kt",
+            "@file:JvmName(\"KoinWaitExtKt\")\n@file:JvmMultifileClass\n\npackage app.core\n\nfun awaitAll(a: Int): Int = a\n",
+        ),
+        (
+            "src/jvmMain/kotlin/app/core/KoinWaitExt.jvm.kt",
+            "@file:JvmName(\"KoinWaitExtKt\")\n@file:JvmMultifileClass\n\npackage app.core\n\nfun awaitOne(a: Int): Int = a\n",
+        ),
+        (
+            java,
+            "package app.boot;\n\nimport app.core.KoinWaitExtKt;\n\nclass Wait {\n    void start() {\n        KoinWaitExtKt.awaitAll(1);\n        KoinWaitExtKt.awaitOne(1);\n    }\n}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    let rt = engine.runtime().unwrap();
+    assert!(edges(rt, java, EdgeKind::Calls).is_empty(), "{:?}", edges(rt, java, EdgeKind::Calls));
+    assert!(edges(rt, java, EdgeKind::Imports).is_empty(), "{:?}", edges(rt, java, EdgeKind::Imports));
+}
+
+/// NFR-RA-06 (S-832): a sync that adds or removes a file's `@file:JvmName`
+/// binds what a fresh index of the final tree binds — the file's own facade,
+/// and a second file starting and stopping to declare it, which no node of
+/// that file spells.
+#[test]
+fn sync_equals_reindex_when_a_jvm_name_annotation_is_added_or_removed() {
+    let strings = SLUGS.0;
+    let other = "src/main/kotlin/app/text/Other.kt";
+    let derived = "package app.text\n\nfun slug(s: String): String = s.lowercase()\n";
+    let other_plain = "package app.text\n\nfun other(): Int = 2\n";
+    let other_slugs = "@file:JvmName(\"Slugs\")\n\npackage app.text\n\nfun other(): Int = 2\n";
+    let java = FACADE_CALLER.0;
+    let declared = format!("{java}:declared@7 -> {strings}:slug@5");
+    let steps: [(&str, &str, Vec<String>); 4] = [
+        (strings, SLUGS.1, vec![declared.clone()]),
+        (other, other_slugs, vec![]),
+        (other, other_plain, vec![declared]),
+        (strings, derived, vec![format!("{java}:derived@11 -> {strings}:slug@3")]),
+    ];
+    let mut state: BTreeMap<&str, &str> = BTreeMap::from([(strings, derived), (other, other_plain), FACADE_CALLER]);
+    let tmp_a = tree(&state.iter().map(|(p, t)| (*p, *t)).collect::<Vec<_>>());
+    let engine_a = index(tmp_a.path());
+    let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
+    let rt_a = engine_a.runtime().unwrap();
+    assert_eq!(edges(rt_a, java, EdgeKind::Calls), vec![format!("{java}:derived@11 -> {strings}:slug@3")]);
+    for (i, (rel, text, bound)) in steps.iter().enumerate() {
+        write(tmp_a.path(), rel, text);
+        engine_a.pipeline().sync(&[root_a.join(rel)]);
+        state.insert(rel, text);
+        let tmp_b = tree(&state.iter().map(|(p, t)| (*p, *t)).collect::<Vec<_>>());
+        let engine_b = index(tmp_b.path());
+        assert_eq!(edges(rt_a, java, EdgeKind::Calls), *bound, "step {i}");
+        assert_eq!(graph_fingerprint(rt_a), graph_fingerprint(engine_b.runtime().unwrap()), "step {i}");
+    }
 }

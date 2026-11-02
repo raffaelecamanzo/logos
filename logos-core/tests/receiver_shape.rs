@@ -47,7 +47,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -505,7 +505,7 @@ fn reindexing_is_byte_identical_and_a_synced_edit_matches_a_fresh_reindex() {
     let engine = index(tmp.path());
     let rt = engine.runtime().unwrap();
     let (edges, rows_a, rows_b) = (call_edges(rt), call_rows(rt, PY_FILE), call_rows(rt, b_file));
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(
         (call_edges(rt), call_rows(rt, PY_FILE), call_rows(rt, b_file)),
         (edges, rows_a.clone(), rows_b),
@@ -519,7 +519,7 @@ fn reindexing_is_byte_identical_and_a_synced_edit_matches_a_fresh_reindex() {
     );
     write(tmp.path(), PY_FILE, &edited);
     let changed: Vec<PathBuf> = vec![PY_FILE.into()];
-    engine.sync(&changed);
+    engine.pipeline().sync(&changed);
 
     let fresh_tmp = tree(&[(PY_FILE, &edited), (b_file, b), (PY_OVERRIDE, PY_MARKED)]);
     let fresh = index(fresh_tmp.path());

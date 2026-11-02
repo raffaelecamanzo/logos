@@ -1,12 +1,16 @@
-//! Focus counts a Rust `impl` method and a Go receiver method toward the
-//! struct their recorded type names (S-510, [CR-166], metric semantics v9),
-//! driven end to end through the public [`Engine`] façade against real Rust and
-//! Go extraction.
+//! Focus counts a Rust inherent `impl` method and a Go receiver method toward
+//! the struct their recorded type names (S-510, [CR-166], metric semantics v9),
+//! and a Rust trait impl's method toward none (S-826, [CR-257], v10), driven end
+//! to end through the public [`Engine`] façade against real Rust and Go
+//! extraction.
 //!
 //! - The 25-method AC holds across the shapes real code has: a Rust struct
-//!   whose methods sit in an inherent `impl` and a trait `impl` in two files of
-//!   one crate, a Go type whose methods have pointer and value receivers in two
-//!   files of one package. A 5-method struct of each is not god.
+//!   whose methods sit in two inherent `impl`s in two files of one crate, a Go
+//!   type whose methods have pointer and value receivers in two files of one
+//!   package. A 5-method struct of each is not god.
+//! - A method of `impl Trait for Type` counts toward no container, in Focus and
+//!   the `no_god_containers` budget, and is reported as `trait_impl` beside the
+//!   denominator; the innermost impl block holding a method decides.
 //! - A method naming zero structs of its crate/package, or two same-named
 //!   structs of it, counts toward none, and the unattributed count is reported
 //!   with its denominator. A same-named struct of another crate/package is
@@ -15,6 +19,7 @@
 //!   Cohesion (which scores `Class` alone) reads nothing of the attribution.
 //!
 //! [CR-166]: ../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
+//! [CR-257]: ../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
 
 use std::fs;
 use std::path::Path;
@@ -33,9 +38,9 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// Index `root` and record one snapshot under the default thresholds.
 fn scan(root: &Path) -> RecordedSnapshot {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     metrics::snapshot(
@@ -70,12 +75,23 @@ fn go_methods(recv: &str, first: usize, n: usize) -> String {
         .collect()
 }
 
+/// `n` Rust trait-impl methods `t0..` reading `self.x`, and the trait's
+/// matching declarations.
+fn trait_methods(n: usize) -> (String, String) {
+    let bodies = (0..n)
+        .map(|i| format!("    fn t{i}(&self) -> i32 {{\n        self.x + {i}\n    }}\n"))
+        .collect();
+    let decls = (0..n).map(|i| format!("    fn t{i}(&self) -> i32;\n")).collect();
+    (bodies, decls)
+}
+
 /// The 25-method AC on Rust with the methods split the way real code splits
-/// them: `Big`'s impls sit in two files of one crate — 13 inherent methods in
-/// the file declaring it, 12 of a trait impl in a submodule's directory — and a 5-method
-/// `Small` beside it. Both are counted toward their struct, `Big` alone is god.
+/// them: `Big`'s two inherent impls sit in two files of one crate — 13 methods
+/// in the file declaring it, 12 in a submodule's directory — and a 5-method
+/// `Small` beside it. Both are counted toward their struct, `Big` alone is god,
+/// and no method was set aside as a trait impl's.
 #[test]
-fn a_rust_struct_with_inherent_and_trait_impls_in_two_files_is_god() {
+fn a_rust_struct_with_two_inherent_impls_in_two_files_is_god() {
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
@@ -86,24 +102,96 @@ fn a_rust_struct_with_inherent_and_trait_impls_in_two_files_is_god() {
             rust_methods(5),
         ),
     );
-    let trait_methods: String = (0..12)
-        .map(|i| format!("    fn t{i}(&self) -> i32 {{\n        self.x + {i}\n    }}\n"))
+    let more: String = (13..25)
+        .map(|i| format!("    pub fn w{i}(&self) -> i32 {{\n        self.x + {i}\n    }}\n"))
         .collect();
-    let trait_decls: String = (0..12).map(|i| format!("    fn t{i}(&self) -> i32;\n")).collect();
+    write(tmp.path(), "src/inner/mod.rs", "pub mod more;\n");
+    write(tmp.path(), "src/inner/more.rs", &format!("use crate::Big;\n\nimpl Big {{\n{more}}}\n"));
+    let s = scan(tmp.path());
+
+    assert_eq!(god_names(&s), ["Big"], "13 + 12 bodied inherent methods → god; 5 → not");
+    assert_eq!(s.metrics.focus.expect("structs are containers").raw, 0.5);
+    let reach = s.metrics.focus_attribution.expect("the methods record a self type");
+    assert_eq!(
+        (reach.trait_impl, reach.unattributed, reach.denominator),
+        (0, 0, 30),
+        "every method reached its struct"
+    );
+}
+
+/// A method of `impl Trait for Type` is the trait's contract, not the type's
+/// surface (S-826, [CR-257], metric semantics v10): `Big`'s 13 inherent methods
+/// count, the 12 of its `impl Worker for Big` in another file of its crate count
+/// toward no container — so `Big` is not god — and `focus_attribution` reports
+/// them set aside beside the denominator, which still counts them.
+///
+/// [CR-257]: ../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+#[test]
+fn a_rust_trait_impl_method_counts_toward_no_container() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/lib.rs",
+        &format!(
+            "mod inner;\n\npub struct Big {{\n    x: i32,\n}}\n\nimpl Big {{\n{}}}\n\npub struct Small {{\n    x: i32,\n}}\n\nimpl Small {{\n{}}}\n",
+            rust_methods(13),
+            rust_methods(5),
+        ),
+    );
+    let (bodies, decls) = trait_methods(12);
     write(tmp.path(), "src/inner/mod.rs", "pub mod traits;\n");
     write(
         tmp.path(),
         "src/inner/traits.rs",
+        &format!("use crate::Big;\n\npub trait Worker {{\n{decls}}}\n\nimpl Worker for Big {{\n{bodies}}}\n"),
+    );
+    let s = scan(tmp.path());
+
+    assert!(god_names(&s).is_empty(), "13 inherent methods are under 20: {:?}", god_names(&s));
+    let reach = s.metrics.focus_attribution.expect("the methods record a self type");
+    assert_eq!(
+        (reach.trait_impl, reach.unattributed, reach.denominator),
+        (12, 0, 30),
+        "the trait impl's 12 set aside, of the 30 that record a self type"
+    );
+    assert_eq!(
+        serde_json::to_value(reach).expect("the attribution serialises"),
+        serde_json::json!({"unattributed": 0, "trait_impl": 12, "denominator": 30}),
+        "`scan --json` reads `metrics.focus_attribution` with its `trait_impl` key"
+    );
+}
+
+/// The block that decides is the **innermost** one holding the method. `Big`'s
+/// inherent `host` holds an `impl Worker for Big` (12 methods, set aside), and
+/// the `carrier` of its `impl Other for Big` holds an inherent `impl Big` of 20
+/// methods (counted). `Big` counts `host` and the 20 — god at 21 — and the 12
+/// and `carrier` are set aside. Judged by the outermost block, or by any trait
+/// block holding the line, `Big` would read 13 or 1 methods and not be god.
+#[test]
+fn a_method_of_a_nested_impl_is_judged_by_its_innermost_block() {
+    let tmp = TempDir::new().unwrap();
+    let (bodies, decls) = trait_methods(12);
+    let inner: String = (0..20)
+        .map(|i| format!("            pub fn n{i}(&self) -> i32 {{\n                self.x + {i}\n            }}\n"))
+        .collect();
+    write(
+        tmp.path(),
+        "src/lib.rs",
         &format!(
-            "use crate::Big;\n\npub trait Worker {{\n{trait_decls}}}\n\nimpl Worker for Big {{\n{trait_methods}}}\n"
+            "pub struct Big {{\n    x: i32,\n}}\n\npub trait Worker {{\n{decls}}}\n\npub trait Other {{\n    fn carrier(&self) -> i32;\n}}\n\n\
+             impl Big {{\n    pub fn host(&self) -> i32 {{\n        impl Worker for Big {{\n{bodies}        }}\n        self.x\n    }}\n}}\n\n\
+             impl Other for Big {{\n    fn carrier(&self) -> i32 {{\n        impl Big {{\n{inner}        }}\n        self.x\n    }}\n}}\n"
         ),
     );
     let s = scan(tmp.path());
 
-    assert_eq!(god_names(&s), ["Big"], "13 + 12 bodied methods → god; 5 → not");
-    assert_eq!(s.metrics.focus.expect("structs are containers").raw, 0.5);
+    assert_eq!(god_names(&s), ["Big"], "host + the 20 nested inherent methods → 21");
     let reach = s.metrics.focus_attribution.expect("the methods record a self type");
-    assert_eq!((reach.unattributed, reach.denominator), (0, 30), "every method reached its struct");
+    assert_eq!(
+        (reach.trait_impl, reach.unattributed, reach.denominator),
+        (12 + 1, 0, 1 + 12 + 1 + 20),
+        "the 12 nested Worker methods and `carrier` set aside"
+    );
 }
 
 /// The 25-method AC on Go with pointer and value receivers in two files of one
@@ -131,7 +219,7 @@ fn a_go_type_with_pointer_and_value_receivers_in_two_files_is_god() {
     assert_eq!(god_names(&s), ["Big"], "14 pointer + 11 value methods → god; 5 → not");
     assert_eq!(s.metrics.focus.expect("Go types are containers").raw, 0.5);
     let reach = s.metrics.focus_attribution.expect("the receivers record a base type");
-    assert_eq!((reach.unattributed, reach.denominator), (0, 30));
+    assert_eq!((reach.trait_impl, reach.unattributed, reach.denominator), (0, 0, 30), "Go has no trait impl");
 }
 
 /// A Rust method counts toward a struct of its **crate** only. Three crates:
@@ -286,7 +374,7 @@ fn attribution_leaves_containment_and_cohesion_alone() {
         &format!("pub struct Big {{\n    x: i32,\n}}\n\nimpl Big {{\n{}}}\n", rust_methods(25)),
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime");
     let (nodes, edges) = rt
         .submit_read(|store| Ok((store.all_nodes()?, store.all_edges()?)))
@@ -311,8 +399,9 @@ fn attribution_leaves_containment_and_cohesion_alone() {
 /// The `no_god_containers` budget counts the same containers Focus does: over
 /// the attributed methods of a Rust struct and of a Go type, under
 /// `god_methods = 4`, exactly the 5-method one of each is a violation and the
-/// 2-method one is not. The budget reads the links through `check`/`scan`'s own
-/// store read, not through the metrics'.
+/// 2-method one is not — nor is `Traited`, whose 2 inherent methods count and
+/// whose 5 of `impl Worker for Traited` do not (S-826). The budget reads the
+/// links through `check`/`scan`'s own store read, not through the metrics'.
 #[test]
 fn the_god_container_budget_counts_attributed_methods() {
     let tmp = TempDir::new().unwrap();
@@ -321,13 +410,16 @@ fn the_god_container_budget_counts_attributed_methods() {
         ".logos/rules.toml",
         "[constraints]\nno_god_containers = true\n\n[metric_thresholds]\ngod_methods = 4\n",
     );
+    let (bodies, decls) = trait_methods(5);
     write(
         tmp.path(),
         "src/lib.rs",
         &format!(
-            "pub struct Wide {{\n    x: i32,\n}}\n\nimpl Wide {{\n{}}}\n\npub struct Narrow {{\n    x: i32,\n}}\n\nimpl Narrow {{\n{}}}\n",
+            "pub struct Wide {{\n    x: i32,\n}}\n\nimpl Wide {{\n{}}}\n\npub struct Narrow {{\n    x: i32,\n}}\n\nimpl Narrow {{\n{}}}\n\n\
+             pub struct Traited {{\n    x: i32,\n}}\n\nimpl Traited {{\n{}}}\n\npub trait Worker {{\n{decls}}}\n\nimpl Worker for Traited {{\n{bodies}}}\n",
             rust_methods(5),
-            rust_methods(2)
+            rust_methods(2),
+            rust_methods(2),
         ),
     );
     write(
@@ -340,8 +432,8 @@ fn the_god_container_budget_counts_attributed_methods() {
         ),
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    let scanned = engine.scan(false).expect("scan runs");
+    engine.pipeline().index();
+    let scanned = engine.quality().scan(false).expect("scan runs");
 
     let mut gods: Vec<&str> = scanned
         .violations

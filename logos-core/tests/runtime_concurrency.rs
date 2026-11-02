@@ -312,7 +312,7 @@ fn index_the_fixture(eager: bool) -> String {
             .compile_all_queries()
             .expect("every query compiles");
     }
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(
         indexed.files_indexed,
         MULTI_LANGUAGE_FIXTURE.len() as u64,

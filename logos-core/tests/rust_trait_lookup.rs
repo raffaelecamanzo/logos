@@ -56,7 +56,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -100,7 +100,7 @@ fn from<'a>(edges: &'a BTreeMap<String, Vec<String>>, caller: &str) -> &'a [Stri
 /// reasons partition the unbound rows and that none is unclassified.
 fn residue(engine: &Engine) -> BTreeMap<R, u64> {
     let residue: CallResidue = engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == "rust")
@@ -628,7 +628,7 @@ fn synced_equals_reindexed(initial: &[(&str, &str)], edits: &[(&str, &str)]) -> 
         write(tmp.path(), rel, text);
         changed.push(root.join(rel));
     }
-    engine.sync(&changed);
+    engine.pipeline().sync(&changed);
     let rt = engine.runtime().unwrap();
 
     let mut final_state: BTreeMap<&str, &str> = initial.iter().copied().collect();
@@ -728,7 +728,7 @@ fn a_purged_empty_impl_takes_its_default_back() {
     );
     let narrowed = "exclude = [\"src/imp.rs\"]\n";
     write(tmp.path(), ".logos/config.toml", narrowed);
-    engine.scan(true).expect("scan reconciles");
+    engine.quality().scan(true).expect("scan reconciles");
     let rt = engine.runtime().unwrap();
 
     let fresh = tree(&files);

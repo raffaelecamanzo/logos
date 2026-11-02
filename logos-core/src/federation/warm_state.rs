@@ -26,11 +26,11 @@
 //!   channels reach here durably and all map to `degraded`: a member whose
 //!   engine could not be **started**, a member that started but whose
 //!   **freshness read** failed, and a member whose **warm** was attempted and
-//!   failed. The second takes care — [`Engine::status`](crate::Engine::status)
+//!   failed. The second takes care — [`Graph::status`](crate::Graph::status)
 //!   is infallible and degrades to a *defaulted* [`StatusInfo`](crate::models::StatusInfo) whose
 //!   `indexed: false` is indistinguishable from an honestly empty graph — so
 //!   [`workspace_status`](super::query::workspace_status) fans
-//!   [`Engine::try_status`](crate::Engine::try_status) and folds its `Err` into the per-member error
+//!   [`Graph::try_status`](crate::Graph::try_status) and folds its `Err` into the per-member error
 //!   channel instead.
 //!
 //! # The record this module reads ([FR-WS-17])
@@ -522,7 +522,7 @@ impl WarmEvidence {
 /// The caller owes this distinction: an `Ok(false)` that actually came from a
 /// *failed* read would be labeled `deferred` here, which is why
 /// [`workspace_status`](super::query::workspace_status) fans the fallible
-/// [`Engine::try_status`](crate::Engine::try_status) rather than the degrading [`Engine::status`](crate::Engine::status).
+/// [`Graph::try_status`](crate::Graph::try_status) rather than the degrading [`Graph::status`](crate::Graph::status).
 ///
 /// # Precedence
 /// **Demonstrated index presence outranks the durable record** ([BR-47]): a

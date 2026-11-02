@@ -8,6 +8,17 @@
 use super::*;
 use crate::plugin::LanguageRegistry;
 
+/// The four quoted language ids and extensions the JVM guard forbids anywhere
+/// in `src/resolve` (`jvm_parity`), kept here, in a file that guard skips, so
+/// the `language_literals` guard can also name them without tripping it.
+#[cfg(all(feature = "lang-java", feature = "lang-kotlin"))]
+const JVM_ID_LITERALS: [&str; 4] = ["\"kotlin\"", "\"java\"", "\"kt\"", "\"scala\""];
+
+/// The registry-derived language-literal guard (S-839); it needs every plugin
+/// loaded, so it runs in the `lang-all` suite only.
+#[cfg(feature = "lang-all")]
+mod language_literals;
+
 /// Scan a source snippet with the plugin registered for `ext` — the capture
 /// dialects are per-language, so each language arm enters through its own
 /// extension.
@@ -1506,24 +1517,27 @@ fn a_javascript_template_path_is_read_verbatim_under_the_shared_path_rule() {
 /// The template patterns keep the shared Express patterns' rules — a
 /// router-named receiver, never a capitalised method — and apply the receiver
 /// rule to the handler-bearing form too: a template is how a client call spells
-/// an interpolated URL, and its callback is no route handler. And they are
-/// JavaScript's own layer, so a TypeScript file reads a template path as before.
+/// an interpolated URL, and its callback is no route handler. They are the
+/// shared TypeScript-family query's since S-822, so JavaScript and TypeScript
+/// read a template path alike.
 #[test]
 #[cfg(feature = "lang-typescript")]
-fn a_javascript_template_path_keeps_the_express_receiver_and_method_rules() {
-    for source in [
-        "cache.get(`${base}/key`);",
-        "app.Get(`${base}/users`, handler);",
-        "axios.get(`/api/items/${item.id}`, config);",
-        "axios.post(`${API_URL}/items`, item);",
-        "https.get(`${base}/health`, onResponse);",
-    ] {
-        assert!(scan_lang("js", source).routes.is_empty(), "{source}");
-    }
-    for ext in TS_EXTENSIONS {
-        assert!(
-            scan_lang(ext, "app.get(`${base}/ping`, handler);").routes.is_empty(),
-            "{ext}: the template layer is JavaScript's alone"
+fn a_template_path_keeps_the_express_receiver_and_method_rules_in_every_typescript_family_language() {
+    for ext in ["js"].into_iter().chain(TS_EXTENSIONS) {
+        for source in [
+            "cache.get(`${base}/key`);",
+            "app.Get(`${base}/users`, handler);",
+            "axios.get(`/api/items/${item.id}`, config);",
+            "axios.post(`${API_URL}/items`, item);",
+            "https.get(`${base}/health`, onResponse);",
+        ] {
+            assert!(scan_lang(ext, source).routes.is_empty(), "{ext}: {source}");
+        }
+        let got: Vec<(String, String, Option<String>)> = route_triples(scan_lang(ext, "app.get(`${base}/ping`, handler);"));
+        assert_eq!(
+            got,
+            [("${base}/ping".to_string(), "GET".to_string(), Some("handler".to_string()))],
+            "{ext}: one route, with its handler"
         );
     }
 }
@@ -4551,8 +4565,12 @@ mod jvm_parity {
             }
             // Language-specific logic need not name a node kind at all — a
             // `plugin.id == "kotlin"` branch would do. The guard would miss
-            // that, so it is asserted directly.
-            for id in ["\"kotlin\"", "\"java\"", "\"kt\"", "\"scala\""] {
+            // that, so it is asserted directly. This closed list keeps its
+            // scope (every file but those named `tests.rs`, so test modules and
+            // `*_tests.rs` are in; no allowlist); the registry-derived
+            // guard for every other language id and extension is
+            // `language_literals` (S-839).
+            for id in JVM_ID_LITERALS {
                 assert!(
                     !code.contains(id),
                     "{file} branches on the language id {id}; the shared \

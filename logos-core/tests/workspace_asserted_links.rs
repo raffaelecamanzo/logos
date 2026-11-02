@@ -96,8 +96,8 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// closed before the registry re-opens it.
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 fn fixture(tmp: &Path) -> Vec<Member> {
@@ -423,7 +423,7 @@ fn a_renamed_link_target_turns_no_match_and_its_root_disappears_on_the_next_answ
     let source = root.join("api/src/lib.rs");
     fs::write(&source, API_LIB.replace("get_cart", "get_basket")).unwrap();
     let api = registry.engine_for("api").expect("api starts");
-    let _ = api.sync(&[source]);
+    let _ = api.pipeline().sync(&[source]);
 
     let after = reach(&registry);
     assert!(after.get("live_via_asserted_link").is_none(), "the root is gone: {after}");

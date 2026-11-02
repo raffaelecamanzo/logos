@@ -66,9 +66,9 @@ fn scan_components(n: usize) -> (TempDir, RecordedSnapshot) {
         write(tmp.path(), &format!("src/Board{i}.tsx"), &component(&format!("Board{i}")));
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     let member_access = engine
@@ -125,7 +125,7 @@ fn two_tsx_classes_read_cohesion_not_applicable_too_few_classes() {
     // The `quality-report` / session readout computes fresh and carries the
     // same reason beside the graph dimensions' ones.
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert_eq!(readout.cohesion_not_applicable.as_ref(), Some(na));
     let json = serde_json::to_value(&readout).unwrap();
     assert_eq!(json["cohesion_not_applicable"]["reason"], "2 of 5 classes — too few classes to score");

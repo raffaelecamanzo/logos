@@ -1,5 +1,5 @@
 //! The branch delta (S-677, [FR-GV-24], [UAT-GV-14], [ADR-82]), end-to-end
-//! through `Engine::review` over real git fixtures.
+//! through `Review::delta` over real git fixtures.
 //!
 //! Coverage by acceptance criterion:
 //! - a branch adding a 6-deep function reports it `new` with value 6 and
@@ -135,12 +135,12 @@ fn rust_repo() -> TempDir {
 
 fn started(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
 fn review(engine: &Engine, base: &str) -> BranchReview {
-    let review = engine.review(Some(base)).expect("review runs");
+    let review = engine.quality().review().delta(Some(base)).expect("review runs");
     assert!(review.measured, "measured: {:?}", review.not_measured_because);
     review
 }
@@ -172,15 +172,15 @@ fn a_new_deep_function_reads_new_against_the_recorded_snapshot_and_its_fix_resol
     let tmp = rust_repo();
     let root = tmp.path();
     let engine = started(root);
-    engine.scan(true).expect("scan records a snapshot at main");
+    engine.quality().scan(true).expect("scan records a snapshot at main");
 
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
     commit(root, "add a 6-deep function");
-    engine.index();
+    engine.pipeline().index();
     // A later snapshot at the branch head: the record read is by the
     // merge-base's own snapshot, never the latest one.
-    engine.scan(true).expect("scan records a snapshot at the branch head");
+    engine.quality().scan(true).expect("scan records a snapshot at the branch head");
 
     let added = review(&engine, "main");
     assert_eq!(added.merge_base.as_deref(), Some(rev(root, "main").as_str()));
@@ -209,12 +209,12 @@ fn a_new_deep_function_reads_new_against_the_recorded_snapshot_and_its_fix_resol
     // The branch lands; a fix branch off the new main flattens the function.
     git(root, &["checkout", "-q", "main"]);
     git(root, &["merge", "-q", "--ff-only", "feature"]);
-    engine.index();
-    engine.scan(true).expect("scan records a snapshot at the new main");
+    engine.pipeline().index();
+    engine.quality().scan(true).expect("scan records a snapshot at the new main");
     git(root, &["checkout", "-q", "-b", "fix"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 2)));
     commit(root, "flatten it");
-    engine.index();
+    engine.pipeline().index();
 
     let fixed = review(&engine, "main");
     let beta = entry(&fixed, "nesting", "beta_depth_six").expect("the fixed function is listed");
@@ -226,11 +226,11 @@ fn a_copied_builder_is_a_new_near_clone_group() {
     let tmp = rust_repo();
     let root = tmp.path();
     let engine = started(root);
-    engine.scan(true).expect("scan");
+    engine.quality().scan(true).expect("scan");
     git(root, &["checkout", "-q", "-b", "copy"]);
     write(root, "src/build.rs", &format!("{BUILDER}\n{BUILDER_COPY}"));
     commit(root, "copy the builder");
-    engine.index();
+    engine.pipeline().index();
 
     let copied = review(&engine, "main");
     let names: Vec<Vec<(&str, bool)>> = copied
@@ -251,13 +251,13 @@ fn without_a_merge_base_snapshot_the_shadow_is_built_once_cached_and_reused() {
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
     commit(root, "add a 6-deep function");
-    engine.index();
+    engine.pipeline().index();
     // A snapshot at the branch head: a commit that is not the merge-base, so
     // it must never stand in for the before-state.
-    engine.scan(true).expect("scan records a snapshot at the branch head");
-    let check_before = engine.check_rules(None, false).expect("check runs");
-    let gate_before = engine.gate(None, false, false).expect("gate runs");
-    let snapshots_before = engine.evolution(None).expect("evolution").snapshots.len();
+    engine.quality().scan(true).expect("scan records a snapshot at the branch head");
+    let check_before = engine.quality().check_rules(None, false).expect("check runs");
+    let gate_before = engine.quality().gate(None, false, false).expect("gate runs");
+    let snapshots_before = engine.quality().readouts().evolution(None).expect("evolution").snapshots.len();
 
     let first = review(&engine, "main");
     let merge_base = rev(root, "main");
@@ -284,14 +284,14 @@ fn without_a_merge_base_snapshot_the_shadow_is_built_once_cached_and_reused() {
         "a rerun is byte-identical"
     );
 
-    let check_after = engine.check_rules(None, false).expect("check runs");
-    let gate_after = engine.gate(None, false, false).expect("gate runs");
+    let check_after = engine.quality().check_rules(None, false).expect("check runs");
+    let gate_after = engine.quality().gate(None, false, false).expect("gate runs");
     assert_eq!(check_after.exit_code(false), check_before.exit_code(false));
     assert_eq!(check_after.passed, check_before.passed);
     assert_eq!(check_after.violations, check_before.violations);
     assert_eq!(gate_after.exit_code(), gate_before.exit_code());
     assert_eq!(
-        engine.evolution(None).expect("evolution").snapshots.len(),
+        engine.quality().readouts().evolution(None).expect("evolution").snapshots.len(),
         snapshots_before + 1,
         "the review appended no snapshot; only the gate above did"
     );
@@ -303,11 +303,11 @@ fn a_contract_with_rules_classifies_its_violations_against_the_shadow() {
     let root = tmp.path();
     write(root, ".logos/rules.toml", "[constraints]\nmax_nesting_depth = 4\nmax_cycles = 7\n");
     let engine = started(root);
-    engine.scan(true).expect("a snapshot at main, which a contract with rules cannot use");
+    engine.quality().scan(true).expect("a snapshot at main, which a contract with rules cannot use");
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
     commit(root, "add a 6-deep function");
-    engine.index();
+    engine.pipeline().index();
 
     let delta = review(&engine, "main");
     assert_eq!(delta.before_state, Some(BranchReview::SHADOW_INDEX));
@@ -394,7 +394,7 @@ fn a_base_that_does_not_resolve_classifies_nothing_and_says_why() {
     let tmp = rust_repo();
     let root = tmp.path();
     let engine = started(root);
-    let missing = engine.review(Some("no-such-branch")).expect("review answers");
+    let missing = engine.quality().review().delta(Some("no-such-branch")).expect("review answers");
     assert!(!missing.measured);
     assert_eq!(missing.base_origin, BranchReview::STATED);
     assert!(
@@ -404,7 +404,7 @@ fn a_base_that_does_not_resolve_classifies_nothing_and_says_why() {
     assert!(missing.offenders.is_empty() && missing.violations.is_empty());
     assert!(cache_files(root).is_empty(), "nothing was measured or cached");
 
-    let defaulted = engine.review(None).expect("review answers");
+    let defaulted = engine.quality().review().delta(None).expect("review answers");
     assert_eq!(defaulted.base_origin, BranchReview::DEFAULT_BRANCH);
     assert_eq!(defaulted.base, "main", "no origin, so main is the default branch");
     assert!(defaulted.measured);
@@ -452,7 +452,7 @@ fn a_merge_base_tree_that_cannot_be_measured_classifies_nothing_and_says_why() {
     fs::remove_file(root.join(".git/objects").join(&blob[..2]).join(&blob[2..])).expect("a loose blob");
     let engine = started(root);
 
-    let review = engine.review(Some("main")).expect("an unmeasurable base is an answer, not an error");
+    let review = engine.quality().review().delta(Some("main")).expect("an unmeasurable base is an answer, not an error");
     assert!(!review.measured, "{review:?}");
     assert!(
         review.not_measured_because.as_deref().unwrap().starts_with("no comparable before-state"),
@@ -477,12 +477,12 @@ fn a_merge_base_snapshot_scored_otherwise_is_not_the_record() {
     let tmp = rust_repo();
     let root = tmp.path();
     let engine = started(root);
-    engine.scan(true).expect("scan records a snapshot at main");
+    engine.quality().scan(true).expect("scan records a snapshot at main");
     let main = rev(root, "main");
     git(root, &["checkout", "-q", "-b", "feature"]);
     write(root, "src/deep.rs", &format!("{}{}", nested("alpha_depth_four", 4), nested("beta_depth_six", 6)));
     commit(root, "add a 6-deep function");
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(review(&engine, "main").before_state, Some(BranchReview::RECORDED_SNAPSHOT));
 
     // Scored under other metric semantics, or before values were recorded:
@@ -516,7 +516,7 @@ fn a_base_with_no_common_history_is_never_measured() {
     git(root, &["checkout", "-q", "--orphan", "elsewhere"]);
     commit(root, "an unrelated root");
     let engine = started(root);
-    let unrelated = engine.review(Some("main")).expect("review answers");
+    let unrelated = engine.quality().review().delta(Some("main")).expect("review answers");
     assert!(!unrelated.measured, "{unrelated:?}");
     assert!(unrelated.merge_base.is_none());
     assert!(unrelated.not_measured_because.as_deref().unwrap().contains("no common ancestor"));
@@ -533,12 +533,12 @@ fn a_deeper_offender_reads_worsened_a_shallower_one_improved_and_both_are_counte
     write(root, "src/deep.rs", &shape(4, 6, 4));
     commit(root, "two 4-deep functions and a 6-deep one");
     let engine = started(root);
-    engine.scan(true).expect("scan records a snapshot at main");
+    engine.quality().scan(true).expect("scan records a snapshot at main");
     git(root, &["checkout", "-q", "-b", "reshape"]);
     // Two deeper and one shallower, all still over 4.
     write(root, "src/deep.rs", &shape(5, 5, 5));
     commit(root, "reshape");
-    engine.index();
+    engine.pipeline().index();
 
     let delta = review(&engine, "main");
     let alpha = entry(&delta, "nesting", "alpha_depth_four").expect("listed");
@@ -604,12 +604,12 @@ fn a_thin_graph_s_longer_module_chain_is_not_classified() {
         let root = tmp.path();
         let engine = started(root);
         if recorded {
-            engine.scan(true).expect("scan records a snapshot at main");
+            engine.quality().scan(true).expect("scan records a snapshot at main");
         }
         git(root, &["checkout", "-q", "-b", "longer"]);
         write(root, "src/c/mod.rs", "pub fn gamma(x: i32) -> i32 {\n    crate::d::delta(x) + 1\n}\n");
         commit(root, "c calls d");
-        engine.index();
+        engine.pipeline().index();
 
         let delta = review(&engine, "main");
         let graph: Vec<_> = delta

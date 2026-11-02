@@ -220,7 +220,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -757,7 +757,7 @@ class Worker
 end
 ",
     );
-    engine.sync(&[reopening.into()]);
+    engine.pipeline().sync(&[reopening.into()]);
     files.push(reopening);
     assert_eq!(calls_from(rt, caller.0), strings(&["lib/worker.rb:go@2 -> lib/runner.rb:run@2"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
@@ -773,7 +773,7 @@ module Runner
 end
 ",
     );
-    engine.sync(&[runner.into()]);
+    engine.pipeline().sync(&[runner.into()]);
     assert_eq!(calls_from(rt, caller.0), strings(&["lib/worker.rb:go@2 -> lib/base.rb:run@2"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 
@@ -786,7 +786,7 @@ class Base
 end
 ",
     );
-    engine.sync(&[base.0.into()]);
+    engine.pipeline().sync(&[base.0.into()]);
     assert!(calls_from(rt, caller.0).is_empty(), "nothing defines `run` any more");
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }
@@ -1065,15 +1065,15 @@ class Worker
 end
 ",
     );
-    engine.sync(&[reopening.0.into()]);
+    engine.pipeline().sync(&[reopening.0.into()]);
     assert!(calls_from(rt, caller.0).is_empty(), "the reopening mixes nothing in now");
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 
     write(tmp.path(), reopening.0, reopening.1);
-    engine.sync(&[reopening.0.into()]);
+    engine.pipeline().sync(&[reopening.0.into()]);
     assert_eq!(calls_from(rt, caller.0), strings(&["lib/worker.rb:go@2 -> lib/runner.rb:run@2"]));
     fs::remove_file(tmp.path().join(reopening.0)).unwrap();
-    engine.sync(&[reopening.0.into()]);
+    engine.pipeline().sync(&[reopening.0.into()]);
     assert!(calls_from(rt, caller.0).is_empty(), "the reopening is gone");
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &files));
 }
@@ -1318,7 +1318,7 @@ module Runner
 end
 ",
     );
-    engine.sync(&[runner.into()]);
+    engine.pipeline().sync(&[runner.into()]);
     assert_eq!(calls_from(rt, worker.0), strings(&["lib/worker.rb:go@4 -> lib/worker.rb:run@10"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[worker.0, runner]));
 
@@ -1349,7 +1349,7 @@ end
     let rt = engine.runtime().unwrap();
     assert!(calls_from(rt, solo.0).is_empty());
     write(tmp.path(), helper.0, "module Helper\n  include Other\nend\n");
-    engine.sync(&[helper.0.into()]);
+    engine.pipeline().sync(&[helper.0.into()]);
     assert_eq!(calls_from(rt, solo.0), strings(&["lib/solo.rb:go@4 -> lib/other.rb:run@2"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &[solo.0, helper.0, other.0]));
 }

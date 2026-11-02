@@ -488,7 +488,7 @@ fi
 # command it names (the network and metrics switches among them).
 SG='scan --config <run>/rule.yml --sarif --output <run>/out.sarif --metrics off --disable-version-check --quiet --exclude .logos'
 OSV='--format json --offline --all-packages --recursive'
-GS='-fmt sarif -out <run>/out.sarif -no-fail -quiet'
+GS='-fmt sarif -out <run>/out.sarif -no-fail'
 CQ='database create <run>/db --language=python --build-mode=none --source-root=. --overwrite'
 n_argv=0
 while IFS='|' read -r s m want; do

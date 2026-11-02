@@ -152,18 +152,44 @@ check_workflow() {
     }' "$1"
 }
 
-# check_dependabot FILE — exit 1 unless version 2 with exactly github-actions and a
-# cooldown of at least one day.
+# dependabot_entries FILE — one line per `updates:` entry, comments dropped:
+# ecosystem|directory|interval|cooldown(0/1)|default-days. Block style only; a
+# flow-style entry reads as ecosystem `?`, so it is refused rather than missed.
+dependabot_entries() {
+    grep -v '^[[:space:]]*#' "$1" | sed -E 's/[[:space:]]+#.*$//' | awk '
+        function val(l) { sub(/^[^:]*:[[:space:]]*/, "", l); gsub(/^"|"$|[[:space:]]+$/, "", l); return l }
+        function flush() { if (inent) print eco "|" dir "|" itv "|" cool "|" days }
+        /^[[:space:]]*-[[:space:]]/ { flush(); inent = 1; eco = "?"; dir = ""; itv = ""; cool = 0; days = ""
+            sub(/^[[:space:]]*-[[:space:]]*/, "") }
+        inent && /^[[:space:]]*package-ecosystem:/ { eco = val($0) }
+        inent && /^[[:space:]]*directory:/ { dir = val($0) }
+        inent && /^[[:space:]]*interval:/ { itv = val($0) }
+        inent && /^[[:space:]]*cooldown:[[:space:]]*$/ { cool = 1 }
+        inent && /^[[:space:]]*default-days:/ { days = val($0) }
+        END { flush() }'
+}
+
+# check_dependabot FILE — exit 1 unless version 2 with exactly the three ecosystems
+# (github-actions at /, cargo at /, npm at /web/ui), each weekly with a cooldown of
+# at least one day.
 check_dependabot() {
-    local f="$1" eco n
+    local f="$1" ents n want eco dir itv cool days
     grep -Eq '^version:[[:space:]]*2[[:space:]]*(#.*)?$' "$f" || { echo "dependabot.yml: not \`version: 2\`"; return 1; }
+    ents="$(dependabot_entries "$f")"
     n="$(grep -v '^[[:space:]]*#' "$f" | grep -o 'package-ecosystem' | wc -l | tr -d ' ')"
-    [ "$n" -eq 1 ] || { echo "dependabot.yml: $n package-ecosystem entries, want exactly 1"; return 1; }
-    eco="$(grep -E '^[[:space:]]*-?[[:space:]]*package-ecosystem:' "$f" | sed -E 's/^[^:]*:[[:space:]]*//; s/[[:space:]]*#.*$//; s/^"(.*)"$/\1/')"
-    [ "$eco" = "github-actions" ] || { echo "dependabot.yml: ecosystem is \`$eco\`, want github-actions"; return 1; }
-    grep -v '^[[:space:]]*#' "$f" | grep -Eq '^[[:space:]]+cooldown:[[:space:]]*$' || { echo "dependabot.yml: no \`cooldown:\` block"; return 1; }
-    grep -v '^[[:space:]]*#' "$f" | grep -Eq '^[[:space:]]+default-days:[[:space:]]*[1-9][0-9]*[[:space:]]*(#.*)?$' ||
-        { echo "dependabot.yml: \`cooldown:\` has no \`default-days\` of at least 1"; return 1; }
+    [ "$n" -eq 3 ] || { echo "dependabot.yml: $n package-ecosystem entries, want exactly 3"; return 1; }
+    for want in "github-actions|/" "cargo|/" "npm|/web/ui"; do
+        printf '%s\n' "$ents" | cut -d'|' -f1,2 | grep -qxF -- "$want" ||
+            { echo "dependabot.yml: no \`${want%%|*}\` entry at \`${want#*|}\`"; return 1; }
+    done
+    while IFS='|' read -r eco dir itv cool days; do
+        [ "$itv" = "weekly" ] || { echo "dependabot.yml: \`$eco\` at \`$dir\` is not weekly"; return 1; }
+        [ "$cool" = "1" ] || { echo "dependabot.yml: \`$eco\` at \`$dir\` has no \`cooldown:\` block"; return 1; }
+        printf '%s' "$days" | grep -Eq '^[1-9][0-9]*$' ||
+            { echo "dependabot.yml: \`$eco\` at \`$dir\` has a \`cooldown:\` with no \`default-days\` of at least 1"; return 1; }
+    done <<EOT
+$ents
+EOT
     return 0
 }
 
@@ -236,7 +262,7 @@ RUN="$(ci_test_run "$WORK/ci-fail-fast.yml")"
 if [ "$RUN" = "cargo test --workspace" ]; then ok "ci.yml: a test step without --no-fail-fast reads differently, so the pin can fail"; else OUT="step run: '$RUN'"; bad "the test-step pin cannot tell --no-fail-fast from its absence"; fi
 
 OUT="$(check_dependabot "$DEP" 2>&1)"; RC=$?
-if [ "$RC" -eq 0 ]; then ok "dependabot.yml: version 2, github-actions only, with a cooldown"; else bad "dependabot.yml carries a defect"; fi
+if [ "$RC" -eq 0 ]; then ok "dependabot.yml: version 2, github-actions, cargo and npm, each weekly with a cooldown"; else bad "dependabot.yml carries a defect"; fi
 
 # --- mutation: each defect must be caught and named -----------------------------
 FIRST_CHECKOUT_SHA="$(grep -Eo 'actions/checkout@[0-9a-f]{40}' "$CI" | head -1 | sed 's/.*@//')"
@@ -383,24 +409,50 @@ dep_caught() {
     OUT="$(check_dependabot "$2" 2>&1)"; RC=$?
     if [ "$RC" -eq 1 ] && printf '%s\n' "$OUT" | grep -qE -- "$3"; then ok "caught: $1"; else bad "not caught ($1): exit $RC, wanted /$3/"; fi
 }
-f="$WORK/dep-cargo.yml"
-{ cat "$DEP"; printf '  - package-ecosystem: cargo\n    directory: /\n    schedule:\n      interval: weekly\n'; } >"$f"
-dep_caught "a second ecosystem (cargo)" "$f" '2 package-ecosystem entries'
-f="$WORK/dep-npm.yml"
-sed -E 's/package-ecosystem: github-actions/package-ecosystem: npm/' "$DEP" >"$f"
-dep_caught "npm in place of github-actions" "$f" 'ecosystem is `npm`'
-f="$WORK/dep-empty.yml"
+# one entry of the real file, dropped: DROP ECOSYSTEM removes its 6 lines.
+drop_entry() { awk -v e="$1" '/^  - package-ecosystem:/ { skip = ($0 ~ ("package-ecosystem: " e "$")) } /^[^ ]/ { skip = 0 } !skip' "$DEP"; }
+for E in github-actions cargo npm; do
+    f="$WORK/dep-no-$E.yml"; drop_entry "$E" >"$f"
+    dep_caught "no $E entry" "$f" '2 package-ecosystem entries'
+done
+f="$WORK/dep-none.yml"
 printf 'version: 2\nupdates: []\n' >"$f"
 dep_caught "no ecosystem at all" "$f" '0 package-ecosystem entries'
+f="$WORK/dep-fourth.yml"
+{ cat "$DEP"; printf '  - package-ecosystem: pip\n    directory: /\n    schedule:\n      interval: weekly\n    cooldown:\n      default-days: 7\n'; } >"$f"
+dep_caught "a fourth ecosystem" "$f" '4 package-ecosystem entries'
 f="$WORK/dep-flow.yml"
-{ cat "$DEP"; printf '  - {package-ecosystem: cargo, directory: /, schedule: {interval: weekly}}\n'; } >"$f"
-dep_caught "a second ecosystem in flow style" "$f" '2 package-ecosystem entries'
+{ drop_entry npm; printf '  - {package-ecosystem: npm, directory: /web/ui, schedule: {interval: weekly}}\n'; } >"$f"
+dep_caught "an npm entry in flow style" "$f" 'no `npm` entry'
 f="$WORK/dep-quoted.yml"
-{ cat "$DEP"; printf '  - "package-ecosystem": cargo\n'; } >"$f"
-dep_caught "a second ecosystem with a quoted key" "$f" '2 package-ecosystem entries'
+sed -E 's/package-ecosystem: npm/"package-ecosystem": npm/' "$DEP" >"$f"
+dep_caught "an npm entry with a quoted key (still one ecosystem, wrong shape caught by count or entry)" "$f" 'no `npm` entry|package-ecosystem entries'
 f="$WORK/dep-prefix.yml"
 sed -E 's/package-ecosystem: github-actions/package-ecosystem: github-actions-foo/' "$DEP" >"$f"
-dep_caught "an ecosystem that only starts with github-actions" "$f" 'ecosystem is `github-actions-foo`'
+dep_caught "an ecosystem that only starts with github-actions" "$f" 'no `github-actions` entry'
+f="$WORK/dep-npm-root.yml"
+sed -E 's#directory: /web/ui#directory: /#' "$DEP" >"$f"
+dep_caught "npm at / instead of /web/ui" "$f" 'no `npm` entry at `/web/ui`'
+f="$WORK/dep-cargo-ui.yml"
+awk '/package-ecosystem: cargo/ { c = 1 } c && /directory: \// { sub(/directory: \//, "directory: /web/ui"); c = 0 } 1' "$DEP" >"$f"
+dep_caught "cargo at /web/ui instead of /" "$f" 'no `cargo` entry at `/`'
+for E in github-actions cargo npm; do
+    f="$WORK/dep-$E-daily.yml"
+    awk -v e="$E" '/package-ecosystem:/ { on = ($0 ~ ("package-ecosystem: " e "$")) } on && /interval: weekly/ { sub(/weekly/, "daily"); on = 0 } 1' "$DEP" >"$f"
+    dep_caught "$E not weekly" "$f" "\`$E\` at .* is not weekly"
+    f="$WORK/dep-$E-nocool.yml"
+    awk -v e="$E" '/package-ecosystem:/ { on = ($0 ~ ("package-ecosystem: " e "$")) } on && /cooldown:|default-days:/ { next } 1' "$DEP" >"$f"
+    dep_caught "$E with no cooldown" "$f" "\`$E\` at .* has no \`cooldown:\` block"
+    f="$WORK/dep-$E-zero.yml"
+    awk -v e="$E" '/package-ecosystem:/ { on = ($0 ~ ("package-ecosystem: " e "$")) } on && /default-days: 7/ { sub(/7/, "0"); on = 0 } 1' "$DEP" >"$f"
+    dep_caught "$E with a cooldown of zero days" "$f" "\`$E\` at .* no \`default-days\` of at least 1"
+    f="$WORK/dep-$E-nodays.yml"
+    awk -v e="$E" '/package-ecosystem:/ { on = ($0 ~ ("package-ecosystem: " e "$")) } on && /default-days:/ { on = 0; next } 1' "$DEP" >"$f"
+    dep_caught "$E with a cooldown block but no default-days" "$f" "\`$E\` at .* no \`default-days\` of at least 1"
+    f="$WORK/dep-$E-commented.yml"
+    awk -v e="$E" '/package-ecosystem:/ { on = ($0 ~ ("package-ecosystem: " e "$")) } on && /cooldown:|default-days:/ { sub(/^ +/, "&# ") } 1' "$DEP" >"$f"
+    dep_caught "$E with a cooldown that is only commented out" "$f" "\`$E\` at .* has no \`cooldown:\` block"
+done
 f="$WORK/dep-v20.yml"
 sed -E 's/^version: 2/version: 20/' "$DEP" >"$f"
 dep_caught "dependabot version 20" "$f" 'not `version: 2`'

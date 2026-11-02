@@ -65,8 +65,8 @@ fn git_init(dir: &Path) {
 
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// `api` holds only the spec, `web` serves `GET /users/{id}` in Rust.

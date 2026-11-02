@@ -91,10 +91,10 @@ fn scanned_engine() -> (TempDir, Arc<Engine>) {
         "fix: add f",
     );
     let engine = Arc::new(Engine::start(repo).expect("engine starts"));
-    engine.index();
-    engine.scan(false).expect("scan persists a metric snapshot");
+    engine.pipeline().index();
+    engine.quality().scan(false).expect("scan persists a metric snapshot");
     engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("hotspots mines + persists a temporal snapshot");
     (tmp, engine)
 }

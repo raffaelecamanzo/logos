@@ -55,8 +55,8 @@ fn write(root: &Path, rel: &str, contents: &str) {
 /// directory an autodiscovery candidate: a child carrying a store is a member).
 fn index_member(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// `api` declares the operation; `web` provides the route; `web-fork` is a

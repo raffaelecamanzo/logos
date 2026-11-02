@@ -3,7 +3,7 @@
 //!
 //! A C bare call is read in two steps:
 //!
-//! 1. **Through includes** ([`Ctx::include_lookup`], S-579): the caller's own
+//! 1. **Through includes** ([`IncludeLookup::include_lookup`](super::includes::IncludeLookup::include_lookup), S-579): the caller's own
 //!    file first, then every file its includes reach. A definition found there
 //!    decides — the caller's own function (a `static` one included), a `static
 //!    inline` function or a macro a header supplies. A **prototype** found there
@@ -32,7 +32,7 @@
 //! exactly-one rule is what keeps a guess out ([CR-185] §7).
 //!
 //! A row of an include-roots language is re-bound on every non-empty sync
-//! delta ([`Index::reads_include_scope`]), so a definition gained, lost or made
+//! delta ([`Invalidation::reads_include_scope`](super::Invalidation::reads_include_scope)), so a definition gained, lost or made
 //! `static` in a file the caller never names moves the call on sync as on a
 //! reindex.
 //!
@@ -42,22 +42,40 @@
 //! [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
 //! [`PackageLayout::links_units`]: crate::resolve::package_key::PackageLayout::links_units
 
+use std::ops::Deref;
+
 use crate::model::{NodeId, NodeKind};
 
 use super::{exactly_one, Ctx, Res};
+use super::includes::IncludeLookup;
 
-impl Ctx<'_> {
+/// A bare call read across the link unit its language's files make.
+#[derive(Clone, Copy)]
+pub(super) struct LinkUnit<'c, 'a> {
+    pub(super) cx: &'c Ctx<'a>,
+}
+
+impl<'a> Deref for LinkUnit<'_, 'a> {
+    type Target = Ctx<'a>;
+
+    fn deref(&self) -> &Ctx<'a> {
+        self.cx
+    }
+}
+
+impl LinkUnit<'_, '_> {
     /// The bare call `segs` once its includes have answered `through_includes`
     /// (S-584; the module docs): that answer when the source's language makes
     /// no link unit, the call is qualified, or the includes found a definition
     /// or two declarations; else — nothing found, or a prototype — the one
     /// non-`static` definition of the name the link unit holds
-    /// ([`link_unit_definition`](Ctx::link_unit_definition)).
+    /// ([`link_unit_definition`](LinkUnit::link_unit_definition)).
     ///
     /// A name a parameter or local binds at the call's `line` — a
     /// function-pointer `cb(x)` — or a variable the file or its includes
     /// declare is called through, never bound: nothing.
     pub(super) fn across_link_unit(&self, segs: &[String], line: Option<i64>, through_includes: Res) -> Res {
+        let includes = IncludeLookup { cx: self.cx };
         let [name] = segs else {
             return through_includes;
         };
@@ -70,7 +88,7 @@ impl Ctx<'_> {
         match through_includes {
             Res::Found(id) if !self.is_prototype(id) => Res::Found(id),
             Res::Ambiguous => Res::Ambiguous,
-            Res::Found(_) | Res::NotFound if self.include_lookup(segs, |k| k == NodeKind::Variable) != Res::NotFound => {
+            Res::Found(_) | Res::NotFound if includes.include_lookup(segs, |k| k == NodeKind::Variable) != Res::NotFound => {
                 Res::NotFound
             }
             Res::Found(_) | Res::NotFound => self.link_unit_definition(name),
@@ -78,7 +96,7 @@ impl Ctx<'_> {
     }
 
     /// Whether a parameter or local of the source's file binds `name` at
-    /// `line` (S-593 facts, [`Index::with_link_unit_locals`](super::Index::with_link_unit_locals)):
+    /// `line` (S-593 facts, [`IndexBuilder::with_link_unit`](super::IndexBuilder::with_link_unit)):
     /// declared at or before it, in a scope spanning it. Read by line, so a
     /// binding later on the call's own line counts too — a call left unbound,
     /// never one bound through a pointer.
@@ -87,7 +105,7 @@ impl Ctx<'_> {
             return false;
         };
         self.ix
-            .link_unit_locals
+            .facts.link_unit_locals
             .get(&(path.to_string(), name.to_string()))
             .is_some_and(|scopes| scopes.iter().any(|&(at, start, end)| at <= line && start <= line && line <= end))
     }
@@ -105,18 +123,18 @@ impl Ctx<'_> {
 
     /// Whether `id` is a function with no body — a prototype a header read as
     /// C++ declares. The store records a bodiless node among the members no
-    /// type inherits ([`Index::uninherited`](super::Index)), and no free
+    /// type inherits ([`DeclarationFacts::uninherited`](super::declaration_facts::DeclarationFacts::uninherited)), and no free
     /// function is marked uninherited on any other ground.
     fn is_prototype(&self, id: NodeId) -> bool {
-        self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Function) && self.ix.uninherited.contains(&id)
+        self.ix.info.get(&id).is_some_and(|i| i.kind == NodeKind::Function) && self.ix.facts.uninherited.contains(&id)
     }
 
     /// The one non-`static`, bodied function `name` among the link unit's
     /// files. Nothing when the index was given no linkage facts
-    /// ([`Index::with_file_local`](super::Index::with_file_local)): a `static`
+    /// ([`IndexBuilder::with_link_unit`](super::IndexBuilder::with_link_unit)): a `static`
     /// it cannot tell apart is never offered to another file.
     fn link_unit_definition(&self, name: &str) -> Res {
-        let Some(file_local) = &self.ix.file_local else {
+        let Some(file_local) = &self.ix.facts.file_local else {
             return Res::NotFound;
         };
         let mut found: Vec<NodeId> = self

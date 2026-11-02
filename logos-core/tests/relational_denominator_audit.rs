@@ -42,9 +42,11 @@
 //!    other type in that file holds as a field** is a *root* of the file's
 //!    containment graph. `ImpactEntry` is held by `ImpactResult`, so it is a
 //!    part; nothing holds `ImpactResult`, so it is a root.
-//! 2. **`engine.rs`** — a root is an *answer* when a `pub fn` of `impl Engine`
-//!    returns it, because every surface reaches the navigation service through
-//!    that façade ([ADR-01]). A root no method returns is answered to no one;
+//! 2. **`engine.rs` and `engine/`** — a root is an *answer* when a `pub fn` of
+//!    `impl Engine`, or of a feature-area façade it hands out (S-829), returns
+//!    it, because every surface reaches the navigation service through that
+//!    façade ([ADR-01]). A method is named `Engine::<name>` whichever façade
+//!    declares it. A root no method returns is answered to no one;
 //!    it is counted and **named** in the denominator line rather than checked
 //!    (today one: `WorkItem`, the parsed input of `impact_intersection`).
 //!
@@ -54,7 +56,7 @@
 //! - every navigation type an `Engine` method returns must be a root. That
 //!   stops a relational answer escaping by being *nested* — fold
 //!   `CallersResult` into another type and it stops being a root, but
-//!   `Engine::callers` still returns it;
+//!   `Navigation::callers` still returns it;
 //! - every method that delegates to `crate::navigate`, by any spelling, must
 //!   return a navigation type — which widens the universe to whatever the
 //!   navigation service answers with;
@@ -62,7 +64,7 @@
 //!
 //! Together they make the count non-vacuous without a floor: a parse of
 //! `models/navigation.rs` that read nothing leaves every delegating method
-//! returning no navigation type, and a parse of `engine.rs` that read nothing
+//! returning no navigation type, and a parse of the engine that read nothing
 //! finds no delegating method. Both fail.
 //!
 //! The one hand-maintained list is [`OUTSIDE_THE_CLASS`], and it lists what is
@@ -99,8 +101,8 @@
 //! - **A spelling the parse does not resolve.** A return type named through a
 //!   `type` alias, or a delegation through a `navigate` function imported by
 //!   name and called bare, is read as what it spells. The workspace answers of
-//!   `federation::query` are built from per-member `Engine::callers` /
-//!   `Engine::impact` results, which carry the field, and are not enumerated
+//!   `federation::query` are built from per-member `Navigation::callers` /
+//!   `Navigation::impact` results, which carry the field, and are not enumerated
 //!   here.
 //! - **A root no `Engine` method returns yet.** It is named in the denominator
 //!   line and the dated record above moves, but its shape is not checked until
@@ -144,7 +146,10 @@ const AUDITED_ON: &str = "2026-09-23";
 const DENOMINATOR_FIELD: &str = "resolution_denominator";
 const DENOMINATOR_TYPE: &str = "ResolutionDenominator";
 
-/// The two source files the enumeration reads, relative to `logos-core`.
+/// The two sources the enumeration reads, relative to `logos-core`: the
+/// navigation read-models, and the engine module — `engine.rs`, which declares
+/// `Engine`, and a file under `engine/` per feature-area façade it hands out
+/// (S-829).
 const NAVIGATION_MODELS: &str = "src/models/navigation.rs";
 const ENGINE: &str = "src/engine.rs";
 
@@ -369,18 +374,17 @@ fn navigation_type_names(node: Node<'_>, source: &str, into: &mut BTreeSet<Strin
     }
 }
 
+/// Every `pub fn` of an inherent `impl` in the engine module's source: `impl
+/// Engine` and the `impl` of each façade it hands out (`impl<'e> Navigation<'e>`),
+/// through which every surface reaches the navigation service (S-829).
 fn engine_methods(source: &str) -> Vec<EngineMethod> {
     let tree = parse(source);
     let root = tree.root_node();
     let mut methods = Vec::new();
     let mut cursor = root.walk();
     for item in root.named_children(&mut cursor) {
-        let inherent_engine_impl = item.kind() == "impl_item"
-            && item.child_by_field_name("trait").is_none()
-            && item
-                .child_by_field_name("type")
-                .is_some_and(|t| text(t, source) == "Engine");
-        if !inherent_engine_impl {
+        let inherent_impl = item.kind() == "impl_item" && item.child_by_field_name("trait").is_none();
+        if !inherent_impl {
             continue;
         }
         let Some(body) = item.child_by_field_name("body") else {
@@ -538,7 +542,7 @@ fn audit_with(
         }
     }
 
-    // The façade was read at all: a parse of `engine.rs` that found no method
+    // The façade was read at all: a parse of the engine that found no method
     // delegating to the navigation service enrols no answer, and every check
     // above would pass over nothing.
     if !methods.iter().any(|m| m.delegates_to_navigate) {
@@ -575,8 +579,22 @@ fn read(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
+/// The engine module's source: [`ENGINE`] with `impl Engine`, then every `.rs`
+/// file of its `engine/` directory in name order — a file per façade.
+fn read_engine() -> String {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join(ENGINE.trim_end_matches(".rs"));
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+    files.insert(0, Path::new(env!("CARGO_MANIFEST_DIR")).join(ENGINE));
+    files.iter().map(|f| std::fs::read_to_string(f).expect("an engine source")).collect::<Vec<_>>().join("\n")
+}
+
 fn live() -> Audit {
-    audit(&read(NAVIGATION_MODELS), &read(ENGINE))
+    audit(&read(NAVIGATION_MODELS), &read_engine())
 }
 
 /// The denominator every failure message states, so "every type was checked"
@@ -696,7 +714,7 @@ fn the_arm_reports_its_count_with_its_denominator() {
 /// item, and the live engine source with `method` inserted into `impl Engine`.
 fn mutated(declaration: &str, method: &str) -> Audit {
     let navigation = format!("{}\n{declaration}\n", read(NAVIGATION_MODELS));
-    let engine = read(ENGINE);
+    let engine = read_engine();
     let anchor = "impl Engine {\n";
     let at = engine.find(anchor).expect("engine.rs declares `impl Engine {`") + anchor.len();
     let engine = format!("{}{method}\n{}", &engine[..at], &engine[at..]);
@@ -861,7 +879,7 @@ fn a_delegating_method_returning_a_type_from_elsewhere_is_named() {
     }
 }
 
-/// **A parse of `engine.rs` that reads nothing fails** rather than enrolling
+/// **A parse of the engine that reads nothing fails** rather than enrolling
 /// no answer and passing over the empty set.
 #[test]
 fn an_engine_parse_that_reads_no_facade_fails() {
@@ -877,7 +895,7 @@ fn an_engine_parse_that_reads_no_facade_fails() {
 
 /// **An answer cannot escape by being nested.** Folding `CallersResult` into
 /// another navigation type removes it from the containment roots, but
-/// `Engine::callers` still returns it — the agreement check names it, whether
+/// `Navigation::callers` still returns it — the agreement check names it, whether
 /// the method delegates or computes the answer inline.
 #[test]
 fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
@@ -888,7 +906,7 @@ fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
         1,
     );
     assert_ne!(navigation, live_source, "the nesting mutation applied");
-    let report = audit(&navigation, &read(ENGINE));
+    let report = audit(&navigation, &read_engine());
     assert!(!report.answers.contains("CallersResult"), "nesting hid it from the roots");
     assert!(
         report
@@ -908,7 +926,7 @@ fn a_nested_relational_answer_is_caught_by_the_engine_agreement() {
         1,
     );
     assert_ne!(navigation, live_source, "the inline nesting applied");
-    let report = audit(&navigation, &read(ENGINE));
+    let report = audit(&navigation, &read_engine());
     assert!(
         report
             .disagreements
@@ -1001,7 +1019,7 @@ fn an_exemption_without_a_reason_or_a_subject_is_stale() {
     exemptions.retain(|(name, _)| *name != "LanguageComposition");
     exemptions.push(("LanguageComposition", "   "));
     exemptions.push(("NoSuchResult", "a reason for a type that does not exist"));
-    let report = audit_with(&read(NAVIGATION_MODELS), &read(ENGINE), &exemptions);
+    let report = audit_with(&read(NAVIGATION_MODELS), &read_engine(), &exemptions);
     assert_eq!(
         report.stale_exemptions,
         vec![
@@ -1022,7 +1040,7 @@ fn an_exemption_over_a_type_that_carries_the_field_is_stale() {
         1,
     );
     assert_ne!(navigation, live_source, "the mutation applied");
-    let report = audit(&navigation, &read(ENGINE));
+    let report = audit(&navigation, &read_engine());
     assert_eq!(
         report.stale_exemptions,
         vec![format!(
@@ -1042,7 +1060,7 @@ fn removing_the_denominator_from_a_shipped_answer_fails() {
     let field = "    pub resolution_denominator: ResolutionDenominator,\n";
     let at = start + live_source[start..].find(field).expect("AffectedResult carries the field");
     let navigation = format!("{}{}", &live_source[..at], &live_source[at + field.len()..]);
-    let report = audit(&navigation, &read(ENGINE));
+    let report = audit(&navigation, &read_engine());
     assert_eq!(
         report.missing,
         vec![format!("AffectedResult has no `{DENOMINATOR_FIELD}` field")]

@@ -11,7 +11,7 @@ use crate::graph_store::{EdgeRow, FunctionMetricRow, NodeRow};
 use crate::hydrate::{build_view, Granularity};
 use crate::model::{EdgeKind, LogosSymbol, NodeId, NodeKind};
 
-use super::{compute, ContainerLinks};
+use super::{compute, ContainerLinks, MethodOwner};
 
 // ── snapshot builders (the hydrate test conventions) ─────────────────────────
 
@@ -385,21 +385,22 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 9 ([CR-252]): Cohesion linking
-/// inherited members and needing `cohesion_min_classes` classes changes what
-/// the signal measures, so the constant advanced 8 → 9 **once** for the
-/// sprint and the first post-upgrade gate auto-re-baselines ([FR-GV-10])
-/// exactly as the v2..v8 bumps did (v8 was [CR-171]'s graph-dimension and
+/// The metric-semantics version pins at 10 ([CR-257]): a Rust trait impl's
+/// method counting toward no container changes what Focus measures, so the
+/// constant advanced 9 → 10 **once** for the sprint and the first post-upgrade
+/// gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v9 bumps did (v9 was
+/// [CR-252]'s Cohesion changes, v8 [CR-171]'s graph-dimension and
 /// `member_access` gates, v7 [CR-163]'s declarative-code fixes, v6
 /// [CR-156]'s small-graph Modularity drop-out).
 ///
+/// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
 /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
-fn metric_semantics_version_is_v9() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 9);
+fn metric_semantics_version_is_v10() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 10);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────
@@ -3910,7 +3911,10 @@ fn func_body(id: i64, has_body: bool) -> FunctionMetricRow {
 /// `typed` as the container links of methods already attributed (`Some`) or not.
 fn typed(methods: &[(i64, Option<i64>)]) -> ContainerLinks {
     ContainerLinks {
-        typed_methods: methods.iter().map(|&(m, owner)| (NodeId(m), owner.map(NodeId))).collect(),
+        typed_methods: methods
+            .iter()
+            .map(|&(m, owner)| (NodeId(m), owner.map_or(MethodOwner::Unattributed, |o| MethodOwner::Struct(NodeId(o)))))
+            .collect(),
         ..ContainerLinks::default()
     }
 }
@@ -3980,7 +3984,7 @@ fn a_method_attributed_to_a_later_part_counts_toward_the_first() {
     let functions = vec![func_body(10, true)];
     let links = ContainerLinks {
         partial_types: vec![(NodeId(2), NodeId(1))],
-        typed_methods: vec![(NodeId(10), Some(NodeId(2)))],
+        typed_methods: vec![(NodeId(10), MethodOwner::Struct(NodeId(2)))],
     };
     let one_is_god = super::Thresholds {
         god_methods: 1,
@@ -4043,12 +4047,105 @@ fn attribute_handles_a_missing_file_a_missing_line_and_a_non_method() {
     assert_eq!(
         attribute(&nodes, &self_types, &blocks),
         vec![
-            (NodeId(4), None),            // no file
-            (NodeId(5), Some(NodeId(1))), // no line → directory `src`, where S sits
-            (NodeId(6), None),            // no line → directory `src`, U is in `src/sub`
-            (NodeId(7), Some(NodeId(2))), // in the impl → crate (`""`), U is in it
+            (NodeId(4), MethodOwner::Unattributed),     // no file
+            (NodeId(5), MethodOwner::Struct(NodeId(1))), // no line → directory `src`, where S sits
+            (NodeId(6), MethodOwner::Unattributed),     // no line → directory `src`, U is in `src/sub`
+            (NodeId(7), MethodOwner::Struct(NodeId(2))), // in the impl → crate (`""`), U is in it
         ],
         "the function carrying a self type (3) is no member"
+    );
+}
+
+/// `attribute` sets a trait impl's method aside by its **innermost** block
+/// (S-826, [CR-257]): in `src/a.rs` an inherent `impl S` (lines 1–20) holds a
+/// trait impl (5–9) and a trait impl (30–50) holds an inherent `impl S`
+/// (35–40). The method at line 6 is set aside, the one at 36 is `S`'s, the one
+/// at 3 and the one at 31 are judged by their outer block; a trait impl's
+/// method is set aside even when its self type names no struct (`E`).
+///
+/// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+#[test]
+fn attribute_sets_a_trait_impl_method_aside_by_its_innermost_block() {
+    use super::attribution::attribute;
+    use crate::graph_store::ImplBlockRow;
+
+    let method = |id: i64, line: i64| NodeRow {
+        start_line: Some(line),
+        end_line: Some(line),
+        ..node(id, &format!("m{id}"), NodeKind::Method, Some("src/a.rs"))
+    };
+    let block = |start: u32, end: u32, trait_path: Option<&str>| ImplBlockRow {
+        file_path: "src/a.rs".to_string(),
+        start_line: start,
+        end_line: end,
+        self_type: "S".to_string(),
+        self_ref: false,
+        trait_path: trait_path.map(str::to_string),
+        deref_target: None,
+    };
+    let nodes = vec![
+        node(1, "S", NodeKind::Struct, Some("src/s.rs")),
+        method(3, 3),
+        method(6, 6),
+        method(31, 31),
+        method(36, 36),
+        method(60, 6),
+    ];
+    // Recorded outer-first and inner-first, so neither order decides.
+    let blocks = vec![block(1, 20, None), block(5, 9, Some("Worker")), block(35, 40, None), block(30, 50, Some("Other"))];
+    let self_types: Vec<(NodeId, String)> = [(3, "S"), (6, "S"), (31, "S"), (36, "S"), (60, "E")]
+        .map(|(id, t)| (NodeId(id), t.to_string()))
+        .into();
+    assert_eq!(
+        attribute(&nodes, &self_types, &blocks),
+        vec![
+            (NodeId(3), MethodOwner::Struct(NodeId(1))),  // inherent block only
+            (NodeId(6), MethodOwner::TraitImpl),          // inner trait impl
+            (NodeId(31), MethodOwner::TraitImpl),         // outer trait impl only
+            (NodeId(36), MethodOwner::Struct(NodeId(1))), // inner inherent impl
+            (NodeId(60), MethodOwner::TraitImpl),         // names no struct, still set aside
+        ]
+    );
+}
+
+/// A trait impl's method joins no container and is counted as set aside, in
+/// the denominator but not as unattributed; a test-scope one is no part of
+/// either (S-826). `S` holds two attributed methods under `god_methods = 3`;
+/// the two set aside would make it god.
+#[test]
+fn a_trait_impl_method_joins_no_container_and_is_counted_aside() {
+    let nodes = vec![
+        node(1, "S", NodeKind::Struct, Some("a.rs")),
+        node(10, "m10", NodeKind::Method, Some("a.rs")),
+        node(11, "m11", NodeKind::Method, Some("a.rs")),
+        node(12, "m12", NodeKind::Method, Some("a.rs")), // trait impl
+        node(13, "m13", NodeKind::Method, Some("a.rs")), // trait impl
+        node(14, "m14", NodeKind::Method, Some("a.rs")), // trait impl, test scope
+        node(15, "m15", NodeKind::Method, Some("a.rs")), // no owner found
+    ];
+    let functions: Vec<_> = (10..=15).map(|id| func_body(id, true)).collect();
+    let links = ContainerLinks {
+        typed_methods: vec![
+            (NodeId(10), MethodOwner::Struct(NodeId(1))),
+            (NodeId(11), MethodOwner::Struct(NodeId(1))),
+            (NodeId(12), MethodOwner::TraitImpl),
+            (NodeId(13), MethodOwner::TraitImpl),
+            (NodeId(14), MethodOwner::TraitImpl),
+            (NodeId(15), MethodOwner::Unattributed),
+        ],
+        ..ContainerLinks::default()
+    };
+    let test_ids: HashSet<NodeId> = [NodeId(14)].into();
+    let view = build_view(Granularity::ExcludeContains, &nodes, &[]);
+
+    let god = super::god_containers(&nodes, &[], &links, &functions, &test_ids, three_methods_are_god());
+    assert!(god.is_empty(), "two counted methods are under three: {god:?}");
+    let r = compute(&view, &nodes, &[], &links, &functions, &test_ids, three_methods_are_god(), &member_access());
+    let reach = r.focus_attribution.expect("methods record a self type");
+    assert_eq!(
+        (reach.trait_impl, reach.unattributed, reach.denominator),
+        (2, 1, 5),
+        "m12, m13 set aside; m15 unattributed; the test method m14 is no part of it"
     );
 }
 

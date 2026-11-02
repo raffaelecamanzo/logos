@@ -212,7 +212,7 @@ fn eps(v: f64) -> String {
 /// temporal tiers.
 fn project(root: &Path) -> GoldenSignal {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(
         result.warnings.is_empty(),
         "the golden fixture must index cleanly: {:?}",
@@ -226,7 +226,7 @@ fn project(root: &Path) -> GoldenSignal {
 fn project_from_engine(engine: &Engine) -> GoldenSignal {
     let rt = engine.runtime().expect("runtime present");
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("view hydrates");
     let snap = metrics::snapshot(rt, &view, Some("golden"), metrics::Thresholds::default(), &engine.registry().expect("a started engine holds its registry").member_access_extensions())
         .expect("snapshot runs")
@@ -403,7 +403,7 @@ fn the_projection_is_deterministic_across_repeated_indexes() {
 fn symbol_ids_are_stable_across_edit_and_sync() {
     let dir = build_fixture();
     let engine = Engine::start(dir.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let before = symbols_by_file(&engine);
 
@@ -414,7 +414,7 @@ fn symbol_ids_are_stable_across_edit_and_sync() {
         "src/twin.rs",
         "// a comment shifts the lines below\npub fn target() -> i64 {\n\x20   2\n}\n",
     );
-    let result = engine.sync(&[PathBuf::from("src/twin.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/twin.rs")]);
     assert_eq!(result.files_modified, 1, "the edited file re-synced");
 
     let after = symbols_by_file(&engine);
@@ -470,7 +470,7 @@ fn symbols_by_file(engine: &Engine) -> HashMap<String, Vec<String>> {
 fn cross_file_call_edge_rebinds_through_sync() {
     let dir = build_fixture();
     let engine = Engine::start(dir.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // The portable symbol carries a scheme/package prefix and backtick-escapes
     // each dotted path segment (``src/`caller.rs`/caller().``); match on the
@@ -501,7 +501,7 @@ fn cross_file_call_edge_rebinds_through_sync() {
          \x20   0\n\
          }\n",
     );
-    let result = engine.sync(&[PathBuf::from("src/callee.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/callee.rs")]);
     assert_eq!(result.files_modified, 1, "the callee file re-synced");
 
     assert!(
@@ -533,7 +533,7 @@ fn has_calls_edge(engine: &Engine, source_suffix: &str, target_suffix: &str) -> 
 fn fts_search_reflects_renames_after_edit_and_sync() {
     let dir = build_fixture();
     let engine = Engine::start(dir.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     assert!(fts_finds(&engine, "unused"), "the original name is indexed");
     assert!(
@@ -557,7 +557,7 @@ fn fts_search_reflects_renames_after_edit_and_sync() {
          \x20   0\n\
          }\n",
     );
-    let result = engine.sync(&[PathBuf::from("src/callee.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/callee.rs")]);
     assert_eq!(result.files_modified, 1, "the renamed file re-synced");
 
     assert!(

@@ -222,18 +222,32 @@ span, and Cohesion does not score it.
 attaches a Rust `impl` method or a Go receiver method to its module, not its
 struct, and leaves it there. Focus attributes each one to the `Struct` its
 recorded type names: a Rust method to the struct of that name in its **crate**
-(the `impl` may sit in any module of it, inherent or trait, associated functions
+(the inherent `impl` may sit in any module of it, associated functions
 included; a crate is the directory above its `src/`), a Go method to the struct
 of that name in its **package** — the directory of its file, pointer and value
 receivers alike. A candidate is also declared in a file of the method's own
 language. A method naming no
 struct of its crate/package (an enum, an alias, a type from elsewhere) or two
 same-named ones counts toward none, and a same-named struct of another
-crate/package is never a candidate. `scan --json` gives the count under
-`metrics.focus_attribution` as `{"unattributed": N, "denominator": M}` — the
-methods that reached no struct, of every production method that records a type
-(`null` when none does, and on a stored snapshot). The attribution feeds Focus
-only: node ids, symbols and edges, and Cohesion, are unchanged.
+crate/package is never a candidate.
+
+**A Rust trait impl's methods count toward no container** (since version 10).
+A method of `impl Trait for Type` implements the trait's contract; it is not
+part of the type's own surface, so it leaves the type's method count, in Focus
+and in the `no_god_containers` budget alike. A type that implements a wide
+trait — a storage backend, a visitor, a protocol handler — is judged on its
+inherent methods. The impl block written closest around the method decides: a
+method of an inherent `impl` nested in a function of a trait impl still counts.
+Go has no explicit interface implementation, so every Go receiver method keeps
+counting; Java, C#, Kotlin, Scala and TypeScript interface implementations are
+members of their class and keep counting too.
+
+`scan --json` gives the figures under `metrics.focus_attribution` as
+`{"unattributed": N, "trait_impl": T, "denominator": M}` — of every production
+method that records a type (`M`), the `T` set aside because they implement a
+trait and the `N` others that reached no struct (`null` when no method records
+a type, and on a stored snapshot). The attribution feeds Focus only: node ids,
+symbols and edges, and Cohesion, are unchanged.
 
 Two cases leave a method unattributed that a reader may not expect. A struct of
 the same name declared inside a Rust `#[cfg(test)]` module, and a Go external
@@ -497,9 +511,8 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **9** (Cohesion links inherited members and needs `cohesion_min_classes`
-  classes to score — see
-  [Metric semantics version 9](#metric-semantics-version-9--cohesion-links-inherited-members-and-needs-enough-classes)).
+  is **10** (a Rust trait impl's methods count toward no container — see
+  [Metric semantics version 10](#metric-semantics-version-10--a-rust-trait-impls-methods-count-toward-no-container)).
   A formula change bumps it, so the first `gate` after an upgrade that bumps it
   re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
@@ -520,6 +533,31 @@ pass it always was. Either way, the *next* gate finds a matching version/hash
 and compares normally — so an existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
+
+### Metric semantics version 10 — a Rust trait impl's methods count toward no container
+
+Version 10 ([CR-257](../requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md))
+changes what Focus counts for Rust, so a project re-baselines **once**.
+
+| Change | Before (v9) | Since v10 |
+|---|---|---|
+| **Rust trait impls** (Focus, `no_god_containers`) | every method of every `impl` of a struct counted toward it, trait impls included | a method whose innermost impl block is `impl Trait for Type` counts toward no container; `focus_attribution` reports how many as `trait_impl` beside its `denominator` |
+
+**Why signals move.** A struct that implements a wide trait read as god on the
+trait's width, not on its own design: a storage type with 18 methods of its own
+and 73 of a store trait read 91. Rust projects with trait impls now score
+higher on Focus, and a type that was a `no_god_containers` violation only
+through its trait impls no longer is. Inherent impls, Go receivers, the other
+languages, node ids, symbols, edges and Cohesion are unchanged.
+
+**What you see on upgrade.** The first `gate` (or `session_end`) after the
+upgrade reports `baseline reset: metric semantics changed (v9 8292 → v10 8295)`
+and passes informationally, and the next one compares normally. Nothing is
+re-extracted: the next `scan` scores under v10. Under a ratcheted
+`no_god_containers` (`ratchet = true`), a blessed type that is no longer a
+violation is listed under `ratchet.fixed`; re-bless with `logos check --bless`
+to drop it from `rules-baseline.json` (see
+[CI integration](ci-integration.md)).
 
 ### Metric semantics version 9 — Cohesion links inherited members and needs enough classes
 

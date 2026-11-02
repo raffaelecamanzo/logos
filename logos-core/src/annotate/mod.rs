@@ -679,21 +679,35 @@ fn reachability_capable(file_path: Option<&str>, reachable_exts: &HashSet<String
 /// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
 /// [ADR-18]: ../../../docs/specs/architecture/decisions/ADR-18.md
 fn is_test_marked(node: &AnnotationNodeRow, test_markers: &[String]) -> bool {
-    node.test_evidence
-        || node
-            .file_path
-            .as_deref()
-            .is_some_and(crate::navigate::is_test_path)
+    is_test_declaration(node.test_evidence, node.file_path.as_deref(), node.kind, &node.name, test_markers)
+}
+
+/// [`is_test_marked`] over a declaration's own facts — its extraction
+/// evidence, its file, its kind and its name — so a declaration that is not in
+/// the graph is judged by the very same rule: a historical security finding's
+/// enclosing node in its anchor commit's version of the file
+/// (`security::historical`, [FR-SC-28]).
+///
+/// [FR-SC-28]: ../../../docs/specs/requirements/FR-SC-28.md
+pub(crate) fn is_test_declaration(
+    test_evidence: bool,
+    file_path: Option<&str>,
+    kind: NodeKind,
+    name: &str,
+    test_markers: &[String],
+) -> bool {
+    test_evidence
+        || file_path.is_some_and(crate::navigate::is_test_path)
         // A file's own module node is named after the file, so a marker match on
         // it would re-judge the file by name and override the path rule:
         // werkzeug's production `src/werkzeug/test.py` (S-524). A file's
         // test-ness is the path rule's call. An inline module (Rust `mod tests`)
         // is a declaration inside the file and stays marker-judged.
-        || (!is_file_module(node)
+        || (!is_file_module(kind, file_path, name)
             && test_markers.iter().any(|marker| {
-                node.name == *marker
-                || node.name.starts_with(&format!("{marker}_"))
-                    || node.name.ends_with(&format!("_{marker}"))
+                name == *marker
+                || name.starts_with(&format!("{marker}_"))
+                    || name.ends_with(&format!("_{marker}"))
             }))
 }
 
@@ -701,14 +715,12 @@ fn is_test_marked(node: &AnnotationNodeRow, test_markers: &[String]) -> bool {
 /// name is the file name without its last extension (`test` for `test.py`,
 /// `foo.test` for `foo.test.ts`). An inline module such as Rust's `mod tests`
 /// inside `provider.rs` is not.
-fn is_file_module(node: &AnnotationNodeRow) -> bool {
-    node.kind == NodeKind::Module
-        && node
-            .file_path
-            .as_deref()
+fn is_file_module(kind: NodeKind, file_path: Option<&str>, name: &str) -> bool {
+    kind == NodeKind::Module
+        && file_path
             .and_then(|p| std::path::Path::new(p).file_stem())
             .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem == node.name)
+            .is_some_and(|stem| stem == name)
 }
 
 /// Whether `node` may take part in exact-duplicate grouping ([FR-AN-02], S-501):

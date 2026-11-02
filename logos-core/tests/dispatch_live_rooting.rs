@@ -1,6 +1,6 @@
 //! Integration tests for the framework-dispatch live-rooting pass (S-161,
 //! [CR-043], [ADR-39], FR-RS-03 / FR-AN-01), exercised end-to-end through
-//! [`Engine::index`] / [`Engine::sync`] against real temp-directory fixtures.
+//! [`Pipeline::index`](crate::Pipeline::index) / [`Pipeline::sync`](crate::Pipeline::sync) against real temp-directory fixtures.
 //!
 //! The pass live-roots the methods an external framework dispatches but the
 //! binder cannot bind a call edge to — `impl Trait for Type` methods
@@ -91,7 +91,7 @@ fn trait_impl_and_tool_methods_are_live_inherent_unreachable_stays_dead() {
     write(tmp.path(), "src/lib.rs", WITH_TOOL);
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -142,7 +142,7 @@ fn removing_the_tool_attribute_retires_the_marker_and_flips_dead() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", WITH_TOOL);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(
         dead_of(&snapshot(rt), "session_end"),
@@ -153,7 +153,7 @@ fn removing_the_tool_attribute_retires_the_marker_and_flips_dead() {
     // Drop the attribute and sync only that file: the dispatch entry is gone, so
     // its marker must be reconciled away and the method flips to dead.
     write(tmp.path(), "src/lib.rs", WITHOUT_TOOL);
-    let synced = engine.sync(&["src/lib.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/lib.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(
         dead_of(&snapshot(rt), "session_end"),
@@ -175,15 +175,15 @@ fn synced_state_matches_a_fresh_reindex_of_the_same_state() {
     let synced_tmp = TempDir::new().unwrap();
     write(synced_tmp.path(), "src/lib.rs", WITH_TOOL);
     let synced_engine = Engine::start(synced_tmp.path()).expect("engine starts");
-    synced_engine.index();
+    synced_engine.pipeline().index();
     write(synced_tmp.path(), "src/lib.rs", WITHOUT_TOOL);
-    synced_engine.sync(&["src/lib.rs".into()]);
+    synced_engine.pipeline().sync(&["src/lib.rs".into()]);
     let synced_snap = snapshot(synced_engine.runtime().unwrap());
 
     let fresh_tmp = TempDir::new().unwrap();
     write(fresh_tmp.path(), "src/lib.rs", WITHOUT_TOOL);
     let fresh_engine = Engine::start(fresh_tmp.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     let fresh_snap = snapshot(fresh_engine.runtime().unwrap());
 
     for name in ["on_event", "into_record", "truly_dead", "session_end"] {
@@ -216,7 +216,7 @@ impl Sink for A {
     write(tmp.path(), "src/b.rs", "pub fn b_one() {}\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(
         dead_of(&snapshot(rt), "on_event"),
@@ -226,7 +226,7 @@ impl Sink for A {
 
     // Change only b.rs and sync only b.rs — a.rs is untouched.
     write(tmp.path(), "src/b.rs", "pub fn b_one() {}\npub fn b_two() {}\n");
-    let synced = engine.sync(&["src/b.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/b.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
 
     assert_eq!(
@@ -268,7 +268,7 @@ fn markers_are_planted_per_node_and_absent_on_non_dispatch_nodes() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", WITH_TOOL);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     assert!(has_self_marker(rt, "on_event"), "trait-impl method is marked");
@@ -296,7 +296,7 @@ fn adding_a_tool_attribute_plants_the_marker_and_flips_live() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", WITHOUT_TOOL);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(
         dead_of(&snapshot(rt), "session_end"),
@@ -306,7 +306,7 @@ fn adding_a_tool_attribute_plants_the_marker_and_flips_live() {
     assert!(!has_self_marker(rt, "session_end"));
 
     write(tmp.path(), "src/lib.rs", WITH_TOOL);
-    let synced = engine.sync(&["src/lib.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/lib.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(
         dead_of(&snapshot(rt), "session_end"),
@@ -370,7 +370,7 @@ fn value_passed_axum_handlers_are_live_inherent_unreachable_stays_dead() {
     write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -418,7 +418,7 @@ fn removing_a_handoff_retires_the_marker_and_flips_dead() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
     assert_eq!(
         dead_of(&snapshot(rt), "spa_fallback"),
@@ -429,7 +429,7 @@ fn removing_a_handoff_retires_the_marker_and_flips_dead() {
     // Drop the fallback handoff and sync only that file: the handler is no
     // longer handed over, so its marker is reconciled away and it flips to dead.
     write(tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
-    let synced = engine.sync(&["src/lib.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/lib.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
     assert_eq!(
         dead_of(&snapshot(rt), "spa_fallback"),
@@ -456,15 +456,15 @@ fn handoff_synced_state_matches_a_fresh_reindex() {
     let synced_tmp = TempDir::new().unwrap();
     write(synced_tmp.path(), "src/lib.rs", AXUM_HANDOFFS);
     let synced_engine = Engine::start(synced_tmp.path()).expect("engine starts");
-    synced_engine.index();
+    synced_engine.pipeline().index();
     write(synced_tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
-    synced_engine.sync(&["src/lib.rs".into()]);
+    synced_engine.pipeline().sync(&["src/lib.rs".into()]);
     let synced_snap = snapshot(synced_engine.runtime().unwrap());
 
     let fresh_tmp = TempDir::new().unwrap();
     write(fresh_tmp.path(), "src/lib.rs", AXUM_HANDOFFS_NO_FALLBACK);
     let fresh_engine = Engine::start(fresh_tmp.path()).expect("engine starts");
-    fresh_engine.index();
+    fresh_engine.pipeline().index();
     let fresh_snap = snapshot(fresh_engine.runtime().unwrap());
 
     for name in [
@@ -505,7 +505,7 @@ fn ambiguous_same_file_handler_binds_nothing_unique_one_binds() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", AMBIGUOUS_HANDOFF);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);
@@ -543,11 +543,11 @@ fn transitive_helper_stays_live_and_marker_retires_on_tool_removal() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", WITH_TOOL);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().unwrap();
 
     write(tmp.path(), "src/lib.rs", WITHOUT_TOOL);
-    let synced = engine.sync(&["src/lib.rs".into()]);
+    let synced = engine.pipeline().sync(&["src/lib.rs".into()]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
 
     assert!(
@@ -588,7 +588,7 @@ fn dyn_dispatch_trait_default_is_live_and_call_fans_out_to_impls() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", DYN_DISPATCH_FIXTURE);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let rt = engine.runtime().unwrap();
     let snap = snapshot(rt);

@@ -64,7 +64,7 @@ fn repo_of(files: &[(&str, &str)]) -> TempDir {
         sh_git(root, &["add", rel]);
     }
     sh_git(root, &["commit", "-q", "-m", "fixture"]);
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -115,7 +115,7 @@ fn types_only_store() -> TempDir {
 fn an_empty_store_still_names_an_empty_graph() {
     let tmp = empty_store();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
 
     assert!(readout.signal.is_none(), "nothing to score: {:?}", readout.signal);
     assert_eq!(
@@ -124,7 +124,7 @@ fn an_empty_store_still_names_an_empty_graph() {
         "no node in the store is an empty graph, and nothing else"
     );
 
-    let payload = engine.quality_report_hook_payload().expect("payload");
+    let payload = engine.quality().readouts().report_hook_payload().expect("payload");
     let json = serde_json::to_value(&payload).expect("serialise");
     let summary = json["systemMessage"].as_str().expect("a summary line");
     assert!(
@@ -143,7 +143,7 @@ fn a_test_only_crate_names_its_empty_production_scope_and_carries_the_figure() {
 
     // The contradiction as the user meets it: `status` says the store is
     // populated in the same breath the readout used to say it was empty.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.indexed, "the reproduction's store is indexed");
     assert!(
         status.node_count > 0,
@@ -151,7 +151,7 @@ fn a_test_only_crate_names_its_empty_production_scope_and_carries_the_figure() {
         status.node_count
     );
 
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert!(readout.signal.is_none(), "the production scope scored nothing");
     let Some(SignalAbsence::NoProductionScope {
         indexed_nodes,
@@ -172,7 +172,7 @@ fn a_test_only_crate_names_its_empty_production_scope_and_carries_the_figure() {
         "the test functions the production filter excluded are counted: {test_functions}"
     );
 
-    let payload = engine.quality_report_hook_payload().expect("payload");
+    let payload = engine.quality().readouts().report_hook_payload().expect("payload");
     let json = serde_json::to_value(&payload).expect("serialise");
     let summary = json["systemMessage"].as_str().expect("a summary line");
     let context = json["hookSpecificOutput"]["additionalContext"]
@@ -231,9 +231,9 @@ fn the_discriminant_agrees_with_the_metrics_own_production_scope() {
         ("types-only store", types_only_store()),
     ] {
         let engine = Engine::start(tmp.path()).expect("engine starts");
-        let scan = engine.scan(true).expect("scan");
-        let status = engine.status();
-        let readout = engine.quality_readout().expect("readout");
+        let scan = engine.quality().scan(true).expect("scan");
+        let status = engine.graph().status();
+        let readout = engine.quality().readouts().readout().expect("readout");
 
         assert_eq!(
             readout.signal.is_none(),
@@ -405,7 +405,7 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
         let engine = Engine::start(tmp.path()).expect("engine starts");
 
         // The threshold floor: `aggregate_signal == None` cannot satisfy one.
-        let floored = engine.gate(Some(10_000), false, true).expect("gate runs");
+        let floored = engine.quality().gate(Some(10_000), false, true).expect("gate runs");
         assert!(
             !floored.passed && floored.message.contains("cannot satisfy threshold"),
             "{name}: an absent signal cannot satisfy a floor: {}",
@@ -431,9 +431,9 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
         // `gate_from_snapshot`'s arm with an entirely different sentence passed
         // 43 of 43 tests — the "call site you never edited" blind spot, inside
         // the one pair this correction exists to hold together.
-        engine.gate(None, true, true).expect("gate --save runs");
-        let persisting = engine.gate(None, false, true).expect("gate runs");
-        let read_only = engine.latest_gate().expect("latest_gate runs");
+        engine.quality().gate(None, true, true).expect("gate --save runs");
+        let persisting = engine.quality().gate(None, false, true).expect("gate runs");
+        let read_only = engine.quality().readouts().latest_gate().expect("latest_gate runs");
         assert_eq!(
             (persisting.message.as_str(), read_only.message.as_str()),
             (
@@ -450,7 +450,7 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
     // *does* establish the cause and still names it.
     let tmp = empty_store();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert_eq!(
         readout.signal_absence,
         Some(SignalAbsence::EmptyGraph),
@@ -470,7 +470,7 @@ fn the_gate_verdict_names_no_cause_for_an_absent_signal() {
 fn the_readout_names_not_applicable_graph_dimensions_with_their_count() {
     let tmp = production_store();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let readout = engine.quality_readout().expect("readout");
+    let readout = engine.quality().readouts().readout().expect("readout");
     assert!(readout.signal.is_some(), "the control store scores");
     let na = readout
         .modularity_not_applicable

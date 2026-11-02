@@ -90,7 +90,7 @@ fn storage_ids(root: &Path) -> Vec<(String, i64)> {
 
 /// Scan and return the recorded list.
 fn scanned(engine: &Engine) -> WhereToStart {
-    let w = engine.scan(true).expect("scan runs").where_to_start;
+    let w = engine.quality().scan(true).expect("scan runs").where_to_start;
     assert!(w.recorded);
     w
 }
@@ -118,7 +118,7 @@ fn unit_of(w: &WhereToStart, kind: FixUnitKind) -> &FixUnit {
 fn every_unit_keeps_its_id_across_a_full_reindex_that_renumbers_the_store() {
     let tmp = project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     let before = scanned(&engine);
     let ids_before = storage_ids(tmp.path());
 
@@ -128,11 +128,11 @@ fn every_unit_keeps_its_id_across_a_full_reindex_that_renumbers_the_store() {
     fs::remove_file(tmp.path().join("src/lib.rs")).unwrap();
     fs::remove_file(tmp.path().join("src/dup.rs")).unwrap();
     write(tmp.path(), "src/aaa.rs", &(0..20).map(|i| format!("pub fn filler_{i}() {{}}\n")).collect::<String>());
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     fs::remove_file(tmp.path().join("src/aaa.rs")).unwrap();
     write(tmp.path(), "src/lib.rs", &lib);
     write(tmp.path(), "src/dup.rs", &dup);
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     let after = scanned(&engine);
     let ids_after = storage_ids(tmp.path());
 
@@ -190,29 +190,29 @@ fn every_unit_keeps_its_id_across_a_full_reindex_that_renumbers_the_store() {
 fn node_and_impact_resolve_a_single_symbol_units_id() {
     let tmp = project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    assert!(engine.index().warnings.is_empty());
+    assert!(engine.pipeline().index().warnings.is_empty());
     let ranking = scanned(&engine);
     let function = unit_of(&ranking, FixUnitKind::Function);
     let id = function.node_id.clone().expect("a recorded unit carries its id");
     let full = coordinate::symbol(&id);
 
-    let node = engine.node(&id, false);
+    let node = engine.navigation().node(&id, false);
     let detail = node.node.as_ref().unwrap_or_else(|| panic!("node resolves {id:?}: {node:?}"));
     assert_eq!(detail.symbol.symbol, full, "the unit's own node");
     assert_eq!(detail.symbol.name, function.name);
     assert!(node.alternatives.is_empty() && node.warnings.is_empty(), "exact, with no note: {node:?}");
-    let by_symbol = engine.node(&full, false);
+    let by_symbol = engine.navigation().node(&full, false);
     assert_eq!(
         serde_json::to_value(&node.node).unwrap(),
         serde_json::to_value(&by_symbol.node).unwrap(),
         "the same answer as the full symbol"
     );
 
-    let impact = engine.impact(&id, None);
+    let impact = engine.navigation().impact(&id, None);
     let resolved = impact.resolved.as_ref().unwrap_or_else(|| panic!("impact resolves {id:?}: {impact:?}"));
     assert_eq!(resolved.symbol, full);
     assert!(impact.alternatives.is_empty(), "{impact:?}");
-    let by_symbol = engine.impact(&full, None);
+    let by_symbol = engine.navigation().impact(&full, None);
     assert_eq!(
         serde_json::to_value(&impact.upstream).unwrap(),
         serde_json::to_value(&by_symbol.upstream).unwrap(),
@@ -221,12 +221,12 @@ fn node_and_impact_resolve_a_single_symbol_units_id() {
 
     // `impact_intersection` resolves through its own resolver, which counts the
     // candidates a name matched: the id is exact, so it matches one.
-    let intersection = engine.impact_intersection(&[format!("a={id}"), format!("b={id}")], None);
+    let intersection = engine.navigation().impact_intersection(&[format!("a={id}"), format!("b={id}")], None);
     let resolved: Vec<&str> = intersection.items[0].resolved.iter().map(|r| r.symbol.as_str()).collect();
     assert_eq!(resolved, [full.as_str()], "impact_intersection resolves the id: {intersection:?}");
     assert!(intersection.warnings.is_empty(), "exact, so no ambiguity warning: {:?}", intersection.warnings);
 
     let group = unit_of(&ranking, FixUnitKind::DuplicateGroup).node_id.clone().unwrap();
-    assert!(engine.node(&group, false).node.is_none(), "a group's id names no single symbol");
-    assert!(engine.impact(&group, None).resolved.is_none());
+    assert!(engine.navigation().node(&group, false).node.is_none(), "a group's id names no single symbol");
+    assert!(engine.navigation().impact(&group, None).resolved.is_none());
 }

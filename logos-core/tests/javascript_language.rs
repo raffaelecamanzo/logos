@@ -79,7 +79,7 @@ fn calls(rt: &Runtime) -> Vec<(String, String)> {
 
 fn status_row(engine: &Engine, language: &str) -> Option<LanguageResolution> {
     engine
-        .status()
+        .graph().status()
         .resolution_by_language
         .into_iter()
         .find(|row| row.language == language)
@@ -99,7 +99,7 @@ fn every_javascript_extension_is_labelled_javascript_and_typescript_keeps_its_ow
     ] {
         write(root, rel, src);
     }
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
 
     let want: BTreeMap<String, String> = [
         ("lib/a.js", "javascript"),
@@ -120,7 +120,7 @@ fn a_js_file_containing_jsx_parses_cleanly_and_its_component_call_binds() {
     let tmp = TempDir::new().unwrap();
     jsx_in_js(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     let syntax: Vec<&String> = result.warnings.iter().filter(|w| w.contains("syntax error")).collect();
     assert!(syntax.is_empty(), "JSX in a `.js` file is no syntax error: {syntax:?}");
@@ -141,7 +141,7 @@ fn status_reports_a_javascript_row_and_the_typescript_rows_count_no_js_file() {
     jsx_in_js(tmp.path());
     write(tmp.path(), "src/util.ts", "export function util(): number {\n  return 1;\n}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let js = status_row(&engine, "javascript").expect("status reports a javascript row");
     assert_eq!(js.files, 2, "Button.js and App.js: {js:?}");
@@ -150,7 +150,7 @@ fn status_reports_a_javascript_row_and_the_typescript_rows_count_no_js_file() {
     assert_eq!(ts.files, 1, "util.ts alone: {ts:?}");
     assert!(status_row(&engine, "tsx").is_none(), "no `.tsx` file, so no tsx row");
 
-    let json = serde_json::to_value(engine.status()).expect("status serialises");
+    let json = serde_json::to_value(engine.graph().status()).expect("status serialises");
     assert!(
         json["resolution_by_language"]
             .as_array()
@@ -175,17 +175,17 @@ fn a_synced_javascript_edit_equals_a_fresh_index() {
     let live = TempDir::new().unwrap();
     jsx_in_js(live.path());
     let engine = Engine::start(live.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     write(live.path(), "src/Badge.jsx", badge);
     write(live.path(), "src/App.js", app);
-    engine.sync(&["src/Badge.jsx".into(), "src/App.js".into()]);
+    engine.pipeline().sync(&["src/Badge.jsx".into(), "src/App.js".into()]);
 
     let fresh = TempDir::new().unwrap();
     jsx_in_js(fresh.path());
     write(fresh.path(), "src/Badge.jsx", badge);
     write(fresh.path(), "src/App.js", app);
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
 
     assert_eq!(file_languages(live.path()), file_languages(fresh.path()));
     assert_eq!(file_languages(live.path())["src/Badge.jsx"], "javascript");
@@ -206,7 +206,7 @@ fn re_extraction_relabels_a_store_whose_javascript_rows_read_typescript() {
     let root = tmp.path();
     write(root, "lib/a.js", "export function a() {}\n");
     write(root, "lib/b.js", "export function b() {}\n");
-    Engine::start(root).expect("engine starts").index();
+    Engine::start(root).expect("engine starts").pipeline().index();
     {
         let conn = Connection::open(root.join(".logos/logos.db")).unwrap();
         conn.execute("UPDATE files SET language = 'typescript' WHERE path LIKE '%.js'", [])
@@ -217,9 +217,9 @@ fn re_extraction_relabels_a_store_whose_javascript_rows_read_typescript() {
 
     let engine = Engine::start(root).expect("engine restarts");
     write(root, "lib/a.js", "export function a() {\n  return 1;\n}\n");
-    engine.sync(&["lib/a.js".into()]);
+    engine.pipeline().sync(&["lib/a.js".into()]);
     assert_eq!(lang("lib/a.js"), "javascript", "a synced edit relabels its file");
 
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(lang("lib/b.js"), "javascript", "a full index relabels every file");
 }

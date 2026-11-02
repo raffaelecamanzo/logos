@@ -77,6 +77,9 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (42, MIGRATION_42),
     (43, MIGRATION_43),
     (44, MIGRATION_44),
+    (45, MIGRATION_45),
+    (46, MIGRATION_46),
+    (47, MIGRATION_47),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -2049,7 +2052,7 @@ CREATE TABLE check_run (
 /// `0` and read back as a clean check: the [FR-GV-03] definition of "clean"
 /// ("a contract was evaluated and held; it never means nothing was
 /// evaluated") could not be honoured by a reader, because the fact it turns
-/// on was never written down. [`check_rules`](crate::Engine::check_rules)
+/// on was never written down. [`check_rules`](crate::Quality::check_rules)
 /// already computes both figures this adds; they were dropped at the
 /// persistence boundary.
 ///
@@ -2065,8 +2068,8 @@ CREATE TABLE check_run (
 /// contract authoring **zero** rules is what [`logos init`](crate::init)'s
 /// default template produces, and a reader must be able to tell it from an
 /// absent contract. `operation` names which run wrote the marker, since
-/// [`scan`](crate::Engine::scan) shares the write site with
-/// [`check_rules`](crate::Engine::check_rules) and the two are not
+/// [`scan`](crate::Quality::scan) shares the write site with
+/// [`check_rules`](crate::Quality::check_rules) and the two are not
 /// interchangeable to a reader.
 ///
 /// Additive only — three `ALTER TABLE ... ADD COLUMN`s, the migration-12
@@ -3437,6 +3440,113 @@ ALTER TABLE metric_snapshot_offenders_uncapped ADD COLUMN partial_parse INTEGER 
 ALTER TABLE metric_snapshot_fix_units ADD COLUMN partial_parse INTEGER CHECK (partial_parse IN (0,1));
 
 -- 3. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 45 — a callable's **parameter shape** (S-820, [CR-254],
+/// [FR-EX-29]), the [migration-42](MIGRATION_42) shape:
+///
+/// - **`nodes.callable_signature`** — the callable's parameter types, each
+///   without its name, default value or top-level `const`, words one space
+///   apart, and followed by `,`, then its declarator's qualifiers
+///   (`const char*,double,const`; `f()` is `''`). Recorded for every C and C++ prototype and definition;
+///   `NULL` on every other node and for a callable whose declarator the reading
+///   finds no parameter list in. A language that records result types too
+///   appends them to the same fact. The binder pairs a bodiless prototype with
+///   the one definition of its scope path, name and shape in a file whose
+///   includes reach it ([FR-RS-38]).
+///
+/// **Plugin-agnostic by construction**: no column names a language.
+///
+/// `NULL` until a file is re-extracted, and **re-extraction is triggered
+/// here** as migrations 25 and 28–44 do it: every `files.content_hash` is
+/// cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_45_adds_the_callable_signature_column` in [`super::migrate`].
+///
+/// [CR-254]: ../../../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+/// [FR-EX-29]: ../../../../docs/specs/requirements/FR-EX-29.md
+/// [FR-RS-38]: ../../../../docs/specs/requirements/FR-RS-38.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_45: &str = "\
+-- 1. A callable's parameter shape (CR-254): its parameter types, then its
+-- declarator's qualifiers. NULL elsewhere, and on rows indexed before this
+-- migration.
+ALTER TABLE nodes ADD COLUMN callable_signature TEXT;
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
+-- next scan like a modified one, filling the column.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 46 — a Go callable's **signature** in the [migration-45](MIGRATION_45)
+/// column (S-830, [CR-260] G1, [FR-RS-18]): no schema change.
+///
+/// `nodes.callable_signature` gains a second reading. A plugin whose
+/// `symbols` query declares the `@signature.*` captures records its callables'
+/// parameter **and result** types, `([]byte)(int,error)`, and a generic type's
+/// type parameters, `[T]` — Go's method-set pass matches a method against an
+/// interface's spec by it. The column already holds text and room for result
+/// types, so the owner-approved reuse adds none.
+///
+/// The fact is filled only by re-extraction, so this migration **triggers
+/// it**, as migrations 25 and 28–45 do: every `files.content_hash` is
+/// cleared, and the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. Until then a Go method records no signature and
+/// matches nothing — a missed `Implements`, never an invented one. No graph
+/// row is deleted. Plugin-agnostic by construction: no language is named.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_46_clears_every_hash_and_changes_no_row` in [`super::migrate`].
+///
+/// [CR-260]: ../../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+/// [FR-RS-18]: ../../../../docs/specs/requirements/FR-RS-18.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_46: &str = "\
+-- Trigger re-extraction (CR-260): a file with no recorded hash is re-extracted
+-- on its next scan like a modified one, recording each Go callable's signature.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 47 — the **facade class a file declares** (S-832, [CR-261],
+/// [FR-RS-31]), the [migration-30](MIGRATION_30) shape:
+///
+/// - **`files.facade`** — the name a file's own annotation gives the class
+///   another language of its family reaches its top-level functions through
+///   (Kotlin's `@file:JvmName("Slugs")`). The binder and the reference
+///   classes' name universe ([FR-RS-49]) read it in place of the name derived
+///   from the file's stem (`StringsKt`). `NULL` on a file that declares none,
+///   and on rows indexed before this migration.
+///
+/// **Plugin-agnostic by construction**: no column names a language; a plugin
+/// fills it by declaring a file facade and capturing `@module.facade`.
+///
+/// `NULL` until a file is re-extracted, and **re-extraction is triggered
+/// here** as migrations 25 and 28–46 do it: every `files.content_hash` is
+/// cleared, so the next scan, index or full-walk sync re-extracts each file
+/// like a modified one. No graph row is deleted.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_47_adds_the_file_facade_and_triggers_reextraction` in
+/// [`super::migrate`].
+///
+/// [CR-261]: ../../../../docs/requests/CR-261-kotlin-resolution-follow-ups.md
+/// [FR-RS-31]: ../../../../docs/specs/requirements/FR-RS-31.md
+/// [FR-RS-49]: ../../../../docs/specs/requirements/FR-RS-49.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_47: &str = "\
+-- 1. The facade class a file's own annotation names (CR-261): what another
+-- language reaches its top-level functions through. NULL on a file declaring
+-- none, and on rows indexed before this migration.
+ALTER TABLE files ADD COLUMN facade TEXT;
+
+-- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next scan like a modified one, filling the column.
 UPDATE files SET content_hash = NULL;
 ";

@@ -296,7 +296,7 @@ public:
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     let read = node_id(rt, "read", NodeKind::Method);
@@ -330,7 +330,7 @@ int run() {
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     let run = node_id(rt, "run", NodeKind::Function);
     let helper = node_id(rt, "helper", NodeKind::Function);

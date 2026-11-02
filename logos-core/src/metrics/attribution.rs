@@ -1,5 +1,6 @@
 //! Method → struct attribution for Rust and Go (S-510, [CR-166], metric
-//! semantics v9) — pure, no I/O.
+//! semantics v9; trait impls set aside since v10, S-826, [CR-257]) — pure, no
+//! I/O.
 //!
 //! Extraction makes the crate/package *module*, not the struct, the `Contains`
 //! parent of a Rust `impl` method and of a Go receiver method, so a struct never
@@ -15,6 +16,13 @@
 //! - **Go** — a receiver method belongs to the struct of that name in its
 //!   **package**, the directory of its file.
 //!
+//! A Rust method whose **innermost** recorded impl block implements a trait
+//! (`impl Trait for Type`, its `trait_path` recorded, [FR-EX-34]) is the
+//! trait's contract, not the type's surface: it belongs to no struct and is
+//! counted as set aside ([`MethodOwner::TraitImpl`]), whatever its self type
+//! names. The innermost block decides, so a method of an `impl` nested in a
+//! function of another `impl` is judged by the block it is written in.
+//!
 //! A candidate struct must also be declared in a file of the method's own
 //! extension, so a same-named struct of another language sharing a directory or
 //! a crate-less path is never a candidate.
@@ -29,6 +37,8 @@
 //! reads nothing of it.
 //!
 //! [CR-166]: ../../../docs/requests/CR-166-rust-and-go-methods-count-toward-their-type-for-focus.md
+//! [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+//! [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
 //! [FR-RS-11]: ../../../docs/specs/requirements/FR-RS-11.md
 //! [FR-EX-12]: ../../../docs/specs/requirements/FR-EX-12.md
 //! [`MethodAttribution`]: crate::models::quality::MethodAttribution
@@ -52,10 +62,23 @@ pub struct ContainerLinks {
     ///
     /// [FR-RS-29]: ../../../docs/specs/requirements/FR-RS-29.md
     pub partial_types: Vec<(NodeId, NodeId)>,
-    /// Every method recording a self type, in id order, with the one struct it
-    /// is attributed to — `None` when it names zero or two-plus structs of its
-    /// crate/package (`attribute`).
-    pub typed_methods: Vec<(NodeId, Option<NodeId>)>,
+    /// Every method recording a self type, in id order, with where it counts
+    /// (`attribute`).
+    pub typed_methods: Vec<(NodeId, MethodOwner)>,
+}
+
+/// Where one method recording a self type counts for Focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodOwner {
+    /// The one struct of its crate/package that its self type names.
+    Struct(NodeId),
+    /// A method of a Rust trait impl, set aside: it counts toward no container
+    /// (metric semantics v10, [CR-257]).
+    ///
+    /// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+    TraitImpl,
+    /// Its self type names zero or two-plus structs of its crate/package.
+    Unattributed,
 }
 
 impl ContainerLinks {
@@ -81,25 +104,23 @@ impl ContainerLinks {
 /// `impl_blocks` (the language places a type's methods in impl blocks, which may
 /// sit in any module of the crate), and the directory of its file otherwise (a
 /// receiver method, bound to a type of its own package); a candidate is also of
-/// the method file's extension. Only a [`NodeKind::Method`] is a member
-/// that Focus counts; any other node carrying a self type is skipped. The result
-/// is in `self_types` order.
+/// the method file's extension. A method whose innermost block
+/// ([`innermost_block`]) implements a trait is [`MethodOwner::TraitImpl`]. Only
+/// a [`NodeKind::Method`] is a member that Focus counts; any other node
+/// carrying a self type is skipped. The result is in `self_types` order.
 pub(super) fn attribute(
     nodes: &[NodeRow],
     self_types: &[(NodeId, String)],
     impl_blocks: &[ImplBlockRow],
-) -> Vec<(NodeId, Option<NodeId>)> {
+) -> Vec<(NodeId, MethodOwner)> {
     let node_of: HashMap<NodeId, &NodeRow> = nodes.iter().map(|n| (n.id, n)).collect();
     let mut structs: HashMap<&str, Vec<&NodeRow>> = HashMap::new();
     for n in nodes.iter().filter(|n| n.kind == NodeKind::Struct && n.file_path.is_some()) {
         structs.entry(n.name.as_str()).or_default().push(n);
     }
-    let mut blocks: HashMap<&str, Vec<(i64, i64)>> = HashMap::new();
+    let mut blocks: HashMap<&str, Vec<&ImplBlockRow>> = HashMap::new();
     for b in impl_blocks {
-        blocks
-            .entry(b.file_path.as_str())
-            .or_default()
-            .push((i64::from(b.start_line), i64::from(b.end_line)));
+        blocks.entry(b.file_path.as_str()).or_default().push(b);
     }
 
     self_types
@@ -107,13 +128,15 @@ pub(super) fn attribute(
         .filter_map(|(id, self_type)| {
             let method = node_of.get(id).filter(|n| n.kind == NodeKind::Method)?;
             let Some(path) = method.file_path.as_deref() else {
-                return Some((*id, None));
+                return Some((*id, MethodOwner::Unattributed));
             };
-            let in_impl = method.start_line.is_some_and(|line| {
-                blocks
-                    .get(path)
-                    .is_some_and(|spans| spans.iter().any(|&(start, end)| start <= line && line <= end))
-            });
+            let block = method
+                .start_line
+                .and_then(|line| innermost_block(blocks.get(path).map_or(&[][..], Vec::as_slice), line));
+            if block.is_some_and(|b| b.trait_path.is_some()) {
+                return Some((*id, MethodOwner::TraitImpl));
+            }
+            let in_impl = block.is_some();
             let scope = |file: &str| {
                 if in_impl {
                     crate_root(file)
@@ -128,12 +151,23 @@ pub(super) fn attribute(
                 .flatten()
                 .filter(|s| s.file_path.as_deref().is_some_and(|p| (scope(p), extension(p)) == wanted));
             let owner = match (candidates.next(), candidates.next()) {
-                (Some(only), None) => Some(only.id),
-                _ => None,
+                (Some(only), None) => MethodOwner::Struct(only.id),
+                _ => MethodOwner::Unattributed,
             };
             Some((*id, owner))
         })
         .collect()
+}
+
+/// The innermost of one file's `blocks` holding `line` — the narrowest span, so
+/// an `impl` written inside a function of another `impl` decides for its own
+/// methods; `None` when no block holds it.
+fn innermost_block<'a>(blocks: &[&'a ImplBlockRow], line: i64) -> Option<&'a ImplBlockRow> {
+    blocks
+        .iter()
+        .copied()
+        .filter(|b| i64::from(b.start_line) <= line && line <= i64::from(b.end_line))
+        .min_by_key(|b| b.end_line - b.start_line)
 }
 
 /// The crate a Rust file belongs to, as a path: the directories before the last

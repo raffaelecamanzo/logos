@@ -68,8 +68,8 @@ pub fn index_member(root: &Path) {
         write(root, ".logos/config.toml", &body);
     }
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 pub fn member(name: &str, root: &Path) -> Member {

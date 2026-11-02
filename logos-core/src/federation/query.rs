@@ -16,7 +16,7 @@
 //! unchanged ([FR-WS-05]).
 //!
 //! # Cross-service impact ([FR-WS-05])
-//! [`xservice_impact`] fans per-member [`Engine::impact`] across the
+//! [`xservice_impact`] fans per-member [`Navigation::impact`](crate::Navigation::impact) across the
 //! [bridge](super::bridge) edges: the seed member's impact, plus — for every
 //! [`BridgeEdge`] whose near endpoint is the queried `(member, symbol)` pair
 //! ([BR-73]) — the far member's impact of the opposite endpoint, tagged with
@@ -148,11 +148,11 @@ fn fan<T>(
 /// [`MemberResult::error`] ([FR-WS-05], [BR-44]).
 ///
 /// [`fan`] cannot serve this: it flattens only the engine-*start* `Err`, and the
-/// freshness read has a second failure mode of its own. [`Engine::status`] hides
+/// freshness read has a second failure mode of its own. [`Graph::status`](crate::Graph::status) hides
 /// that one — it degrades to a defaulted [`StatusInfo`] whose `indexed: false`
 /// is indistinguishable from an honestly empty graph, so a member whose read
 /// failed would be labeled `deferred` ("never attempted") instead of `degraded`
-/// ([BR-44]). Fanning [`Engine::try_status`] and flattening both `Result`s keeps
+/// ([BR-44]). Fanning [`Graph::try_status`](crate::Graph::try_status) and flattening both `Result`s keeps
 /// `MemberResult`'s exactly-one-channel contract while making the second failure
 /// visible to [`MemberStatus`].
 ///
@@ -169,7 +169,7 @@ fn fan<T>(
 /// # And the facts its reference classes are re-read by
 /// The workspace reference resolution (S-637) re-reads each member's provably
 /// external and unbound rows. They are kept by the member's own status read
-/// ([`Engine::try_status_with_reference_facts`]) — the classification `status`
+/// ([`Graph::try_status_with_reference_facts`](crate::Graph::try_status_with_reference_facts)) — the classification `status`
 /// already makes, never a second read — so they cost no walk either, and a
 /// member whose status was not read has none.
 ///
@@ -181,7 +181,7 @@ fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>
     let mut walked = FactsWalked::default();
     let freshness = answer
         .fan_out(|_, engine| {
-            (engine.try_status_with_reference_facts(), engine.build_manifests(), engine.type_facts())
+            (engine.graph().try_status_with_reference_facts(), engine.build_manifests(), engine.type_facts())
         })
         .into_iter()
         .map(|scoped| split_status_and_facts(scoped, &mut walked))
@@ -266,7 +266,7 @@ fn split_status_and_facts(
 }
 
 /// Collapse the two nested failure channels of a fanned fallible read —
-/// [`Engine::try_status`], or [`workspace_security`]'s member read — onto
+/// [`Graph::try_status`](crate::Graph::try_status), or [`workspace_security`]'s member read — onto
 /// [`MemberResult`]'s single `error` ([BR-44]).
 ///
 /// Outer `Err`: the member's engine failed to start. Inner `Err`: it started and
@@ -283,7 +283,7 @@ fn flatten_read<T>(scoped: MemberScoped<anyhow::Result<anyhow::Result<T>>>) -> M
     })
 }
 
-/// Repo-qualified cross-service full-text search ([FR-WS-05]): [`Engine::search`]
+/// Repo-qualified cross-service full-text search ([FR-WS-05]): [`Navigation::search`](crate::Navigation::search)
 /// fanned across the members in scope.
 #[derive(Debug, Serialize)]
 pub struct XserviceSearch {
@@ -307,12 +307,12 @@ pub fn xservice_search(
     XserviceSearch {
         query: query.to_string(),
         scope: repo.map(str::to_string),
-        members: fan(registry, repo, |engine| engine.search(query, kind, limit)),
+        members: fan(registry, repo, |engine| engine.navigation().search(query, kind, limit)),
     }
 }
 
 /// Repo-qualified cross-service callers ([FR-WS-05]): each member's intra-repo
-/// [`Engine::callers`], plus the cross-service consumers that reach the symbol
+/// [`Navigation::callers`](crate::Navigation::callers), plus the cross-service consumers that reach the symbol
 /// over a [bridge](super::bridge) edge.
 #[derive(Debug, Serialize)]
 pub struct XserviceCallers {
@@ -459,7 +459,7 @@ pub fn xservice_callers(
             edge: edge.clone(),
         })
         .collect();
-    let members = fan(registry, repo, |engine| engine.callers(symbol, limit));
+    let members = fan(registry, repo, |engine| engine.navigation().callers(symbol, limit));
     let mut member_reads = inputs.reads.clone();
     for member in &members {
         member.note_in(&mut member_reads);
@@ -772,7 +772,7 @@ pub fn xservice_impact(
             impact,
         })
         .collect();
-    let seed = fan(registry, repo, |engine| engine.impact(symbol, depth));
+    let seed = fan(registry, repo, |engine| engine.navigation().impact(symbol, depth));
     for member in &seed {
         member.note_in(&mut member_reads);
     }
@@ -854,7 +854,7 @@ impl Queried<'_> {
                     CrossServiceImpact {
                         via: edge.clone(),
                         member: far.member.clone(),
-                        impact: engine.impact(far.symbol.as_str(), self.depth),
+                        impact: engine.navigation().impact(far.symbol.as_str(), self.depth),
                     },
                 ))
             })
@@ -866,12 +866,12 @@ impl XserviceImpact {
     /// Stitch the type-reference tier on ([FR-WS-35], [BR-60]): every bound
     /// [`TypeReference`] reaching the queried type, with the importing file's
     /// reach in its member — the files depending on it, directly or
-    /// transitively ([`Engine::affected`]), within `depth` hops (the surfaces
+    /// transitively ([`Navigation::affected`](crate::Navigation::affected)), within `depth` hops (the surfaces
     /// pass the `depth` they passed [`xservice_impact`]; its default when
     /// `None`), so the bound reads the same in every tier of the answer.
     ///
     /// The reach is **file-grain**, not the importing declaration's
-    /// [`Engine::impact`]: a Java/Kotlin import row is held by the importing
+    /// [`Navigation::impact`](crate::Navigation::impact): a Java/Kotlin import row is held by the importing
     /// file's module node, whose symbol impact is empty however much depends on
     /// the file's classes, while the file closure follows the member's own
     /// calls, imports and references from it. A reference binds the import of a
@@ -926,7 +926,7 @@ impl XserviceImpact {
                             closures
                                 .entry((importer.member.clone(), importer.file.clone()))
                                 .or_insert_with(|| {
-                                    within(engine.affected(std::slice::from_ref(&importer.file), false))
+                                    within(engine.navigation().affected(std::slice::from_ref(&importer.file), false))
                                 })
                                 .clone()
                         })
@@ -1385,7 +1385,7 @@ impl MemberStatus {
 pub struct WorkspaceStatus {
     /// The workspace name (`[workspace] name`).
     pub workspace: String,
-    /// Per-member index freshness ([`Engine::status`]) and warm state,
+    /// Per-member index freshness ([`Graph::status`](crate::Graph::status)) and warm state,
     /// repo-qualified.
     pub members: Vec<MemberStatus>,
     /// The workspace-wide warm roll-up over [`members`](Self::members)
@@ -2129,12 +2129,12 @@ fn member_security(engine: &Engine, probes: crate::security::VersionProbes) -> a
     // The roll-up never reads a row's coverage, so no member's tree is walked
     // for it; only an installed gosec or Bandit with no stored report walks
     // it, to decide whether it is `not_applicable` (S-769).
-    let status = engine.security_status_probing(probes, false)?;
+    let status = engine.security().status_probing(probes, false)?;
     // Test code is classified by this member's own graph (FR-SC-16).
     let listings = crate::security::listings(
         engine.root(),
-        &engine.scan_environment(),
-        engine.tools_manifest(),
+        &engine.security().tools().environment(),
+        engine.security().tools().manifest(),
         crate::engine::today_utc(),
         |findings| crate::security::context::in_test_symbols(engine, findings),
     )?;
@@ -2281,7 +2281,7 @@ fn roll_up_security(members: Vec<MemberResult<MemberSecurity>>) -> WorkspaceSecu
 /// have fresh coverage out of all of them ([NFR-CC-04]).
 ///
 /// Each row is read through the member's own engine with the read its own
-/// Coverage page makes ([`Engine::coverage_status_probing`] under
+/// Coverage page makes ([`Coverage::status_probing`](crate::Coverage::status_probing) under
 /// [`Probes::Never`](crate::coverage::Probes::Never)), so no tool process
 /// starts, nothing is written, and a figure here cannot differ from the
 /// member's page. **No figure is summed, averaged or weighted across members**
@@ -2382,7 +2382,7 @@ pub fn workspace_coverage(registry: &EngineRegistry<Engine>) -> WorkspaceCoverag
     roll_up_coverage(
         registry
             .answer()
-            .fan_out(|_, engine| engine.coverage_status_probing(crate::coverage::Probes::Never))
+            .fan_out(|_, engine| engine.coverage().status_probing(crate::coverage::Probes::Never))
             .into_iter()
             .map(flatten_read)
             .collect(),
@@ -2593,6 +2593,7 @@ mod tests {
                         call_residue: None,
                         header_ownership: None,
                         parse_damage: None,
+                        interfaces: None,
                     })
                     .collect(),
                 ..StatusInfo::default()
@@ -3152,8 +3153,8 @@ mod tests {
     /// `degraded` — not arrive as a defaulted `StatusInfo` whose `indexed:
     /// false` would read `deferred` ("never attempted", [BR-44]).
     ///
-    /// [`Engine::status`] hides exactly that case by design (ADR-14 degradation),
-    /// which is why [`fan_status`] fans [`Engine::try_status`]. Asserted over
+    /// [`Graph::status`](crate::Graph::status) hides exactly that case by design (ADR-14 degradation),
+    /// which is why [`fan_status`] fans [`Graph::try_status`](crate::Graph::try_status). Asserted over
     /// [`flatten_read`] rather than a corrupted on-disk store, so all three
     /// channels are pinned deterministically.
     ///

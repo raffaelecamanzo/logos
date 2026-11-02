@@ -144,7 +144,7 @@ fn started_router(
     let dir = TempDir::new().expect("temp root");
     fixture(dir.path());
     let engine = Arc::new(Engine::start(dir.path()).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     let intent = IntentToken::generate();
     let router = web::router_with_intent(Arc::clone(&engine), intent.clone());
     (dir, engine, router, intent)
@@ -220,7 +220,7 @@ async fn uat_ui_06_rules_edit_save_then_apply_re_evaluates_the_gate() {
     });
 
     // Baseline: a clean scan with no contract finds no violations.
-    let baseline = engine.scan(false).expect("baseline scan");
+    let baseline = engine.quality().scan(false).expect("baseline scan");
     assert!(baseline.violations.is_empty(), "no contract yet ⇒ no violations");
 
     // Steps 4–5: Save the stricter contract; the engine stamps provenance.
@@ -243,7 +243,7 @@ async fn uat_ui_06_rules_edit_save_then_apply_re_evaluates_the_gate() {
         "the written rules.toml carries the provenance comment: {written:?}",
     );
     assert!(
-        Engine::open(dir.path()).config_read(None).expect("the stamped file reparses").rules.exists,
+        Engine::open(dir.path()).config().read(None).expect("the stamped file reparses").rules.exists,
         "the stamped rules.toml reparses via the standard load path",
     );
 
@@ -260,7 +260,7 @@ async fn uat_ui_06_rules_edit_save_then_apply_re_evaluates_the_gate() {
     assert!(body.contains("\"action\":\"reevaluated\""), "a rules apply re-evaluates: {body}");
 
     // The gate now reflects the new contract — the upward dependency is flagged.
-    let after = engine.scan(false).expect("post-apply scan");
+    let after = engine.quality().scan(false).expect("post-apply scan");
     assert!(
         !after.violations.is_empty(),
         "the new contract's upward dependency is flagged after Apply (gate updated)",

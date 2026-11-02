@@ -460,16 +460,16 @@ fn tsx_entry() -> GrammarEntry {
 /// queries, so JSX parses in a `.js` file and a TypeScript-family query change
 /// reaches JavaScript with no second copy. Its own `symbols` patterns — the
 /// functions JavaScript defines by assignment, `exports` or prototype (S-539,
-/// [FR-EX-18]) — are layered over the shared `symbols` query, and its own
-/// Express template-literal paths (S-541, [FR-FW-03]) over the shared
-/// `frameworks` query.
+/// [FR-EX-18]) — are layered over the shared `symbols` query. Its Express
+/// template-literal paths (S-541, [FR-FW-03]) were a `frameworks` layer until
+/// S-822 moved them into the shared query, which TypeScript reads too.
 ///
 /// [FR-PL-08]: ../../../docs/specs/requirements/FR-PL-08.md
 /// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
 /// [FR-FW-03]: ../../../docs/specs/requirements/FR-FW-03.md
 #[cfg(feature = "lang-typescript")]
 fn javascript_entry() -> GrammarEntry {
-    entry!("javascript", shares tsx_entry(), layers ["symbols", "frameworks"])
+    entry!("javascript", shares tsx_entry(), layers ["symbols"])
 }
 
 /// The Go grammar entry ([FR-PL-01], S-015).
@@ -829,8 +829,8 @@ mod tests {
         (
             "queries/frameworks.scm",
             "tsx/queries/frameworks.scm",
-            12665,
-            0x5d319b971eeb949a,
+            27379,
+            0xd50ef635194bcd55,
         ),
         (
             "queries/invocations.scm",
@@ -847,23 +847,17 @@ mod tests {
     ];
 
     /// The `javascript` entry's queries (S-539): the `tsx` entry's, with its own
-    /// `symbols` layer appended to the shared `symbols` query and its own
-    /// `frameworks` layer to the shared `frameworks` query (S-541); every other
-    /// query is the `tsx` asset itself.
+    /// `symbols` layer appended to the shared `symbols` query; every other query
+    /// — `frameworks` included since S-822 — is the `tsx` asset itself.
     const JAVASCRIPT_QUERIES: &[(&str, &str, usize, u64)] = &[
         (
             "queries/symbols.scm",
             "tsx/queries/symbols.scm + javascript/queries/symbols.scm",
-            13184,
-            0x3141d7063fbd6df8,
+            13259,
+            0x660268f5c6e5b442,
         ),
         TSX_QUERIES[1],
-        (
-            "queries/frameworks.scm",
-            "tsx/queries/frameworks.scm + javascript/queries/frameworks.scm",
-            15005,
-            0x2acd65db562df3d6,
-        ),
+        TSX_QUERIES[2],
         TSX_QUERIES[3],
         TSX_QUERIES[4],
     ];
@@ -930,8 +924,8 @@ mod tests {
                     (
                         "queries/symbols.scm",
                         "python/queries/symbols.scm",
-                        9857,
-                        0x7b25cb779975a34b,
+                        10053,
+                        0xbb574bd7617f0df2,
                     ),
                     (
                         "queries/references.scm",
@@ -978,8 +972,8 @@ mod tests {
                     (
                         "queries/frameworks.scm",
                         "typescript/queries/frameworks.scm",
-                        12679,
-                        0xb0b0a0f064321e92,
+                        27393,
+                        0x77b9b3378cb1728d,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1001,22 +995,21 @@ mod tests {
                 queries: TSX_QUERIES,
             },
             // JavaScript runs the `tsx` entry's very queries (S-538), never a
-            // copy of its own, with its own `symbols` (S-539) and `frameworks`
-            // (S-541) layers.
+            // copy of its own, with its own `symbols` (S-539) layer.
             Row {
                 feature: cfg!(feature = "lang-typescript"),
-                manifest: ("javascript/plugin.toml", 8108, 0x27b19b132aba44e2),
+                manifest: ("javascript/plugin.toml", 8113, 0xbba2f8c9be9ecb69),
                 queries: JAVASCRIPT_QUERIES,
             },
             Row {
                 feature: cfg!(feature = "lang-go"),
-                manifest: ("go/plugin.toml", 8453, 0x2a7356aef73b47ba),
+                manifest: ("go/plugin.toml", 8602, 0x71f47c1a19a4bad3),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "go/queries/symbols.scm",
-                        9016,
-                        0xeb26e96af4ba6805,
+                        10776,
+                        0xae0f8e8de4a6b211,
                     ),
                     (
                         "queries/references.scm",
@@ -1027,8 +1020,8 @@ mod tests {
                     (
                         "queries/frameworks.scm",
                         "go/queries/frameworks.scm",
-                        4181,
-                        0x0db1f4ebbe9d2b36,
+                        13923,
+                        0x49ca6aa6b64204fe,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1063,8 +1056,8 @@ mod tests {
                     (
                         "queries/references.scm",
                         "java/queries/references.scm",
-                        11390,
-                        0x5cc2f49c507f30ea,
+                        19561,
+                        0xc83d1367e4390fa2,
                     ),
                     (
                         "queries/frameworks.scm",
@@ -1131,19 +1124,19 @@ mod tests {
             },
             Row {
                 feature: cfg!(feature = "lang-kotlin"),
-                manifest: ("kotlin/plugin.toml", 16504, 0x767e96e5cacf9609),
+                manifest: ("kotlin/plugin.toml", 16893, 0xc0b50828d3ccdfea),
                 queries: &[
                     (
                         "queries/symbols.scm",
                         "kotlin/queries/symbols.scm",
-                        10530,
-                        0xfd89cbaf137bdcec,
+                        12953,
+                        0xaff0fef9ba32262d,
                     ),
                     (
                         "queries/references.scm",
                         "kotlin/queries/references.scm",
-                        28484,
-                        0x7c01b75bfccb14b7,
+                        29822,
+                        0x055d4a2385668832,
                     ),
                     (
                         "queries/frameworks.scm",
@@ -1184,8 +1177,8 @@ mod tests {
                     (
                         "queries/references.scm",
                         "c-sharp/queries/references.scm",
-                        28328,
-                        0x5b872d5c84a41bd3,
+                        34056,
+                        0x0ebfea1ae9be0519,
                     ),
                     (
                         "queries/frameworks.scm",
@@ -1238,8 +1231,8 @@ mod tests {
                     (
                         "queries/symbols.scm",
                         "ruby/queries/symbols.scm",
-                        8080,
-                        0x9f73715c8dfb9022,
+                        8639,
+                        0x7d5952a36c6cece4,
                     ),
                     (
                         "queries/references.scm",
@@ -1316,8 +1309,8 @@ mod tests {
                     (
                         "queries/references.scm",
                         "scala/queries/references.scm",
-                        32646,
-                        0x27d3bf8d80b32dcd,
+                        38840,
+                        0x00a5cc4559acbc80,
                     ),
                     (
                         "queries/locals.scm",
@@ -1434,9 +1427,9 @@ mod tests {
     /// (S-538, [FR-PL-08]): the same `LanguageFn`, and every query the `tsx`
     /// asset itself — the very static source, so a TypeScript-family query
     /// change made in `tsx/queries/` is the change JavaScript runs, with no
-    /// second copy to keep in step — except `symbols` and `frameworks`, each
-    /// that asset with JavaScript's own layer appended (S-539, [FR-EX-18];
-    /// S-541, [FR-FW-03]).
+    /// second copy to keep in step — except `symbols`, that asset with
+    /// JavaScript's own layer appended (S-539, [FR-EX-18]). Its `frameworks`
+    /// layer (S-541, [FR-FW-03]) moved into the shared query (S-822).
     ///
     /// [FR-PL-08]: ../../../docs/specs/requirements/FR-PL-08.md
     /// [FR-EX-18]: ../../../docs/specs/requirements/FR-EX-18.md
@@ -1451,7 +1444,6 @@ mod tests {
             assert_eq!(js.relative_path, shared.relative_path);
             let layer = match js.relative_path {
                 "queries/symbols.scm" => Some(include_str!("../../plugins/javascript/queries/symbols.scm")),
-                "queries/frameworks.scm" => Some(include_str!("../../plugins/javascript/queries/frameworks.scm")),
                 _ => None,
             };
             if let Some(layer) = layer {

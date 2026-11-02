@@ -8,14 +8,17 @@
 //! user-level config (the extra flags), or, in a scoped run, from the user's
 //! own path arguments, each confined to the project root before any spawn
 //! ([`super::resolve_scope`]). Nothing in the repository fills a placeholder
-//! but what its own ignore files leave in or out, and both can only narrow
-//! what is scanned — which the repository's `[security_scan]` switch can
-//! already do wholesale ([NFR-SE-08]):
+//! but what its own ignore files leave in or out and the checks its `.bandit`
+//! skips, and each can only narrow what is scanned — which the repository's
+//! `[security_scan]` switch can already do wholesale ([NFR-SE-08]):
 //! - the names of the directories they exclude ([`Arg::Ignored`]), each the
 //!   value of an exclusion flag, a name a flag could misread never passed;
 //! - the paths they leave in ([`Arg::Unignored`]), each a file or directory
 //!   under the root that `.` would have read, never a symbolic link, never
-//!   one starting with `-`, within the same argument budget.
+//!   one starting with `-`, within the same argument budget;
+//! - the Bandit test ids the root's `.bandit` skips ([`Arg::Skips`], HF-3 of
+//!   sprint 110), each a test Bandit 1.7.10 ships, appended to the template's own
+//!   in Bandit's one `--skip` ([`super::bandit_ini`]).
 //!
 //! The scan root is the child's working directory, spelled `.` in the argv
 //! wherever no list of unignored paths takes its place.
@@ -34,7 +37,8 @@
 //!
 //! gosec is pinned at 2.29.0 (S-782), the release that adds Go 1.27 support: 2.21.4
 //! cannot type a package that imports the standard library under it, and exits 1
-//! with no report. Its command line above is the one proven at 2.21.4; the
+//! with no report. Its command line above is the one proven at 2.21.4, less
+//! `-quiet` (S-846: 2.29.0 writes no report at all on a clean scan with it); the
 //! hand-run harness, whose Go files now import the standard library, is re-run
 //! on 2.29.0 by the maintainer, and until its rows are committed at the pin the
 //! `exclude-dir-tree` evidence is the 2.21.4 run. A gosec of any version that
@@ -237,9 +241,14 @@ pub(crate) enum Arg {
     /// `secrets` framework reports the same hardcoded secrets as Gitleaks and
     /// would list each twice, so Gitleaks owns them while it is there.
     SkipSecrets,
+    /// The template's comma list of test ids to skip, with each id the
+    /// project's own `.bandit` skips appended once ([`Fill::project_skips`],
+    /// HF-3 of sprint 110). Bandit's only: its `--skip` replaces the `skips`
+    /// of `.bandit` rather than adding to them, so the template passes both.
+    Skips(&'static str),
 }
 
-use Arg::{Database, Extra, Ignored, Language, Lit, NvdKeyFile, Out, Paths, PinnedConfig, SkipSecrets, Unignored};
+use Arg::{Database, Extra, Ignored, Language, Lit, NvdKeyFile, Out, Paths, PinnedConfig, SkipSecrets, Skips, Unignored};
 
 /// How [`Arg::Ignored`] passes the ignored directories — the shapes the
 /// [module docs](self) record per scanner and tested version.
@@ -660,6 +669,13 @@ pub static REGISTRY: [Scanner; 9] = [
             Out,
             Lit("--exit-zero"),
             Lit("--quiet"),
+            // B404 (`import subprocess`), B603 (a call without a shell) and
+            // B607 (a program started by name) describe no flow (S-844); B602
+            // and every other check still run. The project's own `.bandit`
+            // skips are appended (HF-3), and a user's `--skip` in `Extra`
+            // comes later, so Bandit keeps that one instead.
+            Lit("--skip"),
+            Skips("B404,B603,B607"),
             Lit("--exclude"),
             Lit("./.logos"),
             Ignored(Exclusion::Append { spell: Spelling::DotSlash }),
@@ -688,7 +704,6 @@ pub static REGISTRY: [Scanner; 9] = [
             Lit("-out"),
             Out,
             Lit("-no-fail"),
-            Lit("-quiet"),
             Ignored(Exclusion::Repeat { flag: "-exclude-dir", spell: Spelling::TreeRegex }),
             Extra,
             Paths,
@@ -853,6 +868,9 @@ pub(crate) struct Fill<'a> {
     /// Whether Gitleaks is enabled and has a copy to run, so owns the secrets
     /// (only read by [`Arg::SkipSecrets`]).
     pub gitleaks_runs: bool,
+    /// The test ids the `.bandit` at the scan root skips, valid ids only
+    /// ([`super::bandit_ini::project_skips`]; only read by [`Arg::Skips`]).
+    pub project_skips: &'a [String],
 }
 
 impl Scanner {
@@ -887,6 +905,7 @@ impl Scanner {
                         argv.extend(["--skip-framework", "secrets"].map(OsString::from));
                     }
                 }
+                Skips(base) => argv.push(OsString::from(super::bandit_ini::merge(base, fill.project_skips))),
                 Ignored(_) if fill.scope.is_some() => {}
                 // A scoped run's paths are the path position's; a scanner
                 // without one runs whole whatever the scope.

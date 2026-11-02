@@ -58,8 +58,8 @@ fn indexed_member(root: &Path, name: &str) -> Member {
     std::fs::create_dir_all(repo.join("src")).expect("src dir");
     std::fs::write(repo.join("src").join("lib.rs"), source(name)).expect("fixture source");
     let engine = Engine::start(&repo).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
     Member {
         name: name.to_string(),
         root: repo,
@@ -69,7 +69,7 @@ fn indexed_member(root: &Path, name: &str) -> Member {
 /// The bytes one member answers with, for the query the identity claim is about.
 fn answer(registry: &EngineRegistry<Engine>, member: &str) -> String {
     let engine = registry.engine_for(member).expect("member engine starts");
-    serde_json::to_string(&engine.search("entry", None, None)).expect("search json")
+    serde_json::to_string(&engine.navigation().search("entry", None, None)).expect("search json")
 }
 
 /// [NFR-PE-11] acceptance: an evicted member engine, reconstructed on its next
@@ -97,7 +97,7 @@ fn an_evicted_member_answers_identically_once_reconstructed() {
         EngineRegistry::<Engine>::with_budget(federation(root, members), RegistryMode::Lazy, budget);
 
     // The one line that wires the budget to a real engine —
-    // `MemberEngine::start` → `Engine::start_with_pools` — asserted here against
+    // `MemberEngine::start` → `StartOptions::pools` — asserted here against
     // a live runtime. Reverting it to `Engine::start` would leave every other
     // test in this story green on a host with few enough cores. (The worker-pool
     // half of that same share is pinned in `workspace_shared_worker_pool.rs`.)
@@ -223,7 +223,7 @@ fn a_serve_mode_workspace_evicts_to_its_budget_like_a_lazy_one() {
     // …and a reconstructed member still answers, so eviction under serve costs a
     // rebuild and nothing else.
     let rebuilt = registry.engine_for(names[0]).expect("member engine starts");
-    let answer = serde_json::to_string(&rebuilt.search("entry", None, None)).expect("search json");
+    let answer = serde_json::to_string(&rebuilt.navigation().search("entry", None, None)).expect("search json");
     assert!(
         answer.contains(&format!("{}_entry", names[0])),
         "a serve-mode member rebuilt after eviction lost its own symbols: {answer}"

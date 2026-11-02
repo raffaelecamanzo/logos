@@ -1,7 +1,7 @@
 //! CLI-vs-MCP payload-equality for the ARCHITECTURE `health` surface
 //! (S-361 / [FR-CL-06], [FR-GV-18], [FR-GV-20]).
 //!
-//! Both surfaces delegate to the **one** `Engine::health` entrypoint
+//! Both surfaces delegate to the **one** `Quality::health` entrypoint
 //! ([NFR-CC-01]) and serialise its read-model — the CLI via `serde_json` in
 //! `--json` mode, the MCP twin via `Content::json`. This test proves the wire
 //! payloads are byte-identical for the same repository state.
@@ -75,7 +75,7 @@ fn fixture() -> tempfile::TempDir {
         "src/mid.rs",
         "use crate::core::base;\npub fn mid() {\n    base();\n}\n",
     );
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -99,7 +99,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 /// the comparable call, not a convenience.
 fn cli_payload(root: &Path) -> Value {
     let engine = Engine::start(root).expect("engine");
-    let report = engine.health(true).expect("health");
+    let report = engine.quality().health(true).expect("health");
     serde_json::to_value(&report).expect("serialize")
 }
 
@@ -154,7 +154,7 @@ async fn cli_and_mcp_health_payloads_are_identical() {
 // is pinned against the binary in `cli/tests/improvements_parity.rs`, the one
 // crate that reaches the binary and the router. Each pair is checked where both
 // of its surfaces are reachable (the `xservice_surface.rs` convention), and the
-// pairs meet on `Engine::latest_health()` — the value the Health handler
+// pairs meet on `Readouts::latest_health()` — the value the Health handler
 // serialises — which this test also compares, so the chain closes.
 //
 // [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
@@ -172,8 +172,8 @@ fn scanned_fixture() -> tempfile::TempDir {
     source.push_str(&format!("pub fn deep_one(x: i32) -> i32 {{\n{open}return x;\n{}0\n}}\n", "}\n".repeat(6)));
     write(tmp.path(), "src/lib.rs", &source);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
-    engine.scan(true).expect("scan runs");
+    engine.pipeline().index();
+    engine.quality().scan(true).expect("scan runs");
     tmp
 }
 
@@ -181,7 +181,7 @@ fn scanned_fixture() -> tempfile::TempDir {
 /// serialised exactly as `Output::print` does.
 fn cli_improvements(root: &Path) -> Value {
     let engine = Engine::start(root).expect("engine");
-    serde_json::to_value(engine.improvements().expect("improvements reads")).expect("serialize")
+    serde_json::to_value(engine.quality().readouts().improvements().expect("improvements reads")).expect("serialize")
 }
 
 async fn mcp_improvements(client: &Client) -> String {
@@ -201,7 +201,7 @@ async fn cli_and_mcp_improvements_payloads_are_identical_and_equal_the_health_li
     let cli = cli_improvements(root);
     let health = {
         let engine = Engine::start(root).expect("engine");
-        serde_json::to_value(engine.latest_health().expect("health").scan.where_to_start).unwrap()
+        serde_json::to_value(engine.quality().readouts().latest_health().expect("health").scan.where_to_start).unwrap()
     };
     let (client, server) = boot(root).await;
     let (first, second) = (mcp_improvements(&client).await, mcp_improvements(&client).await);

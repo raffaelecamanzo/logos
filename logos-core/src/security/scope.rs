@@ -25,9 +25,14 @@
 //! suppression reads it ([`project_location`]); a finding with no location, or
 //! one outside the root, is `production`.
 //!
-//! **Documented limitation.** A historical, unbound or stale finding has no
-//! current enclosing node, so the path rule alone classifies it: a secret
-//! found only in history in a `src/` test module reads `production`.
+//! A historical finding — a secret found only in history — has no node of
+//! today's graph at its reported line, so its line at its anchor commit is
+//! re-anchored instead ([`super::historical`], [CR-265]): found in today's
+//! file, or read in that commit's version of the file, its enclosing node
+//! answers `test_symbol` as a bound finding's does, and the path rule decides
+//! when neither does. An old copy of a fake key in a `src/` test module reads
+//! `test`. An unbound or stale finding has no enclosing node, so the path rule
+//! alone classifies it.
 //!
 //! Every list defaults to production behind a [`ScopeFilter`], and every count
 //! leaves test code out by [`counts`](crate::history::security::counts) and
@@ -43,6 +48,7 @@
 //! [FR-SC-30]: ../../../docs/specs/requirements/FR-SC-30.md
 //! [FR-SC-31]: ../../../docs/specs/requirements/FR-SC-31.md
 //! [ADR-79]: ../../../docs/specs/architecture/decisions/ADR-79.md
+//! [CR-265]: ../../../docs/requests/CR-265-security-findings-without-fixture-and-audit-noise.md
 //! [BR-98]: ../../../docs/specs/software-spec.md#328-security-findings
 //! [BR-100]: ../../../docs/specs/software-spec.md#328-security-findings
 
@@ -299,16 +305,219 @@ mod tests {
         assert_eq!(read(&sibling, false), PRODUCTION, "a sibling sharing the root's prefix is outside it");
     }
 
-    /// A historical or stale finding has no enclosing node, so the path rule
-    /// alone decides: a secret found in history in `src/` reads production.
+    /// `git` in the fixture repository at `root`, never in an enclosing one.
+    fn git(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .env("GIT_CEILING_DIRECTORIES", root.parent().unwrap())
+            .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "user.email=t@logos", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// A fake AWS key in a `#[cfg(test)]` module of `src/lib.rs`, moved down by
+    /// a later commit, is found by history scanning at its old line: the copy
+    /// is historical, and its old line holds other text today. It reads `test`
+    /// by its symbol — where the path rule alone read it `production` (1.22.1).
+    /// A second key's line moved from production code into a test: only
+    /// today's file reads it `test`, so it is re-anchored there, not read at
+    /// its commit. A stale finding still has its path, and nothing but its
+    /// path.
     #[test]
-    fn a_historical_finding_in_src_reads_production_by_its_path() {
-        let mut historical = finding(Some("logos-core/src/history/security/parse.rs"), None);
-        historical.binding = FindingBinding::Historical;
-        assert_eq!(read(&historical, false), PRODUCTION);
+    fn a_historical_finding_moved_down_in_a_src_test_module_reads_test_by_its_reanchored_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("project");
+        let repo = root.clone();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".logos")).unwrap();
+        std::fs::write(root.join(".logos/config.toml"), "[project]\nid = \"historical-scope\"\n").unwrap();
+        // Spelled in pieces, so this file holds no key a scanner reads.
+        let key = |n: u32| format!("AKIA{}{n}", "QWERTYUIOPASDFG");
+        let module = |key: &str| format!("#[cfg(test)]\nmod tests {{\n    #[test]\n    fn masks() {{\n        let key = \"{key}\";\n        assert_eq!(key.len(), 20);\n    }}\n}}\n");
+        std::fs::write(root.join("src/lib.rs"), format!("pub fn mask() {{}}\n\n{}", module(&key(1)))).unwrap();
+        std::fs::write(root.join("src/moved.rs"), format!("pub fn key() {{\n        let key = \"{}\";\n}}\n", key(2))).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "a key in a test, a key in production"]);
+        let anchor = git(&repo, &["rev-parse", "HEAD"]);
+        let moved = format!("pub fn mask() {{}}\n\n/// Masks nothing yet.\npub fn unmask() {{}}\n\n{}", module(&key(1)));
+        std::fs::write(root.join("src/lib.rs"), moved).unwrap();
+        std::fs::write(root.join("src/moved.rs"), format!("pub fn key() {{}}\n\n{}", module(&key(2)))).unwrap();
+        git(&repo, &["commit", "-q", "-am", "move the tests down; the production key into a test"]);
+        let engine = crate::Engine::start(&root).unwrap();
+        assert!(engine.pipeline().index().files_indexed > 0);
+
+        let at = |path: &str, line: i64| {
+            let mut f = finding(None, Some(path));
+            f.binding = FindingBinding::Historical;
+            f.start_line = Some(line);
+            f.anchor = Some(crate::history::security::CommitAnchor::new(anchor.clone(), path));
+            f
+        };
+        let (historical, moved) = (at("src/lib.rs", 7), at("src/moved.rs", 2));
+        let labels = scopes(&root, &[&historical, &moved], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        let read_all: Vec<_> = labels.iter().map(|l| (l.code_scope, l.code_scope_reason)).collect();
+        assert_eq!(read_all, [TEST_SYMBOL, TEST_SYMBOL], "moved down in its test module; re-anchored in today's test fn");
+        assert_eq!(read(&historical, false), PRODUCTION, "the path rule alone reads it as production");
+
         let mut stale = finding(Some("src/tests/old.rs"), None);
         stale.freshness = FRESHNESS_STALE;
         assert_eq!(read(&stale, false), TEST_PATH, "a stale finding still has its path");
+    }
+
+    /// A key that sat in a test at its commit and now sits in production code
+    /// alone is re-anchored there: today's file decides, and it reads
+    /// `production`, though its commit's version would have said `test`.
+    #[test]
+    fn a_historical_line_now_only_in_production_code_reads_production_by_todays_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // Spelled in pieces, so this file holds no key a scanner reads.
+        let line = format!("let key = \"AKIA{}\";", "QWERTYUIOPASDFGH");
+        let in_test = format!("#[cfg(test)]\nmod tests {{\n    #[test]\n    fn masks() {{\n        {line}\n    }}\n}}\n");
+        std::fs::write(root.join("src/lib.rs"), in_test).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "a key in a test"]);
+        let anchor = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("src/lib.rs"), format!("pub fn key() {{\n    {line}\n}}\n")).unwrap();
+        git(&root, &["commit", "-q", "-am", "the key in production code"]);
+        let engine = crate::Engine::start(&root).unwrap();
+        assert!(engine.pipeline().index().files_indexed > 0);
+
+        let mut f = finding(None, Some("src/lib.rs"));
+        f.binding = FindingBinding::Historical;
+        f.start_line = Some(5);
+        f.anchor = Some(crate::history::security::CommitAnchor::new(anchor, "src/lib.rs"));
+        let label = scopes(&root, &[&f], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        assert_eq!((label[0].code_scope, label[0].code_scope_reason), PRODUCTION, "today's production fn decides");
+    }
+
+    /// A project below the git root (a member of a repository holding
+    /// several): history names its files from the git root, and the line is
+    /// looked up in today's file under the project, with that prefix taken
+    /// off.
+    #[test]
+    fn a_project_below_the_git_root_re_anchors_in_its_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().canonicalize().unwrap().join("repo");
+        let root = repo.join("member");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // Spelled in pieces, so this file holds no key a scanner reads.
+        let line = format!("let key = \"AKIA{}\";", "QWERTYUIOPASDFGH");
+        std::fs::write(root.join("src/lib.rs"), format!("fn a() {{\n    {line}\n}}\n")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "a key"]);
+        let anchor = git(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("src/lib.rs"), format!("fn b() {{}}\n\nfn a() {{\n    {line}\n}}\n")).unwrap();
+
+        let mut f = finding(None, Some("member/src/lib.rs"));
+        f.binding = FindingBinding::Historical;
+        f.start_line = Some(2);
+        f.anchor = Some(crate::history::security::CommitAnchor::new(anchor, "member/src/lib.rs"));
+        let reanchored = super::super::historical::Reanchoring::read(&root, &[&f]);
+        assert_eq!(reanchored.today_paths().collect::<Vec<_>>(), ["src/lib.rs"], "today's file, relative to the project");
+    }
+
+    /// A PEM key's `BEGIN` line is every key's: a production key rotated out of
+    /// a file whose test now holds another key's PEM is not re-anchored onto
+    /// that header, because its body is not there. Its anchor commit decides,
+    /// and it stays production.
+    #[test]
+    fn a_multi_line_secret_is_re_anchored_by_its_whole_region_never_by_a_shared_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".logos")).unwrap();
+        std::fs::write(root.join(".logos/config.toml"), "[project]\nid = \"historical-pem\"\n").unwrap();
+        // Spelled in pieces, so this file holds no key a scanner reads.
+        let pem = |body: &str| format!("-----BEGIN RSA {}-----\n{body}\n-----END RSA {}-----", "PRIVATE KEY", "PRIVATE KEY");
+        let tests = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn parses() {\n        let pem = \"\n";
+        let production = format!("pub fn key() -> &'static str {{\n    \"\n{}\n\"\n}}\n", pem(&"A".repeat(64)));
+        std::fs::write(root.join("src/lib.rs"), &production).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "a production key"]);
+        let anchor = git(&root, &["rev-parse", "HEAD"]);
+        let rotated = format!("pub fn key() -> &'static str {{\n    \"\"\n}}\n\n{tests}{}\n\";\n        assert!(!pem.is_empty());\n    }}\n}}\n", pem(&"B".repeat(64)));
+        std::fs::write(root.join("src/lib.rs"), rotated).unwrap();
+        git(&root, &["commit", "-q", "-am", "rotate the key; a fixture key in the test"]);
+        let engine = crate::Engine::start(&root).unwrap();
+        assert!(engine.pipeline().index().files_indexed > 0);
+
+        let mut key = finding(None, Some("src/lib.rs"));
+        key.binding = FindingBinding::Historical;
+        (key.start_line, key.end_line) = (Some(3), Some(5));
+        key.anchor = Some(crate::history::security::CommitAnchor::new(anchor, "src/lib.rs"));
+        let label = scopes(&root, &[&key], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        assert_eq!((label[0].code_scope, label[0].code_scope_reason), PRODUCTION, "the key was in production code at its commit");
+    }
+
+    /// A project whose only findings are two historical keys in `src/old.rs`,
+    /// a file a later commit deleted: one in production code, one in a test
+    /// fn. Indexed; the findings anchored to the commit that had them.
+    fn a_deleted_file_with_two_keys() -> (tempfile::TempDir, std::path::PathBuf, crate::Engine, [SecurityFinding; 2]) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap().join("project");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join(".logos")).unwrap();
+        std::fs::write(root.join(".logos/config.toml"), "[project]\nid = \"historical-deleted\"\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+        // Spelled in pieces, so this file holds no key a scanner reads.
+        let key = |n: u32| format!("AKIA{}{n}", "QWERTYUIOPASDFG");
+        let old = format!(
+            "pub fn key() -> &'static str {{\n    \"{}\"\n}}\n\n#[cfg(test)]\nmod tests {{\n    #[test]\n    fn masks() {{\n        let key = \"{}\";\n    }}\n}}\n",
+            key(1),
+            key(2)
+        );
+        std::fs::write(root.join("src/old.rs"), old).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "two keys"]);
+        let anchor = git(&root, &["rev-parse", "HEAD"]);
+        git(&root, &["rm", "-q", "src/old.rs"]);
+        git(&root, &["commit", "-q", "-m", "drop the old file"]);
+        let engine = crate::Engine::start(&root).unwrap();
+        assert!(engine.pipeline().index().files_indexed > 0);
+        let at = |line: i64| {
+            let mut f = finding(None, Some("src/old.rs"));
+            f.binding = FindingBinding::Historical;
+            f.start_line = Some(line);
+            f.anchor = Some(crate::history::security::CommitAnchor::new(anchor.clone(), "src/old.rs"));
+            f
+        };
+        (dir, root, engine, [at(2), at(9)])
+    }
+
+    /// Two keys in one deleted file, and no other finding: one extraction of
+    /// the file at its commit answers each key by its own line, production
+    /// beside test, though no file of today's tree is read by the graph.
+    #[test]
+    fn two_historical_keys_in_one_deleted_file_each_take_their_own_nodes_scope() {
+        let (_dir, root, engine, [production, test]) = a_deleted_file_with_two_keys();
+        let labels = scopes(&root, &[&production, &test], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        let read: Vec<_> = labels.iter().map(|l| (l.code_scope, l.code_scope_reason)).collect();
+        assert_eq!(read, [PRODUCTION, TEST_SYMBOL], "each key by the node around its own line");
+        let labels = scopes(&root, &[&test, &production], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        let read: Vec<_> = labels.iter().map(|l| (l.code_scope, l.code_scope_reason)).collect();
+        assert_eq!(read, [TEST_SYMBOL, PRODUCTION], "whichever is asked first");
+    }
+
+    /// A configuration that does not load names no test markers, so an anchor
+    /// commit's node is not judged under the default ones: the path rule
+    /// decides, as for any finding no node decides.
+    #[test]
+    fn a_configuration_that_does_not_load_leaves_a_historical_finding_to_its_path() {
+        let (_dir, root, engine, [production, test]) = a_deleted_file_with_two_keys();
+        std::fs::write(root.join(".logos/config.toml"), "[semantics]\ntest_markers = 3\n").unwrap();
+        let labels = scopes(&root, &[&production, &test], |f| super::super::context::in_test_symbols(&engine, f)).unwrap();
+        let read: Vec<_> = labels.iter().map(|l| (l.code_scope, l.code_scope_reason)).collect();
+        assert_eq!(read, [PRODUCTION, PRODUCTION], "a src/ path is production");
     }
 
     /// The fixture segments are directories only, and every near miss of one

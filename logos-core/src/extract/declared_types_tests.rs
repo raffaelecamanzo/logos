@@ -328,6 +328,44 @@ fn a_php_kotlin_and_scala_file_declare_their_namespace_or_package() {
     assert_eq!(namespace("app/helpers.php", empty).as_deref(), Some("App.Support"));
 }
 
+/// The facade class a file's own annotation names, as extraction records it.
+fn facade(path: &str, source: &str) -> Option<String> {
+    let facts = extract_files(&[FileInput::new(path, source)], registry(), &SymbolContext::default());
+    facts.into_iter().next().expect("the file is extracted").facade
+}
+
+/// FR-RS-31 (S-832): a Kotlin file's `@file:JvmName("Slugs")` — bare or
+/// qualified, its argument named or its string raw — is its declared facade,
+/// the first one only. Every near miss
+/// names none: another annotation, a name one letter off, a literal holding an
+/// escape or a template, a string that is no class name, and no annotation.
+#[test]
+fn a_kotlin_files_jvm_name_annotation_is_its_declared_facade() {
+    let named = |header: &str| facade("src/Strings.kt", &format!("{header}\n\npackage app.text\n\nfun slug() = 1\n"));
+    assert_eq!(named("@file:JvmName(\"Slugs\")").as_deref(), Some("Slugs"));
+    assert_eq!(named("@file:kotlin.jvm.JvmName(\"Slugs\")").as_deref(), Some("Slugs"));
+    assert_eq!(named("@file:JvmName(\"Slugs_2\")").as_deref(), Some("Slugs_2"));
+    assert_eq!(named("@file:JvmName(\"_Slugs\")").as_deref(), Some("_Slugs"));
+    assert_eq!(named("@file:JvmName(name = \"Slugs\")").as_deref(), Some("Slugs"));
+    assert_eq!(named("@file:JvmName(\"\"\"Slugs\"\"\")").as_deref(), Some("Slugs"));
+    assert_eq!(named("@file:JvmName(\"First\")\n@file:JvmName(\"Second\")").as_deref(), Some("First"));
+    assert_eq!(named("@file:JvmMultifileClass\n@file:JvmName(\"Slugs\")").as_deref(), Some("Slugs"));
+    for header in [
+        "@file:Suppress(\"Slugs\")",
+        "@file:JvmNames(\"Slugs\")",
+        "@file:JvmName(\"Sl\\u0075gs\")",
+        "@file:JvmName(\"\"\"Sl${'$'}gs\"\"\")",
+        "@file:JvmName(\"Slugs\" + \"\")",
+        "@file:JvmName(\"$slugs\")",
+        "@file:JvmName(\"a.b\")",
+        "@file:JvmName(\"1st\")",
+        "@file:JvmName(\"\")",
+        "",
+    ] {
+        assert_eq!(named(header), None, "{header}");
+    }
+}
+
 #[test]
 fn a_file_that_declares_no_namespace_is_in_the_global_one() {
     assert_eq!(namespace("lib/util.php", "<?php\nclass Util {}\n").as_deref(), Some(""));

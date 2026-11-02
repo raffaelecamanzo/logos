@@ -125,7 +125,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 /// Index `root`, returning the engine and the index's warnings.
 fn index_warned(root: &Path) -> (Engine, Vec<String>) {
     let engine = Engine::start(root).expect("engine starts");
-    let warnings = engine.index().warnings;
+    let warnings = engine.pipeline().index().warnings;
     (engine, warnings)
 }
 
@@ -283,7 +283,7 @@ fn a_synced_file_with_a_region_matches_a_fresh_reindex() {
     let engine_a = index(tmp_a.path());
     let path = tmp_a.path().join("src/JsonWriter.Async.cs");
     fs::write(&path, WRITER).unwrap();
-    engine_a.sync(&[path.canonicalize().unwrap()]);
+    engine_a.pipeline().sync(&[path.canonicalize().unwrap()]);
     // The synced file is reduced too: its member sits under its class.
     let synced = rows(engine_a.runtime().unwrap(), "src/JsonWriter.Async.cs");
     let close = synced.iter().find(|r| r.name == "CloseAsync").expect("CloseAsync is extracted");

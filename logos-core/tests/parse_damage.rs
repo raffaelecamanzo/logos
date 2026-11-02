@@ -117,7 +117,7 @@ fn indexed(files: &[(&str, &str)]) -> (TempDir, Engine) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -131,7 +131,7 @@ fn damaged_tree() -> (TempDir, Engine) {
 
 /// `status --json`'s row for `language`, as the surface serialises it.
 fn status_row(engine: &Engine, language: &str) -> Value {
-    let status = serde_json::to_value(engine.status()).expect("status serialises");
+    let status = serde_json::to_value(engine.graph().status()).expect("status serialises");
     status["resolution_by_language"]
         .as_array()
         .expect("rows")
@@ -182,7 +182,7 @@ fn status_states_each_languages_parse_damage_with_its_share() {
 #[test]
 fn a_relational_answer_states_its_denominator_and_not_the_parse() {
     let (_tmp, engine) = damaged_tree();
-    let callers = serde_json::to_value(engine.callers("deep", None)).expect("callers serialises");
+    let callers = serde_json::to_value(engine.navigation().callers("deep", None)).expect("callers serialises");
     let rows = callers["resolution_denominator"]["languages"].as_array().expect("denominator rows");
     assert!(!rows.is_empty(), "the answer attaches its language's row: {callers}");
     assert!(rows.iter().all(|row| row.get("parse_damage").is_none()), "{rows:?}");
@@ -191,7 +191,7 @@ fn a_relational_answer_states_its_denominator_and_not_the_parse() {
 #[test]
 fn scan_warns_naming_the_language_and_flags_the_entries_of_the_damaged_file() {
     let (_tmp, engine) = damaged_tree();
-    let scan = engine.scan(true).expect("scan");
+    let scan = engine.quality().scan(true).expect("scan");
     let warned: Vec<&String> = scan.warnings.iter().filter(|w| w.starts_with("parse damage:")).collect();
     assert_eq!(warned.len(), 1, "{:?}", scan.warnings);
     assert!(
@@ -217,7 +217,7 @@ fn scan_warns_naming_the_language_and_flags_the_entries_of_the_damaged_file() {
 
     // The read-backs return, entry for entry, what the scan returned (FR-QM-15):
     // the capped lists and the ranking from the snapshot, and the uncapped list.
-    let latest = engine.latest_scan().expect("latest scan");
+    let latest = engine.quality().readouts().latest_scan().expect("latest scan");
     assert_eq!(latest.worst_offenders, scan.worst_offenders, "the snapshot's own lists");
     assert_eq!(latest.where_to_start, scan.where_to_start, "the snapshot's own ranking");
     assert_eq!(nesting_flags(&engine), [("deep".to_string(), true), ("deep_clean".to_string(), false)]);
@@ -228,7 +228,7 @@ fn scan_warns_naming_the_language_and_flags_the_entries_of_the_damaged_file() {
 fn nesting_flags(engine: &Engine) -> Vec<(String, bool)> {
     let filter = OffendersFilter::parse(None, Some("nesting")).expect("filter");
     let mut flags: Vec<(String, bool)> = engine
-        .offenders(&filter)
+        .quality().readouts().offenders(&filter)
         .expect("offenders")
         .offenders
         .iter()
@@ -245,17 +245,17 @@ fn nesting_flags(engine: &Engine) -> Vec<(String, bool)> {
 #[test]
 fn a_snapshot_keeps_the_flag_it_computed_until_the_next_scan() {
     let (tmp, engine) = damaged_tree();
-    let scan = engine.scan(true).expect("scan");
+    let scan = engine.quality().scan(true).expect("scan");
     write(tmp.path(), DAMAGED_PATH, REPAIRED);
-    engine.sync(&[DAMAGED_PATH.into()]);
+    engine.pipeline().sync(&[DAMAGED_PATH.into()]);
     assert_eq!(status_row(&engine, "cpp")["parse_damage"]["files"], 0, "the file's record moved");
 
-    let latest = engine.latest_scan().expect("latest scan");
+    let latest = engine.quality().readouts().latest_scan().expect("latest scan");
     assert_eq!(latest.worst_offenders, scan.worst_offenders, "the snapshot's lists did not");
     assert_eq!(latest.where_to_start, scan.where_to_start);
     assert_eq!(nesting_flags(&engine), [("deep".to_string(), true), ("deep_clean".to_string(), false)]);
 
-    engine.scan(true).expect("rescan");
+    engine.quality().scan(true).expect("rescan");
     assert_eq!(nesting_flags(&engine), [("deep".to_string(), false), ("deep_clean".to_string(), false)]);
 }
 
@@ -268,7 +268,10 @@ fn an_upgraded_store_states_its_files_unrecorded_until_a_scan_records_them() {
     drop(engine);
     let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("the store opens");
     db.execute_batch(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; \
          DELETE FROM schema_versions WHERE version = 44; PRAGMA user_version = 43;",
@@ -276,12 +279,12 @@ fn an_upgraded_store_states_its_files_unrecorded_until_a_scan_records_them() {
     .expect("back to what the release before S-571 left on disk");
     drop(db);
 
-    let engine = Engine::start(tmp.path()).expect("engine reopens, applying migration 44");
+    let engine = Engine::start(tmp.path()).expect("engine reopens, applying migrations 44 to 47");
     assert_eq!(
         status_row(&engine, "cpp")["parse_damage"],
         serde_json::json!({ "files": 0, "unrecorded": 2, "share_percent": 0 })
     );
-    let scan = engine.scan(true).expect("scan");
+    let scan = engine.quality().scan(true).expect("scan");
     assert_eq!(
         status_row(&engine, "cpp")["parse_damage"],
         serde_json::json!({ "files": 1, "unrecorded": 0, "share_percent": 50 })
@@ -292,7 +295,7 @@ fn an_upgraded_store_states_its_files_unrecorded_until_a_scan_records_them() {
 #[test]
 fn a_clean_tree_carries_no_parse_damage_warning() {
     let (_tmp, engine) = indexed(&[("src/util/clean.cpp", CLEAN), ("src/lib.rs", "pub fn ok() {}\n")]);
-    let scan = engine.scan(true).expect("scan");
+    let scan = engine.quality().scan(true).expect("scan");
     assert!(!scan.warnings.iter().any(|w| w.starts_with("parse damage:")), "{:?}", scan.warnings);
 }
 
@@ -300,7 +303,7 @@ fn a_clean_tree_carries_no_parse_damage_warning() {
 fn repairing_the_file_and_syncing_it_reads_as_a_cold_index_does() {
     let (tmp, engine) = damaged_tree();
     write(tmp.path(), DAMAGED_PATH, REPAIRED);
-    engine.sync(&[DAMAGED_PATH.into()]);
+    engine.pipeline().sync(&[DAMAGED_PATH.into()]);
     let warm = (recorded(tmp.path()), status_row(&engine, "cpp")["parse_damage"].clone());
     assert_eq!(warm.1, serde_json::json!({ "files": 0, "unrecorded": 0, "share_percent": 0 }), "the repair is read");
 
@@ -314,7 +317,7 @@ fn repairing_the_file_and_syncing_it_reads_as_a_cold_index_does() {
 
     // And the damage comes back when the macro does.
     write(tmp.path(), DAMAGED_PATH, DAMAGED);
-    engine.sync(&[DAMAGED_PATH.into()]);
+    engine.pipeline().sync(&[DAMAGED_PATH.into()]);
     assert_eq!(
         status_row(&engine, "cpp")["parse_damage"],
         serde_json::json!({ "files": 1, "unrecorded": 0, "share_percent": 50 })

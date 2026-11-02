@@ -106,8 +106,8 @@ fn workspace_with_openapi(openapi: &str) -> TempDir {
     init_repo(&root.join("api"), "api/openapi.yaml", openapi);
     init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
     // Index each member so `workspace status` reports index freshness.
-    Engine::start(root.join("api")).expect("api engine").index();
-    Engine::start(root.join("web")).expect("web engine").index();
+    Engine::start(root.join("api")).expect("api engine").pipeline().index();
+    Engine::start(root.join("web")).expect("web engine").pipeline().index();
     std::fs::write(root.join("logos.workspace.toml"), FIXTURE_MANIFEST).unwrap();
     tmp
 }
@@ -523,8 +523,8 @@ fn workspace_with_both_intakes() -> TempDir {
     init_repo(&root.join("api"), "api/openapi.yaml", OPENAPI_YAML);
     init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
     write(&root.join("api"), "src/client.rs", API_CLIENT);
-    Engine::start(root.join("api")).expect("api engine").index();
-    Engine::start(root.join("web")).expect("web engine").index();
+    Engine::start(root.join("api")).expect("api engine").pipeline().index();
+    Engine::start(root.join("web")).expect("web engine").pipeline().index();
     std::fs::write(
         root.join("logos.workspace.toml"),
         "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"web\"]\ndefault = \"api\"\n",
@@ -716,7 +716,7 @@ async fn workspace_reachability_groups_a_symbol_two_members_hold_per_member() {
     init_repo(&root.join("svc-b"), "src/client.rs", FORK_CLIENT_WIRED);
     for member in ["api", "svc-a", "svc-b"] {
         pin_coordinate(&root.join(member), &format!("example.com/{member}"));
-        Engine::start(root.join(member)).expect("member engine").index();
+        Engine::start(root.join(member)).expect("member engine").pipeline().index();
     }
     std::fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"forks\"\nmembers = [\"api\", \"svc-a\", \"svc-b\"]\n")
         .unwrap();
@@ -849,7 +849,7 @@ async fn the_workspace_api_carries_an_asserted_link_labelled() {
         pin_coordinate(&root.join(member), &format!("example.com/{member}"));
     }
     for member in ["api", "web"] {
-        Engine::start(root.join(member)).expect("member engine").index();
+        Engine::start(root.join(member)).expect("member engine").pipeline().index();
     }
     std::fs::write(
         root.join("logos.workspace.toml"),
@@ -1032,8 +1032,8 @@ async fn workspace_build_deps_reports_each_members_rows_and_repo_scopes() {
     );
     init_repo(&root.join("web"), "src/main.rs", AXUM_MAIN);
     write(&root.join("web"), "pom.xml", &pom("web", ""));
-    Engine::start(root.join("api")).expect("api engine").index();
-    Engine::start(root.join("web")).expect("web engine").index();
+    Engine::start(root.join("api")).expect("api engine").pipeline().index();
+    Engine::start(root.join("web")).expect("web engine").pipeline().index();
     std::fs::write(root.join("logos.workspace.toml"), FIXTURE_MANIFEST).unwrap();
     let router = ws_router(&tmp);
 
@@ -1241,7 +1241,7 @@ async fn config_endpoint_resolves_the_slice_against_the_backings_workspace_root(
         assert!(!body.contains(ws_key) && !body.contains("workspace-held"), "{path}: the raw key leaked");
 
         // The literal fields are the member's own — the inherited half is not in them.
-        let alone = Engine::open(tmp.path().join(member)).config_read(None).expect("core read");
+        let alone = Engine::open(tmp.path().join(member)).config().read(None).expect("core read");
         let alone = serde_json::to_string(&alone).unwrap();
         assert_eq!(literal_prefix(&body), literal_prefix(&alone), "{path}: a literal field moved");
         assert!(!literal_prefix(&body).contains("ws/model"), "{path}: the inherited model leaked");
@@ -1469,7 +1469,7 @@ async fn an_unreadable_member_store_is_named_apart_from_an_absent_one() {
 /// left it. The 16-member connection-count form of the same claim lives in
 /// `logos-core/tests/workspace_statistics_engine_free.rs`; this one proves the
 /// route **the SPA actually calls** reaches the engine-free read and not
-/// `Engine::stats`.
+/// `Graph::stats`.
 ///
 /// It therefore drives the real router. An earlier version called
 /// `federation::workspace_statistics` directly off a registry while claiming this
@@ -1716,7 +1716,7 @@ reason = \"edge services must not call core services directly\"
 /// workspace governance — reported or saved — may ever move.
 fn member_gate_verdict(root: &Path, member: &str) -> (bool, Option<bool>, usize) {
     let engine = Engine::start(root.join(member)).expect("member engine");
-    let report = engine.check_rules(None, false).expect("the member evaluates its contract");
+    let report = engine.quality().check_rules(None, false).expect("the member evaluates its contract");
     (report.rules_present, report.passed, report.violations.len())
 }
 
@@ -3559,7 +3559,7 @@ fn security_workspace() -> TempDir {
         write(&dir, "src/other.rs", "pub fn other() {}\n");
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-q", "-m", "init"]);
-        Engine::start(&dir).expect("member engine").index();
+        Engine::start(&dir).expect("member engine").pipeline().index();
     }
 
     let scanned = root.join("scanned");
@@ -3567,10 +3567,10 @@ fn security_workspace() -> TempDir {
     for (name, report) in [("semgrep.sarif", ROLLUP_SEMGREP), ("acme.sarif", ROLLUP_OTHER_TOOL)] {
         let path = root.join(name);
         std::fs::write(&path, report).unwrap();
-        engine.security_ingest(&path).expect("the report ingests");
+        engine.security().ingest(&path).expect("the report ingests");
     }
     let listed = engine
-        .security_findings(&logos_core::security::FindingsFilter::default())
+        .security().findings().list(&logos_core::security::FindingsFilter::default())
         .expect("the stored findings list");
     let concat = listed
         .findings
@@ -3831,14 +3831,14 @@ fn coverage_workspace() -> TempDir {
         write(&dir, "src/b.rs", "pub fn b() -> i64 {\n    0\n}\n");
         sh_git(&dir, &["add", "."]);
         sh_git(&dir, &["commit", "-q", "-m", "init"]);
-        Engine::start(&dir).expect("member engine").index();
+        Engine::start(&dir).expect("member engine").pipeline().index();
     }
 
     let covered = root.join("covered");
     let report = root.join("covered.info");
     std::fs::write(&report, "TN:suite\nSF:src/a.rs\nDA:1,1\nDA:2,0\nend_of_record\nSF:src/b.rs\nDA:1,1\nDA:2,1\nend_of_record\n")
         .unwrap();
-    Engine::start(&covered).expect("covered engine").coverage_ingest(&report, None).expect("the report ingests");
+    Engine::start(&covered).expect("covered engine").coverage().ingest(&report, None).expect("the report ingests");
     // `b.rs` changes after the ingest: stale, so only `a.rs` is counted.
     write(&covered, "src/b.rs", "pub fn b() -> i64 {\n    1\n}\n");
     last_run_record(&covered, "ran", 1_760_000_000);

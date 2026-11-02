@@ -106,7 +106,7 @@ fn engineered_repo() -> TempDir {
     }
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     tmp
 }
 
@@ -117,7 +117,7 @@ fn engineered_file_ranks_first_with_deterministic_order_and_heuristic_label() {
     let tmp = engineered_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let report = engine.hotspots(None, false, false).expect("hotspots runs");
+    let report = engine.history().hotspots(None, false, false).expect("hotspots runs");
     assert!(report.degraded.is_none(), "a real git repo is not degraded");
     assert_eq!(
         report.files.first().map(|h| h.path.as_str()),
@@ -131,7 +131,7 @@ fn engineered_file_ranks_first_with_deterministic_order_and_heuristic_label() {
 
     // Determinism: a second evaluation at the same HEAD + config is byte-for-byte
     // identical (NFR-RA-06). (first_mine is now false → no notice drift.)
-    let again = engine.hotspots(None, false, false).expect("hotspots reruns");
+    let again = engine.history().hotspots(None, false, false).expect("hotspots reruns");
     assert_eq!(
         serde_json::to_string(&report.files).unwrap(),
         serde_json::to_string(&again.files).unwrap(),
@@ -144,11 +144,11 @@ fn limit_truncates_the_ranked_board() {
     let tmp = engineered_repo();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let full = engine.hotspots(None, false, false).expect("hotspots runs");
+    let full = engine.history().hotspots(None, false, false).expect("hotspots runs");
     assert!(full.ranked_files >= 2, "fixture has several ranked files");
 
     let limited = engine
-        .hotspots(Some(1), false, false)
+        .history().hotspots(Some(1), false, false)
         .expect("hotspots --limit 1 runs");
     assert_eq!(limited.files.len(), 1, "--limit caps the returned board");
     assert_eq!(
@@ -210,7 +210,7 @@ fn production_scope_repo() -> TempDir {
     commit(repo, "src/calm.rs", &calm_source("calm"), "add calm");
 
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     tmp
 }
 
@@ -221,7 +221,7 @@ fn production_scope_filter_excludes_whole_test_files_and_keeps_mixed_production_
 
     // Disabled (default): byte-identical to today's whole-repo board —
     // tests.rs leads on both axes.
-    let off = engine.hotspots(None, false, false).expect("hotspots runs");
+    let off = engine.history().hotspots(None, false, false).expect("hotspots runs");
     assert!(!off.production_scope);
     assert_eq!(
         off.files.first().map(|h| h.path.as_str()),
@@ -233,7 +233,7 @@ fn production_scope_filter_excludes_whole_test_files_and_keeps_mixed_production_
     // Enabled: src/tests.rs is gone; src/prod.rs (mixed file — its production
     // function keeps it) surfaces in its place.
     let on = engine
-        .hotspots(None, false, true)
+        .history().hotspots(None, false, true)
         .expect("hotspots --production-scope");
     assert!(on.production_scope);
     let paths: Vec<&str> = on.files.iter().map(|h| h.path.as_str()).collect();
@@ -254,7 +254,7 @@ fn production_scope_filter_excludes_whole_test_files_and_keeps_mixed_production_
 
     // A re-run is byte-identical (NFR-RA-06).
     let again = engine
-        .hotspots(None, false, true)
+        .history().hotspots(None, false, true)
         .expect("hotspots reruns");
     assert_eq!(
         serde_json::to_string(&on.files).unwrap(),
@@ -269,7 +269,7 @@ fn production_scope_composes_with_limit_and_untested() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let limited = engine
-        .hotspots(Some(1), false, true)
+        .history().hotspots(Some(1), false, true)
         .expect("hotspots --production-scope --limit 1");
     assert_eq!(
         limited.files.len(),
@@ -281,7 +281,7 @@ fn production_scope_composes_with_limit_and_untested() {
     // No coverage ingested → `--untested` retains every remaining (n/a) file,
     // so production_scope narrows the set the untested filter then retains.
     let untested = engine
-        .hotspots(None, true, true)
+        .history().hotspots(None, true, true)
         .expect("hotspots --untested --production-scope");
     let paths: Vec<&str> = untested.files.iter().map(|h| h.path.as_str()).collect();
     assert!(
@@ -306,7 +306,7 @@ fn production_scope_composes_with_limit_and_untested_simultaneously() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     let combined = engine
-        .hotspots(Some(1), true, true)
+        .history().hotspots(Some(1), true, true)
         .expect("hotspots --untested --production-scope --limit 1");
     assert!(combined.production_scope);
     assert!(combined.untested);
@@ -331,22 +331,22 @@ fn production_scope_toggle_never_moves_the_gate() {
     let repo = tmp.path();
     let engine = Engine::start(repo).expect("engine starts");
 
-    engine.gate(None, true, true).expect("gate --save");
-    let baseline = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    engine.quality().gate(None, true, true).expect("gate --save");
+    let baseline = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
 
     engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("hotspots with the filter off");
-    let after_off = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_off = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_off,
         "production_scope=false never moves the gate"
     );
 
     engine
-        .hotspots(None, false, true)
+        .history().hotspots(None, false, true)
         .expect("hotspots with the filter on");
-    let after_on = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_on = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_on,
         "production_scope=true never moves the gate (BR-26)"
@@ -376,13 +376,13 @@ fn gate_is_byte_identical_as_the_temporal_tier_advances() {
     let engine = Engine::start(repo).expect("engine starts");
 
     // Save a baseline, then record the gated verdict.
-    engine.gate(None, true, true).expect("gate --save");
-    let baseline = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    engine.quality().gate(None, true, true).expect("gate --save");
+    let baseline = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
 
     // (1) History advances: a temporal evaluation populates history.db and a
     // commit to a NON-indexed path moves HEAD — neither touches the graph.
     engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("temporal eval populates history.db");
     assert!(
         repo.join(".logos/history.db").exists(),
@@ -390,9 +390,9 @@ fn gate_is_byte_identical_as_the_temporal_tier_advances() {
     );
     commit(repo, "NOTES.md", "not indexed\n", "doc-only commit");
     engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("temporal eval after the advance");
-    let after_advance = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_advance = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_advance,
         "history advancing never moves the gate"
@@ -400,20 +400,20 @@ fn gate_is_byte_identical_as_the_temporal_tier_advances() {
 
     // (2) history.db deleted: still byte-identical (the gate never reads it).
     std::fs::remove_file(repo.join(".logos/history.db")).expect("delete history.db");
-    let after_delete = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_delete = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(
         baseline, after_delete,
         "deleting history.db changes nothing gated"
     );
 
     // (3) A full re-index leaves history.db intact and the gate unchanged.
-    engine.hotspots(None, false, false).expect("repopulate history.db");
-    engine.index();
+    engine.history().hotspots(None, false, false).expect("repopulate history.db");
+    engine.pipeline().index();
     assert!(
         repo.join(".logos/history.db").exists(),
         "history.db survives a full index (FR-GH-01)"
     );
-    let after_index = gated_verdict(&engine.gate(None, false, true).expect("gate"));
+    let after_index = gated_verdict(&engine.quality().gate(None, false, true).expect("gate"));
     assert_eq!(baseline, after_index, "a full index never moves the gate");
 }
 
@@ -424,8 +424,8 @@ fn a_bare_gate_never_mines_history() {
     // A fresh engine that only ever runs `gate` must not create history.db —
     // mining is off the gate path (FR-GH-02, BR-26).
     let engine = Engine::start(repo).expect("engine starts");
-    engine.gate(None, true, true).expect("gate --save");
-    engine.gate(None, false, true).expect("gate");
+    engine.quality().gate(None, true, true).expect("gate --save");
+    engine.quality().gate(None, false, true).expect("gate");
     assert!(
         !repo.join(".logos/history.db").exists(),
         "gate spawns no mining — history.db must not exist"
@@ -449,7 +449,7 @@ fn gated_scan(s: &logos_core::models::quality::ScanResult) -> String {
 fn scan_renders_the_labeled_temporal_tier_without_moving_gated_columns() {
     let tmp = engineered_repo();
     let git = Engine::start(tmp.path()).expect("engine starts");
-    let scan_git = git.scan(true).expect("scan runs");
+    let scan_git = git.quality().scan(true).expect("scan runs");
 
     // The non-gated tier is present, labeled, and never gated (NFR-CC-04, BR-26).
     assert!(
@@ -490,8 +490,8 @@ fn scan_renders_the_labeled_temporal_tier_without_moving_gated_columns() {
         std::fs::write(dst, src).unwrap();
     }
     let nogit = Engine::start(plain.path()).expect("engine starts");
-    nogit.index();
-    let scan_nogit = nogit.scan(true).expect("scan runs");
+    nogit.pipeline().index();
+    let scan_nogit = nogit.quality().scan(true).expect("scan runs");
 
     assert_eq!(
         gated_scan(&scan_git),
@@ -512,11 +512,11 @@ fn non_git_directory_reports_na_with_a_notice() {
     std::fs::create_dir_all(tmp.path().join("src")).unwrap();
     std::fs::write(tmp.path().join("src/lib.rs"), calm_source("a")).unwrap();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // The call SUCCEEDS (maps to exit 0) and reports n/a, never an error.
     let report = engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("hotspots succeeds in a non-git dir");
     assert!(report.files.is_empty(), "no fabricated hotspots");
     assert!(report.degraded.is_some(), "the tier is degraded");
@@ -539,9 +539,9 @@ fn shallow_clone_reports_na_without_partial_numbers() {
     );
 
     let engine = Engine::start(&shallow).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let report = engine
-        .hotspots(None, false, false)
+        .history().hotspots(None, false, false)
         .expect("hotspots succeeds on a shallow clone");
     assert!(
         report.files.is_empty(),
@@ -595,8 +595,8 @@ fn twin_repo() -> TempDir {
         }
     }
     let engine = Engine::start(repo).expect("engine starts");
-    engine.index();
-    engine.hotspots(None, false, false).expect("warm-up mine");
+    engine.pipeline().index();
+    engine.history().hotspots(None, false, false).expect("warm-up mine");
     tmp
 }
 
@@ -606,7 +606,7 @@ fn ingest(engine: &Engine, root: &Path, results: &[(&str, &str)]) {
         root.file_name().unwrap().to_string_lossy()
     ));
     std::fs::write(&report, sarif(results)).unwrap();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.security().ingest(&report).expect("the report ingests");
 }
 
 fn cell<'a>(report: &'a logos_core::history::HotspotReport, path: &str) -> &'a logos_core::history::PathFindings {
@@ -624,9 +624,9 @@ fn a_project_nothing_was_scanned_in_has_no_findings_column() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     for report in [
-        engine.hotspots(None, false, false).unwrap(),
-        engine.hotspots_with_findings(None, false, false, true).unwrap(),
-        engine.latest_hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.history().hotspots(None, false, false).unwrap(),
+        engine.history().hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.history().latest_hotspots_with_findings(None, false, false, true).unwrap(),
     ] {
         assert!(report.files.iter().all(|h| h.findings.is_none()), "no scan, no cell");
         assert!(!report.with_findings, "the filter has nothing to prefer");
@@ -641,7 +641,7 @@ fn under_the_filter_a_fresh_high_finding_ranks_above_an_identical_hotspot() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
 
-    let plain = engine.hotspots(None, false, false).unwrap();
+    let plain = engine.history().hotspots(None, false, false).unwrap();
     let paths: Vec<&str> = plain.files.iter().map(|h| h.path.as_str()).collect();
     assert_eq!(paths, ["src/a.rs", "src/z.rs"], "the filter off keeps the path tie-break");
     assert_eq!(plain.files[0].score, plain.files[1].score, "the twins are identical");
@@ -649,8 +649,8 @@ fn under_the_filter_a_fresh_high_finding_ranks_above_an_identical_hotspot() {
     assert_eq!(cell(&plain, "src/a.rs").count, 0, "a scanned file with none reads zero");
 
     for filtered in [
-        engine.hotspots_with_findings(None, false, false, true).unwrap(),
-        engine.latest_hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.history().hotspots_with_findings(None, false, false, true).unwrap(),
+        engine.history().latest_hotspots_with_findings(None, false, false, true).unwrap(),
     ] {
         let paths: Vec<&str> = filtered.files.iter().map(|h| h.path.as_str()).collect();
         assert_eq!(paths, ["src/z.rs", "src/a.rs"], "the fresh high finding leads: {paths:?}");
@@ -670,7 +670,7 @@ fn a_stale_finding_is_labelled_and_excluded_from_the_count_and_the_ranking() {
     // The file moves after the report was ingested: its anchor no longer matches.
     std::fs::write(tmp.path().join("src/z.rs"), "// moved\n").unwrap();
 
-    let filtered = engine.hotspots_with_findings(None, false, false, true).unwrap();
+    let filtered = engine.history().hotspots_with_findings(None, false, false, true).unwrap();
     let z = cell(&filtered, "src/z.rs");
     assert_eq!((z.count, z.highest, z.stale), (0, None, 1), "labelled stale, not counted");
     let paths: Vec<&str> = filtered.files.iter().map(|h| h.path.as_str()).collect();
@@ -683,7 +683,7 @@ fn a_suppressed_finding_leaves_the_count_and_an_expired_suppression_returns_it()
     let engine = Engine::start(tmp.path()).expect("engine starts");
     ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
     let fingerprint = engine
-        .security_findings(&logos_core::security::FindingsFilter::default())
+        .security().findings().list(&logos_core::security::FindingsFilter::default())
         .unwrap()
         .findings[0]
         .finding
@@ -698,11 +698,11 @@ fn a_suppressed_finding_leaves_the_count_and_an_expired_suppression_returns_it()
     };
 
     ignore("2999-01-01");
-    let suppressed = engine.hotspots(None, false, false).unwrap();
+    let suppressed = engine.history().hotspots(None, false, false).unwrap();
     assert_eq!(cell(&suppressed, "src/z.rs").count, 0, "an unexpired entry suppresses it");
 
     ignore("2000-01-01");
-    let expired = engine.hotspots(None, false, false).unwrap();
+    let expired = engine.history().hotspots(None, false, false).unwrap();
     assert_eq!(cell(&expired, "src/z.rs").count, 1, "an expired entry no longer does");
 }
 
@@ -713,15 +713,15 @@ fn an_invalid_ignore_file_fails_the_board_only_once_a_scan_is_stored() {
     std::fs::write(tmp.path().join(".logos/security-ignore.toml"), "not toml [[[").unwrap();
 
     // Nothing scanned: there is nothing to label, so the board does not depend on the file.
-    let board = engine.hotspots(None, false, false).expect("a never-scanned board ignores the file");
+    let board = engine.history().hotspots(None, false, false).expect("a never-scanned board ignores the file");
     assert!(board.files.iter().all(|h| h.findings.is_none()));
 
     // A stored report makes the suppressions load-bearing: an unreadable file is an error
     // (exit 2), never a silent board of unsuppressed findings.
     ingest(&engine, tmp.path(), &[("src/z.rs", "error")]);
     for result in [
-        engine.hotspots(None, false, false),
-        engine.latest_hotspots_with_findings(None, false, false, true),
+        engine.history().hotspots(None, false, false),
+        engine.history().latest_hotspots_with_findings(None, false, false, true),
     ] {
         let err = result.expect_err("a stored report with an unreadable ignore file must not rank");
         assert!(format!("{err:#}").contains("security-ignore.toml"), "{err:#}");

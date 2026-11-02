@@ -43,7 +43,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -262,11 +262,11 @@ fn re_extraction_of_an_unchanged_file_yields_the_identical_fact() {
     let before = self_types(rt);
     assert_eq!(before.len(), 11, "the fact is recorded to begin with: {before:?}");
     let nodes_before = nodes(rt);
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
     assert_eq!(self_types(rt), before, "a second index records the same facts");
     assert_eq!(nodes(rt), nodes_before, "and the same nodes");
     write(tmp.path(), "svc/forms.go", &format!("{FORMS}\n// a comment, no declaration\n"));
-    let synced = engine.sync(&[PathBuf::from("svc/forms.go")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("svc/forms.go")]);
     assert_eq!(synced.files_modified, 1, "the sync really re-extracted the file: {synced:?}");
     assert_eq!(self_types(rt), before, "a re-extracted file with the same declarations records the same facts");
     assert_eq!(nodes(rt), nodes_before);
@@ -286,7 +286,7 @@ fn a_synced_edit_matches_a_fresh_reindex_and_rederives_only_its_file() {
     let edited = FORMS.replace("func (s *Svc[T]) Work() {}", "func (s *Other) Work() {}")
         + "\nfunc (n *Fresh[T]) Make() {}\n";
     write(tmp.path(), "svc/forms.go", &edited);
-    engine.sync(&[PathBuf::from("svc/forms.go")]);
+    engine.pipeline().sync(&[PathBuf::from("svc/forms.go")]);
 
     let synced = self_types(rt);
     assert_eq!(synced.get("svc/forms.go:Work@9").map(String::as_str), Some("Other"));

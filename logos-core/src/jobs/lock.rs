@@ -2,7 +2,7 @@
 //! starts it (S-758, [analysis-jobs]): an exclusive `flock` on the project's
 //! lock file, taken by every security scan and every scanner install from the
 //! CLI, MCP and the web UI — save a CLI install where no scan can run (no
-//! `.logos` directory), which writes nothing there (`Engine::security_install`).
+//! `.logos` directory), which writes nothing there (`Tools::install`).
 //!
 //! A lock the kernel holds per open file, not per process, so two surfaces of
 //! one `serve` exclude each other exactly as two processes do, and the kernel

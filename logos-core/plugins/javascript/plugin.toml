@@ -3,19 +3,19 @@
 # own language but not its own grammar: it parses with the TSX grammar, so JSX
 # inside a `.js` file parses, and it SHARES the `tsx` plugin's queries rather
 # than copying them — `grammars.rs` declares this entry with
-# `entry!("javascript", shares tsx_entry(), layers ["symbols", "frameworks"])`,
+# `entry!("javascript", shares tsx_entry(), layers ["symbols"])`,
 # which takes the TSX `Language` and the very `tsx/queries/*.scm` assets the
 # `tsx` row embeds. A change to a shared query therefore reaches JavaScript with no second
 # copy to keep in step, and the query compiles against the grammar it was
 # written for. Droppable `.scm` query overrides resolve under
 # `.logos/plugins/javascript/queries/` (FR-PL-04, UAT-PL-03), apart from TSX's.
 #
-# Its own queries are two layers, each appended to the `tsx` file of the same
-# name. `queries/symbols.scm` (S-539, FR-EX-18) declares the functions
-# JavaScript defines by assignment, `exports` or prototype, which TypeScript
-# does not read; `queries/frameworks.scm` (S-541, FR-FW-03) reads Express
-# routes with a template-literal path, so TypeScript's routes are untouched. An
-# override of either file replaces its pair.
+# Its own query is one layer, appended to the `tsx` file of the same name:
+# `queries/symbols.scm` (S-539, FR-EX-18) declares the functions JavaScript
+# defines by assignment, `exports` or prototype, which TypeScript does not read.
+# An override of it replaces the pair. Express routes with a template-literal
+# path (S-541, FR-FW-03) were a second layer until S-822 moved them into the
+# shared `frameworks` query, which TypeScript reads too.
 #
 # Every semantic key below matches the `typescript`/`tsx` descriptors, whose
 # rows JavaScript files were read under before S-538, except where a comment

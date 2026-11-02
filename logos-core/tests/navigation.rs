@@ -55,7 +55,7 @@ pub fn gamma() {}
 /// An indexed engine over the standard fixture.
 fn indexed_engine(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -68,7 +68,7 @@ fn search_ranks_known_symbols_first_filters_by_kind_and_honours_limit() {
     let engine = indexed_engine(&tmp);
 
     // A known symbol name is ranked first.
-    let result = engine.search("alpha", None, None);
+    let result = engine.navigation().search("alpha", None, None);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.hits[0].name, "alpha", "exact name ranks first");
     assert_eq!(result.hits[0].kind, NodeKind::Function);
@@ -76,13 +76,13 @@ fn search_ranks_known_symbols_first_filters_by_kind_and_honours_limit() {
     assert!(result.hits[0].line.is_some(), "hits carry a location");
 
     // kind=function excludes the `util` module; kind=module finds it.
-    let functions = engine.search("util", Some(NodeKind::Function), None);
+    let functions = engine.navigation().search("util", Some(NodeKind::Function), None);
     assert!(
         functions.hits.iter().all(|h| h.kind == NodeKind::Function),
         "{:?}",
         functions.hits
     );
-    let modules = engine.search("util", Some(NodeKind::Module), None);
+    let modules = engine.navigation().search("util", Some(NodeKind::Module), None);
     assert!(
         modules.hits.iter().any(|h| h.name == "util"),
         "module filter finds the util module: {:?}",
@@ -90,7 +90,7 @@ fn search_ranks_known_symbols_first_filters_by_kind_and_honours_limit() {
     );
 
     // The limit bounds the result set.
-    let limited = engine.search("a", None, Some(1));
+    let limited = engine.navigation().search("a", None, Some(1));
     assert!(limited.hits.len() <= 1);
 }
 
@@ -102,7 +102,7 @@ fn first_navigation_call_auto_indexes_a_never_indexed_project() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // No explicit `index()` — search must transparently build the graph.
-    let result = engine.search("alpha", None, None);
+    let result = engine.navigation().search("alpha", None, None);
     assert!(
         result.hits.iter().any(|h| h.name == "alpha"),
         "auto-index served the very first navigation call: {result:?}"
@@ -116,7 +116,7 @@ fn context_bundle_is_deterministic_bounded_and_replaces_file_reads() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let bundle = engine.context("alpha", None, false);
+    let bundle = engine.navigation().context("alpha", None, false);
     assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
     assert!(!bundle.nodes.is_empty(), "the task seeds a bundle");
     assert!(
@@ -148,11 +148,11 @@ fn context_bundle_is_deterministic_bounded_and_replaces_file_reads() {
     );
 
     // max_nodes caps the bundle.
-    let capped = engine.context("alpha", Some(2), false);
+    let capped = engine.navigation().context("alpha", Some(2), false);
     assert!(capped.nodes.len() <= 2);
 
     // Determinism: same graph state, byte-identical bundle (NFR-RA-06).
-    let again = engine.context("alpha", None, false);
+    let again = engine.navigation().context("alpha", None, false);
     assert_eq!(
         serde_json::to_string(&bundle).unwrap(),
         serde_json::to_string(&again).unwrap(),
@@ -165,7 +165,7 @@ fn context_include_code_attaches_declaration_source() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let bundle = engine.context("alpha", None, true);
+    let bundle = engine.navigation().context("alpha", None, true);
     let seed = bundle
         .nodes
         .iter()
@@ -185,7 +185,7 @@ fn explore_groups_neighbourhood_source_by_file_and_caps_files() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.explore("alpha", None);
+    let result = engine.navigation().explore("alpha", None);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let anchor = result.anchor.as_ref().expect("anchor resolves");
     assert_eq!(anchor.name, "alpha");
@@ -206,7 +206,7 @@ fn explore_groups_neighbourhood_source_by_file_and_caps_files() {
     );
 
     // max_files caps the groups but total_files stays honest.
-    let capped = engine.explore("alpha", Some(1));
+    let capped = engine.navigation().explore("alpha", Some(1));
     assert_eq!(capped.files.len(), 1);
     assert!(capped.total_files >= 2);
 }
@@ -218,7 +218,7 @@ fn node_returns_metadata_immediate_edges_and_code_only_on_request() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let info = engine.node("beta", false);
+    let info = engine.navigation().node("beta", false);
     assert!(info.warnings.is_empty(), "{:?}", info.warnings);
     let detail = info.node.as_ref().expect("beta resolves");
     assert_eq!(detail.symbol.kind, NodeKind::Function);
@@ -248,7 +248,7 @@ fn node_returns_metadata_immediate_edges_and_code_only_on_request() {
         detail.edges
     );
 
-    let with_code = engine.node("beta", true);
+    let with_code = engine.navigation().node("beta", true);
     let detail = with_code.node.expect("beta resolves");
     assert!(
         detail.code.as_deref().unwrap_or("").contains("fn beta"),
@@ -263,7 +263,7 @@ fn callers_and_callees_return_direct_sets_and_honour_the_limit() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let callers = engine.callers("gamma", None);
+    let callers = engine.navigation().callers("gamma", None);
     assert_eq!(
         callers
             .callers
@@ -275,7 +275,7 @@ fn callers_and_callees_return_direct_sets_and_honour_the_limit() {
     );
     assert_eq!(callers.total, 1);
 
-    let callees = engine.callees("alpha", None);
+    let callees = engine.navigation().callees("alpha", None);
     let names: Vec<&str> = callees.callees.iter().map(|c| c.name.as_str()).collect();
     assert!(
         names.contains(&"run") && names.contains(&"beta"),
@@ -288,7 +288,7 @@ fn callers_and_callees_return_direct_sets_and_honour_the_limit() {
     );
 
     // The limit bounds the page while `total` stays honest.
-    let limited = engine.callees("alpha", Some(1));
+    let limited = engine.navigation().callees("alpha", Some(1));
     assert_eq!(limited.callees.len(), 1);
     assert_eq!(limited.total, 2, "pre-limit total is reported");
 }
@@ -300,7 +300,7 @@ fn impact_returns_both_labeled_directions_within_the_depth_bound() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let impact = engine.impact("gamma", None);
+    let impact = engine.navigation().impact("gamma", None);
     assert!(impact.warnings.is_empty(), "{:?}", impact.warnings);
     assert_eq!(impact.upstream_label, "breaks if changed", "DL-03 label");
     assert_eq!(impact.downstream_label, "depends on", "DL-03 label");
@@ -317,7 +317,7 @@ fn impact_returns_both_labeled_directions_within_the_depth_bound() {
     assert!(impact.downstream.is_empty(), "{:?}", impact.downstream);
 
     // The depth bound is respected: at depth 1 alpha (d2) drops out.
-    let shallow = engine.impact("gamma", Some(1));
+    let shallow = engine.navigation().impact("gamma", Some(1));
     let upstream: Vec<&str> = shallow
         .upstream
         .iter()
@@ -327,7 +327,7 @@ fn impact_returns_both_labeled_directions_within_the_depth_bound() {
     assert!(!upstream.contains(&"alpha"), "depth bound: {upstream:?}");
 
     // And the forward direction: alpha depends on run, beta, gamma (d2).
-    let forward = engine.impact("alpha", None);
+    let forward = engine.navigation().impact("alpha", None);
     let downstream: Vec<&str> = forward
         .downstream
         .iter()
@@ -345,7 +345,7 @@ fn status_reports_populated_counts_and_the_freshness_contract() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.warnings.is_empty(), "{:?}", status.warnings);
     assert!(status.indexed);
     assert_eq!(status.file_count, 2, "both fixture files indexed");
@@ -377,7 +377,7 @@ fn status_reports_an_unindexed_graph_without_building_one() {
     let tmp = fixture();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(!status.indexed, "no index has run");
     assert_eq!((status.file_count, status.node_count), (0, 0));
     assert!(
@@ -392,7 +392,7 @@ fn status_reports_an_unindexed_graph_without_building_one() {
 
     // The health probe itself must not have indexed anything (it reports,
     // it never builds) — a second look still sees an empty graph.
-    let again = engine.status();
+    let again = engine.graph().status();
     assert_eq!(again.node_count, 0, "status never triggers the auto-index");
 }
 
@@ -411,7 +411,7 @@ fn status_reports_the_source_test_loc_rollup_after_a_full_index() {
     write(tmp.path(), "tests/integration.rs", test);
     let engine = indexed_engine(&tmp);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     let total = status
         .total_line_count
         .expect("the roll-up is present after a full index");
@@ -465,7 +465,7 @@ fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
     // (a) A never-indexed graph has neither key → all three counts absent.
-    let unindexed = engine.status();
+    let unindexed = engine.graph().status();
     assert_eq!(unindexed.total_line_count, None, "never a fabricated 0");
     assert_eq!(unindexed.source_line_count, None);
     assert_eq!(unindexed.test_line_count, None);
@@ -478,7 +478,7 @@ fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
         .expect("runtime present")
         .submit_write(|w| w.set_project_metadata(logos_core::perf::INDEXED_LOC_KEY, "4200"))
         .expect("metadata write commits");
-    let legacy = engine.status();
+    let legacy = engine.graph().status();
     assert_eq!(
         legacy.total_line_count, None,
         "an indexed_loc without the test bucket is an absent roll-up (NFR-CC-04)"
@@ -488,8 +488,8 @@ fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
 
     // (c) Neither reading status (twice) nor a no-op sync backfills the test
     // bucket — the roll-up is index-write only (ADR-28, FR-IX-12).
-    let _ = engine.status();
-    let _ = engine.sync(&[]);
+    let _ = engine.graph().status();
+    let _ = engine.pipeline().sync(&[]);
     let test_loc = engine
         .runtime()
         .expect("runtime present")
@@ -500,7 +500,7 @@ fn the_loc_rollup_is_absent_until_computed_and_only_index_writes_it() {
         "no write on read: status and a no-op sync never persist the roll-up"
     );
     assert_eq!(
-        engine.status().total_line_count,
+        engine.graph().status().total_line_count,
         None,
         "the roll-up stays absent after the read-only calls"
     );
@@ -519,7 +519,7 @@ fn a_no_op_sync_leaves_a_computed_loc_rollup_unchanged() {
     write(tmp.path(), "tests/it.rs", "#[test]\nfn t() {}\n");
     let engine = indexed_engine(&tmp);
 
-    let before = engine.status();
+    let before = engine.graph().status();
     let (t0, s0, x0) = (
         before.total_line_count,
         before.source_line_count,
@@ -531,9 +531,9 @@ fn a_no_op_sync_leaves_a_computed_loc_rollup_unchanged() {
     );
 
     // A no-op sync (nothing changed on disk) must not touch the roll-up.
-    let _ = engine.sync(&[]);
+    let _ = engine.pipeline().sync(&[]);
 
-    let after = engine.status();
+    let after = engine.graph().status();
     assert_eq!(after.total_line_count, t0, "total unchanged by a no-op sync");
     assert_eq!(after.source_line_count, s0, "source unchanged by a no-op sync");
     assert_eq!(after.test_line_count, x0, "test unchanged by a no-op sync");
@@ -549,7 +549,7 @@ fn a_source_only_repo_reports_a_present_zero_test_bucket() {
     let tmp = fixture(); // the standard two-file crate: src/ only, no tests
     let engine = indexed_engine(&tmp);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     let total = status.total_line_count.expect("roll-up present");
     let source = status.source_line_count.expect("source present");
     let test_loc = status.test_line_count.expect("test bucket present, not absent");
@@ -588,7 +588,7 @@ fn a_re_index_that_persists_files_overwrites_the_rollup_with_the_new_figures() {
     write(tmp.path(), "src/lib.rs", "pub fn alpha() {}\n");
     let engine = indexed_engine(&tmp);
 
-    let before = engine.status();
+    let before = engine.graph().status();
     assert_eq!(
         before.total_line_count,
         Some(1),
@@ -601,11 +601,11 @@ fn a_re_index_that_persists_files_overwrites_the_rollup_with_the_new_figures() {
         "pub fn alpha() {}\npub fn beta() {}\npub fn gamma() {}\n",
     )
     .expect("write source");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert!(result.files_indexed > 0, "the re-index persisted a file");
 
-    let after = engine.status();
+    let after = engine.graph().status();
     assert_eq!(
         after.total_line_count,
         Some(3),
@@ -642,10 +642,10 @@ fn a_full_index_that_persists_nothing_over_an_empty_store_clears_the_rollup() {
     );
 
     fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.files_indexed, 0, "the re-index admits nothing");
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(!status.indexed, "the graph was purged");
     assert_eq!(
         status.total_line_count, None,
@@ -664,7 +664,7 @@ fn a_full_index_that_persists_nothing_over_an_empty_store_clears_the_rollup() {
     // no-op rather than an error (the index must not degrade).
     let empty = TempDir::new().unwrap();
     let engine = Engine::start(empty.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(
         result.warnings.is_empty(),
         "the index completed; it did not degrade: {:?}",
@@ -676,7 +676,7 @@ fn a_full_index_that_persists_nothing_over_an_empty_store_clears_the_rollup() {
         (None, None),
         "absent is absent — nothing was stored to record the absence"
     );
-    assert_eq!(engine.status().total_line_count, None);
+    assert_eq!(engine.graph().status().total_line_count, None);
 }
 
 #[test]
@@ -701,20 +701,20 @@ fn a_re_index_that_persists_nothing_keeps_the_rollup_of_the_graph_that_survives(
         before.0.is_some() && before.1.is_some(),
         "the first index recorded the roll-up describing the graph it built"
     );
-    let before_status = engine.status();
+    let before_status = engine.graph().status();
     let before_stamp = stored_stamp(&engine).expect("the first index stamped");
 
     // Same paths, same admission — only the contents are now unreadable.
     for rel in ["src/lib.rs", "tests/it.rs"] {
         fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
     }
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(
         result.files_indexed, 0,
         "every admitted file failed to load, so none was persisted"
     );
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         status.indexed,
         "the previous graph survives — nothing was purged: {status:?}"
@@ -781,8 +781,8 @@ fn the_rollup_and_the_stamp_never_classify_one_run_differently() {
     for rel in ["src/lib.rs", "src/util.rs"] {
         fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
     }
-    assert_eq!(engine.index().files_indexed, 0, "nothing persisted");
-    assert!(engine.status().indexed, "the graph survives");
+    assert_eq!(engine.pipeline().index().files_indexed, 0, "nothing persisted");
+    assert!(engine.graph().status().indexed, "the graph survives");
     assert_eq!(
         presence(&engine),
         (true, true),
@@ -791,8 +791,8 @@ fn the_rollup_and_the_stamp_never_classify_one_run_differently() {
 
     // Case 2 — nothing persisted over an emptied store: both cleared.
     fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
-    assert_eq!(engine.index().files_indexed, 0, "nothing persisted");
-    assert!(!engine.status().indexed, "the graph was purged");
+    assert_eq!(engine.pipeline().index().files_indexed, 0, "nothing persisted");
+    assert!(!engine.graph().status().indexed, "the graph was purged");
     assert_eq!(
         presence(&engine),
         (false, false),
@@ -823,7 +823,7 @@ fn status_reports_the_last_full_index_from_a_process_that_did_no_indexing() {
     let tmp = fixture();
     let recorded = {
         let engine = indexed_engine(&tmp);
-        let status = engine.status();
+        let status = engine.graph().status();
         let stamp = status
             .last_full_index_at
             .expect("the indexing process reports its own full index");
@@ -836,7 +836,7 @@ fn status_reports_the_last_full_index_from_a_process_that_did_no_indexing() {
     };
 
     let reader = Engine::start(tmp.path()).expect("a second engine starts");
-    let status = reader.status();
+    let status = reader.graph().status();
     assert_eq!(
         status.last_full_index_at.as_deref(),
         Some(recorded.as_str()),
@@ -861,7 +861,7 @@ fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
     let tmp = fixture();
     let engine = Engine::start(tmp.path()).expect("engine starts");
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert_eq!(
         status.last_full_index_at, None,
         "no full index is recorded, so the field is absent"
@@ -873,8 +873,8 @@ fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
     );
 
     // Reading status repeatedly, and a no-op sync, still write nothing.
-    let _ = engine.status();
-    let _ = engine.sync(&[]);
+    let _ = engine.graph().status();
+    let _ = engine.pipeline().sync(&[]);
     assert_eq!(
         stored_stamp(&engine),
         None,
@@ -891,7 +891,7 @@ fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
         })
         .expect("metadata write commits");
     assert_eq!(
-        engine.status().last_full_index_at,
+        engine.graph().status().last_full_index_at,
         None,
         "a stored 0 reads as absent, never as a 1970 timestamp (NFR-CC-04)"
     );
@@ -908,7 +908,7 @@ fn the_last_full_index_stamp_is_absent_until_an_index_builds_a_graph() {
         })
         .expect("metadata write commits");
     assert_eq!(
-        engine.status().last_full_index_at,
+        engine.graph().status().last_full_index_at,
         None,
         "a non-numeric row reads as absent, never as a fabricated timestamp"
     );
@@ -931,9 +931,9 @@ fn status_never_stamps_a_populated_graph_it_finds_undated() {
         })
         .expect("clearing the stamp commits");
 
-    assert!(engine.status().indexed, "the graph is still populated");
-    let _ = engine.status();
-    let _ = engine.status();
+    assert!(engine.graph().status().indexed, "the graph is still populated");
+    let _ = engine.graph().status();
+    let _ = engine.graph().status();
 
     assert_eq!(
         stored_stamp(&engine),
@@ -941,7 +941,7 @@ fn status_never_stamps_a_populated_graph_it_finds_undated() {
         "no write on read: status never back-fills the stamp it finds missing"
     );
     assert_eq!(
-        engine.status().last_full_index_at,
+        engine.graph().status().last_full_index_at,
         None,
         "and it reports the absence rather than inventing a reading"
     );
@@ -963,13 +963,13 @@ fn a_re_index_that_persists_nothing_keeps_the_stamp_of_the_graph_that_survives()
     for rel in ["src/lib.rs", "src/util.rs"] {
         fs::write(tmp.path().join(rel), [0xffu8, 0xfe, 0xff]).expect("write invalid UTF-8");
     }
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(
         result.files_indexed, 0,
         "every admitted file failed to load, so none was persisted"
     );
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         status.indexed,
         "the previous graph survives — nothing was purged: {status:?}"
@@ -992,7 +992,7 @@ fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
     let empty = TempDir::new().unwrap();
     let engine = Engine::start(empty.path()).expect("engine starts");
 
-    let result = engine.index();
+    let result = engine.pipeline().index();
     // `files_indexed == 0` is ALSO what `degraded_index` returns when the index
     // errors, so on its own it would let this test pass without ever reaching
     // `record_full_index_at`. A degrade pushes "index failed: …" onto `warnings`,
@@ -1008,7 +1008,7 @@ fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
         result.files_indexed, 0,
         "the walk admitted nothing — this is the empty-member case"
     );
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(!status.indexed, "no graph was built");
     assert_eq!(
         status.last_full_index_at, None,
@@ -1025,7 +1025,7 @@ fn a_full_index_that_admits_no_file_leaves_the_stamp_absent() {
     let populated = fixture();
     let engine = indexed_engine(&populated);
     assert!(
-        engine.status().last_full_index_at.is_some(),
+        engine.graph().status().last_full_index_at.is_some(),
         "a member carrying a graph reports the stamp non-null"
     );
 }
@@ -1044,11 +1044,11 @@ fn emptying_a_project_clears_its_last_full_index_stamp() {
     );
 
     fs::remove_dir_all(tmp.path().join("src")).expect("remove every source file");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.files_indexed, 0, "the re-index admits nothing");
 
     assert_eq!(
-        engine.status().last_full_index_at,
+        engine.graph().status().last_full_index_at,
         None,
         "the emptied graph carries no date"
     );
@@ -1070,7 +1070,7 @@ fn a_re_index_moves_the_stamp_forward() {
     // The stamp is whole unix seconds, so a same-second re-index is legitimately
     // equal; sleep past the boundary to observe the overwrite.
     std::thread::sleep(std::time::Duration::from_millis(1_100));
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
     let second = stored_stamp(&engine).expect("the re-index stamped");
 
     let (first, second): (u64, u64) = (first.parse().unwrap(), second.parse().unwrap());
@@ -1079,7 +1079,7 @@ fn a_re_index_moves_the_stamp_forward() {
         "the re-index moved the stamp forward: {first} -> {second}"
     );
     assert_eq!(
-        engine.status().last_full_index_at,
+        engine.graph().status().last_full_index_at,
         Some(second.to_string()),
         "status reports the latest full index, not the first"
     );
@@ -1092,28 +1092,28 @@ fn unknown_symbols_yield_empty_results_with_suggestions_never_errors() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let callers = engine.callers("zzz_definitely_missing", None);
+    let callers = engine.navigation().callers("zzz_definitely_missing", None);
     assert!(callers.resolved.is_none());
     assert!(callers.callers.is_empty() && callers.total == 0);
     assert!(callers.warnings.is_empty(), "graceful, not an error");
 
     // A near-miss earns a "did you mean" (FTS prefix on `alph`) — on `node`,
     // on `callers`/`callees`, and on `search` alike (FR-NV-09 is tool-wide).
-    let info = engine.node("alph", false);
+    let info = engine.navigation().node("alph", false);
     assert!(info.node.is_none());
     assert!(
         info.suggestions.iter().any(|s| s == "alpha"),
         "did-you-mean suggests the real symbol: {:?}",
         info.suggestions
     );
-    let near_callers = engine.callers("alph", None);
+    let near_callers = engine.navigation().callers("alph", None);
     assert!(near_callers.resolved.is_none());
     assert!(
         near_callers.suggestions.iter().any(|s| s == "alpha"),
         "callers near-miss suggests too: {:?}",
         near_callers.suggestions
     );
-    let near_search = engine.search("alph", None, None);
+    let near_search = engine.navigation().search("alph", None, None);
     assert!(near_search.hits.is_empty());
     assert!(
         near_search.suggestions.iter().any(|s| s == "alpha"),
@@ -1122,10 +1122,10 @@ fn unknown_symbols_yield_empty_results_with_suggestions_never_errors() {
     );
 
     // Every traversal tool shares the contract.
-    assert!(engine.impact("zzz_missing", None).resolved.is_none());
-    assert!(engine.explore("zzz_missing", None).anchor.is_none());
-    assert!(engine.context("zzz_missing", None, false).nodes.is_empty());
-    let search = engine.search("zzz_missing", None, None);
+    assert!(engine.navigation().impact("zzz_missing", None).resolved.is_none());
+    assert!(engine.navigation().explore("zzz_missing", None).anchor.is_none());
+    assert!(engine.navigation().context("zzz_missing", None, false).nodes.is_empty());
+    let search = engine.navigation().search("zzz_missing", None, None);
     assert!(search.hits.is_empty() && search.warnings.is_empty());
 }
 
@@ -1167,18 +1167,18 @@ pub fn delta_added_after_index() {}
 ",
     );
 
-    let stamp_before = engine.sync_stamp();
+    let stamp_before = engine.graph().sync_stamp();
     let counts_before = rt.submit_read(|s| s.counts()).unwrap();
 
     // Run all eight tools.
-    let search = engine.search("delta_added_after_index", None, None);
-    let _ = engine.context("alpha", None, false);
-    let _ = engine.explore("alpha", None);
-    let _ = engine.node("beta", false);
-    let _ = engine.callers("gamma", None);
-    let _ = engine.callees("alpha", None);
-    let _ = engine.impact("beta", None);
-    let status = engine.status();
+    let search = engine.navigation().search("delta_added_after_index", None, None);
+    let _ = engine.navigation().context("alpha", None, false);
+    let _ = engine.navigation().explore("alpha", None);
+    let _ = engine.navigation().node("beta", false);
+    let _ = engine.navigation().callers("gamma", None);
+    let _ = engine.navigation().callees("alpha", None);
+    let _ = engine.navigation().impact("beta", None);
+    let status = engine.graph().status();
 
     // Best-effort fresh: the un-synced edit is NOT visible — no per-call
     // reconcile happened (FR-RC-05); the status freshness line says so.
@@ -1193,15 +1193,15 @@ pub fn delta_added_after_index() {}
     assert_eq!(counts_before, counts_after, "no write reached the store");
     assert_eq!(
         stamp_before,
-        engine.sync_stamp(),
+        engine.graph().sync_stamp(),
         "no navigation call advanced the sync clock"
     );
 
     // Background sync — not navigation — is the freshness mechanism: after an
     // explicit sync the new symbol is served.
-    let synced = engine.sync(&[PathBuf::from("src/lib.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
-    let found = engine.search("delta_added_after_index", None, None);
+    let found = engine.navigation().search("delta_added_after_index", None, None);
     assert!(
         found
             .hits
@@ -1217,17 +1217,17 @@ pub fn delta_added_after_index() {}
 fn navigation_on_a_transient_engine_degrades_with_warnings_not_panics() {
     let engine = Engine::open("/tmp");
 
-    assert!(!engine.search("x", None, None).warnings.is_empty());
-    assert!(!engine.context("x", None, false).warnings.is_empty());
-    assert!(!engine.explore("x", None).warnings.is_empty());
-    assert!(!engine.node("x", false).warnings.is_empty());
-    assert!(!engine.callers("x", None).warnings.is_empty());
-    assert!(!engine.callees("x", None).warnings.is_empty());
-    assert!(!engine.impact("x", None).warnings.is_empty());
-    assert!(!engine.status().warnings.is_empty());
+    assert!(!engine.navigation().search("x", None, None).warnings.is_empty());
+    assert!(!engine.navigation().context("x", None, false).warnings.is_empty());
+    assert!(!engine.navigation().explore("x", None).warnings.is_empty());
+    assert!(!engine.navigation().node("x", false).warnings.is_empty());
+    assert!(!engine.navigation().callers("x", None).warnings.is_empty());
+    assert!(!engine.navigation().callees("x", None).warnings.is_empty());
+    assert!(!engine.navigation().impact("x", None).warnings.is_empty());
+    assert!(!engine.graph().status().warnings.is_empty());
     // The S-016 closure query joins the same degradation contract.
     assert!(!engine
-        .affected(&["x.rs".to_string()], false)
+        .navigation().affected(&["x.rs".to_string()], false)
         .warnings
         .is_empty());
 }
@@ -1261,7 +1261,7 @@ fn dogfood_runs_all_eight_tools_on_logos_own_source() {
     copy_rs_tree(&crate_root, &crate_root.join("src"), tmp.path());
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     // No *unexpected* warning. `logos-core/src` has itself grown past the
     // [NFR-PE-09] envelope's 10% margin (>110k LOC), so indexing it now emits
     // the beyond-envelope advisory — a truthful degradation note about this
@@ -1279,7 +1279,7 @@ fn dogfood_runs_all_eight_tools_on_logos_own_source() {
 
     // search: a real Logos symbol ranks first under its exact name.
     let t = std::time::Instant::now();
-    let search = engine.search("build_view", Some(NodeKind::Function), None);
+    let search = engine.navigation().search("build_view", Some(NodeKind::Function), None);
     let search_ms = t.elapsed().as_millis();
     assert!(
         search.hits.iter().any(|h| h.name == "build_view"),
@@ -1288,7 +1288,7 @@ fn dogfood_runs_all_eight_tools_on_logos_own_source() {
 
     // context: one call on a task phrase yields a multi-file bundle.
     let t = std::time::Instant::now();
-    let bundle = engine.context("hydrate graph view", None, false);
+    let bundle = engine.navigation().context("hydrate graph view", None, false);
     let context_ms = t.elapsed().as_millis();
     assert!(!bundle.nodes.is_empty());
     assert!(
@@ -1301,24 +1301,24 @@ fn dogfood_runs_all_eight_tools_on_logos_own_source() {
     // `raw_to_node` has several same-module callers in graph_store — the
     // binding class the scope-hierarchy resolver always resolves, so the
     // assertion stays stable regardless of cross-module resolution recall.
-    let explore = engine.explore("build_view", None);
+    let explore = engine.navigation().explore("build_view", None);
     assert!(explore.anchor.is_some());
-    let node = engine.node("build_view", false);
+    let node = engine.navigation().node("build_view", false);
     assert!(node.node.is_some());
     let t = std::time::Instant::now();
-    let callers = engine.callers("raw_to_node", None);
+    let callers = engine.navigation().callers("raw_to_node", None);
     let callers_ms = t.elapsed().as_millis();
     assert!(
         !callers.callers.is_empty(),
         "raw_to_node has same-module callers: {callers:?}"
     );
-    let callees = engine.callees("build_view", None);
+    let callees = engine.navigation().callees("build_view", None);
     assert!(callees.total > 0, "build_view dispatches to builders");
-    let impact = engine.impact("raw_to_node", None);
+    let impact = engine.navigation().impact("raw_to_node", None);
     assert!(!impact.upstream.is_empty(), "raw_to_node has dependents");
 
     // status: a populated, healthy index over the dogfood tree.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(status.indexed && status.node_count > 100);
     assert!(status.refs_total > 0);
 
@@ -1360,7 +1360,7 @@ fn affected_returns_the_whole_reverse_transitive_closure_by_default() {
     let tmp = chain_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.affected(&["src/core.rs".to_string()], false);
+    let result = engine.navigation().affected(&["src/core.rs".to_string()], false);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.changed, ["src/core.rs"]);
     assert!(result.unknown.is_empty(), "{:?}", result.unknown);
@@ -1403,7 +1403,7 @@ fn affected_tests_only_narrows_to_test_marked_files() {
     let tmp = chain_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.affected(&["src/core.rs".to_string()], true);
+    let result = engine.navigation().affected(&["src/core.rs".to_string()], true);
     assert!(result.tests_only);
     let files: Vec<&str> = result.affected.iter().map(|f| f.file.as_str()).collect();
     assert_eq!(
@@ -1421,7 +1421,7 @@ fn affected_deduplicates_repeated_input_files() {
 
     // The same file in raw and "./"-prefixed form collapses to ONE seed: one
     // `changed` entry, no duplicated dependents (NFR-RA-06 determinism).
-    let result = engine.affected(
+    let result = engine.navigation().affected(
         &[
             "src/core.rs".to_string(),
             "src/core.rs".to_string(),
@@ -1442,7 +1442,7 @@ fn affected_deduplicates_repeated_input_files() {
 
     // The library-level empty changed set (unreachable from the binary —
     // clap requires ≥ 1 file) yields the all-empty result, never an error.
-    let empty = engine.affected(&[], false);
+    let empty = engine.navigation().affected(&[], false);
     assert!(empty.changed.is_empty());
     assert!(empty.affected.is_empty());
     assert!(empty.unknown.is_empty());
@@ -1456,7 +1456,7 @@ fn affected_reports_unknown_files_and_degrades_gracefully() {
 
     // A path not in the graph is reported, not an error (ADR-14 posture);
     // "./"-prefixed input normalises to the stored project-relative form.
-    let result = engine.affected(
+    let result = engine.navigation().affected(
         &["./src/core.rs".to_string(), "no/such/file.rs".to_string()],
         false,
     );
@@ -1468,7 +1468,7 @@ fn affected_reports_unknown_files_and_degrades_gracefully() {
     );
 
     // An entirely-unknown changed set yields an empty closure, never an error.
-    let none = engine.affected(&["ghost.rs".to_string()], false);
+    let none = engine.navigation().affected(&["ghost.rs".to_string()], false);
     assert!(none.affected.is_empty());
     assert_eq!(none.unknown, ["ghost.rs"]);
 }
@@ -1518,7 +1518,7 @@ fn search_finds_a_phrase_only_in_a_doc_body_and_honours_kind() {
 
     // The body-only phrase resolves to its DocSection (the heading does not
     // contain it, nor does any symbol name).
-    let hits = engine.search("quasiquibble", None, None);
+    let hits = engine.navigation().search("quasiquibble", None, None);
     assert!(hits.warnings.is_empty(), "{:?}", hits.warnings);
     assert!(
         hits.hits
@@ -1530,7 +1530,7 @@ fn search_finds_a_phrase_only_in_a_doc_body_and_honours_kind() {
 
     // A nested section's body is indexed under ITS OWN DocSection, not the
     // parent's — proof the body excludes sub-section prose.
-    let nested = engine.search("floopglorp", None, None);
+    let nested = engine.navigation().search("floopglorp", None, None);
     assert!(
         nested
             .hits
@@ -1541,7 +1541,7 @@ fn search_finds_a_phrase_only_in_a_doc_body_and_honours_kind() {
     );
 
     // kind=doc_section keeps it; kind=function excludes documentation entirely.
-    let docs_only = engine.search("quasiquibble", Some(NodeKind::DocSection), None);
+    let docs_only = engine.navigation().search("quasiquibble", Some(NodeKind::DocSection), None);
     assert!(
         !docs_only.hits.is_empty()
             && docs_only
@@ -1551,7 +1551,7 @@ fn search_finds_a_phrase_only_in_a_doc_body_and_honours_kind() {
         "kind=doc_section narrows to docs: {:?}",
         docs_only.hits
     );
-    let funcs_only = engine.search("quasiquibble", Some(NodeKind::Function), None);
+    let funcs_only = engine.navigation().search("quasiquibble", Some(NodeKind::Function), None);
     assert!(
         funcs_only.hits.is_empty(),
         "a code-kind filter excludes the doc body match: {:?}",
@@ -1566,7 +1566,7 @@ fn node_resolves_a_documentation_node_with_its_doc_to_code_edge() {
     let tmp = doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let info = engine.node("Running Tasks", false);
+    let info = engine.navigation().node("Running Tasks", false);
     assert!(info.warnings.is_empty(), "{:?}", info.warnings);
     let detail = info.node.expect("the DocSection resolves");
     assert_eq!(detail.symbol.kind, NodeKind::DocSection);
@@ -1587,7 +1587,7 @@ fn context_can_include_the_docs_explaining_seeded_code() {
     let tmp = doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let bundle = engine.context("run", None, false);
+    let bundle = engine.navigation().context("run", None, false);
     assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
     assert!(
         bundle
@@ -1601,7 +1601,7 @@ fn context_can_include_the_docs_explaining_seeded_code() {
     // Determinism with docs in the bundle (NFR-RA-06): the doc-aware expansion
     // path (a store query feeding the same rank/truncate) stays byte-identical
     // across identical calls — guards against a non-deterministic doc collection.
-    let again = engine.context("run", None, false);
+    let again = engine.navigation().context("run", None, false);
     assert_eq!(
         serde_json::to_string(&bundle).unwrap(),
         serde_json::to_string(&again).unwrap(),
@@ -1610,7 +1610,7 @@ fn context_can_include_the_docs_explaining_seeded_code() {
 
     // Negative path: a symbol no doc references pulls in no DocSection — the
     // bundle stays clean (no spurious doc nodes, no warnings).
-    let idle = engine.context("idle", None, false);
+    let idle = engine.navigation().context("idle", None, false);
     assert!(idle.warnings.is_empty(), "{:?}", idle.warnings);
     assert!(
         idle.nodes
@@ -1669,7 +1669,7 @@ fn context_prose_task_anchors_a_bundle_via_documentation() {
     let tmp = prose_docs_fixture();
     let engine = indexed_engine(&tmp);
 
-    let bundle = engine.context("nightly billing reconciliation workflow", None, false);
+    let bundle = engine.navigation().context("nightly billing reconciliation workflow", None, false);
     assert!(bundle.warnings.is_empty(), "{:?}", bundle.warnings);
 
     // The defect: this exact call returned an empty bundle before S-078.
@@ -1701,7 +1701,7 @@ fn context_prose_task_anchors_a_bundle_via_documentation() {
     );
 
     // The acceptance-criteria invariants still hold: bounded, code opt-in OFF.
-    let capped = engine.context("nightly billing reconciliation workflow", Some(3), false);
+    let capped = engine.navigation().context("nightly billing reconciliation workflow", Some(3), false);
     assert!(capped.nodes.len() <= 3, "max_nodes bounds the bundle");
     assert!(
         bundle.nodes.iter().all(|n| n.code.is_none()),
@@ -1712,7 +1712,7 @@ fn context_prose_task_anchors_a_bundle_via_documentation() {
     // Determinism (NFR-RA-06): the doc-anchored bundle is byte-identical across
     // two identical calls — the kind-balanced seed window and the doc→code
     // expansion both order deterministically.
-    let again = engine.context("nightly billing reconciliation workflow", None, false);
+    let again = engine.navigation().context("nightly billing reconciliation workflow", None, false);
     assert_eq!(
         serde_json::to_string(&bundle).unwrap(),
         serde_json::to_string(&again).unwrap(),
@@ -1727,7 +1727,7 @@ fn implements_lists_code_for_a_doc_and_is_empty_when_unlinked() {
     let tmp = doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let impls = engine.implements("Running Tasks");
+    let impls = engine.navigation().implements("Running Tasks");
     assert!(impls.warnings.is_empty(), "{:?}", impls.warnings);
     assert!(impls.resolved.is_some(), "the doc node resolves");
     assert_eq!(
@@ -1746,7 +1746,7 @@ fn implements_lists_code_for_a_doc_and_is_empty_when_unlinked() {
         .all(|l| l.via == EdgeKind::DocReference));
 
     // A doc section that references no code → empty, not an error (FR-NV-10).
-    let lonely = engine.implements("Lonely Notes");
+    let lonely = engine.navigation().implements("Lonely Notes");
     assert!(lonely.resolved.is_some(), "the section still resolves");
     assert!(
         lonely.implementors.is_empty() && lonely.warnings.is_empty(),
@@ -1755,7 +1755,7 @@ fn implements_lists_code_for_a_doc_and_is_empty_when_unlinked() {
     );
 
     // An unknown doc node → empty result plus suggestions, never an error.
-    let unknown = engine.implements("No Such Heading At All");
+    let unknown = engine.navigation().implements("No Such Heading At All");
     assert!(unknown.resolved.is_none());
     assert!(unknown.implementors.is_empty() && unknown.warnings.is_empty());
 }
@@ -1767,7 +1767,7 @@ fn referencing_docs_lists_docs_for_a_symbol_and_is_empty_when_undocumented() {
     let tmp = doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let docs = engine.referencing_docs("run");
+    let docs = engine.navigation().referencing_docs("run");
     assert!(docs.warnings.is_empty(), "{:?}", docs.warnings);
     assert!(docs.resolved.is_some(), "the code symbol resolves");
     assert_eq!(
@@ -1785,7 +1785,7 @@ fn referencing_docs_lists_docs_for_a_symbol_and_is_empty_when_undocumented() {
         .all(|l| l.symbol.kind == NodeKind::DocSection));
 
     // A code symbol no doc mentions → empty, not an error (FR-NV-10).
-    let undocumented = engine.referencing_docs("idle");
+    let undocumented = engine.navigation().referencing_docs("idle");
     assert!(undocumented.resolved.is_some(), "idle still resolves");
     assert!(
         undocumented.docs.is_empty() && undocumented.warnings.is_empty(),
@@ -1794,7 +1794,7 @@ fn referencing_docs_lists_docs_for_a_symbol_and_is_empty_when_undocumented() {
     );
 
     // An unknown symbol → empty result, never an error.
-    let unknown = engine.referencing_docs("nonexistent_symbol_zzz");
+    let unknown = engine.navigation().referencing_docs("nonexistent_symbol_zzz");
     assert!(unknown.resolved.is_none());
     assert!(unknown.docs.is_empty() && unknown.warnings.is_empty());
 }
@@ -1806,7 +1806,7 @@ fn impact_is_doc_aware_and_lists_referencing_docs() {
     let tmp = doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.impact("run", None);
+    let result = engine.navigation().impact("run", None);
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     assert_eq!(result.docs_label, "documented by");
     assert!(
@@ -1819,7 +1819,7 @@ fn impact_is_doc_aware_and_lists_referencing_docs() {
     );
 
     // A symbol no doc references carries an empty docs dimension, not an error.
-    let idle = engine.impact("idle", None);
+    let idle = engine.navigation().impact("idle", None);
     assert!(idle.docs.is_empty() && idle.warnings.is_empty());
 }
 
@@ -1842,7 +1842,7 @@ fn a_bare_name_that_is_a_class_and_the_file_module_returns_the_class_and_names_t
     let tmp = php_psr4_fixture();
     let engine = indexed_engine(&tmp);
 
-    let info = engine.node("Utils", false);
+    let info = engine.navigation().node("Utils", false);
     assert!(info.warnings.is_empty(), "{:?}", info.warnings);
     let node = info.node.expect("`Utils` resolves");
     assert_eq!(node.symbol.kind, NodeKind::Class, "the class, not the module");
@@ -1859,7 +1859,7 @@ fn a_bare_name_that_is_a_class_and_the_file_module_returns_the_class_and_names_t
 
     // The alternative round-trips: its symbol reaches the module, which —
     // asked for by canonical symbol — passes over nothing.
-    let module_info = engine.node(&module.symbol, false);
+    let module_info = engine.navigation().node(&module.symbol, false);
     assert_eq!(module_info.node.expect("the module resolves").symbol.kind, NodeKind::Module);
     assert!(module_info.alternatives.is_empty());
 }
@@ -1877,7 +1877,7 @@ fn a_bare_name_shared_by_code_and_a_doc_section_returns_the_code() {
     let tmp = code_and_doc_fixture();
     let engine = indexed_engine(&tmp);
 
-    let info = engine.node("Widget", false);
+    let info = engine.navigation().node("Widget", false);
     let node = info.node.expect("`Widget` resolves");
     assert_eq!(node.symbol.kind, NodeKind::Function, "the code, not the doc section");
     assert_eq!(
@@ -1894,19 +1894,19 @@ fn qualified_and_scip_lookups_and_unique_names_pass_over_nothing() {
 
     // A SCIP symbol is exact: the module's own symbol reaches the module, never
     // the same-named class, and names no alternative.
-    let module_symbol = engine.node("Utils", false).alternatives[0].symbol.clone();
-    let by_symbol = engine.node(&module_symbol, false);
+    let module_symbol = engine.navigation().node("Utils", false).alternatives[0].symbol.clone();
+    let by_symbol = engine.navigation().node(&module_symbol, false);
     assert_eq!(by_symbol.node.expect("resolves").symbol.symbol, module_symbol);
     assert!(by_symbol.alternatives.is_empty());
 
     // A name only one node carries is unchanged, and the wire payload keeps no
     // `alternatives` key at all — an unambiguous answer is byte-identical to the
     // one before the field existed.
-    let unique = engine.node("canonicalize", false);
+    let unique = engine.navigation().node("canonicalize", false);
     assert!(unique.node.is_some() && unique.alternatives.is_empty());
     let wire = serde_json::to_value(&unique).unwrap();
     assert!(wire.get("alternatives").is_none(), "{wire}");
-    let ambiguous = serde_json::to_value(engine.node("Utils", false)).unwrap();
+    let ambiguous = serde_json::to_value(engine.navigation().node("Utils", false)).unwrap();
     assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
 }
 
@@ -1918,7 +1918,7 @@ fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
     write(tmp.path(), "application.yml", "server:\n  port: 8080\n");
     let engine = indexed_engine(&tmp);
 
-    let info = engine.node("server", false);
+    let info = engine.navigation().node("server", false);
     let node = info.node.expect("`server` resolves");
     assert_eq!(node.symbol.kind, NodeKind::Module, "the code module, not the YAML key");
     assert_eq!(node.symbol.file.as_deref(), Some("app/server.py"));
@@ -1935,10 +1935,10 @@ fn a_bare_name_prefers_a_code_module_to_a_config_key_of_the_same_name() {
 /// One row per tool, so a fixture asserts the same contract across all of them.
 fn resolutions(engine: &Engine, name: &str) -> [(&'static str, Option<NodeKind>, Vec<NodeKind>); 4] {
     let kinds = |alts: &[SymbolRef]| alts.iter().map(|a| a.kind).collect::<Vec<_>>();
-    let callers = engine.callers(name, None);
-    let callees = engine.callees(name, None);
-    let impact = engine.impact(name, None);
-    let explore = engine.explore(name, None);
+    let callers = engine.navigation().callers(name, None);
+    let callees = engine.navigation().callees(name, None);
+    let impact = engine.navigation().impact(name, None);
+    let explore = engine.navigation().explore(name, None);
     [
         ("callers", callers.resolved.as_ref().map(|r| r.kind), kinds(&callers.alternatives)),
         ("callees", callees.resolved.as_ref().map(|r| r.kind), kinds(&callees.alternatives)),
@@ -1973,7 +1973,7 @@ fn the_four_tools_resolve_a_code_and_doc_bare_name_to_the_code_and_list_the_doc(
 fn the_four_tools_leave_scip_symbols_and_unique_names_exact_with_no_alternatives_key() {
     let tmp = php_psr4_fixture();
     let engine = indexed_engine(&tmp);
-    let module_symbol = engine.node("Utils", false).alternatives[0].symbol.clone();
+    let module_symbol = engine.navigation().node("Utils", false).alternatives[0].symbol.clone();
 
     // A SCIP symbol is exact: the module's own symbol reaches the module, never the
     // same-named class, and names nothing it passed over.
@@ -1985,15 +1985,15 @@ fn the_four_tools_leave_scip_symbols_and_unique_names_exact_with_no_alternatives
     // A name only one node carries is unchanged, and none of the four payloads
     // carries an `alternatives` key at all.
     let wires = [
-        serde_json::to_value(engine.callers("canonicalize", None)).unwrap(),
-        serde_json::to_value(engine.callees("canonicalize", None)).unwrap(),
-        serde_json::to_value(engine.impact("canonicalize", None)).unwrap(),
-        serde_json::to_value(engine.explore("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.navigation().callers("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.navigation().callees("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.navigation().impact("canonicalize", None)).unwrap(),
+        serde_json::to_value(engine.navigation().explore("canonicalize", None)).unwrap(),
     ];
     for wire in wires {
         assert!(wire.get("alternatives").is_none(), "{wire}");
     }
-    let ambiguous = serde_json::to_value(engine.callers("Utils", None)).unwrap();
+    let ambiguous = serde_json::to_value(engine.navigation().callers("Utils", None)).unwrap();
     assert_eq!(ambiguous["alternatives"][0]["kind"], "module", "{ambiguous}");
 }
 
@@ -2008,7 +2008,7 @@ fn an_unknown_bare_name_names_no_alternatives_and_still_suggests() {
         assert_eq!(resolved, None, "{tool}");
         assert!(alternatives.is_empty(), "{tool}");
     }
-    assert!(!engine.callers("Widg", None).suggestions.is_empty());
+    assert!(!engine.navigation().callers("Widg", None).suggestions.is_empty());
 }
 
 /// `Widget` calls `helper` and is called by `use_it`; a doc section is also named
@@ -2032,20 +2032,20 @@ fn the_four_tools_report_the_resolved_nodes_own_edges_not_a_passed_over_nodes() 
     let engine = indexed_engine(&tmp);
     let names = |refs: &[SymbolRef]| refs.iter().map(|r| r.name.clone()).collect::<Vec<_>>();
 
-    let callers = engine.callers("Widget", None);
+    let callers = engine.navigation().callers("Widget", None);
     assert_eq!(callers.resolved.as_ref().map(|r| r.kind), Some(NodeKind::Function));
     assert_eq!((callers.total, names(&callers.callers)), (1, vec!["use_it".to_string()]));
-    let callees = engine.callees("Widget", None);
+    let callees = engine.navigation().callees("Widget", None);
     assert_eq!((callees.total, names(&callees.callees)), (1, vec!["helper".to_string()]));
 
-    let impact = engine.impact("Widget", None);
+    let impact = engine.navigation().impact("Widget", None);
     let upstream: Vec<_> = impact.upstream.iter().map(|e| e.symbol.name.as_str()).collect();
     let downstream: Vec<_> = impact.downstream.iter().map(|e| e.symbol.name.as_str()).collect();
     assert!(upstream.contains(&"use_it"), "{upstream:?}");
     assert!(downstream.contains(&"helper"), "{downstream:?}");
 
     // `explore` walks the neighbourhood of the node it anchored on.
-    let explore = engine.explore("Widget", None);
+    let explore = engine.navigation().explore("Widget", None);
     assert_eq!(explore.anchor.as_ref().map(|a| a.kind), Some(NodeKind::Function));
     let seen: Vec<_> = explore
         .files
@@ -2057,7 +2057,7 @@ fn the_four_tools_report_the_resolved_nodes_own_edges_not_a_passed_over_nodes() 
     // The passed-over doc section, reached by its own symbol, has no call edges.
     let doc = callers.alternatives[0].symbol.clone();
     assert_eq!(callers.alternatives[0].kind, NodeKind::DocSection);
-    assert_eq!(engine.callers(&doc, None).total, 0);
+    assert_eq!(engine.navigation().callers(&doc, None).total, 0);
 }
 
 #[test]
@@ -2067,7 +2067,7 @@ fn an_explore_query_that_matches_no_name_exactly_anchors_by_full_text_and_names_
 
     // Not a node name, so the exact lookup passes over nothing; the full-text
     // fallback still finds an anchor — and names no alternatives for it.
-    let explore = engine.explore("Widg*", None);
+    let explore = engine.navigation().explore("Widg*", None);
     assert!(explore.anchor.is_some(), "the full-text fallback anchors: {explore:?}");
     assert!(explore.alternatives.is_empty(), "{:?}", explore.alternatives);
     let wire = serde_json::to_value(&explore).unwrap();

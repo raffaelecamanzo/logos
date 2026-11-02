@@ -47,7 +47,7 @@ fn indexed(fixture: &[(&str, &str)]) -> (TempDir, Engine) {
 fn index(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -254,7 +254,7 @@ fn sync_equals_a_full_reindex_as_a_declaration_and_its_file_come_and_go() {
     let all = paths(fixtures::MINIMAL);
     // The `mod` line arrives.
     write(tmp.path(), "src/lib.rs", fixtures::MINIMAL[1].1);
-    engine.sync(&["src/lib.rs".into()]);
+    engine.pipeline().sync(&["src/lib.rs".into()]);
     assert_eq!(
         edges_from(rt, "src/lib.rs", EdgeKind::Calls),
         strings(&["alpha -> src/util.rs:run"])
@@ -262,12 +262,12 @@ fn sync_equals_a_full_reindex_as_a_declaration_and_its_file_come_and_go() {
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
     // The declared file leaves: the declaration holds the key, and nothing binds.
     fs::remove_file(tmp.path().join("src/util.rs")).unwrap();
-    engine.sync(&["src/util.rs".into()]);
+    engine.pipeline().sync(&["src/util.rs".into()]);
     assert_eq!(unbound(rt, "src/lib.rs", EdgeKind::Calls), strings(&["run"]));
     assert_eq!(binding_facts(rt), cold_facts(&tmp, &all));
     // It returns.
     write(tmp.path(), "src/util.rs", fixtures::MINIMAL[2].1);
-    engine.sync(&["src/util.rs".into()]);
+    engine.pipeline().sync(&["src/util.rs".into()]);
     assert_eq!(
         edges_from(rt, "src/lib.rs", EdgeKind::Calls),
         strings(&["alpha -> src/util.rs:run"])
@@ -299,7 +299,7 @@ fn sync_equals_a_full_reindex_when_a_second_candidate_file_leaves() {
         strings(&["crate -> src/a/b.rs:c"])
     );
     fs::remove_file(tmp.path().join(rival)).unwrap();
-    engine.sync(&[rival.into()]);
+    engine.pipeline().sync(&[rival.into()]);
     assert_eq!(
         edges_from(rt, "src/a/b.rs", EdgeKind::Calls),
         strings(&["up -> src/a/mod.rs:helper"])

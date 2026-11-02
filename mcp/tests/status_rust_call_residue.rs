@@ -37,7 +37,7 @@ async fn the_status_tool_carries_the_rust_rows_call_residue() {
     fs::create_dir_all(tmp.path().join("src")).unwrap();
     fs::write(tmp.path().join("src/lib.rs"), LIB_RS).unwrap();
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     let (client_io, server_io) = tokio::io::duplex(64 * 1024);
     let server = tokio::spawn(async move {

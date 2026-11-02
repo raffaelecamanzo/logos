@@ -15,6 +15,7 @@ fn universe(names: &[&str]) -> NameUniverse {
             names: names.iter().map(|n| (*n).to_string()).collect(),
             aliases: Vec::new(),
             files: Vec::new(),
+            facades: Vec::new(),
         },
         &PackageLayout::default(),
     )

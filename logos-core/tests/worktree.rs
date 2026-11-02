@@ -103,7 +103,7 @@ const PRIMARY_INDEX_STAMP: &str = "1000000000";
 /// Does a function named `name` exist in this engine's graph?
 fn has_fn(engine: &Engine, name: &str) -> bool {
     engine
-        .search(name, Some(logos_core::model::NodeKind::Function), Some(16))
+        .navigation().search(name, Some(logos_core::model::NodeKind::Function), Some(16))
         .hits
         .iter()
         .any(|h| h.name == name)
@@ -128,7 +128,7 @@ fn a_worktree_seeds_from_main_and_reflects_its_own_code() {
     // either bootstrap and discriminate nothing.
     {
         let engine = Engine::start(&main).expect("primary engine starts");
-        let indexed = engine.index();
+        let indexed = engine.pipeline().index();
         assert!(indexed.files_indexed >= 1, "primary index ran");
         engine
             .runtime()
@@ -173,7 +173,7 @@ fn a_worktree_seeds_from_main_and_reflects_its_own_code() {
     // `last_full_index_at` still reading the primary's sentinel proves it was
     // O(diff-from-main), not a full O(repo) index (FR-WT-03): a full index here
     // would have overwritten that row with the current clock.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         status.indexed,
         "the graph is populated straight from the seed, before any \
@@ -219,10 +219,10 @@ fn a_worktree_without_a_primary_db_full_indexes() {
 
     let engine = Engine::start(&wt).expect("worktree engine starts without a seed");
     assert!(
-        !engine.status().indexed,
+        !engine.graph().status().indexed,
         "no seed → the store starts empty (nothing copied from nowhere)"
     );
-    let result = engine.ensure_indexed();
+    let result = engine.pipeline().ensure_indexed();
     assert!(
         result.files_indexed >= 1,
         "no seed → the auto-index prologue performs a full index, got {result:?}"
@@ -248,7 +248,7 @@ fn worktree_policy_is_honoured_by_the_worktree_engine() {
     write(&wt, ".logos/config.toml", "exclude = [\"vendor/**\"]\n");
 
     let engine = Engine::start(&wt).expect("worktree engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.files_indexed >= 1, "index ran: {result:?}");
     assert!(has_fn(&engine, "seeded_fn"));
     assert!(
@@ -281,7 +281,7 @@ fn outside_git_the_hint_directory_is_the_root() {
     let tmp = TempDir::new().unwrap();
     write(tmp.path(), "src/lib.rs", "pub fn plain_fn() {}\n");
     let engine = Engine::start(tmp.path()).expect("engine starts outside git");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.files_indexed >= 1);
     assert!(has_fn(&engine, "plain_fn"));
     assert!(tmp.path().join(".logos/logos.db").exists());
@@ -340,7 +340,7 @@ fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
     let primary_checked_rules = {
         let engine = Engine::start(&main).expect("primary engine starts");
         let report = engine
-            .check_rules(None, true)
+            .quality().check_rules(None, true)
             .expect("primary check_rules runs");
         assert!(report.rules_present, "the primary has an authored contract");
         report.checked_rules
@@ -372,7 +372,7 @@ fn worktree_seed_carries_the_governance_contract_with_checked_rules_parity() {
     );
 
     let wt_report = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("worktree check_rules runs");
     assert!(wt_report.rules_present, "the seeded worktree has a contract");
     assert_eq!(
@@ -404,12 +404,12 @@ fn worktree_seed_carries_the_contract_even_when_the_primary_has_no_db() {
         "the contract is seeded even though the primary itself was never indexed"
     );
     let report = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("worktree check_rules runs");
     assert!(report.rules_present, "the seeded worktree has a contract");
 }
 
-/// `Engine::start_with_phase_report` — the hand-mirrored, phase-timed twin of
+/// `ColdStartPhases::measure` — the hand-mirrored, phase-timed twin of
 /// `Engine::start`'s cold path — must seed a DB-less worktree the same way
 /// `Engine::start` does: BOTH the graph store and the governance contract
 /// (CR-116 §9 item 5, S-369).
@@ -440,7 +440,7 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     // this exercises the arm where both seeds fire off one resolution.
     {
         let primary = Engine::start(&main).expect("primary engine starts");
-        assert!(primary.index().files_indexed >= 1, "primary index ran");
+        assert!(primary.pipeline().index().files_indexed >= 1, "primary index ran");
         // The same sentinel discipline as
         // `a_worktree_seeds_from_main_and_reflects_its_own_code` — see the note
         // there for why a real timestamp would not discriminate.
@@ -462,7 +462,7 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
 
     let wt = add_worktree(&tmp, &main);
     let (engine, phases) =
-        Engine::start_with_phase_report(&wt).expect("the phase-reported twin starts");
+        logos_core::ColdStartPhases::measure(&wt).expect("the phase-reported twin starts");
 
     // The graph seed fired. `status` reads WITHOUT the auto-index prologue, so
     // a populated graph here proves the seed happened at start, and a
@@ -473,7 +473,7 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
     // the FR-IX-07 prologue, and a full index would satisfy it with no seed at
     // all (which is exactly what `a_worktree_without_a_primary_db_full_indexes`
     // asserts). Read status BEFORE any navigation call.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         status.indexed,
         "the twin seeded the worktree store from the primary checkout, before \
@@ -496,7 +496,7 @@ fn a_phase_reported_engine_start_seeds_the_store_and_the_contract_too() {
         "the twin seeded the governance contract too, byte-identically"
     );
     let report = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("worktree check_rules runs");
     assert!(report.rules_present, "the seeded worktree has a contract");
 
@@ -544,12 +544,12 @@ fn a_phase_reported_engine_start_seeds_the_contract_when_the_primary_has_no_db()
     );
 
     let wt = add_worktree(&tmp, &main);
-    let (engine, _phases) = Engine::start_with_phase_report(&wt)
+    let (engine, _phases) = logos_core::ColdStartPhases::measure(&wt)
         .expect("the twin starts without a primary DB to seed from");
 
     // No graph seed was possible...
     assert!(
-        !engine.status().indexed,
+        !engine.graph().status().indexed,
         "no primary DB → nothing copied; the store starts empty"
     );
     // ...but the contract seed still fired off the shared resolution.
@@ -559,7 +559,7 @@ fn a_phase_reported_engine_start_seeds_the_contract_when_the_primary_has_no_db()
         "the contract is seeded even though the graph seed found nothing"
     );
     let report = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("worktree check_rules runs");
     assert!(report.rules_present, "the seeded worktree has a contract");
 }
@@ -573,7 +573,7 @@ fn worktree_seed_with_no_primary_contract_fabricates_nothing() {
     {
         let engine = Engine::start(&main).expect("primary engine starts");
         let report = engine
-            .check_rules(None, true)
+            .quality().check_rules(None, true)
             .expect("primary check_rules runs");
         assert!(!report.rules_present, "no contract was ever authored");
     }
@@ -585,7 +585,7 @@ fn worktree_seed_with_no_primary_contract_fabricates_nothing() {
         "nothing to copy, and the seed fabricates nothing"
     );
     let report = engine
-        .check_rules(None, true)
+        .quality().check_rules(None, true)
         .expect("worktree check_rules runs");
     assert!(
         !report.rules_present,

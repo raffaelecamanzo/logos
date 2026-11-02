@@ -34,7 +34,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -92,7 +92,7 @@ fn a_synced_edit_matches_a_fresh_reindex() {
     assert_eq!(accesses(engine_a.runtime().unwrap()), [pair("__init__", "a"), pair("total", "a")]);
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     fs::write(tmp_a.path().join("app/box.py"), AFTER).unwrap();
-    engine_a.sync(&[root_a.join("app/box.py")] as &[PathBuf]);
+    engine_a.pipeline().sync(&[root_a.join("app/box.py")] as &[PathBuf]);
     let rt_a = engine_a.runtime().unwrap();
 
     let tmp_b = tree(&[("app/box.py", AFTER)]);

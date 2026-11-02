@@ -61,13 +61,13 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(root: &Path) {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// The gated facts a change must not move, as one comparable string.
 fn gated_verdict(engine: &Engine) -> String {
-    let g = engine.gate(None, false, true).expect("gate");
+    let g = engine.quality().gate(None, false, true).expect("gate");
     serde_json::to_string(&serde_json::json!({
         "passed": g.passed,
         "signal": g.signal,
@@ -100,7 +100,7 @@ fn assembling_the_residue_moves_no_gate_verdict_and_writes_no_member_store() {
         .iter()
         .map(|root| {
             let engine = Engine::start(root).expect("engine starts");
-            engine.gate(None, true, true).expect("gate --save");
+            engine.quality().gate(None, true, true).expect("gate --save");
             gated_verdict(&engine)
         })
         .collect();

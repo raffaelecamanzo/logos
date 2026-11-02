@@ -400,7 +400,7 @@ pub struct SecretWriteOutcome {
     pub chat_key: MaskedSecret,
 }
 
-/// The outcome of an [`Engine::config_apply`] — what the explicit Apply did
+/// The outcome of a [`Configuration::apply`] — what the explicit Apply did
 /// after a validated config edit ([FR-UI-13], [ADR-31]).
 ///
 /// Two shapes for the two policy files, discriminated on the wire by the
@@ -416,7 +416,7 @@ pub struct SecretWriteOutcome {
 /// Every field traces to a real reconcile/scan result — the summary fabricates
 /// nothing ([NFR-RA-05]).
 ///
-/// [`Engine::config_apply`]: crate::Engine::config_apply
+/// [`Configuration::apply`]: crate::Configuration::apply
 /// [FR-UI-13]: ../../../docs/specs/requirements/FR-UI-13.md
 /// [FR-SY-07]: ../../../docs/specs/requirements/FR-SY-07.md
 /// [FR-GV-02]: ../../../docs/specs/requirements/FR-GV-02.md

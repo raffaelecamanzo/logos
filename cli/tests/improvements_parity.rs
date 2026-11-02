@@ -6,7 +6,7 @@
 //! tool and this CLI twin. `CARGO_BIN_EXE_logos` and the axum router are both
 //! reachable only from this crate, so the binary-vs-router pair is pinned here;
 //! the MCP-vs-engine pair, which also meets the Health value on
-//! `Engine::latest_health()`, is `mcp/tests/health_parity.rs`. Each pair is
+//! `Readouts::latest_health()`, is `mcp/tests/health_parity.rs`. Each pair is
 //! compared where both of its surfaces are reachable (`xservice_surface.rs`'s
 //! convention), and the pairs meet on one `Value`.
 //!

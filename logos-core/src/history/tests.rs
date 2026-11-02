@@ -358,7 +358,7 @@ fn history_db_survives_a_full_index() {
     let engine = crate::Engine::start(&repo).expect("engine starts");
 
     // Mine via the lazy seam, then capture the state.
-    let mined = engine.ensure_history_mined().expect("mine");
+    let mined = engine.history().ensure_mined().expect("mine");
     assert_eq!(mined.commits_read, 2);
     let before: i64 = {
         let conn = super::open(&repo).unwrap();
@@ -368,7 +368,7 @@ fn history_db_survives_a_full_index() {
     let version_before = super::schema_version(&repo).unwrap();
 
     // A full index rebuilds logos.db wholesale.
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
 
     // history.db — a separate file — is untouched: same facts, same version.
     let after: i64 = {
@@ -384,7 +384,7 @@ fn history_db_survives_a_full_index() {
     );
 
     // And mining stays incremental afterwards — the cursor survived too.
-    let again = engine.ensure_history_mined().expect("re-mine");
+    let again = engine.history().ensure_mined().expect("re-mine");
     assert_eq!(
         again.commits_read, 0,
         "post-index mine at the same HEAD reads zero (FR-GH-01: 'mines only new commits')"
@@ -401,14 +401,14 @@ fn gate_never_mines_history() {
     let engine = crate::Engine::start(&repo).expect("engine starts");
 
     // A gate (reconcile-then-score) must not create or touch history.db.
-    engine.gate(None, false, true).expect("gate runs");
+    engine.quality().gate(None, false, true).expect("gate runs");
     assert!(
         !super::db_path(&repo).exists(),
         "gate must not mine — history.db is absent (BR-26, FR-GH-02)"
     );
 
     // The lazy temporal seam is the ONLY path that mines.
-    engine.ensure_history_mined().expect("mine");
+    engine.history().ensure_mined().expect("mine");
     assert!(
         super::db_path(&repo).exists(),
         "the temporal read seam creates history.db"

@@ -139,7 +139,7 @@ pub(crate) fn run(root: &Path, fallback: Option<(bool, bool)>, yes: bool, exclud
         match fallback {
             Some((interactive, hooks)) => {
                 let steps = host.init_steps();
-                out.print(&logos_core::Engine::init_with_contributions(root, &crate::init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?
+                out.print(&logos_core::Setup::init_with_contributions(root, &crate::init_options(interactive, hooks, &steps, crate::ask), &steps, &host.owned_skills())?)?
             }
             None => eprintln!("logos init --workspace: no candidate member repositories found under {} — nothing to do", workspace_root.display()),
         }

@@ -173,7 +173,7 @@ fn every_node_symbol_carries_the_configured_coordinate() {
     let tmp = TempDir::new().unwrap();
     every_kind(tmp.path(), "github.com/acme/svc-a");
     let engine = Engine::start(tmp.path()).unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.persist_failures.is_empty(), "{:?}", result.persist_failures);
 
     let all = nodes(&engine);
@@ -206,7 +206,7 @@ fn every_node_symbol_carries_the_configured_coordinate() {
 
     // `check_rules` re-materialises the policy nodes: under the store's
     // coordinate, not a coordinate-less one.
-    engine.check_rules(None, false).unwrap();
+    engine.quality().check_rules(None, false).unwrap();
     assert_eq!(
         symbol_of(&engine, NodeKind::Boundary, "domain->web").as_str(),
         "logos policy github.com/acme/svc-a . boundary/domain/web/"
@@ -222,7 +222,7 @@ fn two_repositories_orders_topics_are_two_symbols() {
         pin(tmp.path(), id);
         write(tmp.path(), "src/OrderService.java", ORDER_SERVICE);
         let engine = Engine::start(tmp.path()).unwrap();
-        engine.index();
+        engine.pipeline().index();
         symbol_of(&engine, NodeKind::Topic, "orders")
     };
     let a = topic("github.com/acme/orders");
@@ -240,7 +240,7 @@ fn a_sync_keeps_the_coordinate_the_store_carries_and_a_full_index_moves_it() {
     write(tmp.path(), "src/lib.rs", "mod util;\npub fn run() { util::helper(); }\n");
     write(tmp.path(), "src/util.rs", "pub fn helper() {}\n");
     let engine = Engine::start(tmp.path()).unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/first"));
 
     // The project's coordinate changes under a running engine (a long-lived
@@ -249,7 +249,7 @@ fn a_sync_keeps_the_coordinate_the_store_carries_and_a_full_index_moves_it() {
     // second one.
     pin(tmp.path(), "example.com/second");
     write(tmp.path(), "src/util.rs", "pub fn helper() {}\npub fn added() {}\n");
-    let synced = engine.sync(&[PathBuf::from("src/util.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/util.rs")]);
     assert_eq!(synced.files_modified, 1, "the edit re-extracted: {synced:?}");
     let added = symbol_of(&engine, NodeKind::Function, "added");
     assert_eq!(added.coordinate(), Some("example.com/first"));
@@ -264,10 +264,10 @@ fn a_sync_keeps_the_coordinate_the_store_carries_and_a_full_index_moves_it() {
 
     // A full index builds every symbol under the coordinate in force, and the
     // store records it.
-    engine.index();
+    engine.pipeline().index();
     assert!(nodes(&engine).iter().all(|(_, s)| s.coordinate() == Some("example.com/second")));
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/second"));
-    assert_eq!(engine.status().project_id.as_deref(), Some("example.com/second"));
+    assert_eq!(engine.graph().status().project_id.as_deref(), Some("example.com/second"));
 }
 
 #[test]
@@ -280,14 +280,14 @@ fn an_index_that_stores_no_file_keeps_the_coordinate_of_the_graph_that_stands() 
     write(tmp.path(), ".logos/rules.toml", "[[layers]]\nname = \"core\"\npaths = [\"src/**\"]\norder = 1\n");
     write(tmp.path(), "src/lib.rs", "pub fn run() {}\n");
     let engine = Engine::start(tmp.path()).unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/first"));
 
     // Under the running engine: a restart would migrate the store to the new
     // coordinate before the index (S-704).
     pin(tmp.path(), "example.com/second");
     fs::write(tmp.path().join("src/lib.rs"), [0xff, 0xfe, 0x00]).unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.files_indexed, 0, "no file loaded: {result:?}");
     assert!(
         nodes(&engine).iter().any(|(k, _)| *k == NodeKind::Function),
@@ -303,7 +303,7 @@ fn an_index_that_stores_no_file_keeps_the_coordinate_of_the_graph_that_stands() 
         "logos policy example.com/first . layer/core/"
     );
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/first"));
-    assert_eq!(engine.status().project_id.as_deref(), Some("example.com/second"));
+    assert_eq!(engine.graph().status().project_id.as_deref(), Some("example.com/second"));
 }
 
 #[test]
@@ -317,7 +317,7 @@ fn a_store_whose_first_write_is_a_sync_carries_the_coordinate() {
     write(synced.path(), "src/util.rs", "pub fn helper() {}\n");
     let engine = Engine::start(synced.path()).unwrap();
     assert_eq!(recorded(&engine), None, "nothing is recorded before the first write");
-    let result = engine.sync(&[PathBuf::from("src/lib.rs"), PathBuf::from("src/util.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/lib.rs"), PathBuf::from("src/util.rs")]);
     assert_eq!(result.files_added, 2, "{result:?}");
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/first-contact"));
     let mut via_sync: Vec<String> = nodes(&engine).into_iter().map(|(_, s)| s.to_string()).collect();
@@ -332,7 +332,7 @@ fn a_store_whose_first_write_is_a_sync_carries_the_coordinate() {
     write(indexed.path(), "src/lib.rs", "mod util;\npub fn run() { util::helper(); }\n");
     write(indexed.path(), "src/util.rs", "pub fn helper() {}\n");
     let engine = Engine::start(indexed.path()).unwrap();
-    engine.index();
+    engine.pipeline().index();
     let mut via_index: Vec<String> = nodes(&engine).into_iter().map(|(_, s)| s.to_string()).collect();
     via_index.sort();
     assert_eq!(via_sync, via_index, "sync-first and index-first build the same symbols");
@@ -345,12 +345,12 @@ fn an_index_that_admits_nothing_records_the_coordinate_for_the_store_it_leaves()
     let tmp = TempDir::new().unwrap();
     pin(tmp.path(), "example.com/empty-first");
     let engine = Engine::start(tmp.path()).unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.files_indexed, 0, "{result:?}");
     assert_eq!(recorded(&engine).as_deref(), Some("example.com/empty-first"));
 
     write(tmp.path(), "src/lib.rs", "pub fn run() {}\n");
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     assert_eq!(
         symbol_of(&engine, NodeKind::Function, "run").as_str(),
         "logos . example.com/empty-first . src/`lib.rs`/run()."
@@ -368,13 +368,13 @@ fn a_store_that_holds_files_but_records_no_coordinate_syncs_coordinate_less() {
     pin(tmp.path(), "example.com/first");
     write(tmp.path(), "src/lib.rs", "pub fn run() {}\n");
     let engine = Engine::start(tmp.path()).unwrap();
-    engine.index();
+    engine.pipeline().index();
     let conn = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).unwrap();
     conn.execute("DELETE FROM project_metadata WHERE key = ?1", [SYMBOL_COORDINATE_KEY]).unwrap();
     drop(conn);
 
     write(tmp.path(), "src/lib.rs", "pub fn run() {}\npub fn added() {}\n");
-    engine.sync(&[PathBuf::from("src/lib.rs")]);
+    engine.pipeline().sync(&[PathBuf::from("src/lib.rs")]);
     let added = symbol_of(&engine, NodeKind::Function, "added");
     assert!(added.is_coordinate_less(), "a keyless store that holds files renders `.`: {added}");
     assert_eq!(recorded(&engine), None);

@@ -183,7 +183,7 @@ struct OverviewSecurity {
 impl OverviewSecurity {
     /// The widget data over `e`: the stored summary, no scanner started.
     fn read(e: &Engine) -> Self {
-        match e.security_summary() {
+        match e.security().findings().summary() {
             Ok(summary) => Self { summary: Some(summary), error: None },
             Err(err) => Self { summary: None, error: Some(format!("{err:#}")) },
         }
@@ -215,16 +215,16 @@ fn admitted_overview_fields(fields: Vec<OverviewField>) -> Vec<OverviewField> {
 /// The Dashboard bundle over one engine: the core's read-models, then `fields`.
 fn read_overview(e: &Engine, fields: &[OverviewField]) -> anyhow::Result<OverviewModel> {
     Ok(OverviewModel {
-        status: e.status(),
+        status: e.graph().status(),
         // The view degrades a composition-read fault to the empty card, never
         // blanks the page — mirror that here ([NFR-CC-04]).
-        composition: e.language_composition().unwrap_or_default(),
-        languages: e.languages(),
-        gate: e.latest_gate()?,
+        composition: e.graph().language_composition().unwrap_or_default(),
+        languages: e.graph().languages(),
+        gate: e.quality().readouts().latest_gate()?,
         // The evidence alone: the Dashboard probes no coverage tool (S-737).
-        coverage: e.coverage_evidence()?,
-        rules: e.check_rules(None, false)?,
-        stats: e.stats(None),
+        coverage: e.coverage().evidence()?,
+        rules: e.quality().check_rules(None, false)?,
+        stats: e.graph().stats(None),
         security: OverviewSecurity::read(e),
         extensions: fields
             .iter()
@@ -270,7 +270,7 @@ pub(crate) struct HealthModel {
 /// # One read, two projections ([CR-135] §3.2)
 ///
 /// The gate verdict and the scan result come from
-/// [`Engine::latest_health`](logos_core::Engine::latest_health) — a single read
+/// [`Readouts::latest_health`](logos_core::Readouts::latest_health) — a single read
 /// of the last persisted snapshot — and **not** from `latest_gate()` plus
 /// `latest_scan()`. Those two each read that same logical row, so calling both
 /// here opened two reads in two transactions: a `scan` committing between them
@@ -319,7 +319,7 @@ pub(crate) struct HealthModel {
 /// `scan` is the last snapshot's [`ScanResult`], so it already carries that
 /// snapshot's advisory ranking as `scan.where_to_start` — read from the same
 /// single `latest_health` read as the verdict and the offender lists, and the
-/// value [`Engine::improvements`] serves the CLI `improvements` and the MCP tool.
+/// value [`Readouts::improvements`](logos_core::Readouts::improvements) serves the CLI `improvements` and the MCP tool.
 /// No field was added here; `tests/api_v1.rs` pins the equality.
 ///
 /// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
@@ -328,12 +328,12 @@ pub(crate) struct HealthModel {
 /// [CR-135]: ../../docs/requests/CR-135-the-health-readout-is-internally-consistent-and-never-stale.md
 pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_health", Surface::Web, |e| -> anyhow::Result<HealthModel> {
-        let LatestHealth { gate, scan } = e.latest_health()?;
+        let LatestHealth { gate, scan } = e.quality().readouts().latest_health()?;
         Ok(HealthModel {
-            status: e.status(),
+            status: e.graph().status(),
             gate,
             scan,
-            evolution: e.evolution(None)?,
+            evolution: e.quality().readouts().evolution(None)?,
         })
     })
     .await;
@@ -347,7 +347,7 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// (`graph_revision`, `node_count`, `edge_count`).
 ///
 /// An **ordinary member** of this surface, deliberately: a thin [`bridge`]
-/// projection of [`Engine::status`], member-scoped through the same
+/// projection of [`Graph::status`](logos_core::Graph::status), member-scoped through the same
 /// [`MemberEngine`] extractor as its siblings, introducing **no new core query**
 /// ([ADR-01], [ADR-43]) and reading through the non-persisting accessor so a load
 /// writes no store ([ADR-28], [FR-UI-03]). It carries the status projection and
@@ -398,7 +398,7 @@ pub(crate) async fn health(MemberEngine(engine): MemberEngine) -> Response {
 /// [CR-097]: ../../docs/requests/CR-097-header-graph-state-readout.md
 /// [FR-OB-09]: ../../docs/specs/requirements/FR-OB-09.md
 pub(crate) async fn status(MemberEngine(engine): MemberEngine) -> Response {
-    let info: StatusInfo = bridge(engine, "api_v1_status", Surface::Shell, |e| e.status()).await;
+    let info: StatusInfo = bridge(engine, "api_v1_status", Surface::Shell, |e| e.graph().status()).await;
     ok(info)
 }
 
@@ -458,7 +458,7 @@ pub(crate) async fn extensions(State(host): State<ExtensionHost>) -> Response {
 /// ([FR-OB-04], [FR-UI-27], [FR-UI-21]) the Statistics tab ([spa-frontend], S-235)
 /// consumes: per-`(surface, tool)` usage, latency percentiles, the honestly-labeled
 /// reads/tokens-saved estimate, the daily-activity series, and the dev-vs-`main`
-/// origin split. A thin `bridge` pass-through of the [`Engine::stats`] read-model —
+/// origin split. A thin `bridge` pass-through of the [`Graph::stats`](logos_core::Graph::stats) read-model —
 /// it selects and projects nothing beyond what that read-model already carries: no
 /// new core query, no write ([ADR-01], [ADR-43], [ADR-28]).
 ///
@@ -473,7 +473,7 @@ pub(crate) async fn statistics(
     Query(q): Query<HashMap<String, String>>,
 ) -> Response {
     let window = q.get("window").and_then(|w| w.trim().parse::<u32>().ok());
-    let info: StatsInfo = bridge(engine, "api_v1_statistics", Surface::Web, move |e| e.stats(window)).await;
+    let info: StatsInfo = bridge(engine, "api_v1_statistics", Surface::Web, move |e| e.graph().stats(window)).await;
     ok(info)
 }
 
@@ -490,7 +490,7 @@ pub(crate) struct ArchitectureModel {
 /// `GET /api/v1/architecture` — the Architecture / Cycles data ([FR-UI-21]).
 pub(crate) async fn architecture(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_architecture", Surface::Web, |e| -> anyhow::Result<ArchitectureModel> {
-        Ok(ArchitectureModel { status: e.status(), dsm: e.dsm(None, false)? })
+        Ok(ArchitectureModel { status: e.graph().status(), dsm: e.quality().readouts().dsm(None, false)? })
     })
     .await;
     respond(model)
@@ -510,8 +510,8 @@ pub(crate) struct GapsModel {
 pub(crate) async fn gaps(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_gaps", Surface::Web, |e| -> anyhow::Result<GapsModel> {
         Ok(GapsModel {
-            status: e.status(),
-            rules: e.check_rules(None, false)?,
+            status: e.graph().status(),
+            rules: e.quality().check_rules(None, false)?,
         })
     })
     .await;
@@ -536,7 +536,7 @@ pub(crate) struct FilesModel {
 /// filter does; the `?production_scope` toggle drops whole test files from the
 /// candidate set before ranking ([FR-UI-05], [CR-076]) — the same optional
 /// filter the CLI `--production-scope` flag and MCP `production_scope` argument
-/// expose, reached through the same [`Engine::latest_hotspots_with_findings`]
+/// expose, reached through the same [`History::latest_hotspots_with_findings`](logos_core::History::latest_hotspots_with_findings)
 /// call. `?with_findings` is the findings filter ([FR-SC-14]): hotspots with a
 /// fresh unsuppressed finding rank first, as the CLI `--with-findings` flag and
 /// the MCP `with_findings` argument do; the findings column rides every board
@@ -552,9 +552,9 @@ pub(crate) async fn files(
     let with_findings = wants_flag(&params, "with_findings");
     let model = bridge(engine, "api_v1_files", Surface::Web, move |e| -> anyhow::Result<FilesModel> {
         Ok(FilesModel {
-            status: e.status(),
-            hotspots: e.latest_hotspots_with_findings(Some(50), untested, production_scope, with_findings)?,
-            temporal: e.latest_temporal_report()?,
+            status: e.graph().status(),
+            hotspots: e.history().latest_hotspots_with_findings(Some(50), untested, production_scope, with_findings)?,
+            temporal: e.history().latest_temporal_report()?,
         })
     })
     .await;
@@ -586,9 +586,9 @@ pub(crate) struct CoverageModel {
 pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_coverage", Surface::Web, |e| -> anyhow::Result<CoverageModel> {
         Ok(CoverageModel {
-            status: e.status(),
-            coverage: e.coverage_status_probing(logos_core::coverage::Probes::Never)?,
-            untested: e.latest_hotspots(Some(20), true, false)?,
+            status: e.graph().status(),
+            coverage: e.coverage().status_probing(logos_core::coverage::Probes::Never)?,
+            untested: e.history().latest_hotspots(Some(20), true, false)?,
         })
     })
     .await;
@@ -600,7 +600,7 @@ pub(crate) async fn coverage(MemberEngine(engine): MemberEngine) -> Response {
 /// The Security bundle ([FR-SC-09]): the index status and the page's one
 /// read-model — scanner matrix, findings in graph context, both OWASP editions
 /// and, with a `rules.toml [security]` table, the gate band
-/// ([`Engine::security_page`]). Read-only: it runs no scan — only the version
+/// ([`Findings::page`](logos_core::Findings::page)). Read-only: it runs no scan — only the version
 /// command of a scanner the project's scan consent names, once per process for
 /// each binary (HF-3) — and writes no store.
 ///
@@ -618,7 +618,7 @@ pub(crate) struct SecurityModel {
 /// [FR-SC-09]: ../../docs/specs/requirements/FR-SC-09.md
 pub(crate) async fn security(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_security", Surface::Web, |e| -> anyhow::Result<SecurityModel> {
-        Ok(SecurityModel { status: e.status(), security: e.security_page()? })
+        Ok(SecurityModel { status: e.graph().status(), security: e.security().findings().page()? })
     })
     .await;
     respond(model)
@@ -644,7 +644,7 @@ pub(crate) async fn graph(
     let granularity = parse_granularity(&q);
     let intent = parse_intent(&q);
     let elements: GraphElements = bridge(engine, "api_v1_graph", Surface::Web, move |e| {
-        e.graph_elements(seed.as_deref(), cap, layers.as_deref(), edge_types.as_deref(), granularity, intent)
+        e.graph().elements(seed.as_deref(), cap, layers.as_deref(), edge_types.as_deref(), granularity, intent)
     })
     .await;
     ok(elements)
@@ -672,7 +672,7 @@ pub(crate) async fn search_query(
 /// `GET /api/v1/impact?seed=<symbol>` — the read-only transitive-impact + doc-trace
 /// read-model ([FR-NV-10], S-037) the SPA's Decisions & docs panel ([FR-DG-02])
 /// consumes. The JSON twin of the legacy HTML `/api/impact` fragment endpoint:
-/// both read the **same** [`Engine::impact`] accessor, so the panel is now built
+/// both read the **same** [`Navigation::impact`](logos_core::Navigation::impact) accessor, so the panel is now built
 /// client-side from the read-model (the SPA owns the presentation) instead of a
 /// server-rendered HTML fragment. A pure reader — the fetch mutates no store
 /// ([ADR-28]). [`ImpactResult`] is infallible at the surface: an unknown seed
@@ -687,7 +687,7 @@ pub(crate) async fn impact(
     else {
         return ok(ImpactResult::default());
     };
-    let result: ImpactResult = bridge(engine, "api_v1_impact", Surface::Web, move |e| e.impact(&seed, None)).await;
+    let result: ImpactResult = bridge(engine, "api_v1_impact", Surface::Web, move |e| e.navigation().impact(&seed, None)).await;
     ok(result)
 }
 
@@ -696,7 +696,7 @@ pub(crate) async fn impact(
 ///
 /// The JSON twin of the `impact-intersection` CLI command and the MCP tool of
 /// the same name: all three hand their raw `item` strings to the **one**
-/// [`Engine::impact_intersection`] accessor, which owns the
+/// [`Navigation::impact_intersection`](logos_core::Navigation::impact_intersection) accessor, which owns the
 /// `<id>=<symbol>,…` parse — so the three surfaces cannot drift in what they
 /// accept ([ADR-01], [NFR-MA-02]). `item` repeats, which is why this handler
 /// reads the query as ordered pairs rather than the map the other endpoints use.
@@ -719,7 +719,7 @@ pub(crate) async fn impact_intersection(
         .find(|(key, _)| key == "depth")
         .and_then(|(_, value)| value.parse::<usize>().ok());
     let result: ImpactIntersectionResult = bridge(engine, "api_v1_impact_intersection", Surface::Web, move |e| {
-        e.impact_intersection(&items, depth)
+        e.navigation().impact_intersection(&items, depth)
     })
     .await;
     ok(result)
@@ -730,7 +730,7 @@ pub(crate) async fn impact_intersection(
 ///
 /// The JSON twin of the `precedent` CLI command and the MCP tool of the same
 /// name: all three hand their raw target string to the **one**
-/// [`Engine::precedent`] accessor, which owns the symbol-then-file resolution
+/// [`Navigation::precedent`](logos_core::Navigation::precedent) accessor, which owns the symbol-then-file resolution
 /// rule, so the three surfaces cannot drift in what they accept ([ADR-01],
 /// [NFR-MA-02]).
 ///
@@ -754,7 +754,7 @@ pub(crate) async fn precedent(
     let target = q.get("target").map(|s| s.trim().to_string()).unwrap_or_default();
     let limit = q.get("limit").and_then(|value| value.parse::<usize>().ok());
     let result: PrecedentResult =
-        bridge(engine, "api_v1_precedent", Surface::Web, move |e| e.precedent(&target, limit)).await;
+        bridge(engine, "api_v1_precedent", Surface::Web, move |e| e.navigation().precedent(&target, limit)).await;
     ok(result)
 }
 /// `GET /api/v1/branch-overlap?ref=<r>&ref=<r>[&base=<r>][&merge=<r>]` — which
@@ -762,7 +762,7 @@ pub(crate) async fn precedent(
 ///
 /// The JSON twin of the `branch-overlap` CLI command and the MCP tool of the
 /// same name: all three hand their raw ref strings to the **one**
-/// [`Engine::branch_overlap`] accessor, so the three surfaces cannot drift in
+/// [`Navigation::branch_overlap`](logos_core::Navigation::branch_overlap) accessor, so the three surfaces cannot drift in
 /// what they accept ([ADR-01], [NFR-MA-02]). `ref` repeats, which is why this
 /// handler reads the query as ordered pairs rather than the map most endpoints
 /// use.
@@ -777,7 +777,7 @@ pub(crate) async fn branch_overlap(
     Query(pairs): Query<Vec<(String, String)>>,
 ) -> Response {
     // `ref` repeats and is read positionally; `base`/`merge` are single. Empty
-    // values are NOT filtered here — `Engine::branch_overlap` owns that rule so
+    // values are NOT filtered here — `Navigation::branch_overlap` owns that rule so
     // `?base=` and `--base ""` behave identically ([ADR-01]).
     let refs: Vec<String> = pairs
         .iter()
@@ -792,7 +792,7 @@ pub(crate) async fn branch_overlap(
     };
     let (base, merge) = (pick("base"), pick("merge"));
     let result: BranchOverlapResult = bridge(engine, "api_v1_branch_overlap", Surface::Web, move |e| {
-        e.branch_overlap(&refs, base.as_deref(), merge.as_deref())
+        e.navigation().branch_overlap(&refs, base.as_deref(), merge.as_deref())
     })
     .await;
     ok(result)
@@ -815,7 +815,7 @@ pub(crate) async fn node(
             .into_response();
     };
     let include_code = truthy(q.get("code"));
-    let info: NodeInfo = bridge(engine, "api_v1_node", Surface::Web, move |e| e.node(&symbol, include_code)).await;
+    let info: NodeInfo = bridge(engine, "api_v1_node", Surface::Web, move |e| e.navigation().node(&symbol, include_code)).await;
     ok(info)
 }
 
@@ -836,7 +836,7 @@ pub(crate) async fn search(
     };
     let kind = q.get("kind").and_then(|k| NodeKind::from_wire(k.trim()));
     let limit = q.get("limit").and_then(|n| n.parse::<usize>().ok());
-    let result: SearchResult = bridge(engine, "api_v1_search", Surface::Web, move |e| e.search(&term, kind, limit)).await;
+    let result: SearchResult = bridge(engine, "api_v1_search", Surface::Web, move |e| e.navigation().search(&term, kind, limit)).await;
     ok(result)
 }
 
@@ -872,7 +872,7 @@ enum CodeRefShape<'a> {
 ///   `./` is dropped, as the navigation readers do.
 /// - Everything else is not a candidate: whitespace (a command line), an absolute
 ///   or parent-relative path (never project-relative), a URL, a flag, a qualified
-///   name (`Engine::node` — the graph's name lookup is by bare name, so it could
+///   name (`Navigation::node` — the graph's name lookup is by bare name, so it could
 ///   only ever come back unresolved).
 fn code_ref_shape(text: &str) -> Option<CodeRefShape<'_>> {
     let text = text.trim();
@@ -966,7 +966,7 @@ fn resolve_code_ref(engine: &Engine, text: String) -> CodeRef {
             // `cap: 1` — only whether the seed is in the graph is read, and the
             // seed's own component is non-empty exactly when it is.
             let elements =
-                engine.graph_elements(Some(path), Some(1), None, None, Some(GraphGranularity::File), false);
+                engine.graph().elements(Some(path), Some(1), None, None, Some(GraphGranularity::File), false);
             if elements.total_nodes > 0 {
                 (CodeRefOutcome::File, Some(path.to_string()))
             } else {
@@ -974,7 +974,7 @@ fn resolve_code_ref(engine: &Engine, text: String) -> CodeRef {
             }
         }
         Some(CodeRefShape::Symbol(name)) => {
-            let info = engine.node(name, false);
+            let info = engine.navigation().node(name, false);
             match info.node {
                 Some(detail) if info.alternatives.is_empty() => (CodeRefOutcome::Symbol, Some(detail.symbol.symbol)),
                 Some(_) => (CodeRefOutcome::Ambiguous, None),
@@ -1649,7 +1649,7 @@ pub(crate) async fn workspace_check(
 /// member.
 ///
 /// # It costs no member engine ([NFR-PE-10] — the binding constraint)
-/// The obvious fan-out would call `Engine::stats` per member and construct N
+/// The obvious fan-out would call `Graph::stats` per member and construct N
 /// engines on one view load, undoing the warm-only-the-default policy the
 /// federated serve exists to keep. This reads each member's `telemetry.db`
 /// directly instead, so loading the view leaves the resident-engine count exactly
@@ -1847,7 +1847,7 @@ pub(crate) async fn config(
 ) -> Response {
     let workspace_root = workspace_root_of(&backing);
     let model = bridge(engine, "api_v1_config", Surface::Web, move |e| -> anyhow::Result<ConfigReadModel> {
-        e.config_read(workspace_root.as_deref())
+        e.config().read(workspace_root.as_deref())
     })
     .await;
     respond(model)
@@ -2227,7 +2227,7 @@ fn written<T: Serialize>(outcome: anyhow::Result<T>) -> Response {
 /// [spa-frontend]: ../../docs/specs/architecture/components/spa-frontend.md
 pub(crate) async fn verify(MemberEngine(engine): MemberEngine) -> Response {
     let model = bridge(engine, "api_v1_verify", Surface::Web, |e| -> anyhow::Result<VerifyReport> {
-        e.verify()
+        e.quality().verify()
     })
     .await;
     respond(model)
@@ -2337,15 +2337,15 @@ pub(crate) async fn security_scan_start(
             .snapshot(JobKind::SecurityScan, &root)
             .is_some_and(|job| job.state == JobState::Running);
         if !running {
-            if let Some(busy) = peek(&e.security_lock_file()?)? {
+            if let Some(busy) = peek(&e.security().lock_file()?)? {
                 return Ok(ScanStart::HeldElsewhere(busy));
             }
-            let pending = e.security_consent_pending()?;
+            let pending = e.security().consent_pending()?;
             if pending.iter().any(|s| !request.consent.iter().any(|accepted| accepted == s)) {
                 return Ok(ScanStart::ConsentRequired(pending));
             }
             if !pending.is_empty() {
-                e.security_record_consent(&pending)?;
+                e.security().record_consent(&pending)?;
             }
         }
         // Consent is now recorded for every scanner the dialog showed; one
@@ -2354,10 +2354,10 @@ pub(crate) async fn security_scan_start(
         // An install job (S-747) runs its own scan once it is done; a second
         // scan beside it is refused, never run over the same store, as is one
         // beside a scan or install the project's lock names (S-758).
-        let lock_file = e.security_lock_file()?;
+        let lock_file = e.security().lock_file()?;
         let started = jobs.start_exclusive(JobKind::SecurityScan, &root, &lock_file, &[JobKind::ToolInstall], move |job| {
             logos_core::observability::in_surface(Surface::Web, || {
-                let summary = member.security_scan_reporting(false, |step| {
+                let summary = member.security().scan_reporting(false, |step| {
                     job.emit(serde_json::to_value(step).unwrap_or_default());
                 })?;
                 Ok(serde_json::to_value(summary)?)
@@ -2520,24 +2520,24 @@ pub(crate) async fn security_install_start(
         if let Some(kind) = busy {
             return Ok(InstallStart::Busy(kind));
         }
-        if let Some(busy) = peek(&e.security_lock_file()?)? {
+        if let Some(busy) = peek(&e.security().lock_file()?)? {
             return Ok(InstallStart::HeldElsewhere(busy));
         }
-        let (request, scan) = match e.security_install_admit(&ask)? {
+        let (request, scan) = match e.security().tools().install_admit(&ask)? {
             InstallAdmission::Ask(plan) => return Ok(InstallStart::Ask(plan)),
             InstallAdmission::Ready { request, scan, scan_consent } => {
                 if !scan_consent.is_empty() {
                     let names: Vec<&str> = scan_consent.iter().map(String::as_str).collect();
-                    e.security_record_consent(&names)?;
+                    e.security().record_consent(&names)?;
                 }
                 (request, scan)
             }
         };
         let excluded = [JobKind::ToolInstall, JobKind::SecurityScan];
-        let lock_file = e.security_lock_file()?;
+        let lock_file = e.security().lock_file()?;
         let started = jobs.start_exclusive(JobKind::ToolInstall, &root, &lock_file, &excluded, move |job| {
             logos_core::observability::in_surface(Surface::Web, || {
-                let done = member.security_install_job(&request, scan, |step| {
+                let done = member.security().tools().install_job(&request, scan, |step| {
                     job.emit(serde_json::to_value(step).unwrap_or_default());
                 })?;
                 Ok(serde_json::to_value(done)?)
@@ -3063,7 +3063,7 @@ pub(crate) async fn security_suppress(MemberEngine(engine): MemberEngine, body: 
     };
     let outcome = bridge(engine, "api_v1_security_suppress", Surface::Web, move |e| {
         let selector = Selector::from_parts(request.fingerprint, request.path, request.rule, request.scanner)?;
-        e.security_suppress_with_evidence(selector, &request.reason, request.expires.as_deref(), &request.evidence)
+        e.security().findings().suppress_with_evidence(selector, &request.reason, request.expires.as_deref(), &request.evidence)
     })
     .await;
     written(outcome)
@@ -3079,7 +3079,7 @@ pub(crate) async fn security_unsuppress(MemberEngine(engine): MemberEngine, body
         };
     let outcome = bridge(engine, "api_v1_security_unsuppress", Surface::Web, move |e| {
         let selector = Selector::from_parts(request.fingerprint, request.path, request.rule, request.scanner)?;
-        e.security_unsuppress(selector)
+        e.security().findings().unsuppress(selector)
     })
     .await;
     written(outcome)
@@ -3098,7 +3098,7 @@ pub(crate) async fn security_reconfirm(MemberEngine(engine): MemberEngine, body:
         Err(refused) => return refused.into_response(),
     };
     let outcome =
-        bridge(engine, "api_v1_security_reconfirm", Surface::Web, move |e| e.security_reconfirm(&request.fingerprint)).await;
+        bridge(engine, "api_v1_security_reconfirm", Surface::Web, move |e| e.security().findings().reconfirm(&request.fingerprint)).await;
     written(outcome)
 }
 

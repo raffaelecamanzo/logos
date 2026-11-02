@@ -452,9 +452,9 @@ fn workspace_status_opens_every_member_under_a_256_fd_limit() {
     let mut latencies_ms: Vec<u128> = Vec::with_capacity(resident.len());
     for member in &resident {
         let engine = registry.engine_for(member).expect("a resident member");
-        let _ = engine.search("f", None, None);
+        let _ = engine.navigation().search("f", None, None);
         let started = std::time::Instant::now();
-        let _ = engine.search("f", None, None);
+        let _ = engine.navigation().search("f", None, None);
         latencies_ms.push(started.elapsed().as_millis());
     }
     // The **worst** of the resident set, not a percentile: the sample is the

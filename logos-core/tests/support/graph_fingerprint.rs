@@ -64,12 +64,16 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
         // namespace rungs match a written type's arity against.
         let type_arity: std::collections::BTreeMap<i64, u32> =
             store.type_arities()?.into_iter().map(|(id, arity)| (id.0, arity)).collect();
+        // Each callable's parameter shape (S-820, migration 45) — what a C/C++
+        // prototype pairs with its definition in another file by.
+        let shape_of: std::collections::BTreeMap<i64, String> =
+            store.node_item_facts()?.into_iter().filter_map(|f| Some((f.id.0, f.callable_signature?))).collect();
 
         let mut node_lines: Vec<String> = nodes
             .iter()
             .map(|n| {
                 format!(
-                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{:?}",
+                    "N {}|{:?}|{}|{}|{:?}|{:?}|{}|{}|{}|{:?}|{:?}",
                     n.symbol.as_str(),
                     n.kind,
                     n.name,
@@ -80,6 +84,7 @@ pub fn graph_fingerprint(rt: &Runtime) -> String {
                     item_of.get(&n.id.0).map_or("None|None|false", String::as_str),
                     uninherited.contains(&n.id.0),
                     type_arity.get(&n.id.0),
+                    shape_of.get(&n.id.0),
                 )
             })
             .collect();

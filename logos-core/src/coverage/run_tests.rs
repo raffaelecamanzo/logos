@@ -77,7 +77,7 @@ fn refusal(err: &anyhow::Error) -> String {
 
 /// The gated verdict, without the provenance that tracks the commit.
 fn gated(engine: &crate::Engine) -> String {
-    let g = engine.gate(None, false, true).expect("gate");
+    let g = engine.quality().gate(None, false, true).expect("gate");
     serde_json::json!([g.passed, g.signal, g.baseline_signal, g.regressions, g.test_function_count]).to_string()
 }
 
@@ -91,11 +91,11 @@ fn a_rust_and_vitest_run_ingests_both_reports_into_one_snapshot() {
     install(&w, "vitest", 0);
     w.commit();
     let engine = crate::Engine::start(&w.root).unwrap().with_scan_environment(w.env());
-    engine.index();
-    engine.gate(None, true, true).expect("gate --save");
+    engine.pipeline().index();
+    engine.quality().gate(None, true, true).expect("gate --save");
     let before = gated(&engine);
 
-    let summary = engine.coverage_run(None, true).expect("the run");
+    let summary = engine.coverage().run(None, true).expect("the run");
     assert_eq!(summary.consent_recorded, ["cargo-llvm-cov", "vitest"]);
     for tool in ["cargo-llvm-cov", "vitest"] {
         let ToolOutcome::Ran { ingests, .. } = outcome(&summary, tool) else {
@@ -109,7 +109,7 @@ fn a_rust_and_vitest_run_ingests_both_reports_into_one_snapshot() {
     assert_eq!(summary.exit_code(), 0);
     assert_eq!(gated(&engine), before, "a coverage run never moves the gate");
 
-    let status = serde_json::to_value(engine.coverage_status().unwrap()).unwrap();
+    let status = serde_json::to_value(engine.coverage().status().unwrap()).unwrap();
     assert_eq!(status["report_count"], 2, "{status}");
     assert_eq!(status["total_files"], 2, "{status}");
     // src/lib.rs covers 3 of its 6 lines, src/sum.js 2 of 4: 5 of 10.
@@ -124,7 +124,7 @@ fn a_rust_and_vitest_run_ingests_both_reports_into_one_snapshot() {
     assert_eq!(runner["consent"]["consented"], serde_json::json!(["cargo-llvm-cov", "vitest"]));
     assert_eq!(runner["consent"]["pending"], serde_json::json!([]));
     // The Dashboard's read carries the evidence alone.
-    let evidence = serde_json::to_value(engine.coverage_evidence().unwrap()).unwrap();
+    let evidence = serde_json::to_value(engine.coverage().evidence().unwrap()).unwrap();
     assert!(evidence.get("runner").is_none(), "{evidence}");
     assert_eq!(evidence["overall_coverage_bp"], 5000);
 }

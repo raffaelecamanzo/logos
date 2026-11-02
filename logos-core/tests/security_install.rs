@@ -63,7 +63,7 @@ impl World {
         git(&w.root(), &["init", "-q", "-b", "main"]);
         git(&w.root(), &["add", "."]);
         git(&w.root(), &["commit", "-q", "-m", "seed"]);
-        Engine::start(w.root()).expect("engine").index();
+        Engine::start(w.root()).expect("engine").pipeline().index();
         w
     }
 
@@ -270,7 +270,7 @@ fn outcomes(payload: &Value) -> Vec<(String, String)> {
 }
 
 fn status_row(engine: &Engine, tool: &str) -> Value {
-    let status = json(&engine.security_status().unwrap());
+    let status = json(&engine.security().status().unwrap());
     status["scanners"]
         .as_array()
         .unwrap()
@@ -292,7 +292,7 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     let trivy_min = &manifest.tool("trivy").unwrap().min_version;
     let own = w.own_copy("trivy", trivy_min);
 
-    let refused = refusal(engine.security_install(&request(Selection::All, false)));
+    let refused = refusal(engine.security().tools().install(&request(Selection::All, false)));
     for tool in ["gitleaks", "osv-scanner", "gosec"] {
         let entry = manifest.tool(tool).unwrap();
         let mb = format!("({:.1} MB)", entry.artifacts[0].size as f64 / 1_000_000.0);
@@ -305,7 +305,7 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     assert!(!w.tools().exists(), "a refusal writes no tool");
     assert!(!w.user().join(INSTALL_CONSENT_FILE).exists(), "a refusal records nothing");
 
-    let installed = json(&engine.security_install(&request(Selection::All, true)).unwrap());
+    let installed = json(&engine.security().tools().install(&request(Selection::All, true)).unwrap());
     assert_eq!(
         installed["consent_recorded"],
         json!(["gitleaks 8.18.4", "osv-scanner 2.7.0", "gosec 2.29.0"])
@@ -334,12 +334,12 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     assert_eq!(gosec["installed"]["update_available"], Value::Null);
 
     // Consented and present: a second install asks nothing and fetches nothing.
-    let again = json(&engine.security_install(&request(Selection::All, false)).unwrap());
+    let again = json(&engine.security().tools().install(&request(Selection::All, false)).unwrap());
     assert_eq!((again["consent_recorded"].clone(), again["tools"].clone()), (json!([]), json!([])));
     assert_eq!(again["kept"].as_array().unwrap().len(), 4);
     assert_eq!(w.downloads().len(), 3);
 
-    let removed = json(&engine.security_uninstall(&Selection::All).unwrap());
+    let removed = json(&engine.security().tools().uninstall(&Selection::All).unwrap());
     assert_eq!(
         outcomes(&removed),
         [("trivy", "not_installed"), ("gitleaks", "removed"), ("osv-scanner", "removed"), ("gosec", "removed")]
@@ -355,7 +355,7 @@ fn consent_then_only_the_missing_tools_install_and_a_users_own_copy_wins_and_sur
     }
 
     // The consent was recorded per user and version: reinstalling asks nothing.
-    let reinstalled = json(&engine.security_install(&request(Selection::Only(vec!["gosec".into()]), false)).unwrap());
+    let reinstalled = json(&engine.security().tools().install(&request(Selection::Only(vec!["gosec".into()]), false)).unwrap());
     assert_eq!(reinstalled["consent_recorded"], json!([]));
     assert_eq!(outcomes(&reinstalled), [("gosec".to_string(), "installed".to_string())]);
 }
@@ -377,10 +377,10 @@ fn a_path_copy_below_the_minimum_is_replaced_by_a_managed_install() {
         "with no managed copy, the user's older copy still runs"
     );
     assert_eq!(before["install"], "logos security install trivy", "below the minimum, an install is offered");
-    let refused = refusal(engine.security_install(&request(Selection::Only(vec!["trivy".into()]), false)));
+    let refused = refusal(engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), false)));
     assert!(refused.contains("trivy 0.74.0") && refused.contains("logos security install trivy --consent"), "{refused}");
 
-    let installed = json(&engine.security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap());
+    let installed = json(&engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap());
     assert_eq!(outcomes(&installed), [("trivy".to_string(), "installed".to_string())]);
     let after = status_row(&engine, "trivy");
     assert_eq!(after["installed"]["copy"], "managed");
@@ -412,11 +412,11 @@ fn install_from_a_directory_needs_no_network_and_verifies_each_artifact() {
     fs::copy(offline.join("trivy.tar.gz"), offline.join(&gosec_name)).unwrap();
 
     let from = InstallRequest { from: Some(offline.clone()), ..request(Selection::All, false) };
-    let refused = refusal(engine.security_install(&from));
+    let refused = refusal(engine.security().tools().install(&from));
     assert!(refused.contains(&format!("trivy 0.74.0 from {}", offline.display())), "{refused}");
     assert!(refused.contains(&format!("--from {} --consent", offline.display())), "{refused}");
 
-    let installed = json(&engine.security_install(&InstallRequest { consent: true, ..from }).unwrap());
+    let installed = json(&engine.security().tools().install(&InstallRequest { consent: true, ..from }).unwrap());
     assert_eq!(
         outcomes(&installed),
         [("trivy", "installed"), ("gitleaks", "installed"), ("osv-scanner", "installed"), ("gosec", "failed")]
@@ -454,7 +454,7 @@ fn a_managed_gosec_2_21_4_shows_the_go_1_27_release_as_its_update_and_keeps_runn
 
     let w = World::new();
     let old = w.manifest(&[("gosec", "2.21.4")]);
-    w.engine(&old).security_install(&request(Selection::Only(vec!["gosec".into()]), true)).unwrap();
+    w.engine(&old).security().tools().install(&request(Selection::Only(vec!["gosec".into()]), true)).unwrap();
     assert!(w.managed("gosec", "2.21.4").is_file());
     let engine = w.engine(&w.manifest(&[]));
     let row = status_row(&engine, "gosec");
@@ -498,7 +498,7 @@ fn a_managed_osv_scanner_1_9_2_shows_2_7_0_as_its_update_and_is_still_found() {
 
     let w = World::new();
     let old = w.manifest(&[("osv-scanner", "1.9.2")]);
-    w.engine(&old).security_install(&request(Selection::Only(vec!["osv-scanner".into()]), true)).unwrap();
+    w.engine(&old).security().tools().install(&request(Selection::Only(vec!["osv-scanner".into()]), true)).unwrap();
     assert!(w.managed("osv-scanner", "1.9.2").is_file());
     let engine = w.engine(&w.manifest(&[]));
     let row = status_row(&engine, "osv-scanner");
@@ -518,7 +518,7 @@ fn a_managed_osv_scanner_1_9_2_shows_2_7_0_as_its_update_and_is_still_found() {
 fn a_newer_pin_shows_update_available_and_install_update_replaces_the_managed_copy_after_consent() {
     let w = World::new();
     let v1 = w.manifest(&[]);
-    w.engine(&v1).security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
+    w.engine(&v1).security().tools().install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
     let v2 = w.manifest(&[("trivy", "0.75.0")]);
     let engine = w.engine(&v2);
 
@@ -530,17 +530,17 @@ fn a_newer_pin_shows_update_available_and_install_update_replaces_the_managed_co
     );
     assert_eq!(row["installed"]["update_available"], "0.75.0");
 
-    let plain = json(&engine.security_install(&request(Selection::Only(vec!["trivy".into()]), false)).unwrap());
+    let plain = json(&engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), false)).unwrap());
     assert_eq!(plain["tools"], json!([]), "nothing updates unless asked: {plain}");
     assert_eq!(w.downloads().len(), 1);
 
     let update = InstallRequest { update: true, ..request(Selection::Only(vec!["trivy".into()]), false) };
-    let refused = refusal(engine.security_install(&update));
+    let refused = refusal(engine.security().tools().install(&update));
     assert!(refused.contains("trivy 0.75.0 from fixtures.invalid"), "the new version is consented to anew: {refused}");
     assert!(refused.contains("logos security install trivy --update --consent"), "{refused}");
     assert_eq!(w.downloads().len(), 1, "a refusal downloads nothing");
 
-    let updated = json(&engine.security_install(&InstallRequest { consent: true, ..update.clone() }).unwrap());
+    let updated = json(&engine.security().tools().install(&InstallRequest { consent: true, ..update.clone() }).unwrap());
     assert_eq!(updated["consent_recorded"], json!(["trivy 0.75.0"]));
     assert_eq!(outcomes(&updated), [("trivy".to_string(), "installed".to_string())]);
     assert!(w.managed("trivy", "0.75.0").is_file());
@@ -553,7 +553,7 @@ fn a_newer_pin_shows_update_available_and_install_update_replaces_the_managed_co
 
     // At the pin, `--update` has nothing to do: the copy is kept, unfetched.
     let downloads = w.downloads().len();
-    let again = json(&engine.security_install(&update).unwrap());
+    let again = json(&engine.security().tools().install(&update).unwrap());
     assert_eq!(again["tools"], json!([]), "{again}");
     assert_eq!((again["kept"][0]["copy"].as_str(), again["kept"][0]["version"].as_str()), (Some("managed"), Some("0.75.0")));
     assert_eq!(w.downloads().len(), downloads);
@@ -575,13 +575,13 @@ fn scan_install_installs_the_missing_scanners_then_scans_them() {
     )
     .unwrap();
 
-    let refused = refusal(engine.security_scan_install(false));
+    let refused = refusal(engine.security().scan_install(false));
     assert!(refused.contains("logos security scan --install --consent"), "{refused}");
     assert!(!refused.contains("gosec"), "a disabled scanner is not asked for: {refused}");
     assert!(w.downloads().is_empty());
     assert!(fs::read_dir(w.user()).unwrap().next().is_none(), "nothing is recorded");
 
-    let done = json(&engine.security_scan_install(true).unwrap());
+    let done = json(&engine.security().scan_install(true).unwrap());
     assert_eq!(
         outcomes(&done["install"]),
         [("trivy", "installed"), ("gitleaks", "installed"), ("osv-scanner", "installed")]
@@ -605,7 +605,7 @@ fn scan_install_installs_the_missing_scanners_then_scans_them() {
 fn an_older_pin_never_downgrades_or_removes_a_newer_managed_copy() {
     let w = World::new();
     let newer = w.manifest(&[("trivy", "0.75.0")]);
-    w.engine(&newer).security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
+    w.engine(&newer).security().tools().install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
     let older = w.manifest(&[]);
     let engine = w.engine(&older);
 
@@ -617,7 +617,7 @@ fn an_older_pin_never_downgrades_or_removes_a_newer_managed_copy() {
     assert_eq!(row["installed"]["update_available"], Value::Null, "a downgrade is not an update: {row}");
 
     let update = InstallRequest { update: true, ..request(Selection::Only(vec!["trivy".into()]), true) };
-    let updated = json(&engine.security_install(&update).unwrap());
+    let updated = json(&engine.security().tools().install(&update).unwrap());
     assert_eq!(updated["tools"], json!([]), "nothing is installed over a newer copy: {updated}");
     assert_eq!(updated["kept"][0]["version"], "0.75.0");
     assert_eq!(w.downloads().len(), 1, "only the newer release's own download");
@@ -642,8 +642,8 @@ fn a_tools_directory_inside_the_project_is_refused_before_anything_is_written() 
     for tools in [inside.clone(), link] {
         let engine = w.engine_with_tools(&manifest, tools.clone());
         for refused in [
-            refusal(engine.security_install(&request(Selection::All, true))),
-            refusal(engine.security_uninstall(&Selection::All)),
+            refusal(engine.security().tools().install(&request(Selection::All, true))),
+            refusal(engine.security().tools().uninstall(&Selection::All)),
         ] {
             assert!(refused.contains("is inside the project"), "{}: {refused}", tools.display());
         }
@@ -670,9 +670,9 @@ fn a_path_copy_whose_version_cannot_be_read_is_installed_over() {
         (before["installed"]["copy"].as_str(), before["installed"]["version"].clone()),
         (Some("path"), Value::Null)
     );
-    let refused = refusal(engine.security_install(&request(Selection::Only(vec!["trivy".into()]), false)));
+    let refused = refusal(engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), false)));
     assert!(refused.contains("trivy 0.74.0 from fixtures.invalid"), "{refused}");
-    engine.security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
+    engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap();
     assert_eq!(status_row(&engine, "trivy")["installed"]["copy"], "managed");
     assert!(silent.is_file());
 }
@@ -690,7 +690,7 @@ fn a_broken_override_is_kept_and_no_install_is_offered_for_it() {
 
     let row = status_row(&engine, "trivy");
     assert_eq!((row["state"].as_str(), row["install"].clone()), (Some("not_installed"), Value::Null), "{row}");
-    let installed = json(&engine.security_install(&request(Selection::Only(vec!["trivy".into()]), false)).unwrap());
+    let installed = json(&engine.security().tools().install(&request(Selection::Only(vec!["trivy".into()]), false)).unwrap());
     assert_eq!(installed["tools"], json!([]), "{installed}");
     assert_eq!((installed["kept"][0]["copy"].as_str(), installed["kept"][0]["binary"].clone()), (Some("override"), json!(missing)));
     assert!(w.downloads().is_empty() && !w.tools().exists(), "nothing is downloaded for a copy that would never run");
@@ -708,7 +708,7 @@ fn a_user_override_is_kept_and_never_downloaded() {
     script(&own, &scanner_script("trivy", "0.60.0"));
     fs::write(w.user().join("config.toml"), format!("[security_scan.trivy]\npath = \"{}\"\n", own.display())).unwrap();
 
-    let installed = json(&engine.security_install(&request(Selection::All, true)).unwrap());
+    let installed = json(&engine.security().tools().install(&request(Selection::All, true)).unwrap());
     let kept = &installed["kept"][0];
     assert_eq!(
         (kept["tool"].as_str(), kept["copy"].as_str(), kept["version"].as_str()),
@@ -739,7 +739,7 @@ fn scan_install_with_nothing_missing_needs_no_tools_directory() {
         })
         .with_tools_manifest(manifest);
 
-    let done = json(&engine.security_scan_install(true).unwrap());
+    let done = json(&engine.security().scan_install(true).unwrap());
     assert_eq!(done["install"]["tools"], json!([]));
     assert_eq!(done["install"]["kept"].as_array().unwrap().len(), 4, "{done}");
     let ran = done["scan"]["scanners"].as_array().unwrap().iter().filter(|r| r["outcome"] == "ran").count();
@@ -768,11 +768,11 @@ fn an_install_outside_a_logos_project_writes_nothing_into_it() {
         })
         .with_tools_manifest(manifest.clone());
 
-    let done = json(&engine.security_install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
+    let done = json(&engine.security().tools().install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
     assert_eq!(outcomes(&done), vec![("gitleaks".to_string(), "installed".to_string())], "{done}");
     assert!(!plain.join(".logos").exists(), "the install wrote no .logos/ into a repository Logos never ran in");
 
-    let done = json(&w.engine(&manifest).security_install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap());
+    let done = json(&w.engine(&manifest).security().tools().install(&request(Selection::Only(vec!["trivy".into()]), true)).unwrap());
     assert_eq!(outcomes(&done), vec![("trivy".to_string(), "installed".to_string())], "{done}");
     let lock = w.root().join(".logos/security").join(logos_core::security::LOCK_FILE);
     assert!(lock.is_file(), "in a Logos project the install took the project lock");
@@ -803,9 +803,9 @@ fn a_symlinked_logos_gets_no_lock_file_written_through_it() {
         })
         .with_tools_manifest(manifest.clone());
 
-    let scan = engine.security_scan(true).expect_err("a scan through a symlinked .logos is refused");
+    let scan = engine.security().scan(true).expect_err("a scan through a symlinked .logos is refused");
     assert!(scan.to_string().contains("is a symbolic link"), "{scan:#}");
-    let done = json(&engine.security_install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
+    let done = json(&engine.security().tools().install(&request(Selection::Only(vec!["gitleaks".into()]), true)).unwrap());
     assert_eq!(outcomes(&done), vec![("gitleaks".to_string(), "installed".to_string())], "{done}");
     let written: Vec<_> = fs::read_dir(&elsewhere).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert!(written.is_empty(), "nothing was written through the link: {written:?}");

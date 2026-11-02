@@ -251,9 +251,39 @@ pub(crate) fn note_package(
     true
 }
 
-/// The namespace captures (S-518) are the module model's vocabulary, owned by
-/// the plugin descriptor that declares the model.
-pub(crate) use crate::plugin::manifest::{NAMESPACE_CAPTURE, NAMESPACE_CHAINED_CAPTURE};
+/// Record the facade class the file's own annotation names from a `symbols`
+/// capture (S-832): `true` when `capture` is the [`FACADE_CAPTURE`] (so the
+/// declaration walk skips it), and `facade` takes the name if not already set
+/// — the first annotation only, a second being an error the compiler reports.
+/// The captured node is the string's content: a literal holding anything
+/// beside it (an escape, a template) or spelling no class name names none.
+pub(crate) fn note_facade(facade: &mut Option<String>, capture: &str, node: Node<'_>, source: &[u8]) -> bool {
+    if capture != FACADE_CAPTURE {
+        return false;
+    }
+    if facade.is_none() {
+        *facade = facade_name(node, source);
+    }
+    true
+}
+
+/// The class name a facade capture spells: the literal's only content, a
+/// JVM identifier — a letter, `_` or `$`, then letters, digits, `_` or `$`.
+fn facade_name(node: Node<'_>, source: &[u8]) -> Option<String> {
+    if node.parent().is_some_and(|literal| literal.named_child_count() != 1) {
+        return None;
+    }
+    let text = node.utf8_text(source).ok()?;
+    let mut chars = text.chars();
+    let first = chars.next()?;
+    let part = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    ((first.is_alphabetic() || first == '_' || first == '$') && chars.all(part)).then(|| text.to_string())
+}
+
+/// The namespace captures (S-518) and the facade capture (S-832) are the
+/// module model's vocabulary, owned by the plugin descriptor that declares
+/// the model.
+pub(crate) use crate::plugin::manifest::{FACADE_CAPTURE, NAMESPACE_CAPTURE, NAMESPACE_CHAINED_CAPTURE};
 
 /// One namespace declaration of a file: the name it declares, as segments, and
 /// the byte range it scopes.

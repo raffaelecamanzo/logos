@@ -54,6 +54,7 @@ pub(crate) use binder::{
     STATIC_WILDCARD_ALIAS, TRAIT_USE_ALIAS,
 };
 pub(crate) use binder::block_wildcard_alias;
+pub(crate) use binder::LambdaReceiver;
 /// The broker topic-identity rule (S-424, CR-136, FR-WS-27, ADR-52): the ONE
 /// function the intra-repo promotion pass, the federation bridge and the
 /// coverage read-model all resolve a broker topic operand through, so a `Topic`
@@ -101,6 +102,10 @@ pub(crate) mod rel_path;
 /// the populations of `status`'s internal-candidate headline. Reads only the
 /// graph. See its module docs.
 pub(crate) mod reference_classes;
+/// The name test's soundness check over one graph (S-835): what the reach
+/// fixtures and the `LOGOS_REF_WORKSPACE` estate harness both run.
+#[doc(hidden)]
+pub use reference_classes::{bound_row_soundness, BoundRowSoundness, LanguageSoundness, NamedNowhereRow};
 /// The package-shaped module key (S-465, CR-149, FR-RS-01): the ONE derivation
 /// of the package a file declares — and so of a type's fully-qualified name —
 /// from its path, for a language whose descriptor declares `[package_modules]`,
@@ -199,19 +204,22 @@ struct Snapshot {
     arities: ArityFacts,
     /// Every file's recorded declared namespace (S-518, `files.namespace`).
     namespaces: Vec<(String, String)>,
+    /// Every file's recorded declared facade (S-832, `files.facade`).
+    facades: Vec<(String, String)>,
     /// Every recorded `impl` block and node item fact (S-606) — the universe
     /// of the one associated-item lookup (S-607,
-    /// [`binder::Index::with_associated_items`]); the item facts also name the
+    /// [`IndexBuilder::with_associated_items`](crate::resolve::binder::IndexBuilder::with_associated_items)); the item facts also name the
     /// required signatures, which bind nothing ([`binder::bindable`]) — save
     /// through a proven TypeScript receiver (S-537,
-    /// `binder::Index::with_declared_signatures`).
+    /// `IndexBuilder::with_signatures`).
     associated: (Vec<ImplBlockRow>, Vec<NodeItemFacts>),
     /// The callables an implementing type never inherits from an interface
     /// (S-609; [`GraphStore::uninherited_members`]).
     uninherited: Vec<NodeId>,
     /// The unexported functions, when the store records linkage and a loaded
-    /// language makes a link unit (S-584; [`GraphStore::unexported_functions`]).
-    /// The link-unit rung reads a link-unit file's alone.
+    /// language makes a link unit (S-584; [`GraphStore::unexported_functions`])
+    /// or reads includes (S-820). The link-unit rung reads a link-unit file's
+    /// alone; the prototype pairs refuse every one.
     file_local: Option<Vec<NodeId>>,
     /// The link-unit files' local bindings (S-584, S-593 facts): what leaves a
     /// call through a function-pointer parameter or local unbound.
@@ -303,6 +311,44 @@ pub(crate) fn arity_facts(store: &dyn GraphStore) -> Result<ArityFacts> {
     Ok((store.node_arities()?, store.type_arities()?))
 }
 
+/// What binds a path-grammar import specifier, read off the tree: the target
+/// extensions of each specifier-writing language (S-439), the Go modules an
+/// import path is anchored on, the `tsconfig`/`jsconfig` aliases and workspace
+/// packages (S-531), and the load roots (S-566). Read once by the resolution
+/// pass, and by the framework pass's mount join (S-822), so the two read one
+/// specifier by one rule.
+#[derive(Default)]
+pub(crate) struct SpecifierFacts {
+    targets: HashMap<String, HashSet<String>>,
+    go_modules: Vec<go_module::GoModule>,
+    ts: ts_config::TsResolution,
+    load_path: load_path::LoadPath,
+}
+
+impl SpecifierFacts {
+    /// Discover the facts for the indexed files `nodes` name, under `root`.
+    pub(crate) fn discover(registry: &LanguageRegistry, root: &Path, nodes: &[crate::graph_store::NodeRow]) -> Self {
+        let files: std::collections::BTreeSet<&str> = nodes.iter().filter_map(|n| n.file_path.as_deref()).collect();
+        let go_files = files.iter().copied().filter(|p| p.ends_with(".go"));
+        Self {
+            targets: registry.specifier_target_extensions(),
+            go_modules: go_module::discover(root, go_files),
+            ts: ts_config::discover(root, registry.tsconfig_extensions(), files.iter().copied()),
+            load_path: load_path::discover(root, registry.load_path_extensions(), files.iter().copied()),
+        }
+    }
+
+    /// `index` with these facts installed — the one way either pass installs
+    /// them, so it binds a specifier as the resolution pass does. Before
+    /// [`binder::IndexBuilder::with_imported_bindings`], which reads them.
+    pub(crate) fn install(self, index: binder::IndexBuilder) -> binder::IndexBuilder {
+        index
+            .with_path_specifiers(self.targets, self.go_modules)
+            .with_ts_resolution(self.ts)
+            .with_load_path(self.load_path)
+    }
+}
+
 /// Run the resolution pass: bind every ledger row it can, persist the rest.
 ///
 /// See the module docs for the snapshot → parallel-compute → serial-commit
@@ -340,15 +386,23 @@ pub fn run(
     let policy = resolution.policy;
     let want_file_paths = delta.is_some();
     // The link-unit facts (S-584) are read only for a graph holding a file of
-    // a language that makes one: elsewhere the rung never runs.
+    // a language that makes one: elsewhere the rung never runs. The linkage
+    // facts also for one holding a file of an include-roots language, whose
+    // prototypes pair only with a definition another file can link (S-820).
     let link_exts: Vec<String> = tree
         .map(|(registry, _)| registry.link_unit_extensions().into_iter().collect())
         .unwrap_or_default();
+    let include_exts: Vec<String> = tree
+        .map(|(registry, _)| registry.include_root_extensions().into_iter().collect())
+        .unwrap_or_default();
     let snap = runtime.submit_read(|store| {
         let nodes = store.all_nodes()?;
-        let links_units = nodes.iter().filter_map(|n| n.file_path.as_deref()).any(|p| {
-            p.rsplit_once('.').is_some_and(|(_, ext)| link_exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
-        });
+        let holds = |exts: &[String]| {
+            nodes.iter().filter_map(|n| n.file_path.as_deref()).any(|p| {
+                p.rsplit_once('.').is_some_and(|(_, ext)| exts.iter().any(|e| e.eq_ignore_ascii_case(ext)))
+            })
+        };
+        let (links_units, reads_includes) = (holds(&link_exts), holds(&include_exts));
         Ok(Snapshot {
             nodes,
             edges: store.all_edges()?,
@@ -356,9 +410,10 @@ pub fn run(
             self_types: store.node_self_types()?,
             arities: arity_facts(store)?,
             namespaces: store.file_namespaces()?,
+            facades: store.file_facades()?,
             associated: associated_items(store)?,
             uninherited: store.uninherited_members()?,
-            file_local: if links_units { store.unexported_functions()? } else { None },
+            file_local: if links_units || reads_includes { store.unexported_functions()? } else { None },
             link_unit_locals: if links_units {
                 store.local_bindings_with_extensions(&link_exts)?
             } else {
@@ -378,18 +433,8 @@ pub fn run(
         })
     })?;
 
-    let (specifier_targets, go_modules, ts_resolution, load_path) =
-        tree.map_or_else(Default::default, |(registry, root)| {
-            let files: std::collections::BTreeSet<&str> =
-                snap.nodes.iter().filter_map(|n| n.file_path.as_deref()).collect();
-            let go_files = files.iter().copied().filter(|p| p.ends_with(".go"));
-            (
-                registry.specifier_target_extensions(),
-                go_module::discover(root, go_files),
-                ts_config::discover(root, registry.tsconfig_extensions(), files.iter().copied()),
-                load_path::discover(root, registry.load_path_extensions(), files.iter().copied()),
-            )
-        });
+    let specifier_facts =
+        tree.map_or_else(SpecifierFacts::default, |(registry, root)| SpecifierFacts::discover(registry, root, &snap.nodes));
     // A package-shaped language (CR-149) keys its files by their package, and a
     // declared-namespace one (S-518) by the namespace each file declares, as
     // its plugin declares; a synthetic graph with no registry keeps the default
@@ -397,32 +442,40 @@ pub fn run(
     let layout = tree.map_or_else(Default::default, |(registry, _)| {
         package_key::PackageLayout::from_registry(registry)
             .with_declared_namespaces(snap.namespaces.iter().cloned())
+            .with_file_facades(package_key::FileFacades::declared(snap.facades.iter().cloned()))
             .with_import_root_overrides(&resolution.import_roots)
     });
     let (impl_blocks, item_facts) = &snap.associated;
     let signatures = signatures_of(item_facts);
     // The languages whose types implement by method set (S-529), with their
-    // methods' self types, kept before the index takes them.
+    // files' packages (S-830) and methods' self types, kept before the index
+    // takes them.
     let method_set_scope = method_set::Scope::of(
         tree.map(|(registry, _)| registry.method_set_extensions()).unwrap_or_default(),
+        &layout,
         &snap.nodes,
         &snap.self_types,
     );
     let (bind_nodes, bind_edges) = binder::bindable(&snap.nodes, &snap.edges, &signatures);
-    let index = binder::Index::build_with_layout(&bind_nodes, &bind_edges, &snap.refs, layout)
+    let builder = binder::IndexBuilder::new(&bind_nodes, &bind_edges, &snap.refs, layout)
         .with_type_arities(snap.arities.1.iter().copied(), &bind_nodes, &snap.refs)
         .with_self_types(snap.self_types)
         .with_arities(&snap.arities.0)
         .with_associated_items(&bind_nodes, impl_blocks, item_facts)
         .with_uninherited(snap.uninherited)
-        .with_file_local(snap.file_local)
-        .with_link_unit_locals(snap.link_unit_locals)
-        .with_declared_signatures(&snap.nodes, &snap.edges, &signatures)
-        .with_trait_signatures(&snap.nodes, &snap.edges, &signatures)
-        .with_path_specifiers(specifier_targets, go_modules)
-        .with_ts_resolution(ts_resolution)
-        .with_load_path(load_path)
-        .with_imported_bindings(&snap.refs, policy);
+        .with_link_unit(snap.file_local, snap.link_unit_locals);
+    // A C/C++ prototype's pair with its definition in another file (S-820),
+    // read off the include scope, the bodiless members and the linkage facts.
+    let index = specifier_facts
+        .install(
+            builder
+                .with_prototype_pairs(item_facts)
+                .with_signatures(&snap.nodes, &snap.edges, &signatures),
+        )
+        .with_imported_bindings(&snap.refs, policy)
+        .build();
+    let invalidation: binder::Invalidation<'_> = index.invalidation();
+    let layout: &package_key::PackageLayout = index.layout();
 
     // A full index (no delta) re-binds the whole ledger. An incremental sync
     // re-binds only the rows whose outcome the change-set can move; every other
@@ -433,7 +486,7 @@ pub fn run(
     // Decided once per run, not per row: whether the change added or removed a
     // package file that can move the detected import roots (S-519), which
     // re-keys a whole language.
-    let roots_moved = delta.is_some_and(|d| d.changed_paths.iter().any(|p| index.moves_import_roots(p)));
+    let roots_moved = delta.is_some_and(|d| d.changed_paths.iter().any(|p| layout.moves_import_roots(p)));
     let mut selected: Vec<&UnresolvedRefRow> = match delta {
         None => snap.refs.iter().collect(),
         Some(d) if d.changed_paths.is_empty() && d.dirty_tokens.is_empty() => Vec::new(),
@@ -441,23 +494,23 @@ pub fn run(
             // …and whether it moved a type of the hierarchy a supertype walk
             // climbs.
             let moved = Moved {
-                hierarchy: index.hierarchy_moved(&d.dirty_tokens, &d.changed_paths),
+                hierarchy: invalidation.hierarchy_moved(&d.dirty_tokens, &d.changed_paths),
                 import_roots: roots_moved,
             };
             // …and the names a renaming import elsewhere gives a dirty name,
             // which a proven Rust receiver's type is read through (S-588).
-            let renamed = index.renamed_import_tokens(&d.dirty_tokens);
+            let renamed = invalidation.renamed_import_tokens(&d.dirty_tokens);
             // …and the functions of every impl block whose header the change
             // spells, which a call reaches through the one lookup (S-607).
-            let headers = index.impl_header_tokens(&d.dirty_tokens);
+            let headers = invalidation.impl_header_tokens(&d.dirty_tokens);
             snap.refs
                 .iter()
                 .filter(|&r| {
                     is_affected(r, d, &snap.file_paths, &index, moved)
                         || (!renamed.is_empty()
                             && binder::is_proven_receiver_call(r)
-                            && index.ref_affected(r, &renamed))
-                        || (!headers.is_empty() && r.kind == EdgeKind::Calls && index.ref_affected(r, &headers))
+                            && invalidation.ref_affected(r, &renamed))
+                        || (!headers.is_empty() && r.kind == EdgeKind::Calls && invalidation.ref_affected(r, &headers))
                 })
                 .collect()
         }
@@ -489,10 +542,20 @@ pub fn run(
     // The method-set pass (S-529) decides every `Implements` out of a type of
     // its languages, over the whole snapshot: a capture row of one restores
     // nothing, and is spent below.
-    let method_sets = method_set_scope.plan(&snap.nodes, &snap.edges, &snap.refs, &snap.arities.0, &|row| {
-        binder::bind(row, &index, policy).into_targets()
-    });
+    let method_set_rows = method_set::Snapshot {
+        nodes: &snap.nodes,
+        edges: &snap.edges,
+        refs: &snap.refs,
+        arities: &snap.arities.0,
+        facts: item_facts,
+    };
+    let method_sets =
+        method_set_scope.plan(method_set_rows, &|row| binder::bind(row, &index, policy).into_targets());
     method_sets.spend_captures(&mut outcomes);
+    // The cross-file prototype/definition links (S-820) likewise, over the
+    // whole graph: a capture row of one restores nothing.
+    let pair_links = binder::PairLinks::of(&index, &snap.edges, &snap.refs);
+    pair_links.spend_captures(&mut outcomes);
 
     // A binding can move although neither endpoint's file changed — a rival
     // arriving, a supertype dropped, a submodule taking over a re-exported
@@ -526,6 +589,7 @@ pub fn run(
     let live: HashSet<&str> = snap.nodes.iter().map(|n| n.symbol.as_str()).collect();
     let mut spent = spent_captures(&snap.refs, &swept, &live, final_bound);
     spent.extend(&method_sets.captures);
+    spent.extend(&pair_links.captures);
     // The reported population also leaves out every capture-before-delete row
     // that stays (S-598, CR-195): each duplicates a reference its source file's
     // own row records, so counting it made a synced store's ratio differ from a
@@ -568,7 +632,9 @@ pub fn run(
             w.delete_unresolved_ref(*ref_id)?;
         }
         // The method-set relation (S-529), reconciled after the bound edges.
-        method_sets.commit(w).map(|inserted| created + inserted)
+        let created = method_sets.commit(w).map(|inserted| created + inserted)?;
+        // …and the cross-file prototype/definition links (S-820).
+        pair_links.commit(w).map(|inserted| created + inserted)
     })?;
 
     Ok(stats(refs_total, refs_resolved, edges_created, by_relation))
@@ -606,6 +672,7 @@ fn swept_sources<'s>(
     let Some(delta) = delta else {
         return HashSet::new();
     };
+    let layout: &package_key::PackageLayout = index.layout();
     let mut swept: HashSet<&'s str> = selected
         .iter()
         .filter(|r| r.resolved)
@@ -630,7 +697,7 @@ fn swept_sources<'s>(
                 .filter(|r| {
                     r.file_id
                         .and_then(|id| file_paths.get(&id))
-                        .is_some_and(|p| index.has_import_roots(p))
+                        .is_some_and(|p| layout.has_import_roots(p))
                 })
                 .map(|r| r.source_symbol.as_str()),
         );
@@ -926,11 +993,11 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    and never through an import, so it is not re-selected here (S-566).
 /// 4. **B** — the row's target (or a name its file's `as`-aliases expand that
 ///    target through) is a token this sync added or removed, so its candidate set
-///    may have changed. Delegated to [`binder::Index::ref_affected`].
+///    may have changed. Delegated to [`Invalidation::ref_affected`](crate::resolve::binder::Invalidation::ref_affected).
 /// 5. **Hierarchy** (S-468; S-522) — `moved.hierarchy`: the sync dirtied a type
 ///    of the `Extends` hierarchy, and `r` is a call from a file that can walk
 ///    it — package-shaped, or of a language whose types record a hierarchy
-///    row ([`binder::Index::walks_hierarchy`]). Such a call may bind through a
+///    row ([`Invalidation::walks_hierarchy`](crate::resolve::binder::Invalidation::walks_hierarchy)). Such a call may bind through a
 ///    supertype walk that crosses the moved type while spelling none of its
 ///    names — `Leaf::start` reaching `Base.start` through a `Mid` that just
 ///    gained `extends Base`, or a Python `self.start()` through a base that
@@ -938,7 +1005,7 @@ fn is_bound(o: &binder::Outcome) -> bool {
 ///    keeps its selection. A TypeScript type whose supertype is named through
 ///    an import moves with that import's binding, so a changed module
 ///    descriptor moves the hierarchy too (S-535,
-///    [`binder::Index::hierarchy_moved`]).
+///    [`Invalidation::hierarchy_moved`](crate::resolve::binder::Invalidation::hierarchy_moved)).
 /// 6. **Global wildcard** (S-518) — `delta.global_imports_moved`: a changed file
 ///    declared a C# `global using` before or after the sync, and `r` is from a
 ///    package-shaped file. The wildcard brings names into view in files the sync
@@ -959,33 +1026,36 @@ fn is_affected(
     index: &binder::Index,
     moved: Moved,
 ) -> bool {
+    let layout: &package_key::PackageLayout = index.layout();
+    let modules: &binder::ModuleIndex = index.modules();
+    let invalidation: binder::Invalidation<'_> = index.invalidation();
     if let Some(path) = r.file_id.and_then(|id| file_paths.get(&id)) {
         if delta.changed_paths.contains(path) {
             return true;
         }
         if is_import_scoped(r)
-            && index.is_path_specifier_file(path)
-            && !(r.kind == EdgeKind::Calls && index.resolves_lexical_constants(path))
+            && modules.is_path_specifier_file(path)
+            && !(r.kind == EdgeKind::Calls && layout.resolves_lexical_constants(path))
         {
             return true;
         }
-        if is_import_qualified_type_relation(r) && index.is_path_specifier_file(path) && index.has_structural_types(path) {
+        if is_import_qualified_type_relation(r) && modules.is_path_specifier_file(path) && layout.has_structural_types(path) {
             return true;
         }
-        if moved.hierarchy && r.kind == EdgeKind::Calls && index.walks_hierarchy(path) {
+        if moved.hierarchy && r.kind == EdgeKind::Calls && invalidation.walks_hierarchy(path) {
             return true;
         }
-        if delta.global_imports_moved && index.is_package_shaped(path) {
+        if delta.global_imports_moved && layout.is_package_shaped(path) {
             return true;
         }
-        if moved.import_roots && index.has_import_roots(path) {
+        if moved.import_roots && layout.has_import_roots(path) {
             return true;
         }
     }
     if r.kind.is_config_reference() {
         return true;
     }
-    index.ref_affected(r, &delta.dirty_tokens)
+    invalidation.ref_affected(r, &delta.dirty_tokens)
 }
 
 /// What an incremental run decided once, before selecting rows: whether the
@@ -1025,7 +1095,7 @@ fn is_import_scoped(r: &UnresolvedRefRow) -> bool {
 
 /// Whether `r` is a type relation a structural-types file (S-535) recorded
 /// through an import, `<import target>::<name>`: it binds within what that
-/// import binds to (`binder::Ctx::resolve_imported_type`), so it is
+/// import binds to (`binder::imported_scope::ImportedScope::resolve_imported_type`), so it is
 /// re-selected on the same terms as a call through one
 /// ([`is_import_scoped`]). A capture-before-delete `Symbol` row names its
 /// target whole and is not one.
@@ -1190,6 +1260,7 @@ pub fn coverage_and_shared_headers(store: &dyn GraphStore) -> Result<(Vec<Langua
             call_residue: None,
             header_ownership: None,
             parse_damage: Some(ParseDamage::of(row.damaged_files, row.files, row.unrecorded_files)),
+            interfaces: None,
         })
         .collect();
     Ok((rows, headers))
@@ -1286,7 +1357,8 @@ pub(crate) fn call_residue_by_language(
     policy: BindingPolicy,
 ) -> Result<BTreeMap<String, CallResidue>> {
     let layout = package_key::PackageLayout::from_registry(registry)
-        .with_declared_namespaces(store.file_namespaces()?);
+        .with_declared_namespaces(store.file_namespaces()?)
+        .with_file_facades(package_key::FileFacades::declared(store.file_facades()?));
     let refs = store.unresolved_refs()?;
     let files = residue_files(store, &layout, &refs)?;
     if files.is_empty() {
@@ -1299,17 +1371,21 @@ pub(crate) fn call_residue_by_language(
         let (arities, type_arities) = arity_facts(store)?;
         let (nodes, edges) = binder::bindable(&nodes, &edges, &signatures_of(&item_facts));
         Some(
-            binder::Index::build_with_layout(&nodes, &edges, &refs, layout)
+            binder::IndexBuilder::new(&nodes, &edges, &refs, layout)
                 .with_type_arities(type_arities, &nodes, &refs)
                 .with_self_types(store.node_self_types()?)
                 .with_arities(&arities)
                 .with_associated_items(&nodes, &impl_blocks, &item_facts)
-                .with_uninherited(store.uninherited_members()?),
+                .with_uninherited(store.uninherited_members()?)
+                .build(),
         )
     } else {
         None
     };
-    let declared = index.as_ref().map(binder::Index::declared_type_names).unwrap_or_default();
+    let declared = index
+        .as_ref()
+        .map(|index| binder::PackageIndex::declared_type_names(index.packages()))
+        .unwrap_or_default();
 
     let mut out: BTreeMap<String, CallResidue> = BTreeMap::new();
     for (language, _) in files.values() {
@@ -1466,3 +1542,5 @@ mod call_target_tests;
 mod mod_declaration_tests;
 #[cfg(test)]
 mod type_relation_tests;
+#[cfg(all(test, feature = "lang-ruby"))]
+mod claimed_name_tests;

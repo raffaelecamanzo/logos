@@ -36,7 +36,7 @@ fn write(root: &Path, rel: &str, contents: &str) {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     engine
 }
 
@@ -225,7 +225,7 @@ fn config_edit_rebinds_and_matches_a_cold_index(logos_config: &str) {
         "apps/web/tsconfig.json",
         r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["./src2/*"] } } }"#,
     );
-    engine.sync(&["apps/web/tsconfig.json".into()]);
+    engine.pipeline().sync(&["apps/web/tsconfig.json".into()]);
     let synced_imports = edges_of(rt, EdgeKind::Imports);
     let synced_calls = edges_of(rt, EdgeKind::Calls);
     assert_eq!(callers_of(rt, "apps/web/src2/lib/format.ts:formatDate"), ["apps/web/src/app.tsx:App"]);
@@ -278,7 +278,7 @@ fn an_extends_base_edit_rebinds_even_when_no_json_file_is_indexed() {
     assert_eq!(callers_of(rt, "src/lib/format.ts:formatDate"), ["src/app.ts:App"]);
 
     fixture(tmp.path(), "./src2/*");
-    engine.sync(&["configs/base.json".into()]);
+    engine.pipeline().sync(&["configs/base.json".into()]);
     let synced = edges_of(rt, EdgeKind::Calls);
     assert_eq!(callers_of(rt, "src2/lib/format.ts:formatDate"), ["src/app.ts:App"]);
     drop(engine);
@@ -346,7 +346,7 @@ fn an_alias_target_or_a_manifest_arriving_by_sync_matches_a_cold_index() {
         "packages/ui/package.json",
         r#"{ "name": "@acme/ui", "exports": { ".": { "import": "./src/next.ts" } } }"#,
     );
-    engine.sync(&["apps/web/src/lib/format.ts".into(), "packages/ui/package.json".into()]);
+    engine.pipeline().sync(&["apps/web/src/lib/format.ts".into(), "packages/ui/package.json".into()]);
     let synced = edges_of(rt, EdgeKind::Calls);
     assert_eq!(callers_of(rt, "apps/web/src/lib/format.ts:formatDate"), ["apps/web/src/app.tsx:App"]);
     assert_eq!(callers_of(rt, "packages/ui/src/next.ts:Button"), ["apps/web/src/app.tsx:App"]);

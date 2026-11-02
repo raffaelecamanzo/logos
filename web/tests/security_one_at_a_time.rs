@@ -198,7 +198,7 @@ fn open(repo: &Path, bin: &Path, user: &Path, rec: &Path) -> Engine {
 async fn mcp_scan(engine: &Arc<Engine>) -> anyhow::Result<logos_core::security::SecurityScanSummary> {
     let engine = Arc::clone(engine);
     tokio::task::spawn_blocking(move || {
-        in_surface(Surface::Mcp, || engine.security_scan_selected(false, &ScanRequest::full(), |_| {}))
+        in_surface(Surface::Mcp, || engine.security().scan_selected(false, &ScanRequest::full(), |_| {}))
     })
     .await
     .unwrap()
@@ -206,7 +206,7 @@ async fn mcp_scan(engine: &Arc<Engine>) -> anyhow::Result<logos_core::security::
 
 /// `logos security scan` in a CLI process: an engine of its own.
 async fn cli_scan(engine: Engine) -> anyhow::Result<logos_core::security::SecurityScanSummary> {
-    tokio::task::spawn_blocking(move || in_surface(Surface::Cli, || engine.security_scan(false))).await.unwrap()
+    tokio::task::spawn_blocking(move || in_surface(Surface::Cli, || engine.security().scan(false))).await.unwrap()
 }
 
 fn git(cwd: &Path, args: &[&str]) {
@@ -272,7 +272,7 @@ async fn beside_an_mcp_scan_web_and_cli_starts_are_refused_naming_it() {
         let f = Fixture::new();
         let engine = Arc::clone(&f.engine);
         let mcp = tokio::task::spawn_blocking(move || {
-            in_surface(Surface::Mcp, || engine.security_scan_selected(false, &ScanRequest::full(), |_| {}))
+            in_surface(Surface::Mcp, || engine.security().scan_selected(false, &ScanRequest::full(), |_| {}))
         });
         f.running(1).await;
         // A scanner installed since, which the project has not consented to.
@@ -317,7 +317,7 @@ async fn beside_a_web_scan_a_cli_install_is_refused_naming_it() {
         let engine = f.open();
         let install = tokio::task::spawn_blocking(move || {
             in_surface(Surface::Cli, || {
-                engine.security_install(&InstallRequest {
+                engine.security().tools().install(&InstallRequest {
                     tools: Selection::Only(vec!["gitleaks".into()]),
                     update: false,
                     from: None,

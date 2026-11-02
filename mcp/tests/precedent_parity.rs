@@ -1,7 +1,7 @@
 //! CLI-vs-MCP payload-equality for the structural precedent query
 //! (S-359 / [FR-NV-12], CR-114).
 //!
-//! Both surfaces delegate to the **one** `Engine::precedent` entrypoint
+//! Both surfaces delegate to the **one** `Navigation::precedent` entrypoint
 //! ([NFR-CC-01]) and serialise its read-model — the CLI via `serde_json` in
 //! `--json` mode, the MCP twin via `Content::json`. This test proves the wire
 //! payloads are byte-identical for the same repository state and the same
@@ -93,7 +93,7 @@ fn fixture() -> tempfile::TempDir {
          \x20   pythonarm_init();\n\
          }\n",
     );
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -116,7 +116,7 @@ async fn boot(root: &Path) -> (Client, tokio::task::JoinHandle<()>) {
 /// so the store has one writer at a time).
 fn cli_payload(root: &Path, target: &str, limit: Option<usize>) -> Value {
     let engine = Engine::start(root).expect("engine");
-    let result = engine.precedent(target, limit);
+    let result = engine.navigation().precedent(target, limit);
     serde_json::to_value(&result).expect("serialize")
 }
 

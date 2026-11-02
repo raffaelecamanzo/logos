@@ -169,7 +169,7 @@ fn assert_parity_shape(
 #[test]
 fn default_build_lists_all_five_languages_with_their_extensions() {
     let tmp = TempDir::new().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
 
     let find = |name: &str| {
         info.languages
@@ -226,7 +226,7 @@ fn default_build_lists_all_five_languages_with_their_extensions() {
 // The verification preflight (FR-CG-06) as a permanent regression guard. Built
 // with `--features lang-terraform,lang-sql`, both grammars must register through
 // the substrate, pass the load-time ABI assertion (not be ABI-skipped), and
-// surface through the public `Engine::languages()` path as artifact-class plugins
+// surface through the public `Graph::languages()` path as artifact-class plugins
 // with their extension claims (FR-CG-01, FR-CG-04). This is the registry-level
 // counterpart to the structural anchor proofs in
 // `extract::config::anchors::tests`.
@@ -234,7 +234,7 @@ fn default_build_lists_all_five_languages_with_their_extensions() {
 #[test]
 fn infra_artifact_grammars_load_and_are_listed() {
     let tmp = TempDir::new().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
 
     let find = |name: &str| {
         info.languages
@@ -285,7 +285,7 @@ fn callee() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Rust's v1 policy maps `impl` methods to Function and collapses them to
     // module scope (no captured impl scope), so the Rust baseline asserts the
@@ -324,7 +324,7 @@ def callee():
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_parity_shape(
         rt,
@@ -381,7 +381,7 @@ class User(models.Model):
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // FastAPI decorator (`@app.get`) and Django URLconf (`path(...)`) both
     // promote (FR-FW-01, FR-FW-03); Django's verb-less registration is ANY.
@@ -430,7 +430,7 @@ function callee(): string[] {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_parity_shape(
         rt,
@@ -466,7 +466,7 @@ app.post(\"/users\", (req, res) => {});
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users", "POST /users"]);
     assert_eq!(result.framework.routes, 2);
@@ -503,7 +503,7 @@ function helper() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The exported PascalCase function is the Next.js component (FR-FW-02,
     // UAT-FW-02); the lowercase helper is not promoted.
@@ -538,7 +538,7 @@ fn an_express_router_module_receiving_its_app_yields_routes() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.files_scanned, 1, "the module is a candidate");
     assert_eq!(
@@ -549,10 +549,13 @@ fn an_express_router_module_receiving_its_app_yields_routes() {
 
 /// An `express.Router()` instance — NodeBB's `src/routes/write/*.js` spelling,
 /// `require('express').Router()` — keeps its file a candidate under import-only
-/// detectors: the `require` is the `Imports` row that names `express`.
+/// detectors: the `require` is the `Imports` row that names `express`. Its router
+/// is returned from a function, which the mount join does not follow (S-822), so
+/// no mount gives it a path: both registrations are refused and counted, where
+/// before S-822 they were promoted at their router-relative paths.
 #[cfg(feature = "lang-typescript")]
 #[test]
-fn an_express_router_instance_module_yields_routes() {
+fn an_express_router_instance_module_mounted_nowhere_is_refused_and_counted() {
     let tmp = TempDir::new().unwrap();
     write(
         tmp.path(),
@@ -575,10 +578,11 @@ module.exports = function () {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.files_scanned, 1);
-    assert_eq!(route_names(rt), ["GET /config", "PUT /:tag/follow"]);
+    assert!(route_names(rt).is_empty(), "{:?}", route_names(rt));
+    assert_eq!(result.framework.routes_not_composed, 2);
 }
 
 /// NodeBB's `src/routes/feeds.js` passed the `next` detector only through its
@@ -603,7 +607,7 @@ function handle404(req, res, next) {
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.framework.files_scanned, 0, "a `next()` call names no framework");
 
     write(
@@ -612,7 +616,7 @@ function handle404(req, res, next) {
         "import Link from \"next/link\";\n\nexport function Home() {\n  return <Link href=\"/\">home</Link>;\n}\n",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.framework.files_scanned, 1, "an import of `next` still does");
     assert_eq!(result.framework.components, 1);
 }
@@ -633,7 +637,7 @@ fn a_typescript_app_parameter_is_not_a_receiver_candidate() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.files_scanned, 0, "TypeScript declares no receiver parameter");
     assert!(route_names(rt).is_empty());
@@ -663,7 +667,7 @@ app.get(\"/users\", listUsers);
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.files_scanned, 1);
     assert_eq!(route_names(rt), ["GET /users"]);
@@ -696,7 +700,7 @@ module.exports = function (app, name) {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -719,21 +723,479 @@ fn syncing_in_a_router_module_equals_a_fresh_index() {
     write(live.path(), "src/util.js", "function plain() {}\n");
     let engine = Engine::start(live.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert!(route_names(rt).is_empty());
 
     write(live.path(), "src/routes/meta.js", ROUTER_MODULE);
-    let synced = engine.sync(&[std::path::PathBuf::from("src/routes/meta.js")]);
+    let synced = engine.pipeline().sync(&[std::path::PathBuf::from("src/routes/meta.js")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
 
     let fresh = TempDir::new().unwrap();
     write(fresh.path(), "src/util.js", "function plain() {}\n");
     write(fresh.path(), "src/routes/meta.js", ROUTER_MODULE);
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
 
     assert_eq!(route_names(rt), route_names(cold.runtime().unwrap()));
     assert_eq!(route_names(rt).len(), 3);
+}
+
+// ── Express routers carry their mount prefix (S-822, CR-255, FR-FW-03) ───────
+
+/// `(route, file, handler)` for every route, sorted; `""` for a route that
+/// links no handler.
+#[cfg(feature = "lang-typescript")]
+fn routes_with_handlers(rt: &Runtime) -> Vec<(String, String, String)> {
+    let names: std::collections::HashMap<NodeId, String> = nodes_of(rt, NodeKind::Function)
+        .into_iter()
+        .chain(nodes_of(rt, NodeKind::Method))
+        .collect();
+    let links = edges_of(rt, EdgeKind::RoutesTo);
+    let mut routes: Vec<(String, String, String)> = nodes_with_files(rt, NodeKind::Route)
+        .into_iter()
+        .map(|(id, name, file)| {
+            let handler = links
+                .iter()
+                .find(|(route, _)| *route == id)
+                .and_then(|(_, target)| names.get(target).cloned())
+                .unwrap_or_default();
+            (name, file.unwrap_or_default(), handler)
+        })
+        .collect();
+    routes.sort();
+    routes
+}
+
+/// The CR-255 §3.1 router module: a router with two registrations, exported.
+#[cfg(feature = "lang-typescript")]
+const ITEMS_JS: &str = "\
+'use strict';
+
+const express = require('express');
+
+const router = express.Router();
+
+function list(req, res) {}
+
+router.get('/items', list);
+router.get('/', list);
+
+module.exports = router;
+";
+
+/// The CR-255 §3.1 application, mounting `items.js` at `prefix`.
+#[cfg(feature = "lang-typescript")]
+fn app_js(prefix: &str) -> String {
+    format!(
+        "\
+'use strict';
+
+const express = require('express');
+const router = require('./items');
+
+const app = express();
+
+function home(req, res) {{}}
+
+app.use('{prefix}', router);
+app.get('/', home);
+"
+    )
+}
+
+/// `(route, file, handler)` triples for the CR-255 fixture mounted at `prefix`.
+#[cfg(feature = "lang-typescript")]
+fn mounted_items(prefix: &str, ext: &str) -> Vec<(String, String, String)> {
+    let at = |path: &str| if path == "/" { prefix.to_string() } else { format!("{prefix}{path}") };
+    let mut expected = vec![
+        ("GET /".to_string(), format!("src/app.{ext}"), "home".to_string()),
+        (format!("GET {}", at("/")), format!("src/items.{ext}"), "list".to_string()),
+        (format!("GET {}", at("/items")), format!("src/items.{ext}"), "list".to_string()),
+    ];
+    expected.sort();
+    expected
+}
+
+/// A router mounted from another file takes the mount's path, and the mount is
+/// no route (CR-255 §3.1). Before S-822 this fixture promoted `ANY /api`, `GET /`
+/// twice and `GET /items`.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn an_express_router_takes_the_prefix_its_mount_in_another_file_gives() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "src/items.js", ITEMS_JS);
+    write(tmp.path(), "src/app.js", &app_js("/api"));
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.pipeline().index();
+
+    assert_eq!(routes_with_handlers(rt), mounted_items("/api", "js"));
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
+/// The same fixture in TypeScript's `import` / `export default` spelling.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_express_router_takes_the_prefix_its_import_mounts_it_at() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/items.ts",
+        "\
+import express from \"express\";
+
+const router = express.Router();
+
+export function list(req: unknown, res: unknown): void {}
+
+router.get(\"/items\", list);
+router.get(\"/\", list);
+
+export default router;
+",
+    );
+    write(
+        tmp.path(),
+        "src/app.ts",
+        "\
+import express from \"express\";
+import router from \"./items\";
+
+const app = express();
+
+export function home(req: unknown, res: unknown): void {}
+
+app.use(\"/api\", router);
+app.get(\"/\", home);
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.pipeline().index();
+
+    assert_eq!(routes_with_handlers(rt), mounted_items("/api", "ts"));
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
+/// A same-file router, one mounted at two paths, one mounted inside a mounted
+/// router (here through a named export of another file) all compose. One
+/// mounted at a path that is not a written literal, and one mounted nowhere,
+/// promote no route and are counted, once per registration.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn express_routers_compose_through_every_mount_and_refuse_without_a_readable_one() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/v1.js",
+        "\
+const { Router } = require('express');
+
+const router = Router();
+
+function ping(req, res) {}
+
+router.get('/ping', ping);
+
+exports.v1 = router;
+",
+    );
+    write(
+        tmp.path(),
+        "src/app.js",
+        "\
+const express = require('express');
+const { v1 } = require('./v1');
+
+const app = express();
+const prefix = process.env.PREFIX;
+
+function h(req, res) {}
+
+const same = express.Router();
+same.get('/x', h);
+app.use('/same', same);
+
+const twice = express.Router();
+twice.get('/t', h);
+app.use('/a', twice);
+app.use('/b', twice);
+
+const outer = express.Router();
+const inner = express.Router();
+inner.get('/deep', h);
+outer.use('/in', inner);
+outer.use('/v1', v1);
+app.use('/out', outer);
+
+const opaque = express.Router();
+opaque.get('/o', h);
+app.use(prefix, opaque);
+
+const lonely = express.Router();
+lonely.get('/l', h);
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.pipeline().index();
+
+    assert_eq!(
+        route_names(rt),
+        ["GET /a/t", "GET /b/t", "GET /out/in/deep", "GET /out/v1/ping", "GET /same/x"]
+    );
+    assert_eq!(result.framework.routes_not_composed, 2, "`opaque` and `lonely`, one registration each");
+    let ping = node_id(rt, "GET /out/v1/ping", NodeKind::Route);
+    assert!(edges_of(rt, EdgeKind::RoutesTo).contains(&(ping, node_id(rt, "ping", NodeKind::Function))));
+}
+
+/// A TypeScript template-literal path is a route, as it is in JavaScript (CR-255
+/// T): its leading interpolation stays in the path, and the handler it names is
+/// linked. A client call written the same way, on a receiver no router is
+/// named, stays out. Before S-822 the `.ts` file promoted no route.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_typescript_template_literal_path_yields_a_route() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "src/server.ts",
+        "\
+import express from \"express\";
+import axios from \"axios\";
+
+const app = express();
+const base = \"/v1\";
+
+export function ping(req: unknown, res: unknown): void {}
+
+app.get(`${base}/ping`, ping);
+axios.get(`${base}/remote`, ping);
+",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.pipeline().index();
+
+    assert_eq!(routes_with_handlers(rt), [("GET ${base}/ping".to_string(), "src/server.ts".to_string(), "ping".to_string())]);
+}
+
+/// A mount reaches its router through the import's own reading: a `tsconfig`
+/// path alias names the router module as it does for the import itself.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_router_imported_through_a_tsconfig_alias_takes_its_mount_path() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "tsconfig.json",
+        r#"{ "compilerOptions": { "baseUrl": ".", "paths": { "@routes/*": ["./src/routes/*"] } } }"#,
+    );
+    write(
+        tmp.path(),
+        "src/routes/items.ts",
+        "import express from \"express\";\n\nconst router = express.Router();\n\nexport function list(req: unknown, res: unknown): void {}\n\nrouter.get(\"/items\", list);\n\nexport default router;\n",
+    );
+    write(
+        tmp.path(),
+        "src/app.ts",
+        "import express from \"express\";\nimport items from \"@routes/items\";\n\nconst app = express();\n\napp.use(\"/api\", items);\n",
+    );
+
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    let result = engine.pipeline().index();
+
+    assert_eq!(route_names(rt), ["GET /api/items"]);
+    assert_eq!(result.framework.routes_not_composed, 0);
+}
+
+/// Sync ≡ reindex for a mount (NFR-RA-06): editing only the mount's prefix in
+/// `app.js` and syncing `app.js` alone moves `items.js`'s routes exactly as a
+/// fresh index of the edited tree places them — the whole store, S-836's
+/// edges-and-ledger comparison, not the routes only — and a prefix that turns
+/// into a variable refuses them in the same count a fresh index gives.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_synced_mount_prefix_edit_moves_the_mounted_routes_as_a_fresh_index_does() {
+    let files = ["src/items.js", "src/app.js"];
+    let live = TempDir::new().unwrap();
+    write(live.path(), "src/items.js", ITEMS_JS);
+    write(live.path(), "src/app.js", &app_js("/api"));
+    coordinate::pin(live.path());
+    let engine = Engine::start(live.path()).expect("engine starts");
+    let rt = engine.runtime().unwrap();
+    engine.pipeline().index();
+    assert_eq!(routes_with_handlers(rt), mounted_items("/api", "js"));
+
+    write(live.path(), "src/app.js", &app_js("/v2"));
+    let synced = engine.pipeline().sync(&[std::path::PathBuf::from("src/app.js")]);
+    assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
+    assert_eq!(routes_with_handlers(rt), mounted_items("/v2", "js"));
+    assert_store_equals_fresh(rt, live.path(), &files, "mount prefix edited");
+
+    let opaque = app_js("/v2").replace("app.use('/v2', router);", "const base = '/v2';\napp.use(base, router);");
+    assert_ne!(opaque, app_js("/v2"), "the fixture's mount line moved: the replace did nothing");
+    write(live.path(), "src/app.js", &opaque);
+    let synced = engine.pipeline().sync(&[std::path::PathBuf::from("src/app.js")]);
+    assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
+    assert_store_equals_fresh(rt, live.path(), &files, "mount prefix made a variable");
+    let fresh = TempDir::new().unwrap();
+    for rel in files {
+        write(fresh.path(), rel, &fs::read_to_string(live.path().join(rel)).unwrap());
+    }
+    let cold = Engine::start(fresh.path()).expect("engine starts");
+    let indexed = cold.pipeline().index();
+    assert_eq!(indexed.framework.routes_not_composed, 2, "`/` and `/items` on the router, both refused");
+    assert_eq!(synced.framework.routes_not_composed, indexed.framework.routes_not_composed);
+}
+
+// ── A route handler renamed, restored and deleted (S-836, CR-263, FR-SY-10) ──
+
+#[cfg(feature = "lang-typescript")]
+#[path = "support/coordinate.rs"]
+mod coordinate;
+#[cfg(feature = "lang-typescript")]
+#[path = "support/graph_fingerprint.rs"]
+mod graph_fingerprint;
+
+/// The router module of the handler-life fixture: its registration names the
+/// handler through the namespace import of the file that declares it, and the
+/// router is mounted at `/api` by `src/app.js`.
+#[cfg(feature = "lang-typescript")]
+fn items_router(path: &str, handler: &str) -> String {
+    format!(
+        "\
+import express from 'express';
+import * as handlers from './handlers';
+
+export const router = express.Router();
+
+router.get('{path}', handlers.{handler});
+"
+    )
+}
+
+#[cfg(feature = "lang-typescript")]
+const HANDLERS_JS: &str = "export function list(req, res) {}\n";
+#[cfg(feature = "lang-typescript")]
+const HANDLERS_RENAMED_JS: &str = "export function list2(req, res) {}\n";
+#[cfg(feature = "lang-typescript")]
+const MOUNT_JS: &str = "\
+import express from 'express';
+import { router } from './items';
+
+const app = express();
+
+app.use('/api', router);
+";
+
+/// One sync of a handler's life: the handler file's new text (`None` removes it),
+/// the router module's text when the run edits it in the same sync, and the
+/// `RoutesTo` links the store holds once it has run.
+#[cfg(feature = "lang-typescript")]
+struct HandlerStep {
+    name: &'static str,
+    handler: Option<&'static str>,
+    router: (&'static str, &'static str),
+    links: usize,
+}
+
+/// Renamed, restored, deleted, restored again. `router` is what an edited run
+/// writes alongside: the registration follows the rename, returns on the
+/// restore, and is re-pathed past the deletion.
+#[cfg(feature = "lang-typescript")]
+const HANDLER_LIFE: [HandlerStep; 4] = [
+    HandlerStep { name: "renamed", handler: Some(HANDLERS_RENAMED_JS), router: ("/items", "list2"), links: 1 },
+    HandlerStep { name: "restored", handler: Some(HANDLERS_JS), router: ("/items", "list"), links: 1 },
+    HandlerStep { name: "deleted", handler: None, router: ("/gone", "list"), links: 0 },
+    HandlerStep {
+        name: "restored after the deletion",
+        handler: Some(HANDLERS_JS),
+        router: ("/items", "list"),
+        links: 1,
+    },
+];
+
+/// The lines of a graph fingerprint that start with `tag`: `"E "` the edges,
+/// `"R "` the reference ledger.
+#[cfg(feature = "lang-typescript")]
+fn fingerprint_lines(fingerprint: &str, tag: &str) -> Vec<String> {
+    fingerprint.lines().filter(|l| l.starts_with(tag)).map(str::to_string).collect()
+}
+
+/// The whole store a sync left, held to a fresh index of the same tree: every
+/// edge first, then every ledger row — the capture-before-delete rows included,
+/// where an unspent `RoutesTo` capture would show as one extra row — then the
+/// rest of the graph.
+#[cfg(feature = "lang-typescript")]
+fn assert_store_equals_fresh(synced: &Runtime, root: &Path, files: &[&str], label: &str) {
+    let fresh = TempDir::new().unwrap();
+    for rel in files {
+        if let Ok(text) = fs::read_to_string(root.join(rel)) {
+            write(fresh.path(), rel, &text);
+        }
+    }
+    coordinate::pin(fresh.path());
+    let cold = Engine::start(fresh.path()).expect("engine starts");
+    cold.pipeline().index();
+    let live = graph_fingerprint::graph_fingerprint(synced);
+    let cold = graph_fingerprint::graph_fingerprint(cold.runtime().unwrap());
+    assert_eq!(fingerprint_lines(&live, "E "), fingerprint_lines(&cold, "E "), "{label}: edges");
+    assert_eq!(fingerprint_lines(&live, "R "), fingerprint_lines(&cold, "R "), "{label}: ledger");
+    assert_eq!(live, cold, "{label}: the rest of the graph");
+}
+
+/// S-836 ([FR-SY-10], [NFR-RA-06], CR-263): an Express router-module handler
+/// renamed, restored, deleted (its file removed) and restored again, each in a
+/// sync of its own, with the router module left alone and then with it edited in
+/// the same sync, leaves the store a fresh index of the same tree builds — edges
+/// and ledger, row for row.
+///
+/// [FR-SY-10]: ../../docs/specs/requirements/FR-SY-10.md
+/// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn an_express_router_modules_handler_renamed_restored_and_deleted_syncs_as_a_fresh_index_builds() {
+    let (handlers, items, mount) = ("src/handlers.js", "src/items.js", "src/app.js");
+    let files = [handlers, items, mount];
+    for edit_router in [false, true] {
+        let variant = if edit_router { "router edited" } else { "router unchanged" };
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), handlers, HANDLERS_JS);
+        write(tmp.path(), items, &items_router("/items", "list"));
+        write(tmp.path(), mount, MOUNT_JS);
+        coordinate::pin(tmp.path());
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        let rt = engine.runtime().unwrap();
+        engine.pipeline().index();
+        assert_eq!(edges_of(rt, EdgeKind::RoutesTo).len(), 1, "{variant}: indexed");
+
+        for step in &HANDLER_LIFE {
+            let mut dirty = vec![std::path::PathBuf::from(handlers)];
+            match step.handler {
+                Some(text) => write(tmp.path(), handlers, text),
+                None => fs::remove_file(tmp.path().join(handlers)).unwrap(),
+            }
+            if edit_router {
+                write(tmp.path(), items, &items_router(step.router.0, step.router.1));
+                dirty.push(items.into());
+            }
+            let synced = engine.pipeline().sync(&dirty);
+            let label = format!("{variant}: {}", step.name);
+            assert!(synced.warnings.is_empty(), "{label}: {:?}", synced.warnings);
+            assert_store_equals_fresh(rt, tmp.path(), &files, &label);
+            // An unchanged router module still names `handlers.list`: it links
+            // only while that handler is declared. An edited one names what the
+            // step wrote, and links whatever it names that exists.
+            let expected = if edit_router { step.links } else { usize::from(step.handler == Some(HANDLERS_JS)) };
+            assert_eq!(edges_of(rt, EdgeKind::RoutesTo).len(), expected, "{label}: the route's link");
+        }
+    }
 }
 
 // ── TypeScript: NestJS decorator routes (S-533, FR-FW-03, FR-FW-05) ──────────
@@ -798,7 +1260,7 @@ class TwinController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -927,7 +1389,7 @@ export class NearMiss {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -1005,7 +1467,7 @@ export class OptionsController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /paths/three", "GET /paths/two"]);
     assert_eq!(result.framework.routes, 2);
@@ -1053,7 +1515,7 @@ export class CatsController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The TSX descriptor's own `[framework_methods]` table: every verb.
     assert_eq!(
@@ -1116,7 +1578,7 @@ export class ArrayPrefixController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -1204,17 +1666,17 @@ export class ItemsController {{
     write(live.path(), "src/items.controller.ts", &controller("items", "list"));
     let engine = Engine::start(live.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert_eq!(route_names(rt), ["GET /items", "POST /items/bulk"]);
 
     write(live.path(), "src/items.controller.ts", &controller("things", "all"));
-    let synced = engine.sync(&[std::path::PathBuf::from("src/items.controller.ts")]);
+    let synced = engine.pipeline().sync(&[std::path::PathBuf::from("src/items.controller.ts")]);
     assert_eq!(synced.framework.routes, 2);
 
     let fresh = TempDir::new().unwrap();
     write(fresh.path(), "src/items.controller.ts", &controller("things", "all"));
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
     let cold_rt = cold.runtime().unwrap();
 
     assert_eq!(route_names(rt), ["GET /things", "POST /things/bulk"]);
@@ -1259,7 +1721,7 @@ func callee() []string {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Go methods declare outside the struct body, so the member half of the
     // parity shape is the method's existence (module-contained), not
@@ -1315,7 +1777,7 @@ func ping(c *gin.Context) {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // net/http registrations carry no verb (ANY); Gin's verbs name themselves.
     assert_eq!(route_names(rt), ["ANY /users", "GET /ping"]);
@@ -1358,7 +1820,7 @@ end
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Ruby `def` is always a method, so every callable maps to Method (the
     // class member and the two file-scope defs alike); the intra-file call binds
@@ -1404,7 +1866,7 @@ end
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The Rails routing DSL verbs inside `draw` promote with their path, and a
     // `controller#action` handler links to that controller's action (S-567);
@@ -1449,7 +1911,7 @@ end
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The resolvable intra-file call binds (compute --Calls--> normalize).
     let compute = node_id(rt, "compute", NodeKind::Method);
@@ -1510,7 +1972,7 @@ public class Store {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Java has no free functions — every callable is a class member, so the
     // parity shape nests one level deeper: module ∋ class ∋ methods, with the
@@ -1551,7 +2013,7 @@ public class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users"]);
     assert_eq!(result.framework.routes, 1);
@@ -1598,7 +2060,7 @@ public class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // `@RequestMapping` declares no single verb, so the method is `ANY`; the
     // path comes from the named `value =` argument.
@@ -1673,7 +2135,7 @@ public class UserApiController implements UserApi {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // Three endpoints: the named `value =` one, and one per element of the
     // list-valued `path =` — each composed onto the interface's class-level
@@ -1781,7 +2243,7 @@ class UserApiController implements UserApi {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.routes, 2);
     let mut declared: Vec<Option<String>> = nodes_with_files(rt, NodeKind::Route)
@@ -1838,7 +2300,7 @@ public class UserService {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // Scanned — the ledger names Spring — and still empty of routes: every
     // string-valued named argument here belongs to an annotation absent from
@@ -1877,7 +2339,7 @@ interface UserApi {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users"]);
     assert_eq!(result.framework.routes, 1);
@@ -1943,7 +2405,7 @@ public class ArchiveController implements ArchiveApiV1 {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // `/v1/` + `/users/{userId}/archives` joins with exactly one separator,
     // and the pathless `@GetMapping` takes the prefix as its whole path —
@@ -2018,7 +2480,7 @@ public class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.framework.routes, 0);
     assert!(nodes_of(rt, NodeKind::Route).is_empty());
@@ -2100,7 +2562,7 @@ public class FacadeController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -2163,7 +2625,7 @@ public class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /v2/users/{id}"]);
     assert_eq!(result.framework.routes_not_composed, 0);
@@ -2218,7 +2680,7 @@ app.get(BASE + \"/users\", listUsers);
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users", "GET /users"]);
     assert_eq!(result.framework.routes, 2);
@@ -2251,7 +2713,7 @@ static int hidden(void) {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // C is flat — no class-like container — so the parity shape is the Rust
     // free-function half: a file `Module` that Contains the functions, with a
@@ -2310,7 +2772,7 @@ fun callee(): List<String> {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // A member `fun` is a Method and a free one a Function (S-559): the member
     // half nests one level deeper — module ∋ class ∋ member fn — with the free
@@ -2351,7 +2813,7 @@ class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users"]);
     assert_eq!(result.framework.routes, 1);
@@ -2403,7 +2865,7 @@ class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // `@RequestMapping` declares no single verb, so the method is `ANY`; the
     // path comes from the named `value =` argument and from nothing else —
@@ -2481,7 +2943,7 @@ class UserApiController : UserApi {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -2577,7 +3039,7 @@ class UserController {{
 
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        let result = engine.index();
+        let result = engine.pipeline().index();
 
         assert_eq!(result.framework.routes, 0, "{prefix}");
         assert!(nodes_of(rt, NodeKind::Route).is_empty(), "{prefix}");
@@ -2609,7 +3071,7 @@ fn kotlin_plain_library_and_mapping_free_spring_file_promote_no_route() {
     );
     let engine = Engine::start(plain.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert_eq!(result.framework.files_scanned, 0, "the ledger gate rejects it");
     assert!(nodes_of(rt, NodeKind::Route).is_empty());
     assert!(nodes_of(rt, NodeKind::Component).is_empty());
@@ -2631,7 +3093,7 @@ class UserService {
     );
     let engine = Engine::start(scanned.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(
         result.framework.files_scanned >= 1,
         "the Spring import must clear the candidacy gate"
@@ -2654,7 +3116,7 @@ fn spring_kotlin_and_java_workspaces_promote_identical_route_nodes() {
         write(tmp.path(), file, source);
         let engine = Engine::start(tmp.path()).expect("engine starts");
         let rt = engine.runtime().unwrap();
-        let result = engine.index();
+        let result = engine.pipeline().index();
         (
             route_names(rt),
             result.framework.routes,
@@ -2786,7 +3248,7 @@ fun helper(): Int {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // The two receiver-less intra-file calls (`helper()`, `compute()`) bind to
     // their unique same-file definitions.
@@ -2840,7 +3302,7 @@ public class Store {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Like Java, C# has no free functions — every callable is a class member, so
     // the parity shape nests one level deeper: module ∋ class ∋ methods, with the
@@ -2881,7 +3343,7 @@ public class UserController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users"]);
     assert_eq!(result.framework.routes, 1);
@@ -2921,7 +3383,7 @@ function callee() { return 1; }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // PHP has both class members and free functions, so it meets the full parity
     // shape: module ∋ class ∋ method, plus free caller/callee with a bound call.
@@ -2969,7 +3431,7 @@ class User extends Model {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /users", "POST /users"]);
     assert_eq!(result.framework.routes, 2);
@@ -3042,7 +3504,7 @@ class BlogController extends AbstractController
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -3089,7 +3551,7 @@ function greet() { return 'hi'; }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     // Both functions extracted from the mixed-HTML file…
     let module_id = node_id(rt, "page", NodeKind::Module);
@@ -3159,7 +3621,7 @@ fn plain_libraries_in_every_language_promote_nothing() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // No file names a framework, so the pass parses zero files and promotes
     // nothing — in any language (FR-FW-04, UAT-FW-03).
@@ -3245,7 +3707,7 @@ class Routes(
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -3315,7 +3777,7 @@ fun lookup(cache: Cache) { cache.get(\"/a/b\") { 1 } ; get(\"/loose\") { 2 } }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /api", "GET /api/v1/users", "GET /health"]);
     assert_eq!(result.framework.routes, 3);
@@ -3377,7 +3839,7 @@ class OwnerController {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -3440,7 +3902,7 @@ class Routes(private val talkHandler: TalkHandler) {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /fn", "GET /prop"]);
     assert_eq!(

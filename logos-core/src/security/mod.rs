@@ -66,8 +66,10 @@
 //! [NFR-SE-08]: ../../../docs/specs/requirements/NFR-SE-08.md
 
 pub use crate::history::security::mask;
+mod bandit_ini;
 pub mod context;
 mod gate;
+mod historical;
 mod lockfile;
 mod page;
 mod probes;
@@ -1117,6 +1119,13 @@ impl Orchestrator {
             Err(e) => return failed_io("could not write the NVD API key file", &out_dir.join(NVD_KEY_FILE), &e),
         };
         let gitleaks_runs = self.gitleaks_runs();
+        // Read once, for Bandit alone: a missing or malformed `.bandit` adds
+        // nothing and never fails the run.
+        let project_skips = if s.run.iter().any(|a| matches!(a, registry::Arg::Skips(_))) {
+            bandit_ini::project_skips(&self.root)
+        } else {
+            Vec::new()
+        };
         let mut reports = Vec::with_capacity(runs.len());
         let mut code = 0;
         for (i, run) in runs.iter().enumerate() {
@@ -1153,6 +1162,7 @@ impl Orchestrator {
                 root,
                 nvd_key_file: key_file.as_ref().map(PrivateFile::path),
                 gitleaks_runs,
+                project_skips: &project_skips,
             };
             code = match self.step(s, binary, s.run, &fill, started) {
                 Ok(code) => code,
@@ -1233,6 +1243,7 @@ impl Orchestrator {
                 root: None,
                 nvd_key_file: None,
                 gitleaks_runs: false,
+                project_skips: &[],
             };
             // The creation template has no extra-flags position: extras go to
             // the analysis only.

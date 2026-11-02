@@ -51,7 +51,10 @@
 //! admitted and Go imports excluded, no bound row of 1.40 million, in fourteen
 //! languages, names nothing the universe holds — the soundness the
 //! `bound_rows_are_never_named_nowhere` test pins per language on the reach
-//! fixtures.
+//! fixtures, and the `bound_row_soundness_estate` harness re-measures by hand
+//! over real stores ([`bound_row_soundness`]). The aliases are an import's
+//! only (S-835): every one the estate's bound rows needed renames on an import
+//! row.
 //!
 //! The classifier reads only the graph and writes nothing. It errs toward the
 //! internal-candidate class — a name declared only by a test or vendored file
@@ -66,7 +69,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 
-use super::package_key::PackageLayout;
+use super::package_key::{FileFacades, PackageLayout};
 use crate::graph_store::{
     DeclaredNameSources, GraphStore, ReferencePopulation, UnboundCodeTarget, UnboundInvocation,
 };
@@ -105,17 +108,22 @@ pub(crate) struct NameUniverse {
 impl NameUniverse {
     /// The universe of one graph's [`DeclaredNameSources`]:
     ///
-    /// - every node name, and every ledger alias that renames — `Y` of
-    ///   `import X as Y`, which a later row names. An alias that is its
-    ///   target's own last segment (`use std::collections::HashMap`) renames
-    ///   nothing, and would otherwise make every import name itself;
+    /// - every node name, and every alias an `Imports` row introduces that
+    ///   renames — `Y` of `import X as Y`, which a later row names. An alias
+    ///   that is its target's own last segment (`use std::collections::HashMap`)
+    ///   renames nothing, and would otherwise make every import name itself.
+    ///   Only import rows' aliases reach `sources` (S-835): a call row's alias
+    ///   is its receiver's name (`requests` of `requests.get()`) or a marker,
+    ///   and as a name it made the external import it calls through read as
+    ///   internal;
     /// - every segment of every indexed file's path, and the file name less
     ///   each of its extensions (`fixture.copy.ts` → `fixture.copy`,
     ///   `fixture`): an include, a directory-index import or a Go package path
     ///   binds a file or a directory;
     /// - every segment of a declared namespace (a C# `using`, a PHP `use`);
     /// - every file facade the file's language declares (`Utils.kt` →
-    ///   `UtilsKt`), from `layout`.
+    ///   `UtilsKt`, or the name the file's `@file:JvmName` declares, S-832),
+    ///   from `layout`.
     pub(crate) fn build(sources: &DeclaredNameSources, layout: &PackageLayout) -> Self {
         let mut names: HashSet<String> = sources.names.iter().cloned().collect();
         names.extend(
@@ -405,8 +413,9 @@ pub(crate) fn classify_population<'a>(
 
 /// Read one graph's reported ledger — one snapshot
 /// ([`GraphStore::reference_population`]) — with the universe its targets are
-/// tested against, built with `layout`'s file facades: what
-/// [`classify_population`] classifies.
+/// tested against, built with `layout`'s file facades and the facades the
+/// graph's files declare (S-832, read in the same snapshot), as the binder
+/// reads them: what [`classify_population`] classifies.
 ///
 /// # Errors
 /// Returns an error if the graph cannot be read.
@@ -415,9 +424,14 @@ pub(crate) fn read_population(
     layout: &PackageLayout,
 ) -> Result<(ReferencePopulation, NameUniverse)> {
     let population = store.reference_population()?;
-    let universe = NameUniverse::build(&population.names, layout);
+    let layout = layout.clone().with_file_facades(FileFacades::declared(population.names.facades.iter().cloned()));
+    let universe = NameUniverse::build(&population.names, &layout);
     Ok((population, universe))
 }
+
+#[path = "reference_soundness.rs"]
+mod soundness;
+pub use soundness::{bound_row_soundness, BoundRowSoundness, LanguageSoundness, NamedNowhereRow};
 
 #[cfg(test)]
 #[path = "reference_classes_tests.rs"]

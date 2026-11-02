@@ -1441,6 +1441,7 @@ mod tests {
             forwarding: Vec::new(),
             declared_types: Vec::new(),
             namespace: None,
+            facade: None,
             impl_blocks: Vec::new(),
             local_bindings: Vec::new(),
         }
@@ -1774,6 +1775,7 @@ mod tests {
             uninherited: false,
             alias: false,
             type_arity: None,
+            callable_signature: None,
         }
     }
 
@@ -1888,6 +1890,7 @@ mod infra_tests {
             forwarding: Vec::new(),
             declared_types: Vec::new(),
             namespace: None,
+            facade: None,
             impl_blocks: Vec::new(),
             local_bindings: Vec::new(),
         }

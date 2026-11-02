@@ -73,7 +73,7 @@ fn service(root: &Path, name: &str, coordinate: &str) -> Member {
     coordinate::pin_as(&dir, coordinate);
     // Index with a throwaway engine so the registry's walk below finds a graph.
     let engine = Engine::start(&dir).expect("start the member engine");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.persist_failures.is_empty(), "{name}: {:?}", result.persist_failures);
     Member {
         name: name.to_string(),

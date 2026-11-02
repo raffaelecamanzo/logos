@@ -1,8 +1,8 @@
 //! The discover → extract → resolve → annotate → persist pipeline
 //! ([pipeline-orchestrator], S-010, [ADR-10]).
 //!
-//! This module is the integrator behind [`Engine::index`](crate::Engine::index)
-//! and [`Engine::sync`](crate::Engine::sync). It owns no new algorithm of its
+//! This module is the integrator behind [`Pipeline::index`](crate::Pipeline::index)
+//! and [`Pipeline::sync`](crate::Pipeline::sync). It owns no new algorithm of its
 //! own — it wires three already-built subsystems together:
 //!
 //! 1. **Discovery** ([config], S-006) — [`config::discover`](crate::config::discover)
@@ -372,7 +372,7 @@ pub fn index(
         failed,
         // Advisory discovery notes (the minified-JS exclusion, HF-1). The FR-WS-02
         // root-scope note (CR-119) is appended after these by the caller
-        // (`Engine::run_index`), which alone knows the project root; this
+        // (`Pipeline::run_index`), which alone knows the project root; this
         // pipeline function is root-agnostic.
         notes,
     })
@@ -383,7 +383,7 @@ pub fn index(
 /// tests) from colliding on one temp path without needing a clock or RNG.
 static SHADOW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// A **throwaway on-disk graph store** for the deep [`verify`](crate::Engine::verify)
+/// A **throwaway on-disk graph store** for the deep [`verify`](crate::Quality::verify)
 /// reindex (CR-052, [FR-GV-19], [ADR-46]).
 ///
 /// It owns its own directory under the OS temp dir, so the shadow reindex writes
@@ -2508,6 +2508,7 @@ fn persist_file(
                 Some(&facts.language),
                 Some(hash),
                 facts.namespace.as_deref(),
+                facts.facade.as_deref(),
                 facts.parse_damaged,
             )?;
             // Replace the file's ledger rows wholesale: stale refs from the
@@ -2551,13 +2552,15 @@ fn persist_file(
         None => w.insert_file(&facts.path, Some(&facts.language), Some(hash))?,
     };
     // The namespace the file declares (S-518), which the binder keys it by,
-    // and whether its parse was damaged (S-571, FR-IX-14), written on the new
-    // row by the same write the replace path makes.
+    // the facade it names (S-832) and whether its parse was damaged (S-571,
+    // FR-IX-14), written on the new row by the same write the replace path
+    // makes.
     w.update_file(
         file_id,
         Some(&facts.language),
         Some(hash),
         facts.namespace.as_deref(),
+        facts.facade.as_deref(),
         facts.parse_damaged,
     )?;
 
@@ -3186,6 +3189,9 @@ fn insert_facts(w: &BatchWriter<'_>, facts: &Facts, file_id: i64) -> Result<Inse
             // The S-602 generic arity of a type whose plugin tells types apart
             // by it — NULL wherever not recorded.
             type_arity: n.type_arity,
+            // The S-820 parameter shape a cross-file prototype pairs by —
+            // NULL wherever not recorded.
+            callable_signature: n.callable_signature.as_deref(),
             ..NewNode::plain(symbol_id, n.kind, &n.name)
         })?;
         let Some(node_id) = inserted else {

@@ -12,7 +12,7 @@
 //! registration sits in is a call on that method's own instance, and binds
 //! exactly as the call `s.PullHandler()` does there — `Self::PullHandler` from
 //! the method, among the callables recorded with its self type
-//! ([`binder::Index::with_self_types`], S-509). The type is the one the
+//! ([`IndexBuilder::with_self_types`](crate::resolve::binder::IndexBuilder::with_self_types), S-509). The type is the one the
 //! declaration proves; nothing is looked up by name alone.
 //!
 //! Any other head — a parameter, a local, a field chain (`s.deps.Pull`) — names

@@ -1,6 +1,6 @@
 //! Integration tests for the resolution engine (S-011 / FR-RS-01..05,
 //! NFR-RA-05, NFR-RA-11, ADR-10), exercised end-to-end through
-//! [`Engine::index`]/[`Engine::sync`] against real temp-directory fixtures and
+//! [`Pipeline::index`](crate::Pipeline::index)/[`Pipeline::sync`](crate::Pipeline::sync) against real temp-directory fixtures and
 //! the Logos dogfood tree.
 //!
 //! Coverage by acceptance criterion:
@@ -80,7 +80,7 @@ pub fn helper() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
 
     let alpha = node_id(rt, "alpha", NodeKind::Function);
@@ -134,7 +134,7 @@ pub fn alpha() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // The external targets exist in no indexed crate: zero Calls/Imports
     // edges may appear (NFR-RA-05), the refs persist for retry (FR-RS-03).
@@ -165,7 +165,7 @@ pub fn alpha() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     assert_eq!(
         first.resolution.refs_resolved, 0,
         "util.rs does not exist yet — the ref must stay unresolved"
@@ -174,7 +174,7 @@ pub fn alpha() {
 
     // The target file appears later; the sync's retry sweep binds the ref.
     write(tmp.path(), "src/util.rs", "pub fn run() {}\n");
-    let second = engine.sync(&[PathBuf::from("src/util.rs")]);
+    let second = engine.pipeline().sync(&[PathBuf::from("src/util.rs")]);
     assert_eq!(second.files_added, 1);
 
     let alpha = node_id(rt, "alpha", NodeKind::Function);
@@ -211,7 +211,7 @@ pub fn fb() {}
     );
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     // The aliases chase each other; the depth limit terminates the chain and
     // the refs simply stay unresolved — completion IS the assertion.
     assert!(result.resolution.refs_unresolved >= 2);
@@ -239,7 +239,7 @@ pub fn caller() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let caller = node_id(rt, "caller", NodeKind::Function);
     let target_before = node_id(rt, "target", NodeKind::Function);
@@ -255,7 +255,7 @@ pub fn caller() {
         "src/callee.rs",
         "// a comment shifts everything\npub fn target() {}\n",
     );
-    let result = engine.sync(&[PathBuf::from("src/callee.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/callee.rs")]);
     assert_eq!(result.files_modified, 1);
 
     let target_after = node_id(rt, "target", NodeKind::Function);
@@ -288,7 +288,7 @@ pub fn helper() {}
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     let cov = rt
         .submit_read(|store| resolve::coverage(store))
@@ -330,7 +330,7 @@ fn dogfood_measures_resolution_accuracy_on_logos_own_source() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     let stats = result.resolution;
 
     println!(
@@ -464,7 +464,7 @@ fn resolved_ref_flips_back_when_target_file_is_deleted() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     let resolved_count = rt
         .submit_read(|store| {
@@ -482,7 +482,7 @@ fn resolved_ref_flips_back_when_target_file_is_deleted() {
 
     // Remove the target file; the sync deletes its nodes and re-sweeps.
     fs::remove_file(tmp.path().join("src/util.rs")).unwrap();
-    let result = engine.sync(&[PathBuf::from("src/util.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("src/util.rs")]);
     assert_eq!(result.files_removed, 1);
 
     let stale = rt
@@ -518,9 +518,9 @@ fn resolution_output_is_deterministic_across_repeated_runs() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let first = engine.index();
+    let first = engine.pipeline().index();
     let edges_first = edges_of(rt, EdgeKind::Calls);
-    let second = engine.index();
+    let second = engine.pipeline().index();
     let edges_second = edges_of(rt, EdgeKind::Calls);
 
     assert_eq!(first.resolution.refs_total, second.resolution.refs_total);

@@ -1,5 +1,5 @@
 //! Structural precedent (S-359 / [FR-NV-12], [FR-NV-04], [NFR-CC-04], CR-114),
-//! exercised end-to-end through `Engine::precedent` against real temp-directory
+//! exercised end-to-end through `Navigation::precedent` against real temp-directory
 //! fixtures.
 //!
 //! Coverage by acceptance criterion:
@@ -111,7 +111,7 @@ fn arm_init(file: &str) -> String {
 fn indexed_engine(tmp: &TempDir) -> Engine {
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -183,7 +183,7 @@ fn one_capability_arm_returns_its_sibling_arms() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent(&extract_in("rust_arm.rs"), None);
+    let result = engine.navigation().precedent(&extract_in("rust_arm.rs"), None);
 
     assert!(
         result.empty_reason.is_none(),
@@ -226,7 +226,7 @@ fn every_result_names_why_it_is_analogous_and_through_which_nodes() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent(&extract_in("rust_arm.rs"), None);
+    let result = engine.navigation().precedent(&extract_in("rust_arm.rs"), None);
 
     for precedent in &result.precedents {
         assert!(
@@ -299,7 +299,7 @@ fn the_shipped_order_is_reproducible_from_the_payloads_own_numbers() {
     // The file target is the richest case: two-facet method siblings and
     // one-facet type siblings in one list, so the ordering is actually tested
     // rather than trivially satisfied by a uniform list.
-    let result = engine.precedent("src/rust_arm.rs", None);
+    let result = engine.navigation().precedent("src/rust_arm.rs", None);
     assert!(result.precedents.len() >= 4, "{}", summarise(&result));
 
     let shipped: Vec<&str> = result
@@ -342,13 +342,13 @@ fn the_answer_is_deterministic_and_ties_break_on_the_canonical_symbol() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let first = serde_json::to_string(&engine.precedent(&extract_in("rust_arm.rs"), None)).unwrap();
-    let second = serde_json::to_string(&engine.precedent(&extract_in("rust_arm.rs"), None)).unwrap();
+    let first = serde_json::to_string(&engine.navigation().precedent(&extract_in("rust_arm.rs"), None)).unwrap();
+    let second = serde_json::to_string(&engine.navigation().precedent(&extract_in("rust_arm.rs"), None)).unwrap();
     assert_eq!(first, second, "two identical calls must agree exactly");
 
     // `go_arm` before `python_arm`: identical ranks, so the canonical symbol
     // decides — and `g` sorts before `p`.
-    let result = engine.precedent(&extract_in("rust_arm.rs"), None);
+    let result = engine.navigation().precedent(&extract_in("rust_arm.rs"), None);
     assert!(
         result.precedents[0].symbol.symbol < result.precedents[1].symbol.symbol,
         "{}",
@@ -366,7 +366,7 @@ fn a_shared_registration_alone_is_a_reason() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("rust_arm_init", None);
+    let result = engine.navigation().precedent("rust_arm_init", None);
 
     let names: Vec<&str> = result
         .precedents
@@ -418,7 +418,7 @@ fn co_import_is_not_a_registration() {
     );
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("Alpha", None);
+    let result = engine.navigation().precedent("Alpha", None);
 
     assert!(
         result.precedents.is_empty(),
@@ -463,7 +463,7 @@ fn a_single_shared_callee_is_not_a_call_shape_and_the_drop_is_counted() {
 
     // The canonical symbol, not the bare name: `subject` also names the module
     // the file becomes, and the module is the lower-id resolution.
-    let result = engine.precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
+    let result = engine.navigation().precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
 
     let names: Vec<&str> = result
         .precedents
@@ -507,7 +507,7 @@ fn a_ubiquitous_helper_is_named_rather_than_treated_as_evidence() {
     write(tmp.path(), "src/callers.rs", &body);
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("caller_0", None);
+    let result = engine.navigation().precedent("caller_0", None);
 
     // NOT `anchors_are_unshared`: the anchor is attached to 239 other nodes,
     // which is exactly why it was dropped. A consumer branching on the closed
@@ -558,7 +558,7 @@ fn a_file_target_compares_every_symbol_the_file_defines() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("src/rust_arm.rs", None);
+    let result = engine.navigation().precedent("src/rust_arm.rs", None);
 
     assert_eq!(result.target_kind, PrecedentTargetKind::File);
     assert_eq!(result.target_file.as_deref(), Some("src/rust_arm.rs"));
@@ -601,8 +601,8 @@ fn a_dot_slash_prefixed_path_resolves_to_the_same_file() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let plain = engine.precedent("src/rust_arm.rs", None);
-    let prefixed = engine.precedent("./src/rust_arm.rs", None);
+    let plain = engine.navigation().precedent("src/rust_arm.rs", None);
+    let prefixed = engine.navigation().precedent("./src/rust_arm.rs", None);
 
     assert_eq!(prefixed.target_kind, PrecedentTargetKind::File);
     assert_eq!(prefixed.target_file, plain.target_file);
@@ -619,7 +619,7 @@ fn every_empty_answer_names_its_reason_from_the_closed_vocabulary() {
     let engine = indexed_engine(&tmp);
 
     // 1. Nothing answers to the text at all — with "did you mean" names.
-    let unknown = engine.precedent("no_such_thing_anywhere", None);
+    let unknown = engine.navigation().precedent("no_such_thing_anywhere", None);
     assert!(unknown.precedents.is_empty());
     assert_eq!(
         unknown.empty_reason.as_ref().map(|e| e.code.as_str()),
@@ -634,7 +634,7 @@ fn every_empty_answer_names_its_reason_from_the_closed_vocabulary() {
         .contains("no_such_thing_anywhere"));
 
     // 2. A real symbol attached to nothing: no supertype, no registrar, no call.
-    let lonely = engine.precedent("lonely_helper", None);
+    let lonely = engine.navigation().precedent("lonely_helper", None);
     assert!(lonely.precedents.is_empty(), "{}", summarise(&lonely));
     assert_eq!(
         lonely.empty_reason.as_ref().map(|e| e.code.as_str()),
@@ -648,7 +648,7 @@ fn every_empty_answer_names_its_reason_from_the_closed_vocabulary() {
     //    because the two call for completely different next actions.
     let bare = TempDir::new().unwrap();
     let unindexed = Engine::start(bare.path()).expect("engine starts");
-    let empty = unindexed.precedent("anything", None);
+    let empty = unindexed.navigation().precedent("anything", None);
     assert!(matches!(
         empty.empty_reason.as_ref().map(|e| e.code.as_str()),
         Some("graph_empty") | Some("target_unresolved")
@@ -679,7 +679,7 @@ fn a_documentation_target_reports_that_it_holds_no_vertex() {
     );
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("docs/design.md", None);
+    let result = engine.navigation().precedent("docs/design.md", None);
 
     // Pinned exactly, not as a disjunction: the three plausible codes make
     // materially different claims ("its structure cannot be compared" vs
@@ -714,7 +714,7 @@ fn a_project_with_no_code_reports_graph_empty_not_nothing_analogous() {
     write(tmp.path(), "docs/two.md", "# Two\n\nMore prose.\n");
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("docs/one.md", None);
+    let result = engine.navigation().precedent("docs/one.md", None);
 
     assert_eq!(
         result.empty_reason.as_ref().map(|e| e.code.as_str()),
@@ -739,7 +739,7 @@ fn a_near_miss_target_earns_did_you_mean_suggestions() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("parse_sour", None);
+    let result = engine.navigation().precedent("parse_sour", None);
 
     assert_eq!(
         result.empty_reason.as_ref().map(|e| e.code.as_str()),
@@ -779,7 +779,7 @@ fn a_long_shared_list_is_truncated_counted_and_says_so() {
     }
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
+    let result = engine.navigation().precedent(&coordinate::symbol("src/`subject.rs`/subject()."), None);
 
     let twin = by_name(&result, "twin");
     let reason = &twin.reasons[0];
@@ -823,7 +823,7 @@ fn an_over_large_limit_is_clamped_and_the_remainder_counted() {
     write(tmp.path(), "src/siblings.rs", &body);
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent(&coordinate::symbol("src/`siblings.rs`/sibling_0()."), Some(10_000));
+    let result = engine.navigation().precedent(&coordinate::symbol("src/`siblings.rs`/sibling_0()."), Some(10_000));
 
     assert_eq!(
         result.precedents.len(),
@@ -844,8 +844,8 @@ fn the_limit_bounds_the_list_and_the_remainder_is_counted() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.precedent("src/rust_arm.rs", None);
-    let capped = engine.precedent("src/rust_arm.rs", Some(1));
+    let full = engine.navigation().precedent("src/rust_arm.rs", None);
+    let capped = engine.navigation().precedent("src/rust_arm.rs", Some(1));
 
     assert!(full.total_found >= 2, "{}", summarise(&full));
     assert_eq!(capped.precedents.len(), 1);
@@ -868,7 +868,7 @@ fn an_ambiguous_bare_name_is_warned_about_rather_than_silently_picked() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("extract", None);
+    let result = engine.navigation().precedent("extract", None);
 
     // The three arms' `extract` and the trait's required signature, a node
     // since S-606.
@@ -890,7 +890,7 @@ fn the_coverage_block_states_what_was_compared() {
     let tmp = plugin_fixture();
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent(&extract_in("rust_arm.rs"), None);
+    let result = engine.navigation().precedent(&extract_in("rust_arm.rs"), None);
 
     assert_eq!(result.coverage.compared.len(), 1);
     assert_eq!(result.coverage.compared[0].name, "extract");
@@ -919,7 +919,7 @@ fn sharing_a_parent_module_is_not_an_analogy() {
     );
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("first", None);
+    let result = engine.navigation().precedent("first", None);
 
     assert!(
         result.precedents.is_empty(),
@@ -962,7 +962,7 @@ fn an_empty_list_always_names_its_reason() {
         "",
     ] {
         for limit in [None, Some(0), Some(1), Some(10_000)] {
-            let result = engine.precedent(target, limit);
+            let result = engine.navigation().precedent(target, limit);
             assert_eq!(
                 result.precedents.is_empty(),
                 result.empty_reason.is_some(),
@@ -1015,7 +1015,7 @@ fn a_large_file_target_is_compared_in_full_but_listed_bounded() {
     );
     let engine = indexed_engine(&tmp);
 
-    let result = engine.precedent("src/wide.rs", None);
+    let result = engine.navigation().precedent("src/wide.rs", None);
 
     assert_eq!(
         result.coverage.compared.len(),

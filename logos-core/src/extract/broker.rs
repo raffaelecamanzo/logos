@@ -2835,6 +2835,7 @@ class OrderService {
             forwarding: Vec::new(),
             declared_types: Vec::new(),
             namespace: None,
+            facade: None,
             impl_blocks: Vec::new(),
             local_bindings: Vec::new(),
         };

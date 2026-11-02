@@ -62,9 +62,9 @@ async fn the_health_gate_carries_the_trend_the_gate_reports() {
     for extra in 0..3 {
         let added: String = (0..extra).map(|i| branches(&format!("g{i}"), 5 + i)).collect();
         write(root, "src/lib.rs", &format!("{many}{added}"));
-        engine.scan(true).expect("scan runs");
+        engine.quality().scan(true).expect("scan runs");
     }
-    let gate = serde_json::to_value(engine.gate(None, false, true).expect("gate runs")).unwrap();
+    let gate = serde_json::to_value(engine.quality().gate(None, false, true).expect("gate runs")).unwrap();
     assert_eq!(gate["trend"][0]["dimension"], "equality", "{gate}");
 
     let recorded = metric_count(root);

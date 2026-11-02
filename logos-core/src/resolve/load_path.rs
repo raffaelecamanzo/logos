@@ -24,7 +24,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
-use super::rel_path::{dir_segments, extension_of, fold_path, names_suffixed_file, parent_of};
+use super::rel_path::{claim_key_of, dir_segments, fold_path, names_suffixed_file, parent_of};
 
 /// The extension a gem specification is written under.
 const GEMSPEC_EXTENSION: &str = ".gemspec";
@@ -35,8 +35,9 @@ const DEFAULT_REQUIRE_PATH: &str = "lib";
 /// The load roots of the opted-in languages' files.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LoadPath {
-    /// The extensions of the files whose bare specifiers bind here (the
-    /// plugins declaring `bare_specifiers = "load-path"`). Empty: none does.
+    /// The claim keys of the files whose bare specifiers bind here (the
+    /// plugins declaring `bare_specifiers = "load-path"`: their extensions and
+    /// claimed names, [`claim_key_of`]). Empty: none does.
     extensions: HashSet<String>,
     /// The project-relative load roots (`""` is the repository root), sorted
     /// and distinct.
@@ -48,7 +49,7 @@ impl LoadPath {
     /// against, or `None` when the file's language declares no load path.
     pub(crate) fn roots_for(&self, source_file: &str) -> Option<&[String]> {
         self.extensions
-            .contains(&extension_of(source_file))
+            .contains(&claim_key_of(source_file))
             .then_some(self.roots.as_slice())
     }
 }
@@ -221,8 +222,9 @@ fn unfrozen(value: &str) -> &str {
     value.strip_suffix(".freeze").map_or(value, str::trim_end)
 }
 
-/// The load roots of the files under `root` whose extension is one of
-/// `extensions`; `files` is every indexed file.
+/// The load roots of the files under `root` whose claim key (extension, or
+/// claimed name such as `Gemfile`) is one of `extensions`; `files` is every
+/// indexed file.
 ///
 /// The roots are the repository root and each gemspec's `require_paths`,
 /// folded against the gemspec's directory — one escaping the repository, or
@@ -240,7 +242,7 @@ pub(crate) fn discover<'p>(
 ) -> LoadPath {
     // An ancestor already present had its own ancestors added with it.
     let mut dirs: HashSet<String> = HashSet::new();
-    for file in files.into_iter().filter(|f| extensions.contains(&extension_of(f))) {
+    for file in files.into_iter().filter(|f| extensions.contains(&claim_key_of(f))) {
         let mut dir = parent_of(file);
         while dirs.insert(dir.to_string()) && !dir.is_empty() {
             dir = parent_of(dir);

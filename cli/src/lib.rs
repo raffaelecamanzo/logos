@@ -1417,7 +1417,7 @@ mod surface_parity {
     use logos_core::{
         federation::{EngineRegistry, Federation, RegistryMode},
         init::InitOptions,
-        Engine,
+        Setup,
     };
     use mcp::LogosMcp;
 
@@ -1584,9 +1584,9 @@ mod surface_parity {
             "gate",
             "the CI gate and the release-only `--save` bless. Its agent-facing \
              spellings ARE tools: `session_end` is literally `gate` with no save \
-             (`Engine::session_end` calls `governance::gate(.., None, false, \
+             (`Quality::session_end` calls `governance::gate(.., None, false, \
              true)`), and `session_start` is the separate \
-             `Engine::session_start` baseline write next to it (FR-GV-04/05) — \
+             `Quality::session_start` baseline write next to it (FR-GV-04/05) — \
              a different read-model and a different telemetry tool, not a \
              spelling of `gate --save`.",
         ),
@@ -1987,7 +1987,7 @@ mod surface_parity {
     #[test]
     fn the_managed_claude_md_block_names_exactly_the_mcp_only_tools() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        Engine::init_with(
+        Setup::init_with(
             tmp.path(),
             &InitOptions {
                 write_claude_md: true,
@@ -2094,7 +2094,7 @@ mod surface_parity {
     /// [FR-IN-09]: ../../docs/specs/requirements/FR-IN-09.md
     fn shipped_guidance() -> Vec<Guidance> {
         let tmp = tempfile::tempdir().expect("tempdir");
-        Engine::init_with(
+        Setup::init_with(
             tmp.path(),
             &InitOptions {
                 write_claude_md: true,
@@ -2496,6 +2496,7 @@ mod surface_parity {
             call_residue: None,
             header_ownership: None,
             parse_damage: None,
+            interfaces: None,
         })
         .collect();
 

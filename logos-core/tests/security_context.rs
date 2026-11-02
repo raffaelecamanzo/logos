@@ -80,9 +80,9 @@ fn project() -> Project {
     };
     let p = Project { _tmp: tmp, root, env };
     let engine = p.engine();
-    engine.index();
+    engine.pipeline().index();
     for report in ["semgrep.sarif", "osv-scanner.sarif"] {
-        engine.security_ingest(&fixture_dir().join(report)).expect("the report ingests");
+        engine.security().ingest(&fixture_dir().join(report)).expect("the report ingests");
     }
     p
 }
@@ -132,8 +132,8 @@ fn inline_project(files: &[(&str, &str)], findings: &[(&str, i64)]) -> Project {
     };
     let p = Project { _tmp: tmp, root, env };
     let engine = p.engine();
-    engine.index();
-    engine.security_ingest(&report).expect("the report ingests");
+    engine.pipeline().index();
+    engine.security().ingest(&report).expect("the report ingests");
     p
 }
 
@@ -143,7 +143,7 @@ impl Project {
     }
 
     fn findings(&self) -> Value {
-        serde_json::to_value(self.engine().security_findings(&FindingsFilter::default()).unwrap()).unwrap()
+        serde_json::to_value(self.engine().security().findings().list(&FindingsFilter::default()).unwrap()).unwrap()
     }
 }
 
@@ -261,7 +261,7 @@ fn blast_radius_is_impact_on_the_same_symbol() {
         let Some(symbol) = f["context"]["enclosing"]["symbol"]["symbol"].as_str() else {
             continue;
         };
-        let impact = engine.impact(symbol, None);
+        let impact = engine.navigation().impact(symbol, None);
         assert_eq!(impact.resolved.as_ref().map(|r| r.symbol.as_str()), Some(symbol));
         let radius = &f["context"]["blast_radius"];
         assert_eq!(radius["depth"], impact.depth, "{symbol}");
@@ -296,7 +296,7 @@ fn a_finding_whose_file_changed_since_the_scan_is_never_bound() {
 fn a_filtered_listing_carries_each_kept_findings_own_context() {
     let p = project();
     let filter = FindingsFilter::parse(None, None, None, Some("scripts"), None, None, None).unwrap();
-    let listed = serde_json::to_value(p.engine().security_findings(&filter).unwrap()).unwrap();
+    let listed = serde_json::to_value(p.engine().security().findings().list(&filter).unwrap()).unwrap();
 
     let kept = listed["findings"].as_array().unwrap();
     assert_eq!(kept.len(), 1, "{listed}");
@@ -478,7 +478,7 @@ fn a_listing_where_nothing_binds_still_says_why_each_finding_is_unbound() {
     // file to bind in.
     let p = project();
     let filter = FindingsFilter::parse(None, Some("osv-scanner"), None, None, None, None, None).unwrap();
-    let listed = serde_json::to_value(p.engine().security_findings(&filter).unwrap()).unwrap();
+    let listed = serde_json::to_value(p.engine().security().findings().list(&filter).unwrap()).unwrap();
 
     let kept = listed["findings"].as_array().unwrap();
     assert_eq!(kept.len(), 1, "{listed}");
@@ -536,10 +536,10 @@ fn the_engine_reads_each_findings_code_scope_from_its_graph_and_its_path() {
             "locations": [{"physicalLocation": {"artifactLocation": {"uri": uri}, "region": {"startLine": 1}}}]}]
     }]});
     fs::write(&osv, sarif.to_string()).unwrap();
-    p.engine().security_ingest(&osv).expect("the osv report ingests");
+    p.engine().security().ingest(&osv).expect("the osv report ingests");
 
     let all = FindingsFilter::parse(None, None, None, None, None, None, Some("all")).unwrap();
-    let listed = serde_json::to_value(p.engine().security_findings(&all).unwrap()).unwrap();
+    let listed = serde_json::to_value(p.engine().security().findings().list(&all).unwrap()).unwrap();
     let production = ("production".to_string(), Value::Null);
     assert_eq!(scope_at(&listed, "src/keys.rs", 2), production, "outside the test module");
     assert_eq!(scope_at(&listed, "src/keys.rs", 9), ("test".to_string(), Value::from("test_symbol")), "{listed}");
@@ -547,17 +547,17 @@ fn the_engine_reads_each_findings_code_scope_from_its_graph_and_its_path() {
     let osv_row = listed["findings"].as_array().unwrap().iter().find(|f| f["scanner_name"] == "osv-scanner").unwrap();
     assert_eq!((osv_row["code_scope"].as_str(), osv_row["code_scope_reason"].as_str()), (Some("test"), Some("test_path")), "{osv_row}");
 
-    let default = serde_json::to_value(p.engine().security_findings(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()).unwrap()).unwrap();
+    let default = serde_json::to_value(p.engine().security().findings().list(&FindingsFilter::parse(None, None, None, None, None, None, None).unwrap()).unwrap()).unwrap();
     let kept: Vec<i64> = default["findings"].as_array().unwrap().iter().map(|f| f["start_line"].as_i64().unwrap()).collect();
     assert_eq!((kept, default["hidden_by_scope"].as_u64()), (vec![2], Some(3)), "{default}");
 
-    let status = serde_json::to_value(p.engine().security_status().unwrap()).unwrap();
+    let status = serde_json::to_value(p.engine().security().status().unwrap()).unwrap();
     let semgrep = status["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == "semgrep").unwrap();
     assert_eq!((semgrep["findings"].as_u64(), semgrep["test"].as_u64()), (Some(1), Some(2)), "{semgrep}");
 
     // Files & Risk classifies by the same graph: the production file with an
     // inline test module counts its production finding alone.
-    let board = serde_json::to_value(p.engine().hotspots_with_findings(None, false, false, false).unwrap()).unwrap();
+    let board = serde_json::to_value(p.engine().history().hotspots_with_findings(None, false, false, false).unwrap()).unwrap();
     let keys = board["files"].as_array().unwrap().iter().find(|h| h["path"] == "src/keys.rs").expect("src/keys.rs is ranked");
     assert_eq!((keys["findings"]["count"].as_u64(), keys["findings"]["test"].as_u64()), (Some(1), Some(1)), "{keys}");
 }

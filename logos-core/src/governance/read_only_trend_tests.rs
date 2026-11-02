@@ -31,7 +31,7 @@ fn scan_with(engine: &Engine, root: &Path, extra: usize) {
     let many: String = (0..200).map(|i| branches(&format!("f{i}"), 2 + i % 2)).collect();
     let added: String = (0..extra).map(|i| branches(&format!("g_above_mean_{i}"), 5 + i)).collect();
     write(root, "src/many.rs", &format!("{many}{added}"));
-    engine.scan(true).expect("scan runs");
+    engine.quality().scan(true).expect("scan runs");
 }
 
 /// The dimensions of `result`'s trend.
@@ -49,7 +49,7 @@ fn a_snapshot_recorded_after_the_displayed_one_never_enters_its_trend() {
     write(root, "src/lib.rs", "pub mod many;\n");
     write(root, ".logos/rules.toml", "[review]\n");
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     scan_with(&engine, root, 0);
     scan_with(&engine, root, 1);
     let one_decline = latest_metrics(&engine).unwrap().expect("a snapshot");

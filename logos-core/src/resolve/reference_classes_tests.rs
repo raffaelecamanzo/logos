@@ -11,7 +11,7 @@ use std::path::Path;
 use tempfile::TempDir;
 
 use super::*;
-use crate::graph_store::UnboundCodeTarget;
+use crate::graph_store::{NewUnresolvedRef, SqliteGraphStore, UnboundCodeTarget};
 use crate::model::RefForm;
 use crate::models::ReferenceFigureAbsence;
 use crate::Engine;
@@ -22,6 +22,7 @@ fn universe(names: &[&str]) -> NameUniverse {
             names: names.iter().map(|n| (*n).to_string()).collect(),
             aliases: Vec::new(),
             files: Vec::new(),
+            facades: Vec::new(),
         },
         &PackageLayout::default(),
     )
@@ -36,6 +37,7 @@ fn files(files: &[(&str, Option<&str>)], layout: &PackageLayout) -> NameUniverse
                 .iter()
                 .map(|(path, namespace)| ((*path).to_string(), namespace.map(str::to_string)))
                 .collect(),
+            facades: Vec::new(),
         },
         layout,
     )
@@ -120,6 +122,7 @@ fn an_alias_is_a_name_only_where_it_renames() {
                 ("HashMap".to_string(), "std::collections::HashMap".to_string()),
             ],
             files: Vec::new(),
+            facades: Vec::new(),
         },
         &PackageLayout::default(),
     );
@@ -128,6 +131,60 @@ fn an_alias_is_a_name_only_where_it_renames() {
     assert!(
         !u.could_name("std::collections::HashMap") && !u.could_name("HashMap"),
         "an alias that is its target's own last segment renames nothing"
+    );
+}
+
+/// S-835 (CR-262 N1): only an `Imports` row's alias is a name. A Python call
+/// through an imported module records its receiver as the call row's alias
+/// (`requests` of `requests.get(u)`), and a call through a parameter the
+/// `local-value` marker; neither declares anything, so the import of the
+/// external `requests` reads provably external.
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_call_rows_alias_and_the_local_value_marker_are_never_names() {
+    let tmp = TempDir::new().unwrap();
+    write(
+        tmp.path(),
+        "app.py",
+        "import requests\n\n\ndef fetch(u, handler):\n    handler(u)\n    return requests.get(u)\n",
+    );
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    engine.pipeline().index();
+    let layout = PackageLayout::from_registry(engine.registry().expect("a registry"));
+    let (ledger, population) = engine
+        .runtime()
+        .unwrap()
+        .submit_read(|store| Ok((store.unresolved_refs()?, store.reference_population()?)))
+        .expect("read runs");
+    // The fixture carries both call-row aliases, or this test pins nothing.
+    let call_aliases: Vec<&str> = ledger
+        .iter()
+        .filter(|r| r.kind == EdgeKind::Calls)
+        .filter_map(|r| r.alias.as_deref())
+        .collect();
+    assert!(
+        call_aliases.contains(&"requests") && call_aliases.contains(&crate::resolve::LOCAL_VALUE_ALIAS),
+        "the fixture's calls carry a receiver alias and the local-value marker: {call_aliases:?}"
+    );
+    assert_eq!(
+        population.names.aliases,
+        vec![("requests".to_string(), "requests".to_string())],
+        "only the import row's alias is collected"
+    );
+    let universe = NameUniverse::build(&population.names, &layout);
+    for alias in ["requests", crate::resolve::LOCAL_VALUE_ALIAS] {
+        assert!(!universe.could_name(alias), "{alias} is a call row's alias, not a name");
+    }
+    let status = engine.graph().status();
+    let python = status
+        .resolution_by_language
+        .iter()
+        .find(|row| row.language == "python")
+        .expect("a python row");
+    assert_eq!(
+        (python.imports.references, python.imports.bound, python.imports.provably_external),
+        (1, 0, Some(1)),
+        "the import of the external `requests` is provably external"
     );
 }
 
@@ -269,6 +326,111 @@ fn an_empty_denominator_reads_absent_and_never_a_ratio() {
     assert_eq!(DocResolution::default(), docs);
 }
 
+/// A ledger row for [`plant`]: `(file, target, alias, form, kind, bound)`;
+/// targets are unique, so a row is marked bound by its target.
+type PlantedRow<'a> = (i64, &'a str, Option<&'a str>, RefForm, EdgeKind, bool);
+
+/// An in-memory store holding `files` (`(path, language)`) and the ledger
+/// rows `rows` builds from their ids, each marked bound or not.
+fn plant(files: &[(&str, &str)], rows: impl FnOnce(&[i64]) -> Vec<PlantedRow<'static>>) -> SqliteGraphStore {
+    let mut store = SqliteGraphStore::open_in_memory().expect("in-memory store");
+    let bound: Vec<&str> = store
+        .write_batch(|w| {
+            let ids = files
+                .iter()
+                .map(|(path, language)| w.insert_file(path, Some(language), None))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let mut bound = Vec::new();
+            for (file, target, alias, form, kind, is_bound) in rows(&ids) {
+                w.insert_unresolved_ref(&NewUnresolvedRef {
+                    file_id: Some(file),
+                    source_symbol: "planted caller",
+                    target,
+                    alias,
+                    form,
+                    kind,
+                    line: None,
+                    payload: None,
+                    receiver: None,
+                    peeled: None,
+                    arg_count: None,
+                    exported: None,
+                })?;
+                if is_bound {
+                    bound.push(target);
+                }
+            }
+            Ok(bound)
+        })
+        .expect("plant the ledger");
+    let ids: Vec<i64> = store
+        .unresolved_refs()
+        .expect("read the ledger")
+        .into_iter()
+        .filter(|r| bound.contains(&r.target.as_str()))
+        .map(|r| r.id)
+        .collect();
+    store
+        .write_batch(|w| ids.iter().try_for_each(|id| w.mark_ref_resolved(*id, true)))
+        .expect("bind the planted rows");
+    store
+}
+
+/// The check fires: a bound row named nowhere is reported with its language,
+/// kind and target, and each language's figures count exactly the rows they
+/// name — a capture-before-delete row and a doc reference judged by none.
+#[test]
+fn the_soundness_check_reports_each_counterexample_with_its_language() {
+    let store = plant(&[("app.py", "python"), ("lib.rs", "rust")], |ids| {
+        let (py, rs) = (ids[0], ids[1]);
+        vec![
+            (py, "zz_declared_nowhere", None, RefForm::Path, EdgeKind::Calls, true),
+            (py, "requests::get", Some("requests"), RefForm::Method, EdgeKind::Calls, false),
+            (py, "zz_doc_nowhere", None, RefForm::Path, EdgeKind::DocReference, true),
+            (py, "zz_captured_nowhere", None, RefForm::Symbol, EdgeKind::Calls, true),
+            (rs, "app::run", None, RefForm::Path, EdgeKind::Imports, true),
+        ]
+    });
+    let soundness = bound_row_soundness(&store, &PackageLayout::default()).expect("the check reads");
+    assert_eq!(
+        soundness.named_nowhere,
+        vec![NamedNowhereRow {
+            language: Some("python".to_string()),
+            kind: EdgeKind::Calls,
+            target: "zz_declared_nowhere".to_string(),
+        }]
+    );
+    let reading = |bound_judged, named_nowhere, call_aliases| LanguageSoundness {
+        bound_judged,
+        named_nowhere,
+        call_aliases,
+    };
+    assert_eq!(
+        soundness.by_language,
+        BTreeMap::from([
+            (Some("python".to_string()), reading(1, 1, 1)),
+            // `app::run` is named by the file stem `app`.
+            (Some("rust".to_string()), reading(1, 0, 0)),
+        ])
+    );
+    assert_eq!(soundness.total(), reading(2, 1, 1));
+}
+
+/// A store with more files than SQLite binds in one statement is read whole:
+/// the language of every file is looked up, the last one's included.
+#[test]
+fn the_soundness_check_reads_a_store_with_more_files_than_one_statement_binds() {
+    let paths: Vec<String> = (0..33_000).map(|i| format!("src/m{i}.py")).collect();
+    let files: Vec<(&str, &str)> = paths.iter().map(|p| (p.as_str(), "python")).collect();
+    let store = plant(&files, |ids| {
+        vec![(ids[ids.len() - 1], "zz_declared_nowhere", None, RefForm::Path, EdgeKind::Calls, true)]
+    });
+    let soundness = bound_row_soundness(&store, &PackageLayout::default())
+        .expect("the check reads past one statement's host parameters");
+    assert_eq!(soundness.named_nowhere.len(), 1);
+    assert_eq!(soundness.named_nowhere[0].language.as_deref(), Some("python"));
+}
+
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -276,47 +438,27 @@ fn write(root: &Path, rel: &str, contents: &str) {
 }
 
 /// The bound, name-bound rows of `files` the name test would call external —
-/// each a counterexample to its soundness — and how many bound rows it judged.
-fn named_nowhere(files: &[(&str, &str)]) -> (Vec<String>, usize) {
+/// each a counterexample to its soundness — and how many bound rows it judged:
+/// the [`bound_row_soundness`] check the estate harness runs too.
+fn named_nowhere(files: &[(&str, &str)]) -> (Vec<String>, u64) {
     let tmp = TempDir::new().unwrap();
     for (rel, contents) in files {
         write(tmp.path(), rel, contents);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let layout = PackageLayout::from_registry(engine.registry().expect("a registry"));
-    engine
+    let soundness = engine
         .runtime()
         .unwrap()
-        .submit_read(move |store| {
-            let universe = NameUniverse::build(&store.reference_population()?.names, &layout);
-            let paths: Vec<String> = store.indexed_files()?.into_iter().map(|f| f.path).collect();
-            let by_path: HashMap<String, String> = store
-                .file_languages(&paths)?
-                .into_iter()
-                .filter_map(|(path, language)| Some((path, language?)))
-                .collect();
-            let languages: HashMap<i64, String> = store
-                .indexed_files()?
-                .into_iter()
-                .filter_map(|f| Some((f.id, by_path.get(&f.path)?.clone())))
-                .collect();
-            let bound: Vec<_> = store
-                .unresolved_refs()?
-                .into_iter()
-                .filter(|r| r.resolved && r.form != RefForm::Symbol && NAME_BOUND.contains(&r.kind))
-                .collect();
-            let nowhere = bound
-                .iter()
-                .filter(|r| {
-                    let language = languages.get(&r.file_id.unwrap_or_default()).map(String::as_str);
-                    !universe.could_be_internal(language, i64::from(r.kind.as_i32()), &r.target)
-                })
-                .map(|r| format!("{:?} {}", r.kind, r.target))
-                .collect();
-            Ok((nowhere, bound.len()))
-        })
-        .expect("read runs")
+        .submit_read(move |store| bound_row_soundness(store, &layout))
+        .expect("read runs");
+    let nowhere = soundness
+        .named_nowhere
+        .iter()
+        .map(|r| format!("{:?} {}", r.kind, r.target))
+        .collect();
+    (nowhere, soundness.total().bound_judged)
 }
 
 #[cfg(all(
@@ -353,18 +495,58 @@ mod reach;
 mod soundness {
     use super::*;
 
+    /// The `@file:JvmName` shape (S-832, CR-261): Java imports and calls the
+    /// facade a file declares, a name no node, path segment or namespace
+    /// spells — only the universe's file facades.
+    const DECLARED_FACADE: &[(&str, &str)] = &[
+        (
+            "src/main/kotlin/app/text/Strings.kt",
+            "@file:JvmName(\"Slugs\")\n\npackage app.text\n\nfun slug(s: String): String = s\n",
+        ),
+        (
+            "src/main/java/app/boot/Boot.java",
+            "package app.boot;\n\nimport app.text.Slugs;\n\nclass Boot {\n    void start() {\n        Slugs.slug(\"x\");\n    }\n}\n",
+        ),
+    ];
+
     /// CR-212 A1, verified per binder: a row the binder bound is never one the
     /// name test would call provably external. Measured on every code
-    /// language's reach fixture — the shapes each binds across files.
+    /// language's reach fixture — the shapes each binds across files — and on
+    /// a declared file facade (S-832).
     #[test]
     fn bound_rows_are_never_named_nowhere() {
         let mut judged = 0;
-        for (language, fixture) in reach::ALL {
+        for (language, fixture) in reach::ALL.iter().copied().chain([("a declared file facade", DECLARED_FACADE)]) {
             let (nowhere, bound) = named_nowhere(fixture);
             assert!(nowhere.is_empty(), "{language}: bound rows named nowhere: {nowhere:?}");
+            if fixture == DECLARED_FACADE {
+                assert!(bound >= 2, "{language}: the import and the call bind ({bound} judged)");
+            }
             judged += bound;
         }
         assert!(judged > 0, "the fixtures bound rows to judge");
+    }
+
+    /// FR-RS-49 (S-832): the universe the classifier reads holds the facade a
+    /// file declares, in place of the one its stem derives — what the binder
+    /// binds `Slugs.slug("x")` through. No bound row above needs it (an import
+    /// is named by any segment, a call by its last name), so it is pinned here.
+    #[test]
+    fn the_universe_holds_a_declared_facade_in_place_of_the_derived_one() {
+        let tmp = TempDir::new().unwrap();
+        for (rel, contents) in DECLARED_FACADE {
+            write(tmp.path(), rel, contents);
+        }
+        let engine = Engine::start(tmp.path()).expect("engine starts");
+        engine.pipeline().index();
+        let layout = PackageLayout::from_registry(engine.registry().expect("a registry"));
+        let (_, universe) = engine
+            .runtime()
+            .unwrap()
+            .submit_read(move |store| read_population(store, &layout))
+            .expect("read runs");
+        assert!(universe.names.contains("Slugs"), "the declared facade is a name");
+        assert!(!universe.names.contains("StringsKt"), "the derived one is not");
     }
 
     /// Three sources of the universe beyond node names, each on the shape that

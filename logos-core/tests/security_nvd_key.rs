@@ -122,7 +122,7 @@ fn a_planted_nvd_key_reaches_no_log_line_payload_or_stored_row() {
         tracing::trace!("capture control");
         for (exit, outcome) in [(1, "failed"), (0, "ran")] {
             stub(exit);
-            let scan = serde_json::to_value(engine.security_scan(true).expect("the scan runs")).unwrap();
+            let scan = serde_json::to_value(engine.security().scan(true).expect("the scan runs")).unwrap();
             let row = scan["scanners"].as_array().unwrap().iter().find(|r| r["scanner"] == "dependency-check").unwrap();
             assert_eq!(row["outcome"], outcome, "{row}");
             assert_eq!(fs::read_to_string(rec.join("props")).unwrap(), format!("nvd.api.key={NVD_KEY}\n"), "the key was handed over");
@@ -130,8 +130,8 @@ fn a_planted_nvd_key_reaches_no_log_line_payload_or_stored_row() {
             // After each run: the failed run's log is gone once the next one runs cleanly.
             assert_eq!(files_holding(&root.join(".logos"), NVD_KEY), Vec::<PathBuf>::new(), "{outcome}: a file under .logos holds the key");
             payloads.push(scan);
-            payloads.push(serde_json::to_value(engine.security_status().unwrap()).unwrap());
-            payloads.push(serde_json::to_value(engine.security_findings(&FindingsFilter::default()).unwrap()).unwrap());
+            payloads.push(serde_json::to_value(engine.security().status().unwrap()).unwrap());
+            payloads.push(serde_json::to_value(engine.security().findings().list(&FindingsFilter::default()).unwrap()).unwrap());
         }
     });
     let log = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();

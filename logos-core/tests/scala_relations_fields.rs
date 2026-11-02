@@ -63,7 +63,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 
 fn index(root: &Path) -> Engine {
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -717,7 +717,7 @@ fn every_further_binding_form_hides_the_field() {
 fn snapshot(tmp: &TempDir) -> RecordedSnapshot {
     let engine = index(tmp.path());
     let view = engine
-        .hydrate(Granularity::ExcludeContains)
+        .graph().hydrate(Granularity::ExcludeContains)
         .expect("dependency view hydrates");
     let rt = engine.runtime().expect("runtime");
     let member_access = engine
@@ -827,7 +827,7 @@ class Box(size: Int, weight: Int) extends Audited {
     let engine = index(tmp.path());
     let root = tmp.path().canonicalize().expect("canonicalize root");
     write(tmp.path(), rel, after);
-    engine.sync(&[root.join(rel)] as &[PathBuf]);
+    engine.pipeline().sync(&[root.join(rel)] as &[PathBuf]);
     let synced = graph_fingerprint(engine.runtime().unwrap());
 
     let cold = tree(&[(rel, after)]);
@@ -856,7 +856,7 @@ fn a_supertype_added_in_another_file_binds_on_sync_as_on_a_cold_index() {
     assert!(edges(engine.runtime().unwrap(), EdgeKind::Implements).is_empty());
     let root = tmp.path().canonicalize().expect("canonicalize root");
     write(tmp.path(), audited.0, audited.1);
-    engine.sync(&[root.join(audited.0)] as &[PathBuf]);
+    engine.pipeline().sync(&[root.join(audited.0)] as &[PathBuf]);
     let synced = graph_fingerprint(engine.runtime().unwrap());
 
     let cold = tree(&[sub, audited]);
@@ -888,7 +888,7 @@ fn a_companion_added_beside_a_mixed_in_trait_keeps_it_bound_on_sync() {
     let root = tmp.path().canonicalize().expect("canonicalize root");
     for text in [paired, bare] {
         write(tmp.path(), rel, text);
-        engine.sync(&[root.join(rel)] as &[PathBuf]);
+        engine.pipeline().sync(&[root.join(rel)] as &[PathBuf]);
         let cold = tree(&[page, (rel, text)]);
         let fresh = index(cold.path());
         assert_eq!(graph_fingerprint(engine.runtime().unwrap()), graph_fingerprint(fresh.runtime().unwrap()));

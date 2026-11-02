@@ -84,7 +84,7 @@ fn two_member_fixture() -> TempDir {
 ///
 /// This, not the existence of `.logos/logos.db`, is what distinguishes "the
 /// warm ran" from "enablement scaffolded the store": `enable` calls
-/// `Engine::init_with` per member, which creates the db file itself, so a
+/// `Setup::init_with` per member, which creates the db file itself, so a
 /// file-existence assertion is satisfied before any supervisor starts and
 /// cannot fail.
 fn graph_revision(member_root: &Path) -> u64 {

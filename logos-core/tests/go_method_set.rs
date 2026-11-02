@@ -1,14 +1,17 @@
 //! Go types implement interfaces by method set, and methods access their
-//! receiver's fields (S-529, CR-172, FR-RS-18, FR-EX-12, FR-EX-15, NFR-RA-05,
+//! receiver's fields (S-529, S-830, CR-172, CR-260, FR-RS-18, FR-EX-12, FR-EX-15, NFR-RA-05,
 //! NFR-RA-06) — exercised end to end through the public [`Engine`] façade
 //! against temp-directory fixtures shaped like zap's `zapcore`.
 //!
 //! - A type whose methods — its own, by pointer or value receiver, and those an
 //!   embedded field promotes — cover every method an in-repository interface
-//!   declares, matched by name and parameter count, with the interface's
-//!   embedded interfaces expanded, records `Implements` to it.
-//! - A type missing one method, or declaring it with another parameter count,
-//!   records none; an unexported method is matched only within its package.
+//!   declares, matched by name and by parameter and result types, each type
+//!   spelt one way (S-830, CR-260), with the interface's embedded interfaces
+//!   expanded, records `Implements` to it.
+//! - A type missing one method, or declaring it with other parameter or result
+//!   types, records none; an unexported method is matched only within its
+//!   package, a directory plus its `package` clause (`a_test` apart).
+//! - `status`'s Go row reads out the pass's figures (S-830).
 //! - A generic interface, a constraint and the empty interface are never
 //!   implemented: the first is not computed, the others declare no method.
 //! - Inside a method, `c.enc` on the method's own receiver `c` records
@@ -54,7 +57,7 @@ fn tree(files: &[(&str, &str)]) -> TempDir {
 fn index(root: &Path) -> Engine {
     coordinate::pin(root);
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -441,7 +444,7 @@ fn a_synced_edit_equals_a_fresh_index_of_the_edited_tree() {
     };
 
     fs::write(&core, CORE_WITHOUT_SYNC).unwrap();
-    engine_a.sync(std::slice::from_ref(&core));
+    engine_a.pipeline().sync(std::slice::from_ref(&core));
     assert_eq!(
         graph_fingerprint(engine_a.runtime().unwrap()),
         fresh(CORE_WITHOUT_SYNC, LEVEL),
@@ -454,7 +457,7 @@ fn a_synced_edit_equals_a_fresh_index_of_the_edited_tree() {
     );
 
     fs::write(&level, LEVEL_WIDER).unwrap();
-    engine_a.sync(std::slice::from_ref(&level));
+    engine_a.pipeline().sync(std::slice::from_ref(&level));
     assert_eq!(
         graph_fingerprint(engine_a.runtime().unwrap()),
         fresh(CORE_WITHOUT_SYNC, LEVEL_WIDER),
@@ -463,7 +466,7 @@ fn a_synced_edit_equals_a_fresh_index_of_the_edited_tree() {
 
     fs::write(&core, CORE).unwrap();
     fs::write(&level, LEVEL).unwrap();
-    engine_a.sync(&[core, level]);
+    engine_a.pipeline().sync(&[core, level]);
     assert_eq!(
         graph_fingerprint(engine_a.runtime().unwrap()),
         fresh(CORE, LEVEL),
@@ -543,7 +546,7 @@ fn a_synced_twin_of_the_receiver_type_rebinds_its_reads_as_a_fresh_index_does() 
     assert!(edges(engine_a.runtime().unwrap(), EdgeKind::Accesses)
         .contains(&("zapcore/Write".to_string(), "ioCore.enc".to_string())));
     write(&root_a, "zapcore/core_windows.go", IO_CORE_TWIN);
-    engine_a.sync(&[root_a.join("zapcore/core_windows.go")]);
+    engine_a.pipeline().sync(&[root_a.join("zapcore/core_windows.go")]);
 
     let tmp_b = tree(&[
         ("go.mod", GO_MOD),
@@ -692,7 +695,7 @@ fn build_tag_twin_methods_implement_nothing_and_sync_equals_reindex() {
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
     assert_eq!(edges(engine_a.runtime().unwrap(), EdgeKind::Implements), BTreeSet::new());
     write(&root_a, "t/x_a.go", "//go:build linux\n\npackage t\n\nfunc (t T) M() {}\n\n// touched\n");
-    engine_a.sync(&[root_a.join("t/x_a.go")]);
+    engine_a.pipeline().sync(&[root_a.join("t/x_a.go")]);
     assert_eq!(edges(engine_a.runtime().unwrap(), EdgeKind::Implements), BTreeSet::new());
 }
 
@@ -791,4 +794,475 @@ fn a_write_to_the_receivers_field_is_an_access() {
     )]);
     let engine = index(tmp.path());
     assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Accesses), pairs(&[("p/Set", "T.w")]));
+}
+
+// ── S-830 (CR-260): signatures, the package clause and the figures ───────────
+
+/// Every `Implements` edge as `(source, target)`, each labelled
+/// `file:name` — the label [`labels`] gives cannot tell `package a` from
+/// `package a_test` of one directory apart.
+fn implements_by_file(rt: &Runtime) -> BTreeSet<(String, String)> {
+    let nodes = rt.submit_read(|store| store.all_nodes()).expect("read runs");
+    let label: HashMap<NodeId, String> = nodes
+        .iter()
+        .map(|n| (n.id, format!("{}:{}", n.file_path.as_deref().unwrap_or_default(), n.name)))
+        .collect();
+    rt.submit_read(|store| store.all_edges())
+        .expect("read runs")
+        .into_iter()
+        .filter(|e| e.kind == EdgeKind::Implements)
+        .map(|e| (label[&e.source].clone(), label[&e.target].clone()))
+        .collect()
+}
+
+/// `status --json`'s `go` row, as the surface serialises it.
+fn go_status_row(engine: &Engine) -> serde_json::Value {
+    let status = serde_json::to_value(engine.graph().status()).expect("status serialises");
+    status["resolution_by_language"]
+        .as_array()
+        .expect("rows")
+        .iter()
+        .find(|row| row["language"] == "go")
+        .unwrap_or_else(|| panic!("a go row: {status}"))
+        .clone()
+}
+
+/// `Read(s string) bool` and `Read(p []byte) int` share `Read`'s name, and the
+/// first its count, with `Reader`'s spec; `[]uint8` is `[]byte` and
+/// `interface{}` is `any`, but `[]any` is no `...any`.
+const SIGNATURES: &str = "\
+package sig
+
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+type Bad struct{}
+
+func (Bad) Read(s string) bool { return false }
+
+type ResultOnly struct{}
+
+func (ResultOnly) Read(p []byte) int { return 0 }
+
+type Good struct{}
+
+func (Good) Read(buf []byte) (int, error) { return 0, nil }
+
+type Spelt struct{}
+
+func (Spelt) Read(b []uint8) (count int, e error) { return 0, nil }
+
+type Logger interface {
+	Log(format string, args ...any)
+}
+
+type sliceLogger struct{}
+
+func (sliceLogger) Log(format string, args []any) {}
+
+type emptyLogger struct{}
+
+func (emptyLogger) Log(f string, args ...interface{}) {}
+";
+
+/// CR-260 G1: a method covers a spec only when its parameter and result types
+/// equal the spec's — a same-named method of another type, or of another
+/// result, implements nothing. Before S-830, `Bad` and `ResultOnly` were
+/// `Reader`s (1.22.0 recorded `Bad → Reader`).
+#[test]
+fn a_same_named_method_with_other_parameter_or_result_types_implements_nothing() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("sig/sig.go", SIGNATURES)]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        edges(engine.runtime().unwrap(), EdgeKind::Implements),
+        pairs(&[("sig/Good", "sig/Reader"), ("sig/Spelt", "sig/Reader"), ("sig/emptyLogger", "sig/Logger")]),
+        "`Bad` takes a `string`, `ResultOnly` returns one value and `sliceLogger` takes a slice"
+    );
+}
+
+/// `Checker`'s spec spells `zc.Entry` and `context.Context` through its
+/// file's imports; `other` spells them through other aliases, and `zapcore`
+/// spells `Entry` bare, as its own.
+const CHECKER: &str = "\
+package check
+
+import (
+	\"context\"
+
+	zc \"example.com/zap/zapcore\"
+)
+
+type Checker interface {
+	Check(ctx context.Context, e zc.Entry) error
+}
+";
+
+const OTHER: &str = "\
+package other
+
+import (
+	stdctx \"context\"
+
+	\"example.com/zap/zapcore\"
+)
+
+type impl struct{}
+
+func (impl) Check(c stdctx.Context, e zapcore.Entry) error { return nil }
+
+type wrong struct{}
+
+func (wrong) Check(c stdctx.Context, e zapcore.Field) error { return nil }
+";
+
+const LOCAL: &str = "\
+package zapcore
+
+import \"context\"
+
+type local struct{}
+
+func (local) Check(ctx context.Context, e Entry) error { return nil }
+";
+
+/// CR-260 G1: two spellings of one type are equal when they name one
+/// declaration — `zc.Entry`, `zapcore.Entry` and `zapcore`'s own bare `Entry`
+/// — and a standard-library type compares by its import path, whatever the
+/// alias. `zapcore.Field` is another type: `wrong` implements nothing.
+#[test]
+fn spellings_of_one_type_through_imports_and_aliases_are_one_type() {
+    let tmp = tree(&[
+        ("go.mod", GO_MOD),
+        ("zapcore/level.go", LEVEL),
+        ("zapcore/core.go", CORE),
+        ("zapcore/write.go", WRITE),
+        ("zapcore/local.go", LOCAL),
+        ("check/check.go", CHECKER),
+        ("other/other.go", OTHER),
+    ]);
+    let engine = index(tmp.path());
+    let got: BTreeSet<(String, String)> = edges(engine.runtime().unwrap(), EdgeKind::Implements)
+        .into_iter()
+        .filter(|(_, target)| target == "check/Checker")
+        .collect();
+    assert_eq!(got, pairs(&[("other/impl", "check/Checker"), ("zapcore/local", "check/Checker")]));
+}
+
+const PACKAGE_A: &str = "\
+package a
+
+type sealed interface {
+	seal()
+}
+
+type T struct{}
+
+func (T) seal() {}
+";
+
+/// `package a_test`, in `a`'s directory: another package.
+const PACKAGE_A_TEST: &str = "\
+package a_test
+
+type Fake struct{}
+
+func (Fake) seal() {}
+
+type T struct{}
+
+func (T) Run() {}
+
+type Runner interface {
+	Run()
+}
+";
+
+/// CR-260 G2: a Go package is its directory and its `package` clause. A
+/// `package a_test` type's `seal()` is `a_test`'s own, so it implements
+/// nothing of `a`'s unexported `sealed`, and a `T` declared in both keeps
+/// each package's own methods. Before S-830, `Fake` was a `sealed` and the
+/// two `T`s owned no method at all.
+#[test]
+fn an_external_test_package_is_a_package_of_its_own() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("a/a.go", PACKAGE_A), ("a/fake_test.go", PACKAGE_A_TEST)]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        implements_by_file(engine.runtime().unwrap()),
+        pairs(&[("a/a.go:T", "a/a.go:sealed"), ("a/fake_test.go:T", "a/fake_test.go:Runner")])
+    );
+}
+
+/// The figures fixture: `Getter` (generic, with a spec) and `MarshalerPtr`
+/// (generic, with none) are generic, `Wide` embeds the standard library's
+/// `io.Reader`, `Number` and `Any` declare no method, and `Marshaler` is
+/// computed and implemented once.
+const FIGURES: &str = "\
+package gen
+
+import \"io\"
+
+type Getter[T any] interface {
+	Get() T
+}
+
+type Number interface {
+	~int | ~float64
+}
+
+type Any interface{}
+
+type Marshaler interface {
+	Marshal() error
+}
+
+type MarshalerPtr[T any] interface {
+	*T
+	Marshaler
+}
+
+type Wide interface {
+	io.Reader
+	Close() error
+}
+
+type box struct{ v int }
+
+func (b box) Get() int { return b.v }
+func (b *box) Marshal() error { return nil }
+";
+
+/// CR-260 G3: `status --json`'s `go` row carries the pass's figures, and a
+/// generic interface that declares no spec of its own counts as generic.
+#[test]
+fn status_reads_out_the_interface_figures_on_the_go_row() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES)]);
+    let engine = index(tmp.path());
+    assert_eq!(
+        go_status_row(&engine)["interfaces"],
+        serde_json::json!({
+            "in_scope": 6,
+            "computed": 1,
+            "implements": 1,
+            "not_computed": { "generic": 2, "unresolved_embedding": 1 },
+            "empty": 2,
+        })
+    );
+}
+
+/// The figures are a status-only extension: a relational answer's rows state
+/// its denominator and nothing more.
+#[test]
+fn a_relational_answer_states_its_denominator_and_not_the_figures() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES)]);
+    let engine = index(tmp.path());
+    let callers = serde_json::to_value(engine.navigation().callers("Marshal", None)).expect("callers serialises");
+    let rows = callers["resolution_denominator"]["languages"].as_array().expect("denominator rows");
+    assert!(!rows.is_empty(), "the answer attaches its language's row: {callers}");
+    assert!(rows.iter().all(|row| row.get("interfaces").is_none()), "{rows:?}");
+}
+
+/// NFR-RA-06: a sync that turns a method's signature, and drops a generic
+/// interface, reads the edges and the figures a fresh index of the edited
+/// tree reads.
+#[test]
+fn a_synced_signature_edit_equals_a_fresh_index_edges_and_figures() {
+    let edited = FIGURES
+        .replace("func (b *box) Marshal() error", "func (b *box) Marshal() bool")
+        .replace("type MarshalerPtr[T any] interface {\n\t*T\n\tMarshaler\n}\n", "");
+    let tmp_a = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES)]);
+    let engine_a = index(tmp_a.path());
+    let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
+    fs::write(root_a.join("gen/gen.go"), &edited).unwrap();
+    engine_a.pipeline().sync(&[root_a.join("gen/gen.go")]);
+
+    let tmp_b = tree(&[("go.mod", GO_MOD), ("gen/gen.go", &edited)]);
+    let engine_b = index(tmp_b.path());
+    assert_eq!(graph_fingerprint(engine_a.runtime().unwrap()), graph_fingerprint(engine_b.runtime().unwrap()));
+    assert_eq!(go_status_row(&engine_a)["interfaces"], go_status_row(&engine_b)["interfaces"]);
+    assert_eq!(
+        go_status_row(&engine_a)["interfaces"],
+        serde_json::json!({
+            "in_scope": 5,
+            "computed": 1,
+            "implements": 0,
+            "not_computed": { "generic": 1, "unresolved_embedding": 1 },
+            "empty": 2,
+        }),
+        "`Marshal() bool` is no `Marshal() error`"
+    );
+}
+
+/// CR-260 G1: a store indexed before the signature was recorded matches
+/// nothing — a method with no signature covers no spec — until its files are
+/// re-extracted, which the signature migration's cleared hashes make the next
+/// scan do (the clearing itself is `graph_store::migrate`'s unit test); a scan
+/// re-extracts only a file whose hash moved.
+#[test]
+fn a_store_without_signatures_matches_nothing_until_its_files_are_re_extracted() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("sig/sig.go", SIGNATURES)]);
+    let engine = index(tmp.path());
+    let want = edges(engine.runtime().unwrap(), EdgeKind::Implements);
+    assert!(!want.is_empty());
+    drop(engine);
+    let unsign = |sql: &str| {
+        let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("the store opens");
+        db.execute_batch(sql).expect("the store is rewritten");
+    };
+
+    unsign("UPDATE nodes SET callable_signature = NULL;");
+    let engine = Engine::start(tmp.path()).expect("engine reopens");
+    engine.quality().scan(true).expect("scan");
+    assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Implements), BTreeSet::new(), "no signature, no match");
+    drop(engine);
+
+    unsign("UPDATE files SET content_hash = NULL;");
+    let engine = Engine::start(tmp.path()).expect("engine reopens");
+    engine.quality().scan(true).expect("scan");
+    assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Implements), want, "re-extracted, matched again");
+}
+
+/// NFR-RA-06: a sync that flips one file's clause from `a` to `a_test` moves
+/// its type and methods to another package — the receiver reads and the
+/// `Implements` of both files read as a fresh index of the edited tree reads
+/// them.
+#[test]
+fn a_synced_package_clause_flip_equals_a_fresh_index() {
+    let methods = "package a\n\nfunc (t T) seal() { _ = t.n }\n";
+    let flipped = "package a_test\n\nfunc (t T) seal() { _ = t.n }\n";
+    let types = "package a\n\ntype sealed interface {\n\tseal()\n}\n\ntype T struct{ n int }\n";
+    let tmp_a = tree(&[("go.mod", GO_MOD), ("a/a.go", types), ("a/m_test.go", methods)]);
+    let engine_a = index(tmp_a.path());
+    assert_eq!(implements_by_file(engine_a.runtime().unwrap()), pairs(&[("a/a.go:T", "a/a.go:sealed")]));
+    assert_eq!(edges(engine_a.runtime().unwrap(), EdgeKind::Accesses), pairs(&[("a/seal", "T.n")]));
+    let root_a = tmp_a.path().canonicalize().expect("canonicalize root");
+    fs::write(root_a.join("a/m_test.go"), flipped).unwrap();
+    engine_a.pipeline().sync(&[root_a.join("a/m_test.go")]);
+
+    let tmp_b = tree(&[("go.mod", GO_MOD), ("a/a.go", types), ("a/m_test.go", flipped)]);
+    let engine_b = index(tmp_b.path());
+    assert_eq!(graph_fingerprint(engine_a.runtime().unwrap()), graph_fingerprint(engine_b.runtime().unwrap()));
+    assert_eq!(implements_by_file(engine_a.runtime().unwrap()), BTreeSet::new(), "`a_test`'s `seal` is no `a.T`'s");
+    assert_eq!(
+        edges(engine_a.runtime().unwrap(), EdgeKind::Accesses),
+        BTreeSet::new(),
+        "`a_test`'s receiver read is no read of `a.T`'s field"
+    );
+    assert_eq!(go_status_row(&engine_a)["interfaces"], go_status_row(&engine_b)["interfaces"]);
+}
+
+/// NFR-RA-05: a package declaring its own type named `any` shadows the
+/// predeclared one, so `M(v any)` there takes that type and is no
+/// `M(interface{})` — in either direction. `b.R`'s `M(interface{})` is `a.I`'s
+/// own spec, exported, so `R` is an `I`.
+#[test]
+fn a_package_type_named_any_is_no_empty_interface() {
+    let tmp = tree(&[
+        ("go.mod", GO_MOD),
+        (
+            "a/a.go",
+            "package a\n\ntype any struct{ x int }\n\ntype I interface {\n\tM(interface{})\n}\n\ntype S struct{}\n\nfunc (S) M(v any) {}\n",
+        ),
+        (
+            "b/b.go",
+            "package b\n\ntype any struct{ x int }\n\ntype J interface {\n\tM(any)\n}\n\ntype R struct{}\n\nfunc (R) M(v interface{}) {}\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Implements), pairs(&[("b/R", "a/I")]));
+}
+
+/// ADR-14 / NFR-RA-05: stored figures that no longer read state no figures and
+/// say why — never another run's, never a failed `status`.
+#[test]
+fn unreadable_stored_figures_state_none_and_say_so() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES)]);
+    drop(index(tmp.path()));
+    let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("the store opens");
+    db.execute("UPDATE project_metadata SET value = 'not json' WHERE key = 'method_set_figures'", [])
+        .expect("the stored figures are overwritten");
+    drop(db);
+    let engine = Engine::start(tmp.path()).expect("engine reopens");
+    let status = engine.graph().status();
+    assert!(
+        status.warnings.iter().any(|w| w.starts_with("the interface figures are not stated")),
+        "{:?}",
+        status.warnings
+    );
+    assert_eq!(go_status_row(&engine)["interfaces"], serde_json::Value::Null);
+}
+
+/// CR-260 G2: an import names a directory's own package, never its external
+/// test package — a `zapcore_test` declaring an `Entry` of its own leaves
+/// `zc.Entry` and `zapcore.Entry` one type.
+#[test]
+fn an_import_never_names_the_external_test_package_beside_it() {
+    let tmp = tree(&[
+        ("go.mod", GO_MOD),
+        ("zapcore/entry.go", "package zapcore\n\ntype Entry struct{}\n"),
+        ("zapcore/entry_test.go", "package zapcore_test\n\ntype Entry struct{}\n"),
+        (
+            "check/check.go",
+            "package check\n\nimport zc \"example.com/zap/zapcore\"\n\ntype Checker interface {\n\tCheck(e zc.Entry) error\n}\n",
+        ),
+        (
+            "other/other.go",
+            "package other\n\nimport \"example.com/zap/zapcore\"\n\ntype impl struct{}\n\nfunc (impl) Check(e zapcore.Entry) error { return nil }\n",
+        ),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Implements), pairs(&[("other/impl", "check/Checker")]));
+}
+
+/// NFR-RA-05: a type of a package outside the repository is named by its
+/// import path, so two such packages sharing a last segment (`log`) are two —
+/// `github.com/a/log.Logger` is no `github.com/b/log.Logger`.
+#[test]
+fn two_outside_packages_of_one_name_are_two_packages() {
+    let tmp = tree(&[
+        ("go.mod", GO_MOD),
+        (
+            "check/check.go",
+            "package check\n\nimport \"github.com/a/log\"\n\ntype Sink interface {\n\tPut(l log.Logger)\n}\n",
+        ),
+        ("other/other.go", "package other\n\nimport \"github.com/b/log\"\n\ntype impl struct{}\n\nfunc (impl) Put(l log.Logger) {}\n"),
+        ("third/third.go", "package third\n\nimport alog \"github.com/a/log\"\n\ntype ok struct{}\n\nfunc (ok) Put(l alog.Logger) {}\n"),
+    ]);
+    let engine = index(tmp.path());
+    assert_eq!(edges(engine.runtime().unwrap(), EdgeKind::Implements), pairs(&[("third/ok", "check/Sink")]));
+}
+
+/// The stored figures follow the graph: a sync that removes the last Go file
+/// leaves no language in scope, and the run removes the figures rather than
+/// keep a former graph's.
+#[test]
+fn the_figures_are_removed_when_no_method_set_language_is_left() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES), ("README.md", "# fixture\n")]);
+    let engine = index(tmp.path());
+    let stored = |engine: &Engine| {
+        engine
+            .runtime()
+            .unwrap()
+            .submit_read(|store| store.project_metadata(logos_core::graph_store::METHOD_SET_FIGURES_KEY))
+            .expect("read runs")
+    };
+    assert!(stored(&engine).is_some(), "a Go run stores its figures");
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+    fs::remove_file(root.join("gen/gen.go")).unwrap();
+    engine.pipeline().sync(&[root.join("gen/gen.go")]);
+    assert_eq!(stored(&engine), None, "no Go file is left, so no figures are");
+}
+
+/// The figures land on the method-set language's row alone: the Markdown row
+/// of the same `status` carries no `interfaces`.
+#[test]
+fn only_the_method_set_languages_row_carries_the_figures() {
+    let tmp = tree(&[("go.mod", GO_MOD), ("gen/gen.go", FIGURES), ("README.md", "# fixture\n")]);
+    let engine = index(tmp.path());
+    let status = serde_json::to_value(engine.graph().status()).expect("status serialises");
+    let rows = status["resolution_by_language"].as_array().expect("rows");
+    let carrying: Vec<&str> =
+        rows.iter().filter(|row| row.get("interfaces").is_some()).filter_map(|row| row["language"].as_str()).collect();
+    assert!(rows.iter().any(|row| row["language"] == "markdown"), "a second row is stated: {rows:?}");
+    assert_eq!(carrying, ["go"]);
 }

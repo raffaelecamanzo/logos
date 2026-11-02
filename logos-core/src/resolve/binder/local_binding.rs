@@ -11,12 +11,12 @@
 //!   [`Residue::LocalBinding`];
 //! - **a local import** ([`LOCAL_IMPORT_ALIAS`]) resolves through that import
 //!   alone: a block-scope `using` through the path it names
-//!   ([`Ctx::local_using_lookup`]), any other through the file's imports of the
+//!   ([`IncludeLookup::local_using_lookup`](super::includes::IncludeLookup::local_using_lookup)), any other through the file's imports of the
 //!   name, which bind only when every one of them names the same declaration,
-//!   and no rung past them ([`Ctx::resolve_local_import_call`]).
+//!   and no rung past them ([`LocalBindings::resolve_local_import_call`]).
 //!
 //! What the rung reads — the file's imports of the name (every one of them),
-//! its `using`s and its include scope — is what [`Index::ref_affected`](super::Index::ref_affected)
+//! its `using`s and its include scope — is what [`Invalidation::ref_affected`](super::Invalidation::ref_affected)
 //! selects a row by: its target's name, the alias chase and every expansion of
 //! its head, and the include-scope clause. A local value reads nothing, so no
 //! delta can change its outcome.
@@ -24,11 +24,29 @@
 //! [CR-191]: ../../../../docs/requests/CR-191-a-local-binding-shadows-the-receiver-and-the-callee.md
 //! [FR-RS-44]: ../../../../docs/specs/requirements/FR-RS-44.md
 
+use std::ops::Deref;
+
 use super::{Ctx, Outcome, Res, Residue, Want, LOCAL_IMPORT_ALIAS, LOCAL_VALUE_ALIAS, MAX_ALIAS_DEPTH};
+use super::includes::IncludeLookup;
+use super::scope_hierarchy::ScopeHierarchy;
 use crate::graph_store::UnresolvedRefRow;
 use crate::model::{EdgeKind, RefForm};
 
-impl Ctx<'_> {
+/// A bare call a local binding shadows.
+#[derive(Clone, Copy)]
+pub(super) struct LocalBindings<'c, 'a> {
+    pub(super) cx: &'c Ctx<'a>,
+}
+
+impl<'a> Deref for LocalBindings<'_, 'a> {
+    type Target = Ctx<'a>;
+
+    fn deref(&self) -> &Ctx<'a> {
+        self.cx
+    }
+}
+
+impl LocalBindings<'_, '_> {
     /// Decide `r` when extraction marked it a bare call through a local
     /// binding; `None` for every other row.
     pub(super) fn resolve_local_binding_call(&self, r: &UnresolvedRefRow) -> Option<Outcome> {
@@ -58,9 +76,9 @@ impl Ctx<'_> {
 
     /// A bare `name` a local import binds, resolved through the import alone.
     /// An include-roots file reads its `using` in force at the call
-    /// ([`Ctx::local_using_lookup`]); any other reads the file's imports of the
+    /// ([`IncludeLookup::local_using_lookup`](super::includes::IncludeLookup::local_using_lookup)); any other reads the file's imports of the
     /// name, as the alias rung reads a file-level import — but every one of
-    /// them ([`agreeing`](Ctx::agreeing)): the file's import table is not
+    /// them ([`agreeing`](LocalBindings::agreeing)): the file's import table is not
     /// scoped, so two functions importing the name from two modules bind
     /// neither, never the first one's. No later rung is read: past its import,
     /// a bare call would reach the workspace's same-named function the import
@@ -69,7 +87,8 @@ impl Ctx<'_> {
     /// `external-type`, and a name no import the binder reads names
     /// `name-not-in-scope`.
     fn resolve_local_import_call(&self, name: &str, want: Want) -> Res {
-        let resolved = match self.local_using_lookup(name, want) {
+        let includes = IncludeLookup { cx: self.cx };
+        let resolved = match includes.local_using_lookup(name, want) {
             Some(resolved) => resolved,
             None => match self.scope().and_then(|s| s.alias_expansions.get(name)) {
                 Some(expansions) => self.agreeing(expansions, want),
@@ -92,9 +111,10 @@ impl Ctx<'_> {
     /// names something — which import is in force at the call is not the
     /// table's to say.
     fn agreeing(&self, expansions: &[Vec<String>], want: Want) -> Res {
+        let scope_hierarchy = ScopeHierarchy { cx: self.cx };
         let mut named: Option<Res> = None;
         for path in expansions {
-            let res = self.resolve_path(path, want, MAX_ALIAS_DEPTH - 1);
+            let res = scope_hierarchy.resolve_path(path, want, MAX_ALIAS_DEPTH - 1);
             match named {
                 Some(seen) if seen != res => return Res::Ambiguous,
                 _ => named = Some(res),

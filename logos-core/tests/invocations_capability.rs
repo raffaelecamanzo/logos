@@ -43,7 +43,7 @@ fn has_capability(plugin: &dyn LanguagePlugin, capability: &str) -> bool {
 #[test]
 fn invocations_is_reported_present_for_rust_and_absent_for_c_cpp_scala() {
     let tmp = tempfile::tempdir().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
     assert!(
         info.load_error.is_none(),
         "the embedded plugin set must load cleanly, got {:?}",

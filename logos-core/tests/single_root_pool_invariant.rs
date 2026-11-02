@@ -42,8 +42,8 @@ fn indexed_repo(root: &Path) {
     std::fs::create_dir_all(root.join("src")).expect("src dir");
     std::fs::write(root.join("src").join("lib.rs"), SOURCE).expect("fixture source");
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let _ = engine.sync(&[] as &[PathBuf]);
+    engine.pipeline().index();
+    let _ = engine.pipeline().sync(&[] as &[PathBuf]);
 }
 
 /// The read-model bytes a single engine produces — the payload the invariant is
@@ -51,8 +51,8 @@ fn indexed_repo(root: &Path) {
 /// deterministic across engines over one store; wall-clock and on-disk-size
 /// fields are not, and are deliberately excluded rather than papered over.
 fn payload(engine: &Engine) -> String {
-    let search = serde_json::to_string(&engine.search("alpha", None, None)).expect("search json");
-    let status = engine.status();
+    let search = serde_json::to_string(&engine.navigation().search("alpha", None, None)).expect("search json");
+    let status = engine.graph().status();
     format!(
         "{search}|files={}|nodes={}|edges={}|refs={}/{}",
         status.file_count,
@@ -125,18 +125,18 @@ fn payloads_are_byte_identical_whatever_the_read_pool_size() {
     );
 
     // A budgeted share of zero is rejected rather than silently defaulted — the
-    // error path `start_with_pools` documents. Asserted here because a
+    // error path `Engine::start_with` documents. Asserted here because a
     // substituted default would be indistinguishable from success at every other
     // call site.
     assert!(
-        Engine::start_with_pools(root, 0, None).is_err(),
+        Engine::start_with(root, logos_core::StartOptions::pools(0, None)).is_err(),
         "a zero-connection pool must be rejected, not defaulted to the core-sized one"
     );
 
     // The budgeted path: the tightest share a workspace could ever hand a member.
     for read_connections in [1, 2] {
         let budgeted =
-            Engine::start_with_pools(root, read_connections, None).expect("engine starts");
+            Engine::start_with(root, logos_core::StartOptions::pools(read_connections, None)).expect("engine starts");
         assert_eq!(
             budgeted
                 .runtime()
@@ -160,7 +160,7 @@ fn payloads_are_byte_identical_whatever_the_read_pool_size() {
     // assertion in this binary.
     let shared = SharedWorkerPool::with_threads(1).expect("pool builds");
     let injected =
-        Engine::start_with_pools(root, 2, Some(shared.clone())).expect("engine starts");
+        Engine::start_with(root, logos_core::StartOptions::pools(2, Some(shared.clone()))).expect("engine starts");
     let injected_runtime = injected
         .runtime()
         .expect("a started engine owns a runtime");

@@ -263,12 +263,12 @@ fn expected_runs(w: &World) -> Vec<(&'static str, Vec<Vec<String>>)> {
             "bandit",
             vec![strings(&[
                 "--recursive", "--format", "sarif", "--output", &w.out("bandit.sarif"),
-                "--exit-zero", "--quiet", "--exclude", "./.logos", ".",
+                "--exit-zero", "--quiet", "--skip", "B404,B603,B607", "--exclude", "./.logos", ".",
             ])],
         ),
         (
             "gosec",
-            vec![strings(&["-fmt", "sarif", "-out", &w.out("gosec.sarif"), "-no-fail", "-quiet", "./..."])],
+            vec![strings(&["-fmt", "sarif", "-out", &w.out("gosec.sarif"), "-no-fail", "./..."])],
         ),
         (
             "checkov",
@@ -499,7 +499,7 @@ fn the_same_keys_at_user_level_take_effect() {
     assert_eq!(
         w.runs("gosec"),
         vec![strings(&[
-            "-fmt", "sarif", "-out", &w.out("gosec.sarif"), "-no-fail", "-quiet", "-exclude=G104", "./...",
+            "-fmt", "sarif", "-out", &w.out("gosec.sarif"), "-no-fail", "-exclude=G104", "./...",
         ])]
     );
     // CodeQL's extras go to the analysis, never to database creation.
@@ -768,6 +768,47 @@ fn a_disabled_scanner_is_neither_probed_nor_run() {
     assert!(w.invocations("trivy").is_empty(), "a disabled scanner is never spawned");
 }
 
+/// A gosec 2.29.0 stand-in: with `-quiet` it writes no report when it finds
+/// nothing (CR-266); without it, it writes a SARIF whose `results` is empty.
+const GOSEC_2_29_CLEAN: &str = "#!/bin/sh\n\
+    case \"$1\" in -version) printf 'Version: 2.29.0\\n'; exit 0;; esac\n\
+    out=''; prev=''; quiet=''\n\
+    for a in \"$@\"; do [ \"$prev\" = '-out' ] && out=\"$a\"; [ \"$a\" = '-quiet' ] && quiet=1; prev=\"$a\"; done\n\
+    [ -n \"$quiet\" ] && exit 0\n\
+    printf '%s' '{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"gosec\"}},\"results\":[]}]}' > \"$out\"\n\
+    exit 0\n";
+
+#[test]
+fn a_gosec_scan_with_no_findings_reads_ran_with_an_empty_report_not_failed() {
+    let w = World::new(PROJECT);
+    write_executable(&w.bin.join("gosec"), GOSEC_2_29_CLEAN);
+    let report = w.scan(&Selection::Only(strings(&["gosec"])));
+    let o = outcome(&report, "gosec");
+    let Outcome::Ran { sarif, .. } = &o.outcome else { panic!("a clean gosec scan ran: {o:?}") };
+    assert_eq!(sarif.len(), 1, "{o:?}");
+    let (_, runs) = parse_report(&fs::read_to_string(&sarif[0]).unwrap()).unwrap();
+    assert_eq!(runs[0].scanner_name, "gosec");
+    assert!(runs[0].findings.is_empty(), "no finding: {:?}", runs[0].findings);
+}
+
+/// The rule that makes a clean scan safe to read as `fresh` is that "exit 0, no
+/// SARIF" is a failure for every scanner — gosec included (CR-266 rejected a
+/// gosec-only exception, which would also hide a real crash).
+#[test]
+fn a_gosec_that_exits_0_and_writes_no_report_still_reads_failed() {
+    let w = World::new(PROJECT);
+    write_executable(
+        &w.bin.join("gosec"),
+        "#!/bin/sh\ncase \"$1\" in -version) printf 'Version: 2.29.0\\n';; esac\nexit 0\n",
+    );
+    let report = w.scan(&Selection::Only(strings(&["gosec"])));
+    let Outcome::Failed { exit_code, stderr } = &outcome(&report, "gosec").outcome else {
+        panic!("a gosec that wrote nothing failed: {report:?}");
+    };
+    assert_eq!(*exit_code, Some(0));
+    assert!(stderr.contains("wrote no SARIF"), "{stderr}");
+}
+
 #[test]
 fn a_failing_scanner_reports_its_stderr_and_never_stops_the_others() {
     let w = World::new(PROJECT);
@@ -894,6 +935,7 @@ fn a_scoped_argv_differs_from_the_full_argv_only_by_its_path_elements() {
             root: None,
             nvd_key_file: None,
             gitleaks_runs: false,
+            project_skips: &[],
         };
         let full = s.render(s.run, &fill);
         let Some(slot) = s.path_slot else {
@@ -1515,6 +1557,7 @@ fn only_checkovs_template_carries_the_secrets_skip() {
         root: None,
         nvd_key_file: None,
         gitleaks_runs: true,
+        project_skips: &[],
     };
     for s in &REGISTRY {
         let carries = s.render(s.run, &fill).iter().any(|a| a == "--skip-framework");
@@ -1524,6 +1567,53 @@ fn only_checkovs_template_carries_the_secrets_skip() {
     for s in &REGISTRY {
         assert!(s.render(s.run, &off).iter().all(|a| a != "--skip-framework"), "{}", s.name);
     }
+}
+
+/// HF-3 of sprint 110 (D1): Bandit gives a command-line `--skip` priority over
+/// the `skips` of the project's `.bandit` and does not merge them, so the
+/// template's own `--skip` would bring back every check a project silenced
+/// there. The run line carries one `--skip`: the template's ids, then the
+/// project's not already among them, in a full run and a scoped one alike. A
+/// user's own `--skip` in `extra_args` still comes after it, and Bandit keeps
+/// the last.
+#[test]
+fn bandits_run_line_merges_the_projects_dot_bandit_skips_into_its_own() {
+    let w = World::new(&[
+        ("app.py", "assert x\n"),
+        (".bandit", "[bandit]\nskips = B101, B105,B603\n"),
+    ]);
+    w.stub("bandit", 0);
+    let only = Selection::Only(strings(&["bandit"]));
+    w.scan(&only);
+    let full = w.runs("bandit");
+    assert_eq!(full.len(), 1, "one full run: {full:?}");
+    let merged = strings(&["--skip", "B404,B603,B607,B101,B105"]);
+    assert!(full[0].windows(2).any(|p| p == merged.as_slice()), "full run: {:?}", full[0]);
+    assert_eq!(full[0].iter().filter(|a| *a == "--skip").count(), 1, "one --skip: {:?}", full[0]);
+
+    let scope = super::resolve_scope(&w.root, &strings(&["app.py"])).unwrap();
+    w.open().unwrap().scan_in(&only, Some(&scope)).unwrap();
+    let scoped = w.runs("bandit");
+    assert_eq!(scoped.len(), 2, "a scoped run after the full one: {scoped:?}");
+    assert!(scoped[1].windows(2).any(|p| p == merged.as_slice()), "scoped run: {:?}", scoped[1]);
+
+    // The user's own `--skip` follows the template's, so Bandit keeps it.
+    w.user_config("[security_scan.bandit]\nextra_args = [\"--skip\", \"B102\"]\n");
+    w.scan(&only);
+    let user = w.runs("bandit").pop().unwrap();
+    let skips: Vec<usize> = user.iter().enumerate().filter(|(_, a)| *a == "--skip").map(|(i, _)| i).collect();
+    assert_eq!(skips.len(), 2, "the template's --skip and the user's: {user:?}");
+    assert_eq!(user[skips[0] + 1], "B404,B603,B607,B101,B105", "{user:?}");
+    assert_eq!(user[skips[1] + 1], "B102", "the user's comes last: {user:?}");
+
+    // A malformed `.bandit` adds nothing: the run line is today's, and the
+    // scan still runs.
+    w.user_config("");
+    fs::write(w.root.join(".bandit"), "skips: [B101]\n").unwrap();
+    let report = w.scan(&only);
+    assert!(matches!(outcome(&report, "bandit").outcome, Outcome::Ran { .. }), "{report:?}");
+    let today = w.runs("bandit").pop().unwrap();
+    assert!(today.windows(2).any(|p| p == strings(&["--skip", "B404,B603,B607"]).as_slice()), "{today:?}");
 }
 
 /// The `[security]` gate reads a scanner fresh exactly when `status` does: a
@@ -1596,9 +1686,10 @@ fn two_files_of_one_go_package_name_the_package_once() {
         root: None,
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let argv = gosec.render(gosec.run, &fill);
-    let at = argv.iter().position(|a| a == "-quiet").unwrap() + 1;
+    let at = argv.iter().position(|a| a == "-no-fail").unwrap() + 1;
     assert_eq!(argv[at..], [OsString::from("./cmd/server"), OsString::from(".")]);
 }
 
@@ -1624,6 +1715,7 @@ fn ignored_directories_reach_each_scanners_exclusion_flag() {
         root: Some("/r"),
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let with = Fill { ignored: &ignored, ..base };
     let expected: &[(&str, &[&str])] = &[
@@ -1705,6 +1797,7 @@ fn checkovs_skip_expression_matches_the_directory_and_not_its_near_misses() {
         root: Some("/srv/my.app"),
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let argv = checkov.render(checkov.run, &fill);
     let patterns: Vec<regex::Regex> = argv
@@ -1766,6 +1859,7 @@ fn gosecs_tree_expression_skips_the_directory_and_below_and_not_its_near_misses(
         root: Some("/srv/project"),
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let values = exclude_dirs(&argv);
@@ -1810,6 +1904,7 @@ fn gosec_reads_excluded_only_when_every_ignored_directory_fits_the_budget() {
             root: Some("/srv/project"),
             nvd_key_file: None,
             gitleaks_runs: false,
+            project_skips: &[],
         };
         let argv: Vec<String> = gosec.render(gosec.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(exclude_dirs(&argv).len(), n - cut, "{n} ignored: what the argv carries");
@@ -1870,7 +1965,7 @@ fn gosec_skips_the_ignored_tree_and_keeps_pkg_mytarget_and_src_target_scanned() 
     assert!(w.runs("trivy")[0].iter().any(|a| a == "target"), "the ignored set was walked: {:?}", w.runs("trivy"));
     let runs = w.runs("gosec");
     assert_eq!(runs.len(), 1, "{runs:?}");
-    assert!(runs[0].ends_with(&strings(&["-quiet", "./target/..."])), "scoped gosec reads target/: {:?}", runs[0]);
+    assert!(runs[0].ends_with(&strings(&["-no-fail", "./target/..."])), "scoped gosec reads target/: {:?}", runs[0]);
     assert_eq!(outcome(&scoped, "gosec").coverage, None, "a scoped run states no coverage");
 }
 
@@ -1930,7 +2025,9 @@ fn harness_rows(tsv: &str) -> Vec<Vec<&str>> {
 /// still read the version it last ran. Only gosec rows at exactly this version
 /// are let through — the argv and the verdict are still checked on them — and
 /// the test fails once the re-run writes rows at the pin, until this constant
-/// and its allowance are deleted with that commit.
+/// and its allowance are deleted with that commit. Those rows also still carry
+/// the `-quiet` the template dropped in S-846; the comparison ignores it on them,
+/// right after `-no-fail`, and that strip goes with this constant.
 const HARNESS_RERUN_PENDING_FROM: &str = "2.21.4";
 
 /// Every exclusion flag the registry calls proven is the argv its committed
@@ -1964,6 +2061,7 @@ fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
             root: None,
             nvd_key_file: None,
             gitleaks_runs: false,
+            project_skips: &[],
         };
         let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let argv = argv.join(" ");
@@ -1981,11 +2079,16 @@ fn a_proven_exclusion_flag_is_the_argv_its_committed_harness_rows_ran() {
             pending += usize::from(r[1] != pin);
             assert!(r[4].starts_with("ran (exit "), "{}: {r:?}", s.name);
             assert_eq!((r[5], r[6]), ("ignored skipped", "near miss kept"), "{}: {r:?}", s.name);
-            assert_eq!(r[9], argv, "{}: the row ran this template's argv", s.name);
+            // The pending rows ran the template as it stood at that version, which
+            // still carried `-quiet` (dropped in S-846, CR-266); it plays no part
+            // in the exclusion mechanism. Rows at the pin must match exactly.
+            // This is the `-quiet` allowance: it is deleted with HARNESS_RERUN_PENDING_FROM.
+            let ran = if r[1] == pin { r[9].to_string() } else { r[9].replace(" -no-fail -quiet", " -no-fail") };
+            assert_eq!(ran, argv, "{}: the row ran this template's argv", s.name);
         }
         assert!(
             pending > 0,
-            "{}: the committed rows are at the pin {pin}: delete HARNESS_RERUN_PENDING_FROM and its allowance",
+            "{}: the committed rows are at the pin {pin}: delete HARNESS_RERUN_PENDING_FROM, its allowance and the `-quiet` strip",
             s.name
         );
     }
@@ -2033,6 +2136,7 @@ fn osv_scanners_unignored_targets_are_the_argv_tail_its_committed_harness_rows_r
         root: None,
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let argv: Vec<String> = s.render(s.run, &fill).iter().map(|a| a.to_string_lossy().into_owned()).collect();
     let tail = argv[argv.iter().position(|a| a == "--recursive").expect("the template recurses")..].join(" ");
@@ -2246,7 +2350,7 @@ fn a_full_scan_keeps_every_scanner_out_of_the_projects_ignored_directories() {
     assert!(contains(&dc, &want), "dependency-check: {dc:?}");
 
     let gosec = run("gosec");
-    let mut want = strings(&["-quiet"]);
+    let mut want = strings(&["-no-fail"]);
     want.extend(pairs("-exclude-dir", dirs.iter().map(|d| format!("^{}(/|$)", regex::escape(d))).collect()));
     want.extend(strings(&["./..."]));
     assert!(gosec.ends_with(&want), "gosec: {gosec:?}");
@@ -2285,7 +2389,7 @@ fn a_full_scan_keeps_every_scanner_out_of_the_projects_ignored_directories() {
     let names = strings(&["semgrep", "bandit", "trivy", "osv-scanner"]);
     let scoped = w.open().unwrap().scan_in(&Selection::Only(names), Some(&scope)).unwrap();
     let bandit = run("bandit");
-    assert!(bandit.ends_with(&strings(&["--exclude", "./.logos", "notes/old"])), "scoped bandit: {bandit:?}");
+    assert!(bandit.ends_with(&strings(&["--skip", "B404,B603,B607", "--exclude", "./.logos", "notes/old"])), "scoped bandit: {bandit:?}");
     let semgrep = run("semgrep");
     assert!(semgrep.ends_with(&strings(&["--exclude", ".logos", "notes/old"])), "scoped semgrep: {semgrep:?}");
     let trivy = run("trivy");
@@ -2320,6 +2424,7 @@ fn a_huge_ignored_set_is_cut_to_the_argument_budget_keeping_the_shallowest() {
         root: Some("/srv/project"),
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let none = Fill { ignored: &[], ..fill };
     for s in REGISTRY.iter().filter(|s| s.takes_exclusion_flag()) {
@@ -2440,7 +2545,7 @@ fn semgrep_and_osv_scanner_are_given_the_unignored_paths_in_every_checkout_shape
         assert_eq!(
             rooted_runs(&w, "gosec"),
             vec![strings(&[
-                "-fmt", "sarif", "-out", "<root>/.logos/security/gosec.sarif", "-no-fail", "-quiet", "-exclude-dir",
+                "-fmt", "sarif", "-out", "<root>/.logos/security/gosec.sarif", "-no-fail", "-exclude-dir",
                 "^target(/|$)", "./...",
             ])],
             "{shape:?}: gosec"
@@ -2589,6 +2694,7 @@ fn unignored_targets_render_only_in_a_whole_project_run_of_a_path_capable_scanne
         root: None,
         nvd_key_file: None,
         gitleaks_runs: false,
+        project_skips: &[],
     };
     let render = |name: &str, fill: &Fill<'_>| -> Vec<String> {
         let s = scanner(name).unwrap();
@@ -2722,6 +2828,7 @@ fn no_key_adds_nothing_and_no_other_scanner_is_handed_one() {
         root: None,
         nvd_key_file: Some(Path::new("/key")),
         gitleaks_runs: false,
+        project_skips: &[],
     };
     for s in REGISTRY.iter().filter(|s| s.name != "dependency-check") {
         let argv = s.render(s.run, &fill);

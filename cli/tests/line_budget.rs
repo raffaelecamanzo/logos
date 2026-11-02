@@ -28,7 +28,7 @@
 //! the `doc-gaps` quality command (FR-GV-14, a read-only static-gap analysis)
 //! — each a one-Engine-call delegation, no logic in the adapter); S-048
 //! 360→370 for the `hotspots` temporal-tier subcommand (FR-GH-06, one
-//! `Engine::hotspots` call shared with the MCP twin); S-051 370→395 for the
+//! `History::hotspots` call shared with the MCP twin); S-051 370→395 for the
 //! coverage evidence tier (CR-007): the `coverage ingest`/`coverage status`
 //! sub-subcommand group (its own `CoverageCommands` enum + two-arm dispatch,
 //! each one `Engine::coverage_*` call) and the `--untested` flag on `hotspots`
@@ -263,7 +263,7 @@ fn adapter_lines() -> usize {
 /// measured 841→851 (+10), 4 lines of headroom. The whole delta is `main.rs`'s
 /// `ImpactIntersection` variant declaration (+7: the `#[command(name = ...)]`
 /// rename, the repeatable `--item` `#[arg]` and the `--depth` `#[arg]`) plus a
-/// 3-line dispatch arm delegating to ONE `Engine::impact_intersection` call.
+/// 3-line dispatch arm delegating to ONE `Navigation::impact_intersection` call.
 ///
 /// The S-321 note above told the next author to expect a duplication of core
 /// logic to delete. The one this file already records — the `stats`/`languages`
@@ -286,7 +286,7 @@ fn adapter_lines() -> usize {
 /// 851→857 (+6), 8 lines of headroom. The whole delta is `main.rs`'s
 /// `Precedent` variant (+5: the four-line doc comment the `--help` renders, the
 /// `target` positional and the `--limit` `#[arg]`) plus a 1-line dispatch arm
-/// delegating to ONE `Engine::precedent` call.
+/// delegating to ONE `Navigation::precedent` call.
 ///
 /// Nothing to trim, and this was checked rather than assumed: the duplication
 /// the S-358 paragraph above re-examined (the `stats`/`languages` `open_query`
@@ -300,7 +300,7 @@ fn adapter_lines() -> usize {
 /// measured 851→863 (+12), 5 lines of headroom. The whole delta is `main.rs`'s
 /// `BranchOverlap` variant declaration (+9: the `#[command(name = ...)]` rename
 /// and the repeatable `--ref` plus `--base` and `--merge` `#[arg]`s) and a
-/// 3-line dispatch arm delegating to ONE `Engine::branch_overlap` call.
+/// 3-line dispatch arm delegating to ONE `Navigation::branch_overlap` call.
 ///
 /// The duplication hunt this file keeps asking of each author was run again and
 /// is still negative: the `stats`/`languages` `open_query` fold recorded in the
@@ -317,8 +317,8 @@ fn adapter_lines() -> usize {
 /// `Health` variant with its `--no-reconcile` flag (+4) and the `SessionStart`
 /// / `SessionEnd` variants, each a `#[command(name = "session-start", …)]`
 /// rename plus a fieldless variant (+2 each) — and `dispatch.rs` +3, one arm
-/// per command, each ONE `Engine::health` / `Engine::session_start` /
-/// `Engine::session_end` call through the existing `try_query` / `report_gate`
+/// per command, each ONE `Quality::health` / `Quality::session_start` /
+/// `Quality::session_end` call through the existing `try_query` / `report_gate`
 /// chokepoints. Nothing computed in the adapter: the baseline upsert and the
 /// epsilon comparison are `logos_core::governance`, exactly as they already
 /// were for the MCP twins these commands now pair with.
@@ -342,7 +342,7 @@ fn adapter_lines() -> usize {
 /// The duplication hunt, re-run rather than assumed, now has **two** candidates
 /// and rejects both on measurement. The standing `stats`/`languages`
 /// `open_query` fold is still net-negative. The new one is this change's own:
-/// `Engine::init_with(root, &init_options(i, h))` appears in both `dispatch.rs`
+/// `Setup::init_with(root, &init_options(i, h))` appears in both `dispatch.rs`
 /// and `workspace_init.rs`. A shared `plain_init` helper costs +3 and removes
 /// 0 — both call sites stay one line — landing at 889 of 890 to de-duplicate a
 /// single expression. Rejected: the duplication is an expression, not a
@@ -421,7 +421,7 @@ fn adapter_lines() -> usize {
 /// Delegation only: whether a run persisted nothing is decided in
 /// `logos_core::pipeline` and carried as `failed`; the adapter projects it.
 /// The `sync` config guard mirrors the one `index` already had — without it an
-/// invalid `config.toml` reaches `Engine::sync`, which now reports a failed run
+/// invalid `config.toml` reaches `Pipeline::sync`, which now reports a failed run
 /// (exit 1) where the contract says usage fault (exit 2). The duplication hunt
 /// was run again: folding the guard into `report_gate` would put a config read
 /// on `check`/`gate`/`doctor`/`verify`, which load their own; rejected.
@@ -478,7 +478,7 @@ fn adapter_lines() -> usize {
 /// | `dispatch.rs`: `hook_emit`, the one body both spellings call | **+5** |
 /// | | **+6** |
 ///
-/// Routing, not logic: `hook_emit` is one `Engine::quality_report_hook_emit`
+/// Routing, not logic: `hook_emit` is one `Readouts::report_hook_emit`
 /// call and one `print`; the materializer lives in `logos_core::hooks`.
 ///
 /// [FR-IN-07]: ../../docs/specs/requirements/FR-IN-07.md
@@ -604,7 +604,7 @@ fn adapter_lines() -> usize {
 /// | | **+8** |
 ///
 /// Routing, not logic: the bless write, the classification and the report are
-/// `logos_core::governance`'s, reached through `Engine::bless_rules`.
+/// `logos_core::governance`'s, reached through `Quality::bless_rules`.
 ///
 /// [FR-GV-23]: ../../docs/specs/requirements/FR-GV-23.md
 ///
@@ -619,7 +619,7 @@ fn adapter_lines() -> usize {
 /// | | **+11** |
 ///
 /// Routing, not logic: the glob, the dimension vocabulary and the listing are
-/// `logos_core::governance::offenders`', reached through `Engine::offenders` —
+/// `logos_core::governance::offenders`', reached through `Readouts::offenders` —
 /// the function the MCP tool calls.
 ///
 /// [FR-QM-19]: ../../docs/specs/requirements/FR-QM-19.md
@@ -638,8 +638,8 @@ fn adapter_lines() -> usize {
 ///
 /// Routing, not logic: the plan, the consent check and its refusal, the
 /// installs and the payloads are `logos_core::tools::surface`'s, reached
-/// through `Engine::security_install`, `security_uninstall` and
-/// `security_scan_install`; `--all` versus the named scanners is
+/// through `Tools::install`, `Tools::uninstall` and
+/// `Security::scan_install`; `--all` versus the named scanners is
 /// `Selection::named_or_all`. The two `CLI_ONLY` entries sit under
 /// `#[cfg(test)]` and are not counted.
 ///
@@ -659,8 +659,8 @@ fn adapter_lines() -> usize {
 /// | | **+5** |
 ///
 /// Routing, not logic: plugin detection, the enrolment, the legacy removals and
-/// the uninstall are `logos_core::init`'s, reached through `Engine::init_with_contributions`
-/// and `Engine::init_uninstall`.
+/// the uninstall are `logos_core::init`'s, reached through `Setup::init_with_contributions`
+/// and `Setup::uninstall`.
 ///
 /// [FR-IN-12]: ../../docs/specs/requirements/FR-IN-12.md
 ///
@@ -678,7 +678,7 @@ fn adapter_lines() -> usize {
 ///
 /// The surface-parity roster entry sits under `#[cfg(test)]` and is not counted.
 ///
-/// Routing, not logic: the list is `Engine::improvements`' — the function the
+/// Routing, not logic: the list is `Readouts::improvements`' — the function the
 /// MCP tool calls — and `GET /api/v1/health` carries the same value.
 ///
 /// [FR-QM-17]: ../../docs/specs/requirements/FR-QM-17.md
@@ -694,7 +694,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: the `Review` variant of `Commands` — `--base` (2), `--repo` (1), header and close (2) | **+5** |
-/// | `dispatch.rs`: the `review` arm — one `Engine::review` call, the verdict on `measured`, and the core's own stderr note on the cache | **+5** |
+/// | `dispatch.rs`: the `review` arm — one `Review::delta` call, the verdict on `measured`, and the core's own stderr note on the cache | **+5** |
 /// | | **+10** |
 ///
 /// The surface-parity roster entry sits under `#[cfg(test)]` and is not counted.
@@ -713,7 +713,7 @@ fn adapter_lines() -> usize {
 /// | | **+3** |
 ///
 /// Routing, not logic: the column and the filter are `logos_core::history`'s,
-/// reached through `Engine::hotspots_with_findings`, the call the MCP tool and
+/// reached through `History::hotspots_with_findings`, the call the MCP tool and
 /// `GET /api/v1/files` also make.
 ///
 /// [FR-SC-14]: ../../docs/specs/requirements/FR-SC-14.md
@@ -730,7 +730,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: `--scanner` and `--path` on `Scan` (attribute + field each) | **+4** |
-/// | `dispatch.rs`: the `Scan` arm builds a `ScanRequest` and calls `Engine::security_scan_selected` | **+3** |
+/// | `dispatch.rs`: the `Scan` arm builds a `ScanRequest` and calls `Security::scan_selected` | **+3** |
 /// | | **+7** |
 ///
 /// Routing, not logic: path confinement, the plan per scanner and the partial
@@ -762,7 +762,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: `--reason` on `Gate` (attribute + field) | **+2** |
-/// | `dispatch.rs`: `reason` named in the `Gate` pattern, passed to `Engine::gate_with_reason` | **+1** |
+/// | `dispatch.rs`: `reason` named in the `Gate` pattern, passed to `Quality::gate_with_reason` | **+1** |
 /// | | **+3** |
 ///
 /// Routing, not logic: the drift-budget check, the exit-2 refusal and the
@@ -778,7 +778,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: `--branches` on `Review` (attribute + field) | **+2** |
-/// | `dispatch.rs`: a `Review` arm guarded on `branches`, calling `Engine::review_branches` | **+1** |
+/// | `dispatch.rs`: a `Review` arm guarded on `branches`, calling `Review::branches` | **+1** |
 /// | | **+3** |
 ///
 /// Routing, not logic: the measurement, the sum and the projection are
@@ -793,7 +793,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: the `Bless` variant of `SecurityCommands` | **+1** |
-/// | `dispatch.rs`: its arm, calling `Engine::security_bless` | **+1** |
+/// | `dispatch.rs`: its arm, calling `Findings::bless` | **+1** |
 /// | | **+2** |
 ///
 /// Routing, not logic: which findings are blessed, the file format and the
@@ -837,7 +837,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: `--headroom`, `--subjects` and `--near` on `Review` (attribute + field each) | **+6** |
-/// | `dispatch.rs`: a `Review` arm guarded on `headroom`, calling `Engine::review_headroom` | **+1** |
+/// | `dispatch.rs`: a `Review` arm guarded on `headroom`, calling `Review::headroom` | **+1** |
 /// | | **+7** |
 ///
 /// Routing, not logic: the base, the measurement, the subject resolution and
@@ -853,7 +853,7 @@ fn adapter_lines() -> usize {
 /// |---|---|
 /// | `lib.rs`: the `Run { tool, consent }` variant of `CoverageCommands` (attribute + field each) | **+6** |
 /// | `dispatch.rs`: the `Coverage` arm becomes a block that installs the stop handler, then matches as before | **+3** |
-/// | `dispatch.rs`: the `Run` arm, calling `Engine::coverage_run`; `Refresh` now exits through the same `report_gate` | **+1** |
+/// | `dispatch.rs`: the `Run` arm, calling `Coverage::run`; `Refresh` now exits through the same `report_gate` | **+1** |
 /// | | **+10** |
 ///
 /// Routing, not logic: the run, the consent, the outcomes and the exit code are
@@ -885,7 +885,7 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: the `dependency_consent` field of `CoverageCommands::Run` and its `#[arg]` | **+2** |
-/// | `dispatch.rs`: the flag joins the `Run` arm's pattern, calling `Engine::coverage_run_adding` on the same line | **0** |
+/// | `dispatch.rs`: the flag joins the `Run` arm's pattern, calling `Coverage::run_adding` on the same line | **0** |
 /// | | **+2** |
 ///
 /// Routing, not logic: the plan, the consent, the package-manager run and the
@@ -902,12 +902,12 @@ fn adapter_lines() -> usize {
 /// | Region | Δ |
 /// |---|---|
 /// | `lib.rs`: the `Reconfirm` variant of `SecurityCommands` (`fingerprint`, repeatable `--evidence`) | **+6** |
-/// | `dispatch.rs`: the arm, one `Engine::security_reconfirm_with_evidence` call | **+3** |
+/// | `dispatch.rs`: the arm, one `Findings::reconfirm_with_evidence` call | **+3** |
 /// | `lib.rs`: the `MCP_SURFACE` row (test table, outside the production count) | **0** |
 /// | | **+8** |
 ///
 /// Routing, not logic: the entry lookup, the evidence pinning and the write are
-/// `Engine::security_reconfirm_with_evidence`'s.
+/// `Findings::reconfirm_with_evidence`'s.
 ///
 /// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
 #[test]

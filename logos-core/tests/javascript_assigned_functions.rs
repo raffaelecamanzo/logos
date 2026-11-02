@@ -429,16 +429,16 @@ fn a_synced_edit_of_assignment_functions_equals_a_fresh_index() {
     write(live.path(), "src/main.js", caller);
     coordinate::pin(live.path());
     let engine = Engine::start(live.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     write(live.path(), "src/user.js", edited);
-    engine.sync(&["src/user.js".into()]);
+    engine.pipeline().sync(&["src/user.js".into()]);
 
     let fresh = tempfile::tempdir().expect("tempdir");
     write(fresh.path(), "src/user.js", edited);
     write(fresh.path(), "src/main.js", caller);
     coordinate::pin(fresh.path());
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
 
     let synced = graph_fingerprint(engine.runtime().unwrap());
     assert_eq!(synced, graph_fingerprint(cold.runtime().unwrap()));

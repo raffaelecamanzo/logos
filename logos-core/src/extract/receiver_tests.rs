@@ -623,3 +623,236 @@ fn a_name_a_macro_binds_proves_nothing_from_the_callers_binding() {
     let src = with_types("fn g(x: A, v: Vec<B>) { assert!(v.iter().all(|y| y.g()) && x.f()); }");
     assert_eq!(calls_of_f(&src), vec![typed("A", None)]);
 }
+
+// ── Python: a nested callable's own `self` (S-838, [CR-264], [FR-RS-44]) ─────
+//
+// A textual `self.go()` is the method's instance only where the innermost
+// `self` in force is the method's own parameter. A callable nested in the
+// method that declares its own `self` — a nested `def`, a `lambda self:` —
+// binds another value, so the call reads `other`, as it does for a receiver the
+// body rebinds elsewhere.
+//
+// [CR-264]: ../../../docs/requests/CR-264-sprint-109-review-follow-ups.md
+// [FR-RS-44]: ../../../docs/specs/requirements/FR-RS-44.md
+
+/// The `Calls` rows of `go` in a Python file: `(caller symbol, target, form,
+/// receiver)`, sorted.
+#[cfg(feature = "lang-python")]
+fn python_go_calls(source: &str) -> Vec<(String, String, RefForm, Option<ReceiverShape>)> {
+    let plugin = registry().for_extension("py").expect("python grammar");
+    let ctx = SymbolContext::cargo("logos-core", "0.1.0");
+    let facts = extract(&FileInput::new("app/a.py", source), plugin, &ctx);
+    let mut rows: Vec<_> = facts
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == EdgeKind::Calls && (r.target == "go" || r.target.ends_with("::go")))
+        .map(|r| (r.source.to_string(), r.target, r.form, r.receiver))
+        .collect();
+    rows.sort_by_key(|r| (r.0.clone(), r.1.clone(), r.2.as_i32()));
+    rows
+}
+
+/// The caller's trailing symbol segment, minus its closing `.`: `run().each()`
+/// for a nested `each`.
+#[cfg(feature = "lang-python")]
+fn caller_tail(symbol: &str) -> &str {
+    symbol.rsplit_once('#').map_or(symbol, |(_, tail)| tail).trim_end_matches('.')
+}
+
+/// `(caller tail, form, receiver)` of each `go` call.
+#[cfg(feature = "lang-python")]
+fn python_go_shapes(source: &str) -> Vec<(String, RefForm, Option<ReceiverShape>)> {
+    sorted_shapes(
+        python_go_calls(source)
+            .into_iter()
+            .map(|(caller, _, form, shape)| (caller_tail(&caller).to_string(), form, shape))
+            .collect(),
+    )
+}
+
+/// `rows` in one fixed order, so an expectation is written in reading order.
+#[cfg(feature = "lang-python")]
+fn sorted_shapes(
+    mut rows: Vec<(String, RefForm, Option<ReceiverShape>)>,
+) -> Vec<(String, RefForm, Option<ReceiverShape>)> {
+    rows.sort_by_key(|(caller, form, shape)| (caller.clone(), form.as_i32(), shape.map(ReceiverShape::as_i32)));
+    rows
+}
+
+#[cfg(feature = "lang-python")]
+fn self_instance_row(caller: &str) -> (String, RefForm, Option<ReceiverShape>) {
+    (caller.to_string(), RefForm::Method, Some(ReceiverShape::SelfInstance))
+}
+
+#[cfg(feature = "lang-python")]
+fn other_row(caller: &str) -> (String, RefForm, Option<ReceiverShape>) {
+    (caller.to_string(), RefForm::Method, Some(ReceiverShape::Other))
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_nested_def_with_its_own_self_reads_other() {
+    let src = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        def each(self):
+            return self.go()
+        return each
+";
+    assert_eq!(python_go_shapes(src), vec![other_row("run().each()")]);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_nested_def_reading_the_methods_self_by_closure_still_binds() {
+    let src = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        def each():
+            return self.go()
+        return each
+";
+    assert_eq!(python_go_shapes(src), vec![self_instance_row("run().each()")]);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_lambda_with_its_own_self_reads_other_and_the_methods_own_call_binds() {
+    let src = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        self.go()
+        return lambda self: self.go()
+";
+    // Both calls belong to `run`: the lambda is no declaration. The method's own
+    // call keeps its shape; the lambda's reads `other`.
+    assert_eq!(
+        python_go_shapes(src),
+        sorted_shapes(vec![other_row("run()"), self_instance_row("run()")])
+    );
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_decorated_methods_own_self_call_still_binds_beside_a_nested_def_with_its_own() {
+    // The declaration node is the `def` inside its `decorated_definition`: the
+    // method's own `self` is the method's, not a nested callable's.
+    let src = "\
+class A:
+    def go(self):
+        pass
+
+    @decorator
+    def run(self):
+        def each(self):
+            return self.go()
+        self.go()
+        return each
+";
+    assert_eq!(
+        python_go_shapes(src),
+        sorted_shapes(vec![other_row("run().each()"), self_instance_row("run()")])
+    );
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_nested_def_whose_own_parameter_is_not_self_leaves_self_the_methods() {
+    let src = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        def each(item, other_self=None):
+            return self.go()
+        return each
+";
+    assert_eq!(python_go_shapes(src), vec![self_instance_row("run().each()")]);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_lambda_with_its_own_self_in_a_class_body_is_a_method_and_binds() {
+    // A class-level `lambda self:` is a method whose `self` is the instance: no
+    // method encloses it, so no nested callable rebinds the method's `self` —
+    // beside a class in a method as beside a top-level one.
+    let top = "\
+class A:
+    def go(self):
+        pass
+
+    f = lambda self: self.go()
+";
+    let inner = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        class B:
+            f = lambda self: self.go()
+        return B
+";
+    assert_eq!(python_go_shapes(top), vec![self_instance_row("")]);
+    assert_eq!(python_go_shapes(inner), vec![self_instance_row("")]);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_self_bound_outside_the_method_or_in_a_nested_class_is_not_a_nested_callables() {
+    // Only a binding scoped strictly INSIDE the method is a nested callable's.
+    // A `self` the enclosing function binds, around the class, is outside it;
+    // a nested class's own method is no callable nested in this one.
+    let outside = "\
+def make(self):
+    class A:
+        def go(self):
+            pass
+
+        def run():
+            return self.go()
+    return A
+";
+    assert_eq!(python_go_shapes(outside), vec![self_instance_row("run()")]);
+    let nested_class = "\
+class A:
+    def go(self):
+        pass
+
+    def run(self):
+        class B:
+            def m(self):
+                return self.go()
+        return B
+";
+    assert_eq!(python_go_shapes(nested_class), vec![self_instance_row("m()")]);
+}
+
+#[cfg(feature = "lang-python")]
+#[test]
+fn a_nested_defs_own_cls_reads_other_and_a_closure_over_cls_binds() {
+    // The rule reads the receiver the call writes, not a fixed name.
+    let own = "\
+class A:
+    def go(cls):
+        pass
+
+    def run(cls):
+        def each(cls):
+            return cls.go()
+        return each
+";
+    let closure = own.replace("def each(cls):", "def each():");
+    assert_eq!(python_go_shapes(own), vec![other_row("run().each()")]);
+    assert_eq!(python_go_shapes(&closure), vec![self_instance_row("run().each()")]);
+}

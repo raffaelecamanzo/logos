@@ -13,6 +13,255 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.22.3] — 2026-11-02
+
+### Fixed
+
+- **Bandit keeps the checks your project's `.bandit` skips.** Since 1.22.2 Bandit
+  runs with `--skip B404,B603,B607`: an `import subprocess`, a call made without a
+  shell and a program started by name describe no flow and are not reported, while
+  B602 (`shell=True`) and every other check still run. Bandit takes a `--skip` on
+  its command line instead of the `skips` list in `.bandit`, so in 1.22.2 a check a
+  project had silenced there was reported again. Logos now reads the `.bandit` at
+  the project root and appends each id its `[bandit]` section skips to its own list:
+  `skips = B101, B105` runs Bandit with `--skip B404,B603,B607,B101,B105`. A missing
+  `.bandit` adds nothing, and so does one that cannot be read or parsed or names
+  anything but a test Bandit 1.7.10 ships, with a warning in the log; the scan
+  still runs.
+  A `--skip` in a user-level `extra_args` still comes last and replaces the merged
+  list. The workaround of repeating the project's checks in a user-level `--skip`
+  is no longer needed. See [The nine scanners](docs/howto/security.md#the-nine-scanners).
+
+## [1.22.2] — 2026-11-02
+
+### Added
+
+- **An unattended session is refused a guarded action instead of asked.** With
+  `LOGOS_GUARD_MODE=unattended` in the host's environment, the plugin's guardrail
+  answers `deny` wherever it would answer `ask`, a payload it cannot read included,
+  and its reason ends by saying the session runs unattended and the owner decides
+  at review. A session no human watches no longer waits on a prompt, and the
+  quality contract is still not relaxed. `LOGOS_GUARD_ALLOW`, a colon-separated
+  list of project-relative paths, names the contract files such a session may
+  write with a file tool. It never admits a shell command naming one, nor any
+  guarded command: those deny wherever the interactive guard would ask. Any other value of `LOGOS_GUARD_MODE`, or none, asks as before;
+  no value of either variable turns the guardrail off. See
+  [In an unattended session](docs/howto/plugin.md#in-an-unattended-session).
+  **Owner step, once this release's plugin is installed:** retire the local
+  `LOGOS_GUARD_DISABLE` patch. Check that the installed plugin's `hooks/guard.sh`
+  no longer carries it: `grep -n 'LOGOS_GUARD_DISABLE\|\.worktrees/' hooks/guard.sh`
+  there prints nothing (the patch also exited early for a worktree project
+  directory). Delete the patched copy if an older plugin version is still cached,
+  and have the launcher of unattended sessions set `LOGOS_GUARD_MODE=unattended` in
+  place of `LOGOS_GUARD_DISABLE=1`.
+
+### Fixed
+
+- **`Gemfile` and `Rakefile` bind as a `.rake` file does.** The Ruby plugin claims
+  both by exact name, but several lookups keyed on a file's extension left them
+  out: `require_relative "lib/app"` bound from `root.rb` and not from a `Rakefile`
+  or `Gemfile`, a bare `require 'app'` fell to the TypeScript rung and bound a
+  gemspec, and a `module Build` declared in a `Rakefile` was no constant for
+  `Build.step` in `lib/`. Lexical constants, the load path, relative requires,
+  member access, reachability and framework candidacy now ask the file's claim —
+  its extension, else the exact name its language claims. `Gemfile.lock` stays
+  unclaimed, and a repository without either file reads as before.
+- **A C# local types only the calls in its own block.** A plain-name receiver
+  (`svc.Send()`) is typed by the one declaration of its name in scope at the call:
+  a parameter in its method or lambda, a local from its declaration to the end of
+  its block (a `case` section's local in its whole `switch`), a `foreach`,
+  `using`, `catch` or `case` variable in its construct, a pattern or `out`
+  variable to the end of its block — or only inside the loop condition, resource,
+  `catch` filter or query it is declared in — and a field or property in its own
+  type's members; a top-level statement's local types no call. A local in a block
+  that has closed no
+  longer types a later call on an inherited member of its name (that call reads
+  `no-receiver-evidence`), and a name declared with different types in different
+  methods of one file now types each method's calls.
+- **A C or C++ prototype pairs with its definition in another file, and its callers
+  reach the definition.** A header's `void save();` and `repo.cpp`'s
+  `void Repo::save() {}` were two unrelated nodes: a call bound the bodiless
+  prototype and the definition had no callers. Every C and C++ callable now records its
+  parameter types, and a prototype pairs with the one definition of its namespace or
+  class path, name and parameter types in a file whose includes reach it — never a
+  `static` or anonymous-namespace one, and never one of two. Both nodes stay; the
+  prototype records a `References` edge to the definition, a call landing on it binds
+  the definition, and `node` on the bare name lands on the definition. An included
+  prototype whose parameter types differ from a same-named function of the caller's own
+  file is another overload, so `to_text(1.5)` beside `to_text(int)` and a header's
+  `to_text(double)` now stays unbound instead of binding the wrong one. The store
+  migrates to version 45, and the next scan re-extracts every file once
+  ([usage](docs/howto/usage.md)).
+- **Gin route groups compose their prefixes.** A route registered on a group is
+  promoted at the group's path: after `api := r.Group("/api")`, `api.GET("/items", h)`
+  is `GET /api/items`, and `api.GET("/", h)` is `GET /api/`, as Gin serves it. This holds
+  for a group used inline (`r.Group("/api").GET(…)`), a group nested in a group, a group
+  after `Use(…)`, and the `{ … }` block a group's routes are written in. Before, these
+  routes were promoted as if absolute, and a group's `GET("/")` was lost to the
+  application's own `GET /`. A route on a group whose prefix logos cannot prove is not
+  promoted and counts in `routes_not_composed`. That covers a group whose path is not a
+  written string, a `*gin.RouterGroup` parameter, a `range` variable, a name assigned a
+  group after it is declared, and any other call made on a group. A route whose receiver
+  never passes through `Group`, such as `gin.Default()`, an engine parameter, a field like
+  `s.router`, `http.HandleFunc` or a `ServeMux`, keeps its path. A group kept in a field,
+  returned by a helper, passed as a `gin.IRouter` or declared at package level in another
+  file of the package is not recognised as a group, so its routes keep their written path. Gin's verb-first `Handle("GET", "/p", h)` promotes no
+  route.
+- **A Scala local types only the calls in its own block.** A plain-name receiver
+  (`svc.send()`) is typed by the one declaration of its name in scope at the
+  call: a parameter in its `def` or lambda, a local `val` or `var` from its
+  definition to the end of its block, a class parameter or member `val`/`var` in
+  its own type's members. A local in a block that has closed, a nested `def`'s
+  parameter and a typed lambda parameter no longer type a later call of their
+  name (that call reads `no-receiver-evidence`). A name a `case` pattern,
+  generator, untyped lambda, `catch`, `given` or self-type alias binds is refused
+  only inside its own construct, and a name declared with different types in
+  different methods of one file types each method's calls, so a typed parameter
+  of that name elsewhere in the file now types its call. A member of an outer
+  type no longer types a call in a type nested inside it, and a call on a
+  lowercase `object` the file declares (`util.send()`) is no longer typed.
+- **A Java local types only the calls in its own block.** A plain-name receiver
+  (`svc.send()`) is typed by the one declaration of its name in scope at the call:
+  a parameter in its method, constructor, lambda or record, a local from its
+  declaration to the end of its block (a case group's local in its whole
+  `switch`), a `for` or resource variable in its statement, and a field in its
+  class's members and in the inner classes reached through classes that inherit
+  nothing. A parameter or local hides the field of its name, and an untyped lambda
+  parameter, an enhanced-`for`, `catch`, pattern or varargs variable hides it with
+  no type. A local in a block that has closed no longer types a later call on an
+  inherited field of its name (that call reads `no-receiver-evidence`), and a name
+  declared with different types in different methods of one file now types each
+  method's calls. A static type name (`Clock.now()`), `this.x`, `this` and `super`
+  are typed as before.
+- **A Kotlin extension binds only through a receiver of its type.** A call on a
+  proven receiver reaches an extension of that type or of a repository
+  supertype of it, so `d.format("x")` on a `LocalDate` no longer binds `fun
+  LocalDateTime.format`. A call on a receiver of unproven type reaches only an
+  extension of a class the repository declares, so `Base64.getDecoder().decode(s)`
+  no longer binds `fun ServerRequest.decode`. Inside class `Box`, or a subclass
+  of it, a bare `twice()` that no member answers now binds `fun Box.twice()`.
+  Extension calls on library types through an unproven receiver are no longer
+  bound.
+- **A call through an external import no longer makes the import an internal
+  candidate.** A call through an imported module or class (`requests.get(u)`)
+  records its receiver as an alias, and every alias entered the names the
+  reference classifier tests targets against, so the import of an external
+  `requests` read as a possible internal name and lowered `internal_resolution`.
+  Only the renaming alias of an import (`Y` of `import X as Y`) is such a name
+  now; a call's receiver never is. `provably_external` rises wherever an import
+  or a call was counted internal only because a call's receiver spelled its
+  name; `refs_total`, `refs_resolved` and every bound reference are unchanged
+  ([commands](docs/howto/commands.md#internal_resolution-and-doc_resolution)).
+- **Go interface matching reads method signatures and the package clause, and its
+  figures are read out.** A Go type implemented an interface when its method names and
+  parameter counts matched, so `func (Bad) Read(s string) bool` was recorded as
+  implementing `Reader { Read(p []byte) (int, error) }`, and a fake in `package foo_test` implemented `foo`'s
+  unexported interface. Every Go method and interface method now records its parameter
+  and result types, and a method matches only by name and by those types — two spellings
+  of one type, such as a package's own `Entry` and another package's `zapcore.Entry`, are
+  one type, and a spelling that names no one declaration matches nothing. A package is a
+  directory plus its `package` clause, so `foo_test` is a package of its own. `status`'s
+  Go row carries an `interfaces` object: interfaces in scope, computed, implemented, not
+  computed (generic or with an embedding outside the repository) and empty, a generic
+  interface counted generic whether or not it declares methods. The store's logos.db
+  migration 46 makes the next scan re-extract every file once
+  ([usage](docs/howto/usage.md), [commands](docs/howto/commands.md)).
+- **An Express router carries the prefix it is mounted at.** A route registered on
+  an `express.Router()` (or a `Router()` imported from `express`) is promoted at the
+  path its mount gives it: with `router.get('/items', list)` exported from
+  `items.js` and `app.use('/api', router)` in `app.js`, the route is `GET /api/items`,
+  and `router.get('/', list)` is `GET /api`, as Express serves it. The mount may be in
+  the same file or reach the router through the `require` or `import` of the module
+  exporting it. A router mounted at two paths has a route under each, and one mounted
+  on a mounted router joins both paths. The mount itself is no longer a route, so
+  `ANY /api` is gone. A route on a router mounted at a path that is not a written
+  string is not promoted and counts in `routes_not_composed`. So is a route on a
+  router no framework file mounts: logos reads mounts only in files that import the
+  framework or receive an `app`/`router` parameter, and does not follow a router that
+  reaches its mount by being returned from a function or passed to one. A route
+  registered on an `app` or `router` parameter keeps its written path.
+- **TypeScript reads Express template-literal paths.** ``app.get(`${base}/ping`, ping)``
+  in a `.ts` or `.tsx` file is the route `GET ${base}/ping`, linked to `ping`, as it
+  already was in JavaScript. A client call such as ``axios.get(`${base}/x`)`` is still
+  not a route.
+- **A bare Kotlin call inside a lambda with a receiver reads the receiver first.**
+  Inside `with(repo) { save() }`, `repo.apply { save() }` or `repo.run { save() }`,
+  with `repo`'s type proven, the call binds that type's `save`, own or inherited,
+  ahead of a same-named top-level function or member of the enclosing class. With
+  no such member on a type whose whole hierarchy the repository holds, it binds as
+  before. Where nothing proves the receiver (`buildString { append("x") }`, a DSL
+  builder such as `module { single { … } }` or `coRouter { … }`), the call no longer
+  binds a top-level, imported or package function and reads `no-receiver-evidence`;
+  it still reaches a member of the enclosing class or of its companion, a class it
+  constructs (`X(…)`) and a local function. The trailing lambda of `let`, `forEach`, `map` and
+  the other listed non-receiver functions is unchanged. Bound Kotlin call rows go
+  from 1,064 of 3,941 to 1,051 of 3,943 on mixit and from 1,991 of 9,774 to 1,706
+  of 9,822 on koin, whose builder DSLs (`module { }` inside `startKoin { }`, a
+  composable inside a Compose layout) account for the drop. No schema change; a
+  Kotlin file's rows change when it is next extracted.
+- **A nested Python `def` with its own `self` parameter is not the method's
+  `self`.** In `def run(self): def each(self): return self.go()`, the `self` of
+  `each` is its own argument, yet the call read as the method's instance and
+  `each` became a false caller of the class's `go`. A call on a `self` that a
+  `def` or `lambda` nested in the method rebinds with a parameter of that name
+  now reads as another receiver and binds nothing through the class. A nested
+  `def` that declares no such parameter still reads the method's `self` by
+  closure, and the method's own `self.go()` is unchanged.
+- **A gosec scan with no findings reads fresh, not failed.** Logos ran gosec with
+  `-quiet`, which in gosec 2.29.0 suppresses the SARIF file when nothing is
+  found, so every clean Go project recorded "gosec exited with 0, which its
+  template accepts, but wrote no SARIF" and showed the scanner as failed. The
+  template no longer passes `-quiet`: a clean scan writes an empty report and
+  reads fresh with 0 findings. A scanner that exits 0 and writes nothing still
+  reads failed, gosec included
+  ([scanner templates](docs/howto/configuration.md)).
+- **A Kotlin file's `@file:JvmName` names its facade class.** Java reaches a Kotlin
+  file's top-level functions through `<Stem>Kt`, or through the name the file
+  declares with `@file:JvmName("Slugs")`: on `Strings.kt`, `Slugs.slug("x")` now
+  binds and `StringsKt.slug(…)` binds nothing. Two files naming one facade still bind
+  neither. The name is recorded per file (logos.db migration 47), so the first
+  index after upgrading re-extracts every file.
+- **The plugin guardrail reads an rtk prefix, a heredoc body and an option's value
+  as the shell does, and leaves other repositories alone.** `rtk` is a prefix, as
+  `env` is: `rtk grep x .logos/rules.toml`, `rtk ls .logos/` and
+  `rtk proxy cat .logos/rules.toml` pass, and `rtk rm .logos/rules.toml` asks. A
+  heredoc body is data, so a `python3 - <<'EOF'` body naming `logos check --bless`
+  passes, while `bash <<'EOF'` running it asks, as do `cat > .logos/rules.toml <<'EOF'`
+  and any body a shell, `eval` or a patch tool on the line may read. A quoted or
+  escaped glob character is literal
+  (`sqlite3 x/.logos/logos.db "select count(*) from t"` passes, `rm .logos/*` asks),
+  except where a shell or git and `find` match it again. An expansion glued to
+  literal text as the value of an option of logos's that takes one is that value
+  (`logos check --project $L/before` passes; `--rules=$L` still asks). A target
+  placed outside the project passes: an absolute or `~` path, a relative one after
+  a leading `cd /DIR &&`, a repository of its own below the project root, and
+  `logos --project /other check --bless`; a linked worktree's main checkout is the
+  project too. What the guard cannot place (`cd $D`, `cd -`, a subshell, a symlink,
+  `git -C`, a `..` that lands in the project read as text or through the links) is
+  judged as before
+  ([the guardrail](docs/howto/plugin.md#the-guardrail)).
+
+### Changed
+
+- **A Rust trait impl's methods no longer count toward their type (metric semantics 10).**
+  A method of `impl Trait for Type` implements the trait's contract, so it now counts
+  toward no container in Focus and in the `no_god_containers` budget: a type implementing
+  a wide trait is judged on its inherent methods. The impl block written closest around a
+  method decides. `scan --json` reports how many were set aside as
+  `metrics.focus_attribution.trait_impl`, beside `unattributed` and `denominator`.
+  Inherent impls, Go receiver methods, other languages, node ids, symbols, edges and
+  Cohesion are unchanged. The metric semantics move to version 10, so a baseline taken
+  before resets once: the first `gate` after upgrading re-baselines informationally
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-10--a-rust-trait-impls-methods-count-toward-no-container)).
+- **A secret found only in history takes the scope of the code it was found in.** A
+  historical Gitleaks finding was classified by its path alone, so an old copy of a fake
+  key in a `src/` file's test module read `production`. Its line is now looked up in
+  today's file, or read from the file as it was at its commit, and the symbol around it
+  decides `test` or `production`; the path decides only when neither can. A key committed
+  in production code and deleted later still counts. The compared line is never stored,
+  logged or shown, and the gate, ratchet and baseline still count every finding
+  ([security](docs/howto/security.md#findings-in-test-code)).
+
 ## [1.22.1] — 2026-10-30
 
 ### Changed

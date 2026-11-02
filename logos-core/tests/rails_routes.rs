@@ -183,7 +183,7 @@ fn rails_routes_inside_draw_link_to_their_controller_actions() {
     fixture(tmp.path(), ROUTES);
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(
         route_names(rt),
@@ -228,15 +228,15 @@ fn syncing_the_routes_file_equals_a_fresh_index() {
     fixture(live.path(), ROUTES);
     let engine = Engine::start(live.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     write(live.path(), "config/routes.rb", &edited);
-    let synced = engine.sync(&[std::path::PathBuf::from("config/routes.rb")]);
+    let synced = engine.pipeline().sync(&[std::path::PathBuf::from("config/routes.rb")]);
     assert!(synced.warnings.is_empty(), "{:?}", synced.warnings);
 
     let fresh = TempDir::new().unwrap();
     fixture(fresh.path(), &edited);
     let cold = Engine::start(fresh.path()).expect("engine starts");
-    cold.index();
+    cold.pipeline().index();
     let cold_rt = cold.runtime().unwrap();
 
     assert_eq!(route_names(rt), route_names(cold_rt));
@@ -255,7 +255,7 @@ fn syncing_a_controller_that_gains_the_action_links_its_route() {
     fixture(live.path(), ROUTES);
     let engine = Engine::start(live.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
     assert!(!route_handlers(rt).iter().any(|(route, _)| route == "GET /missing"));
 
     write(
@@ -263,7 +263,7 @@ fn syncing_a_controller_that_gains_the_action_links_its_route() {
         "app/controllers/nowhere_controller.rb",
         "class NowhereController < ApplicationController\n  def index\n  end\nend\n",
     );
-    engine.sync(&[std::path::PathBuf::from("app/controllers/nowhere_controller.rb")]);
+    engine.pipeline().sync(&[std::path::PathBuf::from("app/controllers/nowhere_controller.rb")]);
     assert!(
         route_handlers(rt).contains(&pair("GET /missing", "app/controllers/nowhere_controller.rb#index")),
         "{:?}",
@@ -300,7 +300,7 @@ end
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().unwrap();
-    engine.index();
+    engine.pipeline().index();
 
     assert_eq!(route_names(rt), ["GET /dup", "GET /module", "GET /split"]);
     assert_eq!(

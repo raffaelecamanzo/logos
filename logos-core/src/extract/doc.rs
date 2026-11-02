@@ -87,22 +87,7 @@ pub(super) fn extract_one_doc(
     plugin: &dyn LanguagePlugin,
     ctx: &SymbolContext,
 ) -> Facts {
-    let mut facts = Facts {
-        path: input.path.clone(),
-        language: plugin.name().to_string(),
-        partial: false,
-        parse_damaged: false,
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        refs: Vec::new(),
-        warnings: Vec::new(),
-        config_source: None,
-        forwarding: Vec::new(),
-        declared_types: Vec::new(),
-        namespace: None,
-        impl_blocks: Vec::new(),
-        local_bindings: Vec::new(),
-    };
+    let mut facts = Facts::empty(input.path.clone(), plugin.name().to_string());
 
     if parser.set_language(plugin.language()).is_err() {
         facts.warnings.push(format!(
@@ -168,6 +153,7 @@ pub(super) fn extract_one_doc(
         uninherited: false,
         alias: false,
         type_arity: None,
+        callable_signature: None,
     });
 
     // A parser bound to the markdown *inline* grammar, for the per-`inline`-block
@@ -319,6 +305,7 @@ fn walk_sections(
             uninherited: false,
             alias: false,
             type_arity: None,
+            callable_signature: None,
         });
         facts.edges.push(EdgeFact {
             source: parent_symbol.clone(),

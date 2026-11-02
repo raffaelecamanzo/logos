@@ -156,7 +156,7 @@ use crate::models::quality::{
 use crate::runtime::Runtime;
 
 mod attribution;
-pub use attribution::ContainerLinks;
+pub use attribution::{ContainerLinks, MethodOwner};
 mod extended;
 use extended::ContainerIndex;
 pub use extended::{GodContainer, Thresholds};
@@ -365,7 +365,18 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 ///   - *Trait dispatch* (S-713, [FR-QM-20]): an edge reached through a trait is
 ///     skipped by every architecture view and kept by every runtime one. v9
 ///     had not shipped, so these add no version.
+/// - **v10** — a Rust trait impl's method counts toward no container ([CR-257],
+///   [FR-QM-12], S-826); a v9 baseline is incomparable, so the first
+///   post-upgrade gate auto-re-baselines ([FR-GV-10]). A method whose innermost
+///   impl block implements a trait (`impl Trait for Type`, [FR-EX-34]) is the
+///   trait's contract, not the type's surface: it leaves Focus's method count
+///   and the `no_god_containers` budget, and `focus_attribution` reports how
+///   many were set aside (`trait_impl`) beside the denominator, which still
+///   counts them. Inherent impls, Go receivers, ids, symbols, edges and
+///   Cohesion are unchanged.
 ///
+/// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
+/// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
 /// [FR-EX-31]: ../../../docs/specs/requirements/FR-EX-31.md
 /// [FR-EX-19]: ../../../docs/specs/requirements/FR-EX-19.md
 /// [FR-EX-27]: ../../../docs/specs/requirements/FR-EX-27.md
@@ -402,7 +413,7 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
 /// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 9;
+pub const METRIC_SEMANTICS_VERSION: i64 = 10;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -427,8 +438,9 @@ pub const METRIC_SEMANTICS_VERSION: i64 = 9;
 /// `links` unite declarations into containers: the partial types' part links
 /// ([`GraphStore::partial_type_links`](crate::graph_store::GraphStore::partial_type_links),
 /// S-557) make the parts of one type one container for Cohesion and Focus, and
-/// the Rust/Go method attribution (S-510, [`ContainerLinks`]) counts an `impl`
-/// or receiver method toward its struct for Focus.
+/// the Rust/Go method attribution (S-510, [`ContainerLinks`]) counts an inherent
+/// `impl` or receiver method toward its struct for Focus, and a Rust trait
+/// impl's method toward none (S-826).
 ///
 /// `member_access` is the set of file extensions whose plugin declares the
 /// `member_access` capability

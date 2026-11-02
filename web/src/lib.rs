@@ -421,9 +421,9 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// without an engine (below). All six are additionally gated by [`intent_guard`]
 /// (same-origin + per-session token).
 ///
-/// - `/config/save` → [`Engine::config_write`] (validated atomic write).
-/// - `/config/apply` → [`Engine::config_apply`] (explicit reconcile/re-eval).
-/// - `/config/secret` → [`Engine::config_write_secret`] (the masked chat-key
+/// - `/config/save` → [`Configuration::write`](logos_core::Configuration::write) (validated atomic write).
+/// - `/config/apply` → [`Configuration::apply`](logos_core::Configuration::apply) (explicit reconcile/re-eval).
+/// - `/config/secret` → [`Configuration::write_secret`](logos_core::Configuration::write_secret) (the masked chat-key
 ///   write to the gitignored `secrets.toml`, S-169, [FR-CF-06], [NFR-SE-07]).
 /// - `/api/v1/workspace/config/save` and `/api/v1/workspace/config/secret` → the
 ///   **same** two writers, [`write_config`] and [`write_secret`], pointed at the
@@ -512,8 +512,8 @@ pub const SECURITY_INSTALL_POST_ROUTES: &[&str] = &["/api/v1/security/install", 
 /// suppression (reason required, expiry and evidence optional), remove one, and
 /// re-confirm the evidence of one (S-818, [FR-SC-32]), each written to the
 /// committed `.logos/security-ignore.toml` through
-/// [`Engine::security_suppress_with_evidence`], [`Engine::security_unsuppress`]
-/// and [`Engine::security_reconfirm`]. Like every
+/// [`Findings::suppress_with_evidence`](logos_core::Findings::suppress_with_evidence), [`Findings::unsuppress`](logos_core::Findings::unsuppress)
+/// and [`Findings::reconfirm`](logos_core::Findings::reconfirm). Like every
 /// admitted `POST`, each carries the same-origin + per-session intent-token
 /// proof [`intent_guard`] enforces ([NFR-SE-06]): a cross-origin page cannot
 /// hide a finding or bring one back. Kept in lock-step with [`method_guard`],
@@ -953,7 +953,7 @@ fn build_router(state: WebState) -> Router {
         .route("/api/v1/code-refs", get(api_v1::code_refs))
         .route("/api/v1/config", get(api_v1::config))
         // The enriched telemetry read-model the Statistics tab consumes (S-234,
-        // FR-OB-04/FR-UI-27): a thin `Engine::stats(window)` pass-through, `?window=`
+        // FR-OB-04/FR-UI-27): a thin `Graph::stats(window)` pass-through, `?window=`
         // scoping the trailing window (default 7). GET, so the read-only carve-out
         // stack already covers it.
         .route("/api/v1/statistics", get(api_v1::statistics))
@@ -994,7 +994,7 @@ fn build_router(state: WebState) -> Router {
         // the selected member, this one for the workspace — and the reason it is
         // a workspace route and not a `?repo=`-less mode of that one is the
         // engine budget: it reads each member's store directly rather than
-        // through `Engine::stats`, so a view load constructs no member engine
+        // through `Graph::stats`, so a view load constructs no member engine
         // and the resident count is what a `workspace status` already paid.
         .route("/api/v1/workspace/statistics", get(api_v1::workspace_statistics_aggregate))
         // ── The workspace root as a config root (S-450, [FR-WS-30], [ADR-40]):
@@ -1477,7 +1477,7 @@ fn parse_policy_file(raw: Option<&String>) -> Option<PolicyFile> {
     }
 }
 
-/// `POST /config/save` → [`Engine::config_write`] (FR-UI-12, BR-35): validate the
+/// `POST /config/save` → [`Configuration::write`](logos_core::Configuration::write) (FR-UI-12, BR-35): validate the
 /// edited candidate against the load path and, only if valid, replace the file
 /// atomically. Form fields: `file=config|rules`, `content=<toml>`. A rejected
 /// candidate is a validation fault (`422` with the typed message), and the engine
@@ -1492,7 +1492,7 @@ async fn config_save(
             .into_response();
     };
     let content = form.get("content").cloned().unwrap_or_default();
-    let result = bridge(engine, "config_save", Surface::Web, move |e| e.config_write(file, &content)).await;
+    let result = bridge(engine, "config_save", Surface::Web, move |e| e.config().write(file, &content)).await;
     match result {
         Ok(outcome) => Json(outcome).into_response(),
         // Honest-error translation at the façade boundary (ADR-14): a validation
@@ -1517,7 +1517,7 @@ pub(crate) fn config_write_status(e: &anyhow::Error) -> StatusCode {
     }
 }
 
-/// `POST /config/apply` → [`Engine::config_apply`] (FR-UI-13): the explicit Apply
+/// `POST /config/apply` → [`Configuration::apply`](logos_core::Configuration::apply) (FR-UI-13): the explicit Apply
 /// — reconcile/index for `config.toml` or a governance re-eval for `rules.toml`.
 /// Form field: `file=config|rules`. Runs the blocking engine job on the pool via
 /// [`bridge`] (ADR-03), never the surface thread. A structural failure surfaces
@@ -1531,14 +1531,14 @@ async fn config_apply(
         return (StatusCode::BAD_REQUEST, "unknown policy file (expected file=config|rules)")
             .into_response();
     };
-    let result = bridge(engine, "config_apply", Surface::Web, move |e| e.config_apply(file)).await;
+    let result = bridge(engine, "config_apply", Surface::Web, move |e| e.config().apply(file)).await;
     match result {
         Ok(outcome) => Json(outcome).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_text(e)).into_response(),
     }
 }
 
-/// `POST /config/secret` → [`Engine::config_write_secret`] (S-169, FR-CF-06,
+/// `POST /config/secret` → [`Configuration::write_secret`](logos_core::Configuration::write_secret) (S-169, FR-CF-06,
 /// NFR-SE-07): write (or clear) the chat API key into the gitignored
 /// `secrets.toml`. Form field: `api_key=<raw>` (blank clears the key).
 ///
@@ -1552,7 +1552,7 @@ async fn config_save_secret(
 ) -> Response {
     let api_key = form.get("api_key").cloned().unwrap_or_default();
     let result = bridge(engine, "config_save_secret", Surface::Web, move |e| {
-        e.config_write_secret(&api_key)
+        e.config().write_secret(&api_key)
     })
     .await;
     match result {
@@ -2288,12 +2288,20 @@ mod tests {
         assert_eq!(snapshot_reads(fn_body(&code, "async fn overview(")), Vec::<&str>::new());
 
         // The Security widget's data is the stored summary, read through
-        // `OverviewSecurity::read` — never the page's `security_page()` or a
-        // `security_status()` readout, which probe scanner versions: a
+        // `OverviewSecurity::read` — never the page's `findings().page()` or a
+        // `security().status()` readout, which probe scanner versions: a
         // Dashboard load is a read a cross-site page can trigger (S-789).
-        let widget = fn_body(&code, "fn read(e: &Engine) -> Self {");
-        assert!(widget.contains("security_summary("), "the widget reads the stored summary");
-        for probing in ["security_page(", "security_status(", "security_scan("] {
+        // Whitespace removed, so a wrapped chain reads as written in one line,
+        // and every `security()` hop counted, so a façade bound to a local
+        // cannot reach another read.
+        let widget: String = fn_body(&code, "fn read(e: &Engine) -> Self {").split_whitespace().collect();
+        assert!(widget.contains("security().findings().summary("), "the widget reads the stored summary");
+        assert_eq!(
+            widget.matches("security()").count(),
+            widget.matches("security().findings().summary(").count(),
+            "every security hop of the widget reads the stored summary: {widget}"
+        );
+        for probing in [".page(", ".status(", ".scan("] {
             assert!(!widget.contains(probing), "the widget must not call {probing}");
         }
         assert!(
@@ -2309,12 +2317,16 @@ mod tests {
     #[test]
     fn the_coverage_reads_probe_no_tool() {
         let code = production_code(include_str!("api_v1.rs"));
-        let overview = fn_body(&code, "fn read_overview(");
-        assert!(overview.contains("coverage_evidence("), "the Dashboard reads the evidence alone");
-        let page = fn_body(&code, "async fn coverage(");
-        assert!(page.contains("coverage_status_probing(logos_core::coverage::Probes::Never)"), "the page reads unprobed");
-        for body in [overview, page] {
-            assert!(!body.contains("coverage_status("), "a web read must not call the probing coverage_status()");
+        // Whitespace removed and every `coverage()` hop counted, as the widget
+        // check above does: a wrapped chain or a local cannot hide a probe.
+        let unprobed = "coverage().status_probing(logos_core::coverage::Probes::Never)";
+        let overview: String = fn_body(&code, "fn read_overview(").split_whitespace().collect();
+        assert!(overview.contains("coverage().evidence("), "the Dashboard reads the evidence alone");
+        let page: String = fn_body(&code, "async fn coverage(").split_whitespace().collect();
+        assert!(page.contains(unprobed), "the page reads unprobed");
+        for (body, read) in [(&overview, "coverage().evidence("), (&page, unprobed)] {
+            assert_eq!(body.matches("coverage()").count(), body.matches(read).count(), "every coverage hop is `{read}`: {body}");
+            assert!(!body.contains("coverage().status("), "a web read must not call the probing coverage().status()");
             assert!(!body.contains("Probes::Every"), "a web read must not probe");
         }
     }

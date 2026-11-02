@@ -41,7 +41,7 @@ fn indexed() -> (TempDir, Engine) {
     );
     write(tmp.path(), "docs/guide.md", "# Guide\n\nCall `run` to start.\n");
     let engine = Engine::start(tmp.path()).unwrap();
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.persist_failures.is_empty(), "{:?}", result.persist_failures);
     (tmp, engine)
 }
@@ -102,21 +102,21 @@ fn node_callers_callees_and_impact_answer_an_old_form_symbol_with_a_note() {
     let (_tmp, engine) = indexed();
     let (old, canonical) = (old_form(), canonical());
 
-    let node = engine.node(&canonical, false);
+    let node = engine.navigation().node(&canonical, false);
     assert_eq!(node.node.as_ref().map(|n| n.symbol.symbol.as_str()), Some(canonical.as_str()));
-    assert_upgraded("node", &engine.node(&old, false), &node);
+    assert_upgraded("node", &engine.navigation().node(&old, false), &node);
 
-    let callers = engine.callers(&canonical, None);
+    let callers = engine.navigation().callers(&canonical, None);
     assert_eq!(callers.callers.len(), 1, "alpha calls run: {callers:?}");
-    assert_upgraded("callers", &engine.callers(&old, None), &callers);
+    assert_upgraded("callers", &engine.navigation().callers(&old, None), &callers);
 
-    let callees = engine.callees(&canonical, None);
+    let callees = engine.navigation().callees(&canonical, None);
     assert_eq!(callees.callees.len(), 1, "run calls gamma: {callees:?}");
-    assert_upgraded("callees", &engine.callees(&old, None), &callees);
+    assert_upgraded("callees", &engine.navigation().callees(&old, None), &callees);
 
-    let impact = engine.impact(&canonical, None);
+    let impact = engine.navigation().impact(&canonical, None);
     assert!(!impact.upstream.is_empty() && !impact.downstream.is_empty(), "{impact:?}");
-    assert_upgraded("impact", &engine.impact(&old, None), &impact);
+    assert_upgraded("impact", &engine.navigation().impact(&old, None), &impact);
 }
 
 /// Every other tool resolving a symbol argument through the same resolvers
@@ -126,12 +126,12 @@ fn every_resolver_upgrades_an_old_form_symbol() {
     let (_tmp, engine) = indexed();
     let (old, canonical) = (old_form(), canonical());
 
-    assert_upgraded("explore", &engine.explore(&old, None), &engine.explore(&canonical, None));
-    assert_upgraded("precedent", &engine.precedent(&old, None), &engine.precedent(&canonical, None));
-    let docs = engine.referencing_docs(&canonical);
+    assert_upgraded("explore", &engine.navigation().explore(&old, None), &engine.navigation().explore(&canonical, None));
+    assert_upgraded("precedent", &engine.navigation().precedent(&old, None), &engine.navigation().precedent(&canonical, None));
+    let docs = engine.navigation().referencing_docs(&canonical);
     assert!(docs.resolved.is_some(), "{docs:?}");
-    assert_upgraded("referencing_docs", &engine.referencing_docs(&old), &docs);
-    assert_upgraded("implements", &engine.implements(&old), &engine.implements(&canonical));
+    assert_upgraded("referencing_docs", &engine.navigation().referencing_docs(&old), &docs);
+    assert_upgraded("implements", &engine.navigation().implements(&old), &engine.navigation().implements(&canonical));
 }
 
 /// `impact_intersection` resolves each declared symbol through the counting
@@ -141,8 +141,8 @@ fn every_resolver_upgrades_an_old_form_symbol() {
 fn impact_intersection_upgrades_a_declared_old_form_symbol() {
     let (_tmp, engine) = indexed();
     let gamma = coordinate::symbol("src/`lib.rs`/gamma().");
-    let canonical = engine.impact_intersection(&[format!("a={}", canonical()), format!("b={gamma}")], None);
-    let old = engine.impact_intersection(&[format!("a={}", old_form()), format!("b={gamma}")], None);
+    let canonical = engine.navigation().impact_intersection(&[format!("a={}", canonical()), format!("b={gamma}")], None);
+    let old = engine.navigation().impact_intersection(&[format!("a={}", old_form()), format!("b={gamma}")], None);
 
     let (mut old_json, mut canonical_json) =
         (serde_json::to_value(&old).unwrap(), serde_json::to_value(&canonical).unwrap());
@@ -167,15 +167,15 @@ fn a_symbol_carrying_another_repositorys_coordinate_resolves_as_unknown() {
     let (_tmp, engine) = indexed();
     let foreign = foreign();
 
-    let node = engine.node(&foreign, false);
+    let node = engine.navigation().node(&foreign, false);
     assert!(node.node.is_none(), "{node:?}");
-    let callers = engine.callers(&foreign, None);
+    let callers = engine.navigation().callers(&foreign, None);
     assert!(callers.resolved.is_none() && callers.callers.is_empty(), "{callers:?}");
-    let callees = engine.callees(&foreign, None);
+    let callees = engine.navigation().callees(&foreign, None);
     assert!(callees.resolved.is_none() && callees.callees.is_empty(), "{callees:?}");
-    let impact = engine.impact(&foreign, None);
+    let impact = engine.navigation().impact(&foreign, None);
     assert!(impact.resolved.is_none() && impact.upstream.is_empty(), "{impact:?}");
-    let elements = engine.graph_elements(Some(&foreign), None, None, None, None, false);
+    let elements = engine.graph().elements(Some(&foreign), None, None, None, None, false);
     assert!(elements.nodes.is_empty(), "{elements:?}");
     assert_eq!(elements.warnings, vec![format!("unknown seed symbol: {foreign}")]);
 
@@ -193,8 +193,8 @@ fn a_symbol_carrying_another_repositorys_coordinate_resolves_as_unknown() {
 #[test]
 fn a_web_seed_with_an_old_form_symbol_renders_the_canonical_graph() {
     let (_tmp, engine) = indexed();
-    let canonical = engine.graph_elements(Some(&canonical()), None, None, None, None, false);
-    let old = engine.graph_elements(Some(&old_form()), None, None, None, None, false);
+    let canonical = engine.graph().elements(Some(&canonical()), None, None, None, None, false);
+    let old = engine.graph().elements(Some(&old_form()), None, None, None, None, false);
 
     assert!(canonical.nodes.len() >= 3, "a seeded neighbourhood: {canonical:?}");
     assert!(canonical.warnings.is_empty(), "{:?}", canonical.warnings);
@@ -213,7 +213,7 @@ fn a_web_seed_with_an_old_form_symbol_renders_the_canonical_graph() {
 #[test]
 fn a_rollup_seed_is_never_upgraded() {
     let (_tmp, engine) = indexed();
-    let file = engine.graph_elements(Some("src/lib.rs"), None, None, None, Some(GraphGranularity::File), false);
+    let file = engine.graph().elements(Some("src/lib.rs"), None, None, None, Some(GraphGranularity::File), false);
     assert_eq!(file.seed.as_deref(), Some("src/lib.rs"));
     assert!(!file.nodes.is_empty(), "{file:?}");
     assert!(file.warnings.is_empty(), "{:?}", file.warnings);

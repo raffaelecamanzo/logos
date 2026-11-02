@@ -59,7 +59,7 @@ fn indexed_under(fixture: fixtures::Fixture, policy: Option<&str>) -> (TempDir, 
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -160,7 +160,7 @@ fn cold(fixture: fixtures::Fixture, tmp: &TempDir) -> (Vec<(String, String, Stri
     }
     coordinate::pin(fresh.path());
     let engine = Engine::start(fresh.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     binding_facts(engine.runtime().unwrap())
 }
 
@@ -436,7 +436,7 @@ fn a_php_trait_ends_the_inherited_walk_and_a_relative_name_records_nothing() {
 #[test]
 fn precedent_returns_the_sibling_converters() {
     let (_tmp, engine) = indexed(fixtures::WERKZEUG);
-    let result = engine.precedent("UUIDConverter", None);
+    let result = engine.navigation().precedent("UUIDConverter", None);
     let names: Vec<&str> = result.precedents.iter().map(|p| p.symbol.name.as_str()).collect();
     assert!(names.contains(&"UnicodeConverter"), "{names:?}");
 }
@@ -481,7 +481,7 @@ fn sync_equals_a_full_reindex_when_a_python_base_changes() {
         original.to_string(),
     ] {
         write(tmp.path(), base, &edit);
-        engine.sync(&[base.into()]);
+        engine.pipeline().sync(&[base.into()]);
         assert_eq!(binding_facts(rt), cold(fixture, &tmp), "after writing:\n{edit}");
     }
 }
@@ -504,7 +504,7 @@ fn sync_equals_a_full_reindex_when_a_python_class_changes_its_base() {
         original.to_string(),
     ] {
         write(tmp.path(), sub, &edit);
-        engine.sync(&[sub.into()]);
+        engine.pipeline().sync(&[sub.into()]);
         assert_eq!(binding_facts(rt), cold(fixture, &tmp), "after writing:\n{edit}");
     }
 }
@@ -528,7 +528,7 @@ fn sync_equals_a_full_reindex_when_a_csharp_supertype_changes_kind() {
         original.to_string(),
     ] {
         write(tmp.path(), file, &edit);
-        engine.sync(&[file.into()]);
+        engine.pipeline().sync(&[file.into()]);
         assert_eq!(binding_facts(rt), cold(fixture, &tmp), "after writing:\n{edit}");
     }
 }
@@ -547,7 +547,7 @@ fn sync_equals_a_full_reindex_when_a_php_supertype_changes() {
         let original = fixture.iter().find(|(rel, _)| *rel == file).unwrap().1;
         for edit in [original.replace(from, to), original.to_string()] {
             write(tmp.path(), file, &edit);
-            engine.sync(&[file.into()]);
+            engine.pipeline().sync(&[file.into()]);
             assert_eq!(binding_facts(rt), cold(fixture, &tmp), "after writing:\n{edit}");
         }
     }

@@ -530,7 +530,7 @@ fn coverage_survives_a_full_index() {
     assert!(!before.is_empty());
 
     let engine = crate::Engine::start(&r).expect("engine starts");
-    let _ = engine.index();
+    let _ = engine.pipeline().index();
 
     let after = coverage_rows(&super::super::open(&r).unwrap());
     assert_eq!(

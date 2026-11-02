@@ -1,5 +1,5 @@
 //! Integration tests for the read-only graph-elements accessor
-//! (`Engine::graph_elements`, S-084 / FR-UI-08, FR-DB-05, ADR-29), exercised
+//! (`Graph::elements`, S-084 / FR-UI-08, FR-DB-05, ADR-29), exercised
 //! end-to-end through the [`Engine`] façade against a real temp-directory
 //! fixture.
 //!
@@ -67,7 +67,7 @@ pub fn gamma() {}
 /// An indexed long-lived engine over the fixture (hydration needs `start`).
 fn indexed_engine(tmp: &TempDir) -> Engine {
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     engine
 }
@@ -79,7 +79,7 @@ fn whole_graph_returns_layered_nodes_and_typed_edges_that_trace_to_the_graph() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let elements = engine.graph_elements(None, None, None, None, None, false);
+    let elements = engine.graph().elements(None, None, None, None, None, false);
     assert!(elements.warnings.is_empty(), "{:?}", elements.warnings);
     assert_eq!(elements.seed, None, "whole-graph snapshot echoes no seed");
 
@@ -176,7 +176,7 @@ The entry point is `compute` in `src/lib.rs`.
     );
 
     let engine = indexed_engine(&tmp);
-    let elements = engine.graph_elements(None, None, None, None, None, false);
+    let elements = engine.graph().elements(None, None, None, None, None, false);
     assert!(elements.warnings.is_empty(), "{:?}", elements.warnings);
 
     // All three presentation layers reach the canvas — the headline ADR-34 fix.
@@ -228,13 +228,13 @@ fn repeated_calls_mutate_no_store() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let before = engine.status();
+    let before = engine.graph().status();
     // Hammer the accessor in whole-graph and seed-scoped modes.
     for _ in 0..5 {
-        let _ = engine.graph_elements(None, None, None, None, None, false);
-        let _ = engine.graph_elements(Some("alpha"), Some(2), None, None, None, false);
+        let _ = engine.graph().elements(None, None, None, None, None, false);
+        let _ = engine.graph().elements(Some("alpha"), Some(2), None, None, None, false);
     }
-    let after = engine.status();
+    let after = engine.graph().status();
 
     assert_eq!(
         (before.node_count, before.edge_count, before.file_count),
@@ -250,8 +250,8 @@ fn a_tight_cap_elides_the_remainder_and_reports_it() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.graph_elements(None, None, None, None, None, false);
-    let capped = engine.graph_elements(None, Some(2), None, None, None, false);
+    let full = engine.graph().elements(None, None, None, None, None, false);
+    let capped = engine.graph().elements(None, Some(2), None, None, None, false);
 
     assert_eq!(capped.cap, 2);
     assert_eq!(capped.nodes.len(), 2, "the cap bounds the rendered node count");
@@ -282,11 +282,11 @@ fn seed_scoped_mode_returns_the_seed_neighbourhood() {
     // The seed is the canonical SCIP symbol string (what the web `/graph?seed=`
     // link carries), not the human name — resolve it via search, exactly as the
     // canvas's search-to-locate will.
-    let hit = engine.search("gamma", None, None);
+    let hit = engine.navigation().search("gamma", None, None);
     let gamma = &hit.hits.iter().find(|h| h.name == "gamma").expect("gamma resolves").symbol;
 
-    let whole = engine.graph_elements(None, None, None, None, None, false);
-    let scoped = engine.graph_elements(Some(gamma), None, None, None, None, false);
+    let whole = engine.graph().elements(None, None, None, None, None, false);
+    let scoped = engine.graph().elements(Some(gamma), None, None, None, None, false);
 
     assert_eq!(scoped.seed.as_deref(), Some(gamma.as_str()), "the seed is echoed back");
     assert!(scoped.warnings.is_empty(), "{:?}", scoped.warnings);
@@ -319,12 +319,12 @@ fn seed_scoped_cap_elides_the_remainder_and_reports_it() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let hit = engine.search("gamma", None, None);
+    let hit = engine.navigation().search("gamma", None, None);
     let gamma = &hit.hits.iter().find(|h| h.name == "gamma").expect("gamma resolves").symbol;
 
-    let full = engine.graph_elements(Some(gamma), None, None, None, None, false);
+    let full = engine.graph().elements(Some(gamma), None, None, None, None, false);
     assert!(full.total_nodes >= 2, "gamma's neighbourhood spans several nodes");
-    let capped = engine.graph_elements(Some(gamma), Some(1), None, None, None, false);
+    let capped = engine.graph().elements(Some(gamma), Some(1), None, None, None, false);
 
     assert_eq!(capped.seed.as_deref(), Some(gamma.as_str()));
     assert_eq!(capped.cap, 1);
@@ -356,10 +356,10 @@ fn seed_scoped_cap_always_keeps_the_seed_node() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let hit = engine.search("gamma", None, None);
+    let hit = engine.navigation().search("gamma", None, None);
     let gamma = &hit.hits.iter().find(|h| h.name == "gamma").expect("gamma resolves").symbol;
 
-    let capped = engine.graph_elements(Some(gamma), Some(1), None, None, None, false);
+    let capped = engine.graph().elements(Some(gamma), Some(1), None, None, None, false);
     assert_eq!(capped.nodes.len(), 1, "the cap bounds the rendered set to one node");
     assert_eq!(
         capped.nodes[0].label, "gamma",
@@ -375,8 +375,8 @@ fn cap_zero_elides_everything_without_underflow() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.graph_elements(None, None, None, None, None, false);
-    let zero = engine.graph_elements(None, Some(0), None, None, None, false);
+    let full = engine.graph().elements(None, None, None, None, None, false);
+    let zero = engine.graph().elements(None, Some(0), None, None, None, false);
 
     assert_eq!(zero.cap, 0);
     assert!(zero.nodes.is_empty(), "cap 0 renders no nodes");
@@ -393,7 +393,7 @@ fn unknown_seed_yields_an_honest_empty_snapshot_with_a_warning() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let elements = engine.graph_elements(Some("does_not_exist"), None, None, None, None, false);
+    let elements = engine.graph().elements(Some("does_not_exist"), None, None, None, None, false);
     assert_eq!(elements.seed.as_deref(), Some("does_not_exist"));
     assert!(elements.nodes.is_empty(), "no node is fabricated for an unknown seed");
     assert!(elements.edges.is_empty());
@@ -411,8 +411,8 @@ fn output_is_deterministic_across_calls() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let a = serde_json::to_value(engine.graph_elements(None, None, None, None, None, false)).unwrap();
-    let b = serde_json::to_value(engine.graph_elements(None, None, None, None, None, false)).unwrap();
+    let a = serde_json::to_value(engine.graph().elements(None, None, None, None, None, false)).unwrap();
+    let b = serde_json::to_value(engine.graph().elements(None, None, None, None, None, false)).unwrap();
     assert_eq!(a, b, "same graph state ⇒ byte-identical elements (NFR-RA-06)");
 }
 
@@ -480,7 +480,7 @@ fn layer_filter_refills_the_budget_with_previously_elided_nodes() {
 
     // Unfiltered at the tight cap: the doc layer is present and the high-degree
     // DocFile claims at least one of the three slots (the guard below proves it).
-    let unfiltered = engine.graph_elements(None, Some(CAP), None, None, None, false);
+    let unfiltered = engine.graph().elements(None, Some(CAP), None, None, None, false);
     let code_in_unfiltered =
         unfiltered.nodes.iter().filter(|n| n.layer == GraphLayer::Code).count();
     let doc_in_unfiltered =
@@ -495,7 +495,7 @@ fn layer_filter_refills_the_budget_with_previously_elided_nodes() {
     // Filter to the code layer at the SAME cap: the freed slot(s) backfill with
     // code nodes, so strictly more code nodes are shown than when unfiltered.
     let code_only =
-        engine.graph_elements(None, Some(CAP), Some(&[GraphLayer::Code]), None, None, false);
+        engine.graph().elements(None, Some(CAP), Some(&[GraphLayer::Code]), None, None, false);
     assert!(
         code_only.nodes.iter().all(|n| n.layer == GraphLayer::Code),
         "the layer filter returns only code-layer nodes: {:?}",
@@ -532,7 +532,7 @@ fn empty_layer_filter_yields_an_honest_empty_graph() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let none = engine.graph_elements(None, None, Some(&[]), None, None, false);
+    let none = engine.graph().elements(None, None, Some(&[]), None, None, false);
     assert!(none.nodes.is_empty(), "no layer selected ⇒ no nodes: {:?}", none.nodes);
     assert!(none.edges.is_empty(), "no nodes ⇒ no edges");
     assert_eq!(none.total_nodes, 0, "the filtered in-scope total is honestly zero");
@@ -543,7 +543,7 @@ fn empty_layer_filter_yields_an_honest_empty_graph() {
     // matches nothing and empties the tier — not a silent fall-back to all layers
     // (S-124 / FR-UI-15, NFR-CC-04).
     let none_module =
-        engine.graph_elements(None, None, Some(&[]), None, Some(GraphGranularity::Module), false);
+        engine.graph().elements(None, None, Some(&[]), None, Some(GraphGranularity::Module), false);
     assert!(
         none_module.nodes.is_empty(),
         "no layer selected ⇒ no module clusters: {:?}",
@@ -601,9 +601,9 @@ fn edge_type_filter_rebudgets_the_degree_ranking() {
     let tmp = edge_rebudget_fixture();
     let engine = indexed_engine(&tmp);
 
-    let unfiltered = engine.graph_elements(None, Some(1), None, None, None, false);
+    let unfiltered = engine.graph().elements(None, Some(1), None, None, None, false);
     let calls_only =
-        engine.graph_elements(None, Some(1), None, Some(&[logos_core::model::EdgeKind::Calls]), None, false);
+        engine.graph().elements(None, Some(1), None, Some(&[logos_core::model::EdgeKind::Calls]), None, false);
 
     assert_eq!(unfiltered.nodes.len(), 1, "cap 1 keeps a single node");
     assert_eq!(calls_only.nodes.len(), 1, "cap 1 keeps a single node under the filter too");
@@ -624,8 +624,8 @@ fn edge_type_filter_restricts_edges_and_rebases_the_tally() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.graph_elements(None, None, None, None, None, false);
-    let calls_only = engine.graph_elements(None, None, None, Some(&[EdgeKind::Calls]), None, false);
+    let full = engine.graph().elements(None, None, None, None, None, false);
+    let calls_only = engine.graph().elements(None, None, None, Some(&[EdgeKind::Calls]), None, false);
 
     assert!(
         calls_only.edges.iter().all(|e| e.edge_type == Some(EdgeKind::Calls)),
@@ -662,8 +662,8 @@ fn empty_edge_type_filter_yields_honest_empty_edges_but_keeps_the_nodes() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.graph_elements(None, None, None, None, None, false);
-    let no_edges = engine.graph_elements(None, None, None, Some(&[]), None, false);
+    let full = engine.graph().elements(None, None, None, None, None, false);
+    let no_edges = engine.graph().elements(None, None, None, Some(&[]), None, false);
 
     assert!(no_edges.edges.is_empty(), "no edge type selected ⇒ no edges: {:?}", no_edges.edges);
     assert_eq!(no_edges.total_edges, 0, "the filtered in-scope edge total is honestly zero");
@@ -690,8 +690,8 @@ fn default_granularity_is_the_symbol_visualization_view() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let default = engine.graph_elements(None, None, None, None, None, false);
-    let symbol = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
+    let default = engine.graph().elements(None, None, None, None, None, false);
+    let symbol = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
 
     assert_eq!(default.granularity, GraphGranularity::Symbol, "the default tier is symbol");
     assert_eq!(
@@ -719,8 +719,8 @@ fn granularity_module_selects_the_module_rollup_cluster_view() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let symbol = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
-    let module = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Module), false);
+    let symbol = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
+    let module = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Module), false);
 
     assert_eq!(module.granularity, GraphGranularity::Module, "the module tier is echoed back");
     assert!(!module.nodes.is_empty(), "the module rollup yields cluster vertices");
@@ -757,8 +757,8 @@ fn granularity_file_selects_the_file_rollup_cluster_view() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let symbol = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
-    let file = engine.graph_elements(None, None, None, None, Some(GraphGranularity::File), false);
+    let symbol = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
+    let file = engine.graph().elements(None, None, None, None, Some(GraphGranularity::File), false);
 
     assert_eq!(file.granularity, GraphGranularity::File, "the file tier is echoed back");
     assert!(!file.nodes.is_empty(), "the file rollup yields cluster vertices");
@@ -779,7 +779,7 @@ fn granularity_file_selects_the_file_rollup_cluster_view() {
     // The altitude ladder is two-level coarse: the module rollup is at least as
     // coarse as the file rollup (ADR-36 — low zoom-out aggregates further). For a
     // fixture without explicit `mod` blocks the two coincide, so the bound is `<=`.
-    let module = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Module), false);
+    let module = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Module), false);
     assert!(
         module.total_nodes <= file.total_nodes,
         "the module rollup is at least as coarse as the file rollup ({} modules <= {} files)",
@@ -815,7 +815,7 @@ fn edge_type_filter_is_a_noop_at_the_rollup_tiers() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let unfiltered = engine.graph_elements(None, None, None, None, Some(GraphGranularity::File), false);
+    let unfiltered = engine.graph().elements(None, None, None, None, Some(GraphGranularity::File), false);
     assert!(
         !unfiltered.edges.is_empty(),
         "the call chain crosses files, so the file rollup has at least one aggregate edge",
@@ -823,7 +823,7 @@ fn edge_type_filter_is_a_noop_at_the_rollup_tiers() {
 
     // An explicit edge-type filter at the file tier must NOT drop the kind-less
     // aggregate edges (unlike the symbol tier, where it filters by concrete kind).
-    let filtered = engine.graph_elements(
+    let filtered = engine.graph().elements(
         None,
         None,
         None,
@@ -874,7 +874,7 @@ fn rollup_tiers_exclude_documentation_and_artifact_files_and_modules() {
     // The symbol (visualization) tier DOES surface the doc AND artifact layers — the
     // guards below are meaningful, not vacuous (this is the ADR-34 behaviour S-113
     // added; the rollups must drop both).
-    let symbol = engine.graph_elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
+    let symbol = engine.graph().elements(None, None, None, None, Some(GraphGranularity::Symbol), false);
     assert!(
         symbol.nodes.iter().any(|n| n.layer == GraphLayer::Doc),
         "the symbol tier surfaces the doc layer (doc guard is meaningful): {:?}",
@@ -889,7 +889,7 @@ fn rollup_tiers_exclude_documentation_and_artifact_files_and_modules() {
     // The file and module rollup tiers exclude documentation AND config/artifacts
     // entirely (FR-DG-06 / FR-CG-05): only the code layer, no `.md`/`.yaml` cluster.
     for tier in [GraphGranularity::File, GraphGranularity::Module] {
-        let rollup = engine.graph_elements(None, None, None, None, Some(tier), false);
+        let rollup = engine.graph().elements(None, None, None, None, Some(tier), false);
         assert!(
             rollup.nodes.iter().all(|n| n.layer == GraphLayer::Code),
             "{tier:?} rollup excludes non-code layers (FR-DG-06/FR-CG-05): {:?}",
@@ -912,10 +912,10 @@ fn a_rollup_tier_honours_the_cap_and_reports_the_elided_remainder() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let full = engine.graph_elements(None, None, None, None, Some(GraphGranularity::File), false);
+    let full = engine.graph().elements(None, None, None, None, Some(GraphGranularity::File), false);
     assert!(full.total_nodes >= 2, "the file rollup spans several clusters");
     let capped =
-        engine.graph_elements(None, Some(1), None, None, Some(GraphGranularity::File), false);
+        engine.graph().elements(None, Some(1), None, None, Some(GraphGranularity::File), false);
 
     assert_eq!(capped.granularity, GraphGranularity::File);
     assert_eq!(capped.nodes.len(), 1, "the cap bounds the rendered cluster count");
@@ -936,8 +936,8 @@ fn a_rollup_tier_honours_the_cap_and_reports_the_elided_remainder() {
     // the symbol tier and at the module tier each report `elided == total − rendered`
     // against their OWN total, and those totals differ (clusters vs symbols), proving
     // the denominator is per-tier.
-    let capped_symbol = engine.graph_elements(None, Some(1), None, None, Some(GraphGranularity::Symbol), false);
-    let capped_module = engine.graph_elements(None, Some(1), None, None, Some(GraphGranularity::Module), false);
+    let capped_symbol = engine.graph().elements(None, Some(1), None, None, Some(GraphGranularity::Symbol), false);
+    let capped_module = engine.graph().elements(None, Some(1), None, None, Some(GraphGranularity::Module), false);
     assert_eq!(
         capped_symbol.elided_nodes,
         capped_symbol.total_nodes - 1,
@@ -966,8 +966,8 @@ fn intent_overlay_is_a_byte_identical_noop_without_governing_docs() {
     let tmp = fixture();
     let engine = indexed_engine(&tmp);
 
-    let off = serde_json::to_value(engine.graph_elements(None, None, None, None, None, false)).unwrap();
-    let on = serde_json::to_value(engine.graph_elements(None, None, None, None, None, true)).unwrap();
+    let off = serde_json::to_value(engine.graph().elements(None, None, None, None, None, false)).unwrap();
+    let on = serde_json::to_value(engine.graph().elements(None, None, None, None, None, true)).unwrap();
     assert_eq!(
         off, on,
         "with no governing-doc nodes the intent overlay admits nothing — byte-identical \
@@ -1012,7 +1012,7 @@ The entry point is `target` in `src/lib.rs`.
 /// as the canvas's search-to-locate does.
 #[cfg(feature = "lang-markdown")]
 fn target_symbol(engine: &Engine) -> String {
-    let hit = engine.search("target", None, None);
+    let hit = engine.navigation().search("target", None, None);
     hit.hits
         .iter()
         .find(|h| h.name == "target")
@@ -1036,8 +1036,8 @@ fn intent_overlay_admits_governing_doc_nodes_adjacent_to_kept_code() {
     let engine = indexed_engine(&tmp);
     let target = target_symbol(&engine);
 
-    let off = engine.graph_elements(Some(&target), Some(1), None, None, None, false);
-    let on = engine.graph_elements(Some(&target), Some(1), None, None, None, true);
+    let off = engine.graph().elements(Some(&target), Some(1), None, None, None, false);
+    let on = engine.graph().elements(Some(&target), Some(1), None, None, None, true);
     assert!(off.warnings.is_empty(), "{:?}", off.warnings);
     assert!(on.warnings.is_empty(), "{:?}", on.warnings);
 
@@ -1089,8 +1089,8 @@ fn intent_overlay_never_reduces_the_code_anchor_set() {
     let engine = indexed_engine(&tmp);
 
     for cap in [0usize, 1, 2, 3, 5, 250] {
-        let off = engine.graph_elements(None, Some(cap), None, None, None, false);
-        let on = engine.graph_elements(None, Some(cap), None, None, None, true);
+        let off = engine.graph().elements(None, Some(cap), None, None, None, false);
+        let on = engine.graph().elements(None, Some(cap), None, None, None, true);
 
         let code_ids = |els: &logos_core::models::navigation::GraphElements| {
             els.nodes
@@ -1120,8 +1120,8 @@ fn intent_overlay_elided_counts_account_for_the_overlay() {
     let engine = indexed_engine(&tmp);
     let target = target_symbol(&engine);
 
-    let off = engine.graph_elements(Some(&target), Some(1), None, None, None, false);
-    let on = engine.graph_elements(Some(&target), Some(1), None, None, None, true);
+    let off = engine.graph().elements(Some(&target), Some(1), None, None, None, false);
+    let on = engine.graph().elements(Some(&target), Some(1), None, None, None, true);
 
     // The elided invariant holds for both — the accounting is always consistent.
     assert_eq!(
@@ -1165,8 +1165,8 @@ fn intent_overlay_admits_out_of_scope_docs_and_widens_the_total() {
     let tmp = intent_overlay_fixture();
     let engine = indexed_engine(&tmp);
 
-    let code_only = engine.graph_elements(None, None, Some(&[GraphLayer::Code]), None, None, false);
-    let with_intent = engine.graph_elements(None, None, Some(&[GraphLayer::Code]), None, None, true);
+    let code_only = engine.graph().elements(None, None, Some(&[GraphLayer::Code]), None, None, false);
+    let with_intent = engine.graph().elements(None, None, Some(&[GraphLayer::Code]), None, None, true);
 
     // The code-layer filter alone yields no doc node — the structural in-scope set
     // excludes the doc layer entirely.

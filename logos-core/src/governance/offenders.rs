@@ -106,7 +106,7 @@ impl OffendersFilter {
     }
 }
 
-/// The listing behind [`Engine::offenders`]: the last snapshot's uncapped
+/// The listing behind [`Readouts::offenders`](crate::Readouts::offenders): the last snapshot's uncapped
 /// lists, flattened in [`WorstOffenders::DIMENSIONS`] order and each list's
 /// computed order, then narrowed by `filter` — which leaves out equality's
 /// entries unless it names that dimension.

@@ -36,7 +36,7 @@ fn fixture() -> tempfile::TempDir {
         "<?php\n\nnamespace Monolog;\n\nfinal class Utils\n{\n    public static function canonicalize(string $path): string\n    {\n        return $path;\n    }\n}\n",
     )
     .unwrap();
-    Engine::start(tmp.path()).expect("engine starts").index();
+    Engine::start(tmp.path()).expect("engine starts").pipeline().index();
     tmp
 }
 
@@ -67,10 +67,10 @@ const TOOLS: [(&str, &str); 4] = [
 fn cli_payload(root: &Path, tool: &str, text: &str) -> Value {
     let engine = Engine::start(root).expect("engine");
     match tool {
-        "callers" => serde_json::to_value(engine.callers(text, None)),
-        "callees" => serde_json::to_value(engine.callees(text, None)),
-        "impact" => serde_json::to_value(engine.impact(text, None)),
-        "explore" => serde_json::to_value(engine.explore(text, None)),
+        "callers" => serde_json::to_value(engine.navigation().callers(text, None)),
+        "callees" => serde_json::to_value(engine.navigation().callees(text, None)),
+        "impact" => serde_json::to_value(engine.navigation().impact(text, None)),
+        "explore" => serde_json::to_value(engine.navigation().explore(text, None)),
         other => panic!("not a navigation tool: {other}"),
     }
     .expect("serialize")

@@ -947,8 +947,8 @@ fn rewrite(root: &Path, edit: impl FnOnce(&mut IgnoreFile) -> Result<IgnoreEntry
 
 // ── What the engine's two evidence writes do ([FR-SC-32], [S-818]) ───────────
 //
-// `Engine::security_suppress_with_evidence` and
-// `Engine::security_reconfirm_with_evidence` are one call each into the two
+// `Findings::suppress_with_evidence` and
+// `Findings::reconfirm_with_evidence` are one call each into the two
 // functions below. The one thing they cannot know is the graph's answer to
 // "which symbol encloses this finding", which the engine computes from the open
 // index and hands in as `enclosing`: the identity of the symbol, or `None` when

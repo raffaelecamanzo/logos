@@ -44,6 +44,10 @@ mod arity;
 // block headers, receiver modes, enum variant names and required signatures,
 // read off the `@item.*` captures a plugin's `symbols` query declares.
 mod assoc;
+// Fields declared at their name (S-837, CR-264, FR-EX-20, FR-EX-26): one
+// marker and one settle pass for Python's and JavaScript's attributes and Ruby's
+// state, the owner and precedence rules read off the plugin's query settings.
+mod at_name;
 mod complexity;
 // How one declaration completes another (S-577, FR-EX-29): out-of-line members
 // merge into their declaration, prototypes pair with definitions, class-body
@@ -129,7 +133,12 @@ mod preprocess;
 // Java receiver typing (S-467, CR-150 §3.2 A): retypes a receiver call's row to
 // a type-qualified Path-form `T::name` where the file proves `T`.
 mod receiver;
+mod receiver_lambda;
 mod shape;
+// A callable's parameter and result types, and a generic type's type
+// parameters (S-830, CR-260, FR-RS-18): read off the `@signature.*` captures a
+// plugin's `symbols` query declares, into `NodeFact::callable_signature`.
+mod signature;
 // The name a test macro declares by its arguments (S-580, CR-184 — C++):
 // `TEST(Suite, Name)` is `Suite.Name`, `TEST_CASE("name")` is `name`.
 mod test_name;
@@ -149,7 +158,6 @@ pub use locals::LocalBindingFact;
 pub use symbol::SymbolContext;
 
 use std::cell::OnceCell;
-use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -194,29 +202,6 @@ const SELF_TYPE_CAPTURE: &str = "symbol.self_type";
 /// multi-name form (C's `int a, b;`) has always recorded. Not a [`NodeKind`], so
 /// [`kind_for_capture`] never mistakes it for a declaration.
 const EACH_NAME_CAPTURE: &str = "symbol.names";
-
-/// A `symbols`-query marker, in the same match as a `@symbol.<kind>` capture,
-/// that the declaration is an **attribute an assignment declares** (S-543,
-/// [FR-EX-20]): Python's class-body `x = …` / `x: int` and a method's
-/// `self.x = …`, and JavaScript's `this.x = …` (S-542). Such a declaration is
-/// taken at its name node, never lifted to the assignment, so what the
-/// assignment holds — an initialiser's calls, the method's own `self.x` access —
-/// stays its scope's. It is owned by its class:
-/// the declaration it sits in when that is class-like, else the class of the
-/// method it sits in; one sitting anywhere else declares nothing. Each name is
-/// declared once per class — a class-body one ahead of a method write, then the
-/// first in source order ([`settle_attributes`]). Not a [`NodeKind`], so
-/// [`kind_for_capture`] never mistakes it for a declaration.
-///
-/// [FR-EX-20]: ../../../docs/specs/requirements/FR-EX-20.md
-const ATTRIBUTE_CAPTURE: &str = "symbol.attribute";
-
-/// A `symbols`-query marker, in the same match as a `@symbol.<kind>` capture,
-/// that the declaration is **state of the class or module around it** (S-564,
-/// Ruby's `attr_accessor :x` and the first `@x = …`): see [`settle_state`].
-/// Not a [`NodeKind`], so [`kind_for_capture`] never mistakes it for a
-/// declaration.
-const STATE_CAPTURE: &str = "symbol.state";
 
 /// A `symbols`-query setting, `(#set! symbol.name "<name>")`, on a pattern
 /// whose `@symbol.<kind>` capture is not the declaration's name (S-559): a
@@ -623,6 +608,27 @@ pub struct NodeFact {
     ///
     /// [CR-199]: ../../../docs/requests/CR-199-csharp-resolution-honours-type-arity-and-using-scope.md
     pub type_arity: Option<u32>,
+    /// A callable's signature as its parameter types (S-820, [CR-254] P1): each
+    /// parameter's type without its name (nor those a function type's own
+    /// parameters carry), default value or top-level `const`, words one space
+    /// apart and each followed by `,`, then the declarator's `const`/`&`/`&&`
+    /// qualifiers — `f(const char* s, int n = 0) const`
+    /// records `const char*,int,const`, and `f()` and `f(void)` record `""`
+    /// (`extract::definition`). Recorded for every C/C++ prototype and definition
+    /// alike, and `None` for every other node and for a callable whose
+    /// declarator the reading finds no parameter list in. The binder pairs a
+    /// prototype with its definition in another file by it. Recorded beside
+    /// the symbol, never in it ([ADR-07]). A plugin whose `symbols` query
+    /// declares the `@signature.*` captures records its own reading instead
+    /// (S-830, [CR-260], `extract::signature`): Go's `Read(p []byte) (int,
+    /// error)` records `([]byte)(int,error)`, parameter and result types, a
+    /// generic Go interface the names of the type parameters it binds, `[T]`
+    /// (`[K,V]`), and a method of a generic receiver both, `[T](T)(bool)`.
+    ///
+    /// [CR-254]: ../../../docs/requests/CR-254-cpp-prototype-pairs-with-definition-across-files.md
+    /// [CR-260]: ../../../docs/requests/CR-260-go-interface-matching-by-signature-and-package.md
+    /// [ADR-07]: ../../../docs/specs/architecture/decisions/ADR-07.md
+    pub callable_signature: Option<String>,
 }
 
 /// A graph relationship produced by extraction.
@@ -803,6 +809,17 @@ pub struct Facts {
     /// [FR-RS-13]: ../../../docs/specs/requirements/FR-RS-13.md
     /// [FR-RS-17]: ../../../docs/specs/requirements/FR-RS-17.md
     pub namespace: Option<String>,
+    /// The facade class this file's own annotation names, for a language that
+    /// declares file facades (S-832, [FR-RS-31]): Kotlin's
+    /// `@file:JvmName("Slugs")` is `Some("Slugs")`, which another language of
+    /// the family reaches the file's top-level functions through in place of
+    /// the `<Stem>Kt` its stem derives
+    /// ([`file_facade`](crate::resolve::package_key::PackageLayout::file_facade)).
+    /// `None` for a file naming none, for one whose name is no class name
+    /// (a template, an escape), and for every file of any other language.
+    ///
+    /// [FR-RS-31]: ../../../docs/specs/requirements/FR-RS-31.md
+    pub facade: Option<String>,
     /// Every impl block this file declares, an empty one included, in source
     /// order (S-606, [CR-202] F1): its self type, reference flag, trait and
     /// `Deref` target ([`ImplBlockFact`]). Empty for a file whose plugin
@@ -818,6 +835,32 @@ pub struct Facts {
     ///
     /// [FR-EX-33]: ../../../docs/specs/requirements/FR-EX-33.md
     pub local_bindings: Vec<LocalBindingFact>,
+}
+
+impl Facts {
+    /// A file's facts before its extractor records any: `path` in `language`,
+    /// clean, with no node, edge, reference, warning or file-level fact. The
+    /// one starting point of the code, documentation and artifact extractors,
+    /// so a new field gains its empty value in one place.
+    pub(crate) fn empty(path: String, language: String) -> Self {
+        Self {
+            path,
+            language,
+            partial: false,
+            parse_damaged: false,
+            nodes: Vec::new(),
+            edges: Vec::new(),
+            refs: Vec::new(),
+            warnings: Vec::new(),
+            config_source: None,
+            forwarding: Vec::new(),
+            declared_types: Vec::new(),
+            namespace: None,
+            facade: None,
+            impl_blocks: Vec::new(),
+            local_bindings: Vec::new(),
+        }
+    }
 }
 
 /// One captured declaration, retained with its tree-sitter node for the metrics
@@ -855,19 +898,20 @@ struct Decl<'tree> {
     /// out-of-line body merged into its in-class prototype (S-577). It emits no
     /// node of its own; its body is the one the prototype's node carries.
     completes: Option<usize>,
-    /// An attribute an assignment declares ([`ATTRIBUTE_CAPTURE`], S-543):
-    /// taken at its name, owned by its class, once per class.
-    attribute: bool,
-    /// The declaration is state of the nearest enclosing class or module
-    /// ([`STATE_CAPTURE`], S-564): its node is its name alone, so it owns no
-    /// scope and no reference, and [`settle_state`] keeps one per name.
-    state: bool,
+    /// The rules of a field declared at its name ([`at_name`], S-837): its node
+    /// is its name alone, so it owns no scope and no reference, and
+    /// [`at_name::settle`] gives it its owner and keeps one per name. `None` for
+    /// every other declaration.
+    at_name: Option<at_name::Rules>,
     /// Where the `@owner.*` captures place this declaration (S-539): by the
     /// name its assignment gives, not by nesting ([`owner::place`]). A placed
     /// declaration owns no scope. `None` for every other declaration.
     owner: Option<owner::Owner>,
     /// What the `@member.*` captures say about this declaration (S-582).
     member: member::DeclMemberFacts,
+    /// The signature the `@signature.*` captures give this declaration
+    /// (S-830, [`signature`]), `None` when they give it none.
+    signature: Option<String>,
 }
 
 /// Extract one file with an explicit plugin, allocating a fresh parser.
@@ -1013,22 +1057,7 @@ fn extract_one(
         return config::extract_one_config(parser, input, plugin, ctx);
     }
 
-    let mut facts = Facts {
-        path: input.path.clone(),
-        language: plugin.name().to_string(),
-        partial: false,
-        parse_damaged: false,
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        refs: Vec::new(),
-        warnings: Vec::new(),
-        config_source: None,
-        forwarding: Vec::new(),
-        declared_types: Vec::new(),
-        namespace: None,
-        impl_blocks: Vec::new(),
-        local_bindings: Vec::new(),
-    };
+    let mut facts = Facts::empty(input.path.clone(), plugin.name().to_string());
 
     // A grammar that fails to bind (ABI skew) is skipped-and-warned, never fatal.
     if parser.set_language(plugin.language()).is_err() {
@@ -1067,9 +1096,10 @@ fn extract_one(
     let source = text.as_bytes();
 
     // 1) Collect declarations from the query matches.
-    let (mut decls, package_statement, namespaces, damage, impl_blocks) =
+    let (mut decls, package_statement, namespaces, damage, impl_blocks, facade) =
         collect_decls(query, tree.root_node(), source, &plugin.semantics().body_node_kinds);
     facts.impl_blocks = impl_blocks;
+    facts.facade = facade.filter(|_| plugin.semantics().file_facade.is_some());
     if let Some(i) = partial_warning {
         damage.annotate(&mut facts.warnings[i]);
     } else if let Some(warning) = damage.silent_warning() {
@@ -1080,7 +1110,7 @@ fn extract_one(
     // 2) Resolve parent scopes, complete the declarations one another defines
     // (S-577) and 3) assign canonical-sort ordinals.
     assign_parents(&mut decls);
-    settle_attributes(&mut decls);
+    at_name::settle(&mut decls);
     let completion = definition::complete(&mut decls, source, &plugin.semantics().body_node_kinds);
     assign_ordinals(&mut decls);
 
@@ -1247,6 +1277,13 @@ fn extract_one(
             alias: decl.item.alias,
             // S-602: a type's generic arity, where its plugin tells types apart by it.
             type_arity: (type_arity && crate::resolve::is_type_like(node_kind)).then(|| decl.item.type_parameters.unwrap_or(0)),
+            // S-820: the parameter shape a cross-file prototype pairs by; S-830:
+            // the signature a plugin's `@signature.*` captures give, a generic
+            // type's type parameters included.
+            callable_signature: decl
+                .signature
+                .clone()
+                .or_else(|| is_callable.then(|| definition::parameter_shape(decl.node, source)).flatten()),
         });
 
         // A Contains edge links the enclosing scope to this declaration; both
@@ -1927,6 +1964,7 @@ fn file_module_node(symbol: LogosSymbol, name: String, end_line: u32) -> NodeFac
         uninherited: false,
         alias: false,
         type_arity: None,
+        callable_signature: None,
     }
 }
 
@@ -2337,8 +2375,9 @@ fn collect_refs(
     }
 
     bare_accesses.finish(&mut out, receivers.as_mut()); // appended: no row the receiver pass indexes moves
-    finish_receivers(receivers, &mut out, (root, source), decls, symbols, &imports, local_shadows);
+    let lambda_calls = finish_receivers(receivers, &mut out, (root, source), decls, symbols, &imports, local_shadows);
     free_calls.finish(&mut out, &callees, decls, &id_to_idx); // reads the shapes just recorded
+    lambda_calls.apply(&mut out); // S-834: reads the free calls just decided
     shadows.apply(&mut out);
     // A CommonJS module's `module.exports` statements (S-540).
     out.extend(commonjs_export_rows(root, source, &imports, file_module, semantics));
@@ -2416,11 +2455,6 @@ fn counted_call(captures: &[QueryCapture<'_>], capture_names: &[&str]) -> Option
     }
 }
 
-/// The node kinds of a JavaScript function that binds its own `this` (S-542): a
-/// `this.x = …` written inside one (`setTimeout(function () { this.t = 1; })`)
-/// is not the instance's. An arrow function keeps the lexical `this`.
-const THIS_REBINDING_KINDS: &[&str] = &["function_expression", "generator_function", "generator_function_declaration"];
-
 /// Whether `node` sits inside a node of one of `kinds` that is itself inside
 /// `scope` — the ancestors strictly between the two.
 fn sits_within_any(node: Node<'_>, scope: Node<'_>, kinds: &[&str]) -> bool {
@@ -2470,7 +2504,8 @@ fn is_unapplied_selection(selection: Node<'_>) -> bool {
 /// registered is typed or shaped, in place. A query that declares no receiver
 /// marker has none, and nothing happens. A type a path-import language's typed
 /// row names is qualified through the file's named imports (S-537), as its
-/// type relations are.
+/// type relations are. Returns the bare calls inside a lambda with a receiver
+/// the pass found (S-834), which are marked after the free-call pass.
 fn finish_receivers<'tree>(
     receivers: Option<receiver::Receivers<'tree>>,
     out: &mut Vec<RefFact>,
@@ -2479,13 +2514,14 @@ fn finish_receivers<'tree>(
     symbols: &[Option<LogosSymbol>],
     imports: &ImportBindings,
     shadows: &local_shadow::LocalShadows<'_>,
-) {
-    if let Some(receivers) = receivers {
-        let id_to_idx = &decl_index(decls);
-        let imported = |node: Node<'tree>, name: &str| imports.named_target(node, name).map(str::to_string);
-        let file = receiver::FileDecls { root, source, decls, symbols, id_to_idx, imported: &imported, shadows };
-        receivers.finish(out, &file);
-    }
+) -> receiver_lambda::ReceiverLambdaCalls {
+    let Some(receivers) = receivers else {
+        return receiver_lambda::ReceiverLambdaCalls::default();
+    };
+    let id_to_idx = &decl_index(decls);
+    let imported = |node: Node<'tree>, name: &str| imports.named_target(node, name).map(str::to_string);
+    let file = receiver::FileDecls { root, source, decls, symbols, id_to_idx, imported: &imported, shadows };
+    receivers.finish(out, &file)
 }
 
 /// Push one macro invocation's rows onto `out`, each row whose receiver the
@@ -4101,12 +4137,26 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
     }
 }
 
+/// What [`collect_decls`] reads off one file, in order: its declarations, its
+/// `package` statement, its namespace declarations, its parse damage, its impl
+/// blocks and its declared facade.
+type CollectedDecls<'t> = (
+    Vec<Decl<'t>>,
+    Option<String>,
+    Vec<declared_types::NamespaceScope>,
+    ParseDamage,
+    Vec<ImplBlockFact>,
+    Option<String>,
+);
+
 /// Step 1 of [`extract_one`]: the declarations the `symbols` query captures,
 /// the file's `package` statement when its grammar's query names one (S-472),
 /// the namespace declarations it names (S-518, [`declared_types::NAMESPACE_CAPTURE`]),
 /// the declarations a parse-error region cost the file ([FR-EX-30]), and the
 /// file's impl blocks (S-606, the [`assoc`] `@item.*` vocabulary, which also
-/// gives each declaration its receiver mode, variants and signature marker).
+/// gives each declaration its receiver mode, variants and signature marker),
+/// and the facade class the file's own annotation names (S-832,
+/// [`declared_types::FACADE_CAPTURE`]).
 ///
 /// A [`SELF_TYPE_CAPTURE`] gives its text to every declaration captured in the
 /// **same match** (S-493). It is gathered by declaration node and applied after
@@ -4117,18 +4167,7 @@ fn function_metrics(decl: &Decl<'_>, keywords: &[String], body_kinds: &[String])
 /// still carries its self type.
 ///
 /// [FR-EX-30]: ../../../docs/specs/requirements/FR-EX-30.md
-fn collect_decls<'t>(
-    query: &Query,
-    root: Node<'t>,
-    source: &[u8],
-    body_kinds: &[String],
-) -> (
-    Vec<Decl<'t>>,
-    Option<String>,
-    Vec<declared_types::NamespaceScope>,
-    ParseDamage,
-    Vec<ImplBlockFact>,
-) {
+fn collect_decls<'t>(query: &Query, root: Node<'t>, source: &[u8], body_kinds: &[String]) -> CollectedDecls<'t> {
     let capture_names = query.capture_names();
     let mut decls: Vec<Decl<'t>> = Vec::new();
     // Guard against a declaration being captured more than once (a query with
@@ -4153,6 +4192,7 @@ fn collect_decls<'t>(
     let mut damage = ParseDamage::default();
     let mut misread: HashSet<usize> = HashSet::new();
     let mut package: Option<String> = None;
+    let mut facade: Option<String> = None;
     let mut namespaces: Vec<declared_types::NamespaceScope> = Vec::new();
     // declaration node id → the self type its match declares (S-493).
     let mut self_types: HashMap<usize, String> = HashMap::new();
@@ -4166,6 +4206,8 @@ fn collect_decls<'t>(
     let mut test_names = test_name::TestNames::default();
     // The owner names and placement markers (S-539).
     let mut owners = owner::OwnerCaptures::default();
+    // The parameter, result and type-parameter lists (S-830).
+    let mut signatures = signature::SignatureCaptures::default();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source);
     while let Some(m) = matches.next() {
@@ -4181,12 +4223,14 @@ fn collect_decls<'t>(
             let capture = capture_names[cap.index as usize];
             let companion = |name: &str| match_capture(m.captures, capture_names, name);
             if declared_types::note_package(&mut package, capture, cap.node, source)
+                || declared_types::note_facade(&mut facade, capture, cap.node, source)
                 || declared_types::note_namespace(&mut namespaces, capture, cap.node, source, chained)
                 || params.note(capture, cap.node)
                 || items.note(capture, cap.node, companion)
                 || test_names.note(capture, cap.node, m.captures, capture_names, source)
                 || definitions.note(capture, cap.node)
                 || owners.note(capture, cap.node)
+                || signatures.note(capture, cap.node)
             {
                 continue;
             }
@@ -4203,12 +4247,14 @@ fn collect_decls<'t>(
             // parent walk simply starts one level higher — the contract is that
             // a capture identifies one declaration.
             let name_node = cap.node;
-            // An attribute (S-543) and state (S-564) are declared at their name
-            // ([`ATTRIBUTE_CAPTURE`], [`STATE_CAPTURE`]): the assignment or call
-            // they sit in is the method's, not the field's.
-            let attribute = m.captures.iter().any(|c| capture_names[c.index as usize] == ATTRIBUTE_CAPTURE);
-            let state = m.captures.iter().any(|c| capture_names[c.index as usize] == STATE_CAPTURE);
-            let lifted = if attribute || state {
+            // A field is declared at its name ([`at_name`]): the assignment or
+            // call it sits in is the method's, not the field's.
+            let at_name = m
+                .captures
+                .iter()
+                .any(|c| capture_names[c.index as usize] == at_name::CAPTURE)
+                .then(|| at_name::Rules::of_pattern(query, m.pattern_index));
+            let lifted = if at_name.is_some() {
                 Lifted {
                     node: name_node,
                     at_error: false,
@@ -4241,7 +4287,7 @@ fn collect_decls<'t>(
                 continue; // non-UTF-8 identifier slice — skip defensively
             };
             let name = crate::plugin::queries::pattern_setting(query, m.pattern_index, NAME_SETTING).unwrap_or(text);
-            let name = if state { state_name(name) } else { name.to_string() };
+            let name = if at_name.is_some() { at_name::name(query, m.pattern_index, name) } else { name.to_string() };
             damage.truncated += usize::from(lifted.at_error);
             note_value_binding(&mut value_bindings, decls.len(), decl_node.id(), kind);
             decls.push(Decl {
@@ -4259,10 +4305,10 @@ fn collect_decls<'t>(
                 def: definition::DeclDefinitionFacts::default(),
                 qualifier: Vec::new(),
                 completes: None,
-                attribute,
-                state,
+                at_name,
                 owner: None,
                 member: member::DeclMemberFacts::of_match(m.captures, capture_names),
+                signature: None,
             });
         }
     }
@@ -4286,74 +4332,18 @@ fn collect_decls<'t>(
     for (decl, own) in decls.iter_mut().zip(own_owners) {
         decl.owner = own;
     }
+    let own_signatures = signatures.per_decl(&decls, source);
+    for (decl, own) in decls.iter_mut().zip(own_signatures) {
+        decl.signature = own;
+    }
     // An out-of-line definition error recovery invented is not a declaration
     // (S-577, `definition`). Dropped before parents exist, so no index moves.
     decls.retain(|d| !d.def.artifact);
-    settle_state(&mut decls);
     damage.truncated -= member::settle(&mut decls, source);
     let named: HashSet<usize> = seen_decls.iter().map(|&(decl, _)| decl).collect();
     damage.skipped = nameless.difference(&named).count();
     damage.misread = misread.len();
-    (decls, package, namespaces, damage, items.impl_blocks(source))
-}
-
-/// The name of a state declaration (S-564): the instance variable it is, `@x`
-/// — whether the capture is the variable itself (`@x`), a symbol literal
-/// (`:x`) or a string's content (`x`).
-fn state_name(captured: &str) -> String {
-    format!("@{}", captured.trim_start_matches(':').trim_start_matches('@'))
-}
-
-/// The class or module a state declaration is state of (S-564): the nearest
-/// enclosing declaration that is one, whatever method, block or call lies
-/// between. `None` for state no class or module holds.
-fn state_owner(decl: &Decl<'_>, decls: &[Decl<'_>], index: &HashMap<usize, usize>) -> Option<usize> {
-    let mut ancestor = decl.node.parent();
-    while let Some(node) = ancestor {
-        if let Some(&j) = index.get(&node.id()) {
-            if matches!(decls[j].kind, NodeKind::Class | NodeKind::Module) {
-                return Some(j);
-            }
-        }
-        ancestor = node.parent();
-    }
-    None
-}
-
-/// Settle the state declarations ([`STATE_CAPTURE`], S-564): one per name in
-/// its class or module, at the first place the file writes it — an `attr_*`
-/// symbol and the `@x = …` it stands for are one Field — and none for state
-/// outside any class or module. Run before [`assign_parents`], which places
-/// each at its owner, because it removes declarations.
-fn settle_state(decls: &mut Vec<Decl<'_>>) {
-    if !decls.iter().any(|d| d.state) {
-        return;
-    }
-    let index = decl_index(decls);
-    let mut first: HashMap<(usize, &str), usize> = HashMap::new();
-    let mut drop = vec![false; decls.len()];
-    for (i, decl) in decls.iter().enumerate().filter(|(_, d)| d.state) {
-        let Some(owner) = state_owner(decl, decls, &index) else {
-            drop[i] = true;
-            continue;
-        };
-        match first.entry((owner, decl.name.as_str())) {
-            Entry::Vacant(slot) => {
-                slot.insert(i);
-            }
-            Entry::Occupied(mut slot) => {
-                let earlier = *slot.get();
-                if decls[earlier].start_byte <= decl.start_byte {
-                    drop[i] = true;
-                } else {
-                    drop[earlier] = true;
-                    slot.insert(i);
-                }
-            }
-        }
-    }
-    let mut kept = drop.iter().map(|d| !d);
-    decls.retain(|_| kept.next().unwrap_or(true));
+    (decls, package, namespaces, damage, items.impl_blocks(source), facade)
 }
 
 /// Remember a Constant/Variable declaration (`index` into `decls`) so a later
@@ -5695,9 +5685,8 @@ fn kind_for_capture(capture_name: &str) -> Option<NodeKind> {
 /// the tree-sitter ancestry. A declaration with no captured ancestor is at file
 /// scope (`parent = None`).
 ///
-/// A state declaration ([`STATE_CAPTURE`], [`settle_state`]) is placed at its
-/// class or module whatever lies between ([`state_owner`]). Otherwise one
-/// exception: a [`NodeKind::Field`] declared **in a method's parameter list**
+/// A field declared at its name is placed at its owner afterwards
+/// ([`at_name::settle`]). One exception: a [`NodeKind::Field`] declared **in a method's parameter list**
 /// — a TypeScript parameter property, `constructor(private readonly http: Client)`,
 /// or a PHP promoted property, `__construct(private Logger $log)` (S-548, pinned by
 /// `php_members.rs`) — is owned by the class the method belongs to, not by the
@@ -5720,16 +5709,7 @@ fn assign_parents(decls: &mut [Decl<'_>]) {
     let id_to_idx = decl_index(decls);
 
     let scopeless: Vec<bool> = decls.iter().map(owns_no_scope).collect();
-    // State is placed at its class or module, never the method it sits in (S-564).
-    let owners: Vec<Option<usize>> = decls
-        .iter()
-        .map(|d| if d.state { state_owner(d, decls, &id_to_idx) } else { None })
-        .collect();
-    for (i, decl) in decls.iter_mut().enumerate() {
-        if decl.state {
-            decl.parent = owners[i];
-            continue;
-        }
+    for decl in decls.iter_mut() {
         // A member a torn head claims sits at that head (S-582, `member`).
         if let Some(head) = decl.member.claimed_by() {
             decl.parent = id_to_idx.get(&head).copied();
@@ -5771,72 +5751,6 @@ fn assign_parents(decls: &mut [Decl<'_>]) {
     // A declaration placed by name is owned by what its assignment names, or
     // by the object or function it is written in (S-539).
     owner::place(decls, &id_to_idx);
-}
-
-/// Give each attribute declaration ([`ATTRIBUTE_CAPTURE`], S-543) its class,
-/// and keep one per name per class. Runs on the parents [`assign_parents`]
-/// resolved.
-///
-/// An attribute whose parent is class-like ([`crate::resolve::is_class_like`]) —
-/// a class-body `x = …` — is that class's. One whose parent is a callable whose
-/// own parent is class-like — a method's `self.x = …` — is lifted to that class.
-/// Any other — a `self.x = …` in a function nested in a method, or in a free
-/// function — has no class to belong to and is dropped. Of the attributes one
-/// class declares under one name, the class-body one wins over a method write,
-/// then the first in source order; the rest are dropped, so the class holds one
-/// Field per name. A method's attribute written inside a function of its own
-/// that rebinds `this` ([`THIS_REBINDING_KINDS`]) is no class's and is dropped. A Field the class declares in its own right — JavaScript's
-/// `x = 0;` beside a constructor's `this.x = …` (S-542) — is that name's
-/// declaration already: every attribute of it is dropped.
-///
-/// A dropped attribute is a name node, so no declaration sits inside it: the
-/// indices are compacted and every parent is remapped without orphaning one.
-fn settle_attributes(decls: &mut Vec<Decl<'_>>) {
-    if !decls.iter().any(|d| d.attribute) {
-        return;
-    }
-    let class_like = |i: usize| crate::resolve::is_class_like(decls[i].kind);
-    let callable = |i: usize| matches!(decls[i].kind, NodeKind::Function | NodeKind::Method);
-    let mut attributes: Vec<(bool, usize, usize, usize)> = decls
-        .iter()
-        .enumerate()
-        .filter(|(_, d)| d.attribute)
-        .filter_map(|(i, d)| {
-            let scope = d.parent?;
-            if class_like(scope) {
-                return Some((false, d.start_byte, i, scope));
-            }
-            let class = decls[scope].parent.filter(|&c| callable(scope) && class_like(c))?;
-            (!sits_within_any(d.node, decls[scope].node, THIS_REBINDING_KINDS)).then_some((true, d.start_byte, i, class))
-        })
-        .collect();
-    attributes.sort_unstable();
-    let mut keep: Vec<bool> = decls.iter().map(|d| !d.attribute).collect();
-    let mut declared: HashSet<(usize, String)> = decls
-        .iter()
-        .filter(|d| d.kind == NodeKind::Field && !d.attribute)
-        .filter_map(|d| Some((d.parent.filter(|&c| class_like(c))?, d.name.clone())))
-        .collect();
-    for (_, _, i, class) in attributes {
-        if declared.insert((class, decls[i].name.clone())) {
-            keep[i] = true;
-            decls[i].parent = Some(class);
-        }
-    }
-    let mut remap: Vec<Option<usize>> = Vec::with_capacity(decls.len());
-    let mut next = 0;
-    for &kept in &keep {
-        remap.push(kept.then_some(next));
-        next += usize::from(kept);
-    }
-    let mut index = 0;
-    decls.retain(|_| {
-        index += 1;
-        keep[index - 1]
-    });
-    for decl in decls.iter_mut() {
-        decl.parent = decl.parent.and_then(|p| remap[p]);
-    }
 }
 
 /// `true` for a TypeScript/JavaScript value binding — a top-level `const x = …`

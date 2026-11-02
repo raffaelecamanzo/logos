@@ -85,7 +85,7 @@ fn index_populates_the_graph_on_logos_own_source() {
     copy_rs_tree(&manifest, &manifest.join("src"), tmp.path());
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert!(
         result.files_indexed >= 10,
@@ -128,7 +128,7 @@ fn index_result_carries_a_reconciling_per_phase_breakdown() {
     copy_rs_tree(&manifest, &manifest.join("src"), tmp.path());
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
     let p = &result.phases;
 
     // A non-trivial index takes measurable wall-clock overall.
@@ -207,7 +207,7 @@ fn sync_re_extracts_only_changed_files() {
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
 
-    let idx = engine.index();
+    let idx = engine.pipeline().index();
     assert_eq!(idx.files_indexed, 3, "all three files indexed");
 
     // beta and gamma are unchanged across the sync; record their node ids to
@@ -219,7 +219,7 @@ fn sync_re_extracts_only_changed_files() {
     // Change only alpha's content (its hash changes).
     write(tmp.path(), "alpha.rs", "fn alpha() { let _x = 1; }\n");
 
-    let result = engine.sync(&[
+    let result = engine.pipeline().sync(&[
         PathBuf::from("alpha.rs"),
         PathBuf::from("beta.rs"),
         PathBuf::from("gamma.rs"),
@@ -250,7 +250,7 @@ fn capture_before_delete_preserves_a_cross_file_edge() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     let caller_id = node_id_of(rt, "caller");
     let callee_id = node_id_of(rt, "callee");
@@ -269,7 +269,7 @@ fn capture_before_delete_preserves_a_cross_file_edge() {
 
     // Edit the callee's file: its hash changes, but `fn callee` keeps its symbol.
     write(tmp.path(), "callee.rs", "// touched\nfn callee() {}\n");
-    let result = engine.sync(&[PathBuf::from("callee.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("callee.rs")]);
     assert_eq!(
         result.files_modified, 1,
         "the callee's file was re-extracted"
@@ -310,7 +310,7 @@ fn auto_index_triggers_on_first_evaluation() {
         .expect("read runs");
     assert_eq!(before, 0, "a freshly started engine has an empty graph");
 
-    let first = engine.ensure_indexed();
+    let first = engine.pipeline().ensure_indexed();
     assert!(
         first.files_indexed >= 1,
         "the first evaluation auto-indexes"
@@ -320,7 +320,7 @@ fn auto_index_triggers_on_first_evaluation() {
         .expect("read runs");
     assert_eq!(after, 1, "the graph is populated after auto-index");
 
-    let second = engine.ensure_indexed();
+    let second = engine.pipeline().ensure_indexed();
     assert_eq!(
         second.files_indexed, 0,
         "an already-indexed graph is not re-indexed"
@@ -335,17 +335,17 @@ fn sync_adds_new_and_removes_deleted_files() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // A brand-new file is an addition.
     write(tmp.path(), "beta.rs", "fn beta() {}\n");
-    let added = engine.sync(&[PathBuf::from("beta.rs")]);
+    let added = engine.pipeline().sync(&[PathBuf::from("beta.rs")]);
     assert_eq!(added.files_added, 1);
     assert_eq!(added.files_modified, 0);
 
     // A path gone from disk is a removal.
     fs::remove_file(tmp.path().join("alpha.rs")).expect("delete alpha");
-    let removed = engine.sync(&[PathBuf::from("alpha.rs")]);
+    let removed = engine.pipeline().sync(&[PathBuf::from("alpha.rs")]);
     assert_eq!(removed.files_removed, 1);
 
     // The graph now holds beta only.
@@ -370,7 +370,7 @@ fn sync_drops_a_captured_edge_when_the_target_symbol_disappears() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     let caller_id = node_id_of(rt, "caller");
     let callee_id = node_id_of(rt, "callee");
@@ -380,7 +380,7 @@ fn sync_drops_a_captured_edge_when_the_target_symbol_disappears() {
     // The edit renames the callee, so its old symbol no longer exists after
     // re-extraction — the captured edge has no target to rebind to.
     write(tmp.path(), "callee.rs", "fn callee_renamed() {}\n");
-    let result = engine.sync(&[PathBuf::from("callee.rs")]);
+    let result = engine.pipeline().sync(&[PathBuf::from("callee.rs")]);
     assert_eq!(
         result.files_modified, 1,
         "the callee's file was re-extracted"
@@ -424,17 +424,17 @@ fn sync_skips_unsupported_extensions_and_rejects_outside_root_paths() {
     write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
     // An unsupported extension is skipped: no grammar claims `.toml`.
-    let unsupported = engine.sync(&[PathBuf::from("Cargo.toml")]);
+    let unsupported = engine.pipeline().sync(&[PathBuf::from("Cargo.toml")]);
     assert_eq!(unsupported.files_added, 0);
     assert_eq!(unsupported.files_modified, 0);
     assert_eq!(unsupported.files_removed, 0);
     assert!(unsupported.warnings.is_empty());
 
     // An escaping path is rejected with a warning and no graph mutation.
-    let escaping = engine.sync(&[PathBuf::from("../escape.rs")]);
+    let escaping = engine.pipeline().sync(&[PathBuf::from("../escape.rs")]);
     assert_eq!(escaping.files_added, 0);
     assert_eq!(escaping.files_modified, 0);
     assert_eq!(escaping.files_removed, 0);
@@ -473,7 +473,7 @@ fn full_walk_sync_purges_a_file_deleted_off_the_path_set() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
     assert!(function_node_exists(rt, "beta"), "beta indexed to start");
 
     // Delete beta.rs on disk, then run a FULL-WALK sync whose path-set is only the
@@ -523,12 +523,12 @@ fn partial_sync_does_not_purge_files_outside_its_path_set() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     // Delete beta.rs off disk, then edit + partial-sync ONLY alpha.rs.
     fs::remove_file(tmp.path().join("beta.rs")).expect("delete beta");
     write(tmp.path(), "alpha.rs", "fn alpha() { let _ = 1; }\n");
-    let partial = engine.sync(&[PathBuf::from("alpha.rs")]);
+    let partial = engine.pipeline().sync(&[PathBuf::from("alpha.rs")]);
     assert_eq!(partial.files_modified, 1, "alpha re-extracted");
     assert_eq!(
         partial.files_removed, 0,
@@ -540,7 +540,7 @@ fn partial_sync_does_not_purge_files_outside_its_path_set() {
     );
 
     // The full-walk backstop (a reconciling scan) then does remove it.
-    engine.scan(true).expect("reconcile scan runs");
+    engine.quality().scan(true).expect("reconcile scan runs");
     assert!(
         !function_node_exists(rt, "beta"),
         "the full-walk reconcile sweeps the disk-deleted file out"
@@ -563,7 +563,7 @@ fn full_walk_sweep_returns_inbound_refs_to_unresolved() {
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
     let rt = engine.runtime().expect("runtime present");
-    engine.index();
+    engine.pipeline().index();
 
     let caller_id = node_id_of(rt, "caller");
     let target_id = node_id_of(rt, "target");
@@ -655,7 +655,7 @@ fn assert_syncs_match_reindex(initial: &[(&str, &str)], steps: &[&[Edit]]) -> (T
     }
     coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine a starts");
-    engine_a.index();
+    engine_a.pipeline().index();
     // The real watcher canonicalizes the root and `notify` reports *real* paths,
     // so the changed set `sync` receives is canonical-root-relative. Mirror that:
     // on macOS a TempDir under `/var` symlinks to `/private/var`, and `sync`
@@ -665,7 +665,7 @@ fn assert_syncs_match_reindex(initial: &[(&str, &str)], steps: &[&[Edit]]) -> (T
     // `watch/mod.rs` for this exact reason).
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root a");
     for edits in steps {
-        engine_a.sync(&apply(&root_a, edits));
+        engine_a.pipeline().sync(&apply(&root_a, edits));
     }
     let fp_sync = graph_fingerprint(engine_a.runtime().expect("runtime a"));
 
@@ -723,7 +723,7 @@ fn reindexed(initial: &[(&str, &str)], steps: &[&[Edit]]) -> (TempDir, Engine) {
     }
     coordinate::pin(tmp.path());
     let engine = Engine::start(tmp.path()).expect("engine b starts");
-    engine.index();
+    engine.pipeline().index();
     (tmp, engine)
 }
 
@@ -812,15 +812,15 @@ fn sync_equiv_after_a_failed_persist_heals() {
     }
     coordinate::pin(tmp_a.path());
     let engine_a = Engine::start(tmp_a.path()).expect("engine a starts");
-    engine_a.index();
+    engine_a.pipeline().index();
     let root_a = tmp_a.path().canonicalize().expect("canonicalize root a");
     write(tmp_a.path(), "b.rs", edited);
     let rt = engine_a.runtime().expect("runtime a");
     rt.inject_persist_fault("b.rs");
-    let failed = engine_a.sync(&[root_a.join("b.rs")]);
+    let failed = engine_a.pipeline().sync(&[root_a.join("b.rs")]);
     assert_eq!(failed.files_failed, ["b.rs"], "the fault fired: {failed:?}");
     rt.clear_persist_faults();
-    let healed = engine_a.sync(&[root_a.join("b.rs")]);
+    let healed = engine_a.pipeline().sync(&[root_a.join("b.rs")]);
     assert_eq!((healed.files_modified, healed.files_failed.len()), (1, 0));
     let fp_sync = graph_fingerprint(rt);
 
@@ -829,7 +829,7 @@ fn sync_equiv_after_a_failed_persist_heals() {
     write(tmp_b.path(), "b.rs", edited);
     coordinate::pin(tmp_b.path());
     let engine_b = Engine::start(tmp_b.path()).expect("engine b starts");
-    engine_b.index();
+    engine_b.pipeline().index();
     assert_eq!(
         fp_sync,
         graph_fingerprint(engine_b.runtime().expect("runtime b")),
@@ -886,7 +886,7 @@ fn sync_equiv_renaming_through_an_alias_unbinds() {
     // "ali", a name b.rs never defined. This is the case bare target-token matching
     // misses: the incremental resolver only catches it by expanding a.rs's alias
     // chain (ali -> crate::b::orig) against the dirty name `orig`. Guards
-    // `Index::ref_affected`'s alias chase.
+    // `Invalidation::ref_affected`'s alias chase.
     assert_sync_matches_reindex(
         &[
             ("a.rs", "use crate::b::orig as ali;\nfn a() { ali(); }\n"),
@@ -1342,16 +1342,16 @@ fn a_seeded_worktree_synced_step_by_step_equals_a_fresh_index() {
     sh_git(&main, &["init", "-q", "-b", "main"]);
     sh_git(&main, &["add", "."]);
     sh_git(&main, &["commit", "-q", "-m", "initial"]);
-    Engine::start(&main).expect("primary engine starts").index();
+    Engine::start(&main).expect("primary engine starts").pipeline().index();
 
     let wt = tmp.path().join("wt");
     sh_git(&main, &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()]);
     let engine = Engine::start(&wt).expect("worktree engine starts");
     // `status` runs no auto-index, so a populated graph here is the seed.
-    assert!(engine.status().indexed, "the worktree store was seeded from the primary");
+    assert!(engine.graph().status().indexed, "the worktree store was seeded from the primary");
     let root = wt.canonicalize().expect("canonicalize worktree");
     for edits in CALLER_THEN_CALLEE {
-        engine.sync(&apply(&root, edits));
+        engine.pipeline().sync(&apply(&root, edits));
     }
 
     let (_oracle_tmp, oracle) = reindexed(&BOTH_ROOTS, &CALLER_THEN_CALLEE);
@@ -1376,7 +1376,7 @@ fn the_watcher_synced_step_by_step_equals_a_fresh_index() {
         write(&root, rel, body);
     }
     let engine = std::sync::Arc::new(Engine::start(&root).expect("engine starts"));
-    engine.index();
+    engine.pipeline().index();
     let handle = engine.watch().expect("watcher starts");
     let mut written = 0;
     for edits in CALLER_THEN_CALLEE {
@@ -1519,13 +1519,13 @@ fn an_edit_and_revert_cycle_leaves_the_ledger_a_fresh_indexs() {
         write(tmp.path(), rel, body);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime");
     let cold = graph_fingerprint(rt);
     let root = tmp.path().canonicalize().expect("canonicalize root");
     for body in [edited, initial[1].1] {
         write(tmp.path(), "b.rs", body);
-        engine.sync(&[root.join("b.rs")]);
+        engine.pipeline().sync(&[root.join("b.rs")]);
     }
     assert_eq!(graph_fingerprint(rt), cold, "edit → sync → revert → sync equals the cold index");
     assert_eq!(capture_rows(rt), Vec::new());
@@ -1593,7 +1593,7 @@ fn the_next_sync_heals_stale_resolved_capture_rows() {
         write(tmp.path(), rel, body);
     }
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime");
     let cold = graph_fingerprint(rt);
     // What the pre-CR-187 binary left after a sync of b.rs: the call's capture
@@ -1644,7 +1644,7 @@ fn the_next_sync_heals_stale_resolved_capture_rows() {
     assert_eq!(capture_rows(rt).len(), 1, "the store carries one stale capture");
 
     let root = tmp.path().canonicalize().expect("canonicalize root");
-    let synced = engine.sync(&[root.join("c.rs")]);
+    let synced = engine.pipeline().sync(&[root.join("c.rs")]);
 
     assert_eq!(capture_rows(rt), Vec::new(), "the next sync deleted the stale capture");
     assert!(has_edge(rt, "a", "target", EdgeKind::Calls), "its edge stays");
@@ -1670,14 +1670,14 @@ fn sync_stats_never_count_a_suppressed_capture_row() {
         "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid extends Base {}\n",
     );
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     write(
         tmp.path(),
         path,
         "package app;\n\npublic class Base {\n    public void start() {}\n}\n\nclass Mid {}\n",
     );
     let root = tmp.path().canonicalize().expect("canonicalize root");
-    let synced = engine.sync(&[root.join(path)]);
+    let synced = engine.pipeline().sync(&[root.join(path)]);
     let ledger = engine
         .runtime()
         .expect("runtime")
@@ -1732,7 +1732,7 @@ fn bench_incremental_vs_full_resolve() {
     }
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime");
     let resolution = logos_core::config::Resolution {
         policy: logos_core::config::BindingPolicy::Balanced,
@@ -1818,7 +1818,7 @@ fn index_and_doctor_surface_the_unindexed_doc_symlink_warning() {
     write(&proj, ".gitignore", "/docs/specs\n"); // git-ignored, and NO `.swe-skills`.
 
     let engine = Engine::start(&proj).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     // `index` surfaces the warning naming the dropped path and the reason.
     let index_warning = result
@@ -1837,7 +1837,7 @@ fn index_and_doctor_surface_the_unindexed_doc_symlink_warning() {
 
     // `doctor` surfaces the same warning and stays ok (no admission drift, since
     // the unindexed symlink was never indexed).
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
     assert!(
         report.ok,
         "doctor stays ok — the diagnostic warning does not flip the verdict: {}",
@@ -1885,7 +1885,7 @@ fn parent_of_sibling_repos_indexes_nothing_and_warns_exactly_once() {
     }
 
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.files_indexed, 0, "the prune rule is unchanged: nothing is admitted");
     assert_eq!(result.nodes_created, 0, "a nested repo's symbols never enter the parent graph");
@@ -1927,7 +1927,7 @@ fn a_stray_non_indexable_file_does_not_silence_the_diagnostic() {
     write(root, "LICENSE", "All rights reserved.\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.files_indexed, 0, "the stray file is not indexable");
     assert_eq!(
@@ -1951,7 +1951,7 @@ fn a_repo_vendoring_a_nested_repo_emits_no_prune_warning() {
     write(root, "vendor/dep/src/dep.rs", "pub fn dep() {}\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    let result = engine.index();
+    let result = engine.pipeline().index();
 
     assert_eq!(result.files_indexed, 1, "only the parent's own file is admitted");
     // FR-IX-13 AC2 is about the WHOLE array, not just the absence of a warning
@@ -1978,17 +1978,17 @@ fn a_repo_vendoring_a_nested_repo_emits_no_prune_warning() {
         "the nested repository's files are still not admitted: {vendored:?}"
     );
 
-    // A partial `Engine::sync` re-discovers nothing (`SyncScope::Partial` never
+    // A partial `Pipeline::sync` re-discovers nothing (`SyncScope::Partial` never
     // reaches `discover_candidates`), so it cannot emit the diagnostic in either
     // direction — asserting on it would be vacuous. The sync-FAMILY path that does
     // walk is the governance reconcile, exercised below.
-    let synced = engine.sync(&[PathBuf::from("src/own.rs")]);
+    let synced = engine.pipeline().sync(&[PathBuf::from("src/own.rs")]);
     assert!(synced.warnings.is_empty(), "sync stays clean: {:?}", synced.warnings);
 }
 
 #[test]
 fn the_reconcile_walk_emits_the_diagnostic_exactly_once() {
-    // FR-IX-13 names `index` *and* `sync`. A partial `Engine::sync` performs no
+    // FR-IX-13 names `index` *and* `sync`. A partial `Pipeline::sync` performs no
     // discovery walk, so the sync-family surface that can carry the diagnostic is
     // the governance reconcile — and it must carry exactly one, never two (it both
     // walks itself and folds in the warnings of the `sync` it drives).
@@ -2005,7 +2005,7 @@ fn the_reconcile_walk_emits_the_diagnostic_exactly_once() {
     // zero-admission root indexes nothing — so `reconcile` takes the FR-RC-02
     // degrade-to-full-index arm, which is itself the path that must not
     // double-emit: it returns `index`'s warnings verbatim.)
-    assert_eq!(engine.index().files_indexed, 0);
+    assert_eq!(engine.pipeline().index().files_indexed, 0);
 
     let rt = engine.runtime().expect("runtime present");
     let registry = engine.registry().expect("registry present");
@@ -2057,14 +2057,14 @@ fn index_status_and_doctor_agree_on_the_zero_admission_diagnostic() {
     parent_of_sibling_repos(root, 5);
 
     let engine = Engine::start(root).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(indexed.files_indexed, 0, "the CR-098 shape: nothing is admitted");
     let from_index = sole_prune_warning(&indexed.warnings);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     let from_status = sole_prune_warning(&status.warnings);
 
-    let doctor = engine.doctor().expect("doctor runs");
+    let doctor = engine.quality().doctor().expect("doctor runs");
     let from_doctor = doctor
         .zero_admission_warning
         .clone()
@@ -2103,7 +2103,7 @@ fn a_root_indexed_before_enablement_stops_naming_the_remedy_once_it_is_applied()
     parent_of_sibling_repos(root, 4);
 
     let engine = Engine::start(root).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(indexed.files_indexed, 0, "indexed BEFORE enablement: nothing is admitted");
     assert_eq!(
         prune_warnings(&indexed.warnings).len(),
@@ -2117,7 +2117,7 @@ fn a_root_indexed_before_enablement_stops_naming_the_remedy_once_it_is_applied()
     fs::write(root.join("logos.workspace.toml"), "[workspace]\nname = \"w\"\nmembers = []\n")
         .expect("manifest written");
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert_eq!(status.file_count, 0, "the persisted count is unchanged — no index has run");
     assert!(
         prune_warnings(&status.warnings).is_empty(),
@@ -2125,18 +2125,18 @@ fn a_root_indexed_before_enablement_stops_naming_the_remedy_once_it_is_applied()
         status.warnings
     );
     assert!(
-        engine.doctor().expect("doctor runs").zero_admission_warning.is_none(),
+        engine.quality().doctor().expect("doctor runs").zero_admission_warning.is_none(),
         "and neither does `doctor`"
     );
 
     // Control: same store, same persisted zero, manifest gone ⇒ both speak again.
     fs::remove_file(root.join("logos.workspace.toml")).expect("manifest removed");
     assert_eq!(
-        prune_warnings(&engine.status().warnings).len(),
+        prune_warnings(&engine.graph().status().warnings).len(),
         1,
         "without the manifest the diagnostic is still live — the manifest is the differentiator"
     );
-    assert!(engine.doctor().expect("doctor runs").zero_admission_warning.is_some());
+    assert!(engine.quality().doctor().expect("doctor runs").zero_admission_warning.is_some());
 }
 
 /// The `index` seam's half of the same guarantee — the one the unit tests cannot
@@ -2160,7 +2160,7 @@ fn the_index_seam_passes_the_walked_root_to_the_suppression() {
         .expect("manifest written");
 
     let engine = Engine::start(root).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(
         indexed.files_indexed, 0,
         "git-ignored, the manifest is not admitted — the root really does admit nothing"
@@ -2175,7 +2175,7 @@ fn the_index_seam_passes_the_walked_root_to_the_suppression() {
     let other = TempDir::new().expect("temp root");
     parent_of_sibling_repos(other.path(), 3);
     write(other.path(), ".gitignore", "/logos.workspace.toml\n");
-    let control = Engine::start(other.path()).expect("engine starts").index();
+    let control = Engine::start(other.path()).expect("engine starts").pipeline().index();
     assert_eq!(control.files_indexed, 0);
     assert_eq!(
         prune_warnings(&control.warnings).len(),
@@ -2197,8 +2197,8 @@ fn status_carries_the_diagnostic_in_both_human_and_json_output() {
     parent_of_sibling_repos(root, 3);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
-    let status = engine.status();
+    engine.pipeline().index();
+    let status = engine.graph().status();
 
     assert!(!status.indexed, "the graph really is empty — the silence being explained");
     let json = serde_json::to_value(&status).expect("status serialises");
@@ -2227,9 +2227,9 @@ fn the_diagnostic_never_moves_doctors_exit_code() {
     parent_of_sibling_repos(root, 4);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
 
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
     assert!(
         report.zero_admission_warning.is_some(),
         "the diagnostic is present: {report:?}"
@@ -2263,7 +2263,7 @@ fn a_never_indexed_root_is_not_diagnosed_by_status_or_doctor() {
 
     // BEFORE any index: the store is empty and the depth-1 prune record is
     // populated — the exact state that used to produce the false diagnostic.
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(!status.indexed, "precondition: nothing has been indexed yet");
     assert!(
         prune_warnings(&status.warnings).is_empty(),
@@ -2271,18 +2271,18 @@ fn a_never_indexed_root_is_not_diagnosed_by_status_or_doctor() {
         status.warnings
     );
     assert_eq!(
-        engine.doctor().expect("doctor runs").zero_admission_warning,
+        engine.quality().doctor().expect("doctor runs").zero_admission_warning,
         None,
         "and `doctor` says nothing about it either"
     );
 
     // AFTER indexing: `index` admits the root's own file and stays silent, and so
     // do the other two — the three agree at both moments, which is the point.
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(indexed.files_indexed, 1, "the root's own file is admitted");
     assert!(prune_warnings(&indexed.warnings).is_empty(), "{:?}", indexed.warnings);
-    assert!(prune_warnings(&engine.status().warnings).is_empty());
-    assert_eq!(engine.doctor().expect("doctor runs").zero_admission_warning, None);
+    assert!(prune_warnings(&engine.graph().status().warnings).is_empty());
+    assert_eq!(engine.quality().doctor().expect("doctor runs").zero_admission_warning, None);
 }
 
 #[test]
@@ -2296,14 +2296,14 @@ fn the_diagnostic_survives_the_completed_index_gate_at_a_parent_of_repos_root() 
     parent_of_sibling_repos(root, 3);
 
     let engine = Engine::start(root).expect("engine starts");
-    assert_eq!(engine.index().files_indexed, 0, "nothing is admitted");
+    assert_eq!(engine.pipeline().index().files_indexed, 0, "nothing is admitted");
 
     assert_eq!(
-        prune_warnings(&engine.status().warnings).len(),
+        prune_warnings(&engine.graph().status().warnings).len(),
         1,
         "the gate lets the genuine zero-admission verdict through"
     );
-    assert!(engine.doctor().expect("doctor runs").zero_admission_warning.is_some());
+    assert!(engine.quality().doctor().expect("doctor runs").zero_admission_warning.is_some());
 }
 
 #[test]
@@ -2317,13 +2317,13 @@ fn the_diagnostic_is_gate_neutral() {
     parent_of_sibling_repos(root, 4);
 
     let engine = Engine::start(root).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     assert!(
-        engine.doctor().expect("doctor runs").zero_admission_warning.is_some(),
+        engine.quality().doctor().expect("doctor runs").zero_admission_warning.is_some(),
         "precondition: this root does produce the diagnostic"
     );
 
-    let rules = engine.check_rules(None, false).expect("check_rules runs");
+    let rules = engine.quality().check_rules(None, false).expect("check_rules runs");
     let leaked: Vec<_> = rules
         .violations
         .iter()
@@ -2331,7 +2331,7 @@ fn the_diagnostic_is_gate_neutral() {
         .collect();
     assert!(leaked.is_empty(), "the diagnostic never becomes a rule finding: {leaked:?}");
 
-    let scan = engine.scan(false).expect("scan runs");
+    let scan = engine.quality().scan(false).expect("scan runs");
     assert!(
         !serde_json::to_string(&scan).expect("scan serialises").contains("logos init --workspace"),
         "and it never reaches the quality signal: {scan:?}"
@@ -2358,7 +2358,7 @@ fn an_ordinary_repository_is_silent_on_all_three_surfaces() {
     write(root, "subrepo/src/dep.rs", "pub fn dep() {}\n");
 
     let engine = Engine::start(root).expect("engine starts");
-    let indexed = engine.index();
+    let indexed = engine.pipeline().index();
     assert_eq!(indexed.files_indexed, 1, "the parent's own file is admitted");
     // The prune record IS populated at depth 1 — so only the admitted count can be
     // what keeps all three surfaces quiet.
@@ -2370,14 +2370,14 @@ fn an_ordinary_repository_is_silent_on_all_three_surfaces() {
     );
     assert!(indexed.warnings.is_empty(), "`index` is silent: {:?}", indexed.warnings);
 
-    let status = engine.status();
+    let status = engine.graph().status();
     assert!(
         prune_warnings(&status.warnings).is_empty(),
         "`status` is silent: {:?}",
         status.warnings
     );
 
-    let report = engine.doctor().expect("doctor runs");
+    let report = engine.quality().doctor().expect("doctor runs");
     assert_eq!(
         report.zero_admission_warning, None,
         "`doctor` reports an honest absent, never an empty string (NFR-CC-04)"
@@ -2418,7 +2418,7 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     write(tmp.path(), "src/lib.rs", "pub fn hello() -> u32 { 1 + 2 }\n");
 
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let fresh = persisted_bodies(engine.runtime().expect("runtime"));
     assert_eq!(
         fresh,
@@ -2447,7 +2447,10 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 44 (S-571, the `files.parse_damaged` column and the snapshot
+    // Migrations 47 (S-832, the `files.facade` column), 46 (S-830, the Go
+    // signature re-extraction), 45 (S-820, the
+    // `nodes.callable_signature` column), 44 (S-571,
+    // the `files.parse_damaged` column and the snapshot
     // entries' `partial_parse` flags), 43 (S-712,
     // the dispatch re-bind), 42 (S-602, the
     // `nodes.type_arity` column), 41 (S-593, the
@@ -2468,7 +2471,10 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
+        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+         DELETE FROM schema_versions WHERE version = 46; \
+         ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
+         ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_offenders_uncapped DROP COLUMN partial_parse; \
          ALTER TABLE metric_snapshot_fix_units DROP COLUMN partial_parse; DELETE FROM schema_versions WHERE version = 44; \
          DELETE FROM schema_versions WHERE version = 43; \
@@ -2529,7 +2535,7 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
         .count();
     assert_eq!(unhashed, 2, "every file awaits re-extraction");
 
-    engine.health(true).expect("a full-walk reconcile runs");
+    engine.quality().health(true).expect("a full-walk reconcile runs");
     assert_eq!(persisted_bodies(rt), fresh, "the re-extraction fills the column as a fresh index does");
     assert!(
         rt.submit_read(|s| s.indexed_files())
@@ -2549,17 +2555,17 @@ fn re_extracting_an_unchanged_file_yields_an_identical_has_body_column() {
     let rel = "src/main/java/com/x/Shape.java";
     write(tmp.path(), rel, SHAPE_JAVA);
     let engine = Engine::start(tmp.path()).expect("engine starts");
-    engine.index();
+    engine.pipeline().index();
     let rt = engine.runtime().expect("runtime");
     let first = persisted_bodies(rt);
     assert_eq!(first.len(), 2);
 
     rt.submit_write(|w| {
         let id = w.file_id(rel)?.expect("the file row");
-        w.update_file(id, Some("java"), None, None, false)
+        w.update_file(id, Some("java"), None, None, None, false)
     })
     .expect("clear the recorded hash");
-    let result = engine.sync(&[PathBuf::from(rel)]);
+    let result = engine.pipeline().sync(&[PathBuf::from(rel)]);
     assert_eq!(result.files_modified, 1, "the unchanged file was re-extracted");
     assert_eq!(persisted_bodies(rt), first);
 }

@@ -4,7 +4,7 @@
 //!
 //! The two blocks live between `<!-- reach:begin -->` / `<!-- reach:end -->`
 //! markers in `docs/howto/usage.md` and `README.md`. The test renders each block
-//! from `Engine::languages()` — the surface that reads the descriptors — and
+//! from `Graph::languages()` — the surface that reads the descriptors — and
 //! fails when the committed text differs, so a language that changes its
 //! declared reach cannot leave the docs claiming the old one. To regenerate
 //! after changing a descriptor:
@@ -85,7 +85,7 @@ fn display_name(descriptor: &str) -> &'static str {
 /// the generated text is stable.
 fn declared() -> Vec<(String, &'static str, String, Vec<String>)> {
     let tmp = TempDir::new().unwrap();
-    let info = Engine::open(tmp.path()).languages();
+    let info = Engine::open(tmp.path()).graph().languages();
     assert!(info.load_error.is_none(), "{:?}", info.load_error);
     let mut rows: Vec<(usize, &'static str, String, String, Vec<String>)> = info
         .languages

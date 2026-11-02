@@ -122,7 +122,7 @@ impl DegradedReason {
 }
 
 /// The outcome of a mine attempt ([FR-GH-02]). A `Serialize` read-model so the
-/// `pub` [`Engine::ensure_history_mined`](crate::Engine::ensure_history_mined)
+/// `pub` [`History::ensure_mined`](crate::History::ensure_mined)
 /// seam conforms to the [ADR-01] "every public Engine method returns a
 /// serializable read-model" convention.
 ///
