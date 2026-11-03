@@ -116,7 +116,7 @@ tree-sitter-ruby = { version = "0.23", optional = true }
 # assertion (ABI 15) and links without duplicating the C runtime's symbols
 # (NFR-PC-05). Pure C parse tables built by `cc`; no socket/HTTP surface
 # (NFR-SE-01).
-tree-sitter-php = { version = "0.24", optional = true }
+tree-sitter-php = { version = "0.25", optional = true }
 # Scala (S-061, CR-009) — the highest-risk grammar of the language-breadth set,
 # explicitly gated on its verification preflight (CRA-01). `tree-sitter-scala`
 # 0.26 exposes its grammar as a `tree_sitter_language::LanguageFn` (`LANGUAGE`)
