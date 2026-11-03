@@ -90,6 +90,23 @@ opening a session there creates no store and enrols nothing. In an enrolled
 repository with no `logos` on `PATH`, the readout says so and names the minimum,
 and the server's instructions say its tools are unavailable.
 
+## Updating
+
+The plugin's version is the release's: `version` in
+`plugins/logos/.claude-plugin/plugin.json` is the version of the logos release it
+shipped with, written by the release build beside the workspace version, and a
+release is refused at publish time when the two differ. Claude Code reads that
+field to decide whether an installed plugin is out of date, so every release that
+changes a hook, a skill or the launcher reaches you once you run:
+
+```bash
+claude plugin update logos@logos
+```
+
+Restart Claude Code afterwards so the new hooks load. The plugin's version is not
+the minimum binary: `metadata.minBinaryVersion` stays the oldest `logos` the
+plugin works with, and moves only when the plugin starts needing something newer.
+
 ## Migrating from `init -i`
 
 Before the plugin, `logos init -i` wired the agent side itself: a `logos` entry

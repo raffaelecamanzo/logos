@@ -60,8 +60,13 @@ N=0
 
 g() { git -c maintenance.auto=false -c gc.auto=0 "$@"; }
 
-cargo() { # cargo <version> -> a Cargo.toml carrying it
+cargo() { # cargo <version> -> a Cargo.toml carrying it, and the plugin's plugin.json (CR-272)
     printf '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "%s"\n' "$1" >Cargo.toml
+    plugin "$1"
+}
+plugin() { # plugin <version> -> a plugin.json carrying it; the release carries it too
+    mkdir -p plugins/logos/.claude-plugin
+    printf '{\n  "name": "logos",\n  "version": "%s",\n  "metadata": { "minBinaryVersion": "1.0.0" }\n}\n' "$1" >plugins/logos/.claude-plugin/plugin.json
 }
 
 # The CHANGELOG at each release, newest first, as the real one is.
@@ -371,6 +376,32 @@ expect "a version the release tree's Cargo.toml does not carry is refused" 2 0 "
 run --version 1.0.1 --from main~1
 expect "--from an older release publishes that release" 0 1 "sections 1.0.1"
 
+# The plugin's version is the release's (CR-272): a plugin.json that disagrees with
+# --version is refused before any commit or tag, in every mode, and names both.
+fixture
+(cd "$CLONE" && plugin 1.0.1 && g commit -qam 'plugin.json left behind')
+run --version 1.0.2
+expect "a plugin.json version that differs from --version is refused, naming both" 2 0 "plugin.json version is '1.0.1', not 1.0.2"
+run --version 1.0.2 --push
+expect "a plugin.json version mismatch is refused with --push too, before a tag is made" 2 0 "plugin.json version is '1.0.1', not 1.0.2"
+if git -C "$CLONE" tag --list 'v1.0.2' | grep -q .; then fail "a tag v1.0.2 exists after the refusal"; else ok "no tag was created by the refused runs"; fi
+(cd "$CLONE" && git rm -q plugins/logos/.claude-plugin/plugin.json && g commit -qm 'no plugin.json')
+run --version 1.0.2
+expect "a release tree with no plugin.json is refused" 2 0 "plugin.json version is '', not 1.0.2"
+# A value that merely starts with --version, or ends in a newline the shell would strip,
+# is not that version.
+# (JSON text of the value, what the check reports it as: '' when it is not X.Y.Z at all)
+for odd in '1.0.20|1.0.20' '1.0.2-rc1|' '1.0.2\n|'; do
+    fixture
+    (cd "$CLONE" && printf '{\n  "version": "%s"\n}\n' "${odd%%|*}" >plugins/logos/.claude-plugin/plugin.json && g commit -qam 'odd plugin.json version')
+    run --version 1.0.2
+    expect "a plugin.json version of '${odd%%|*}' is not --version 1.0.2" 2 0 "plugin.json version is '${odd##*|}', not 1.0.2"
+done
+fixture
+run --version 1.0.2
+expect "a plugin.json version equal to --version behaves as before" 0 1 "sections 1.0.2 1.0.1"
+
+(cd "$CLONE" && plugin 1.0.3)
 commit 'bump only' Cargo.toml '[workspace.package]
 version = "1.0.3"
 '
@@ -437,6 +468,7 @@ if [ "$RC" -eq 0 ] && git -C "$CLONE" merge-base --is-ancestor "$S" main; then
 else
     fail "after a push, --bootstrap --yes did not record the squash"
 fi
+(cd "$CLONE" && plugin 1.0.3)
 commit 'release(1.0.3)' Cargo.toml '[workspace.package]
 version = "1.0.3"
 '
@@ -891,6 +923,13 @@ expect "--tag-only refuses a version the release tree's Cargo.toml does not carr
 (cd "$CLONE" && g tag -a v1.0.2 -m existing main~1)
 run --version 1.0.2 --tag-only
 expect "--tag-only refuses when the local tag exists, and leaves it" 2 0 "already exists locally"
+
+# ... and so does the plugin.json check: the tag names the plugin's version too.
+fixture
+(cd "$CLONE" && plugin 1.0.1 && g commit -qam 'plugin.json left behind' && g push -q origin main 2>/dev/null)
+run --version 1.0.2 --tag-only
+expect "--tag-only refuses a plugin.json version that differs from --version, and makes no tag" 2 0 "plugin.json version is '1.0.1', not 1.0.2"
+if git -C "$CLONE" tag --list 'v1.0.2' | grep -q .; then fail "a tag v1.0.2 exists after the refusal"; else ok "--tag-only left no tag behind"; fi
 
 # Origin's main is local main itself (so the trees match), but its CHANGELOG has
 # no section for the version.

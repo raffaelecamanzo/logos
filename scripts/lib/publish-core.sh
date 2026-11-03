@@ -60,6 +60,7 @@ publish_newest_version() {
 # publish_check_version: the version is newer than origin's newest, no local tag
 # of that name exists, and the release tree's Cargo.toml carries it (the tag
 # names the product version; a workspace version that differs would name another).
+# The plugin's version is checked by publish_check_plugin_version.
 publish_check_version() {
     local cargo_version
     version_gt "$VERSION" "$NEWEST" || die 2 "$VERSION is not newer than v$NEWEST, the newest version on $REMOTE"
@@ -72,6 +73,19 @@ publish_check_version() {
         f && /^version *=/ { gsub(/[" ]/, ""); sub(/version=/, ""); print; exit }')" || true
     [ "$cargo_version" = "$VERSION" ] \
         || die 2 "the release tree's Cargo.toml [workspace.package] version is '${cargo_version}', not $VERSION"
+}
+
+# publish_check_plugin_version: the release tree's plugins/logos/.claude-plugin/plugin.json
+# carries VERSION too (CR-272). `claude plugin update` compares that field, so a tag
+# whose plugin.json is behind ships hook changes to nobody. A missing file or field,
+# or a value that is not exactly MAJOR.MINOR.PATCH (a trailing newline, a suffix), is a
+# difference. Runs before any object is written, in every mode.
+publish_check_plugin_version() {
+    local plugin_version
+    plugin_version="$(git show "$RELEASE:plugins/logos/.claude-plugin/plugin.json" 2>/dev/null \
+        | python3 -I -c 'import json,re,sys; v = json.load(sys.stdin).get("version"); print(v if isinstance(v, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", v) else "")' 2>/dev/null)" || true
+    [ "$plugin_version" = "$VERSION" ] \
+        || die 2 "the release tree's plugins/logos/.claude-plugin/plugin.json version is '${plugin_version}', not $VERSION: the plugin's version is the release's (scripts/swe-build.sh writes it)"
 }
 
 # publish_changelog_message: sets MESSAGE to every CHANGELOG.md section origin has

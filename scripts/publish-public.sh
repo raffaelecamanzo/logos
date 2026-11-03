@@ -21,6 +21,10 @@
 #   - X.Y.Z is newer than origin's newest version, and the release tree's
 #     Cargo.toml carries version X.Y.Z (the tag names the product version, and a
 #     tag the workspace version does not match would name a different one);
+#   - the release tree's plugins/logos/.claude-plugin/plugin.json carries X.Y.Z
+#     too: the plugin's version is the release's, and `claude plugin update`
+#     reads that field. Checked in every mode (--tag-only and --push included);
+#     otherwise exit 2 before any commit or tag;
 #   - CHANGELOG.md in the release tree has a `## [X.Y.Z]` section and a section
 #     for origin's newest version below it;
 #   - no local tag vX.Y.Z exists (creating it would move an existing tag);
@@ -239,6 +243,7 @@ if [ "$TAG_ONLY" = yes ] && [ "$(git rev-parse --verify --quiet "refs/tags/$TAG^
 fi
 publish_newest_version
 publish_check_version
+publish_check_plugin_version
 
 # Scratch files live under this repository's git directory, so nothing appears in
 # the working tree and nothing is read from it.

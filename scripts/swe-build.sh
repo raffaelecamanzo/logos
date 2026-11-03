@@ -2,7 +2,7 @@
 # swe-build.sh — build contract: see sprint-coordinator references/build-hook-contract.md
 #
 # Builds the version the human tests at the sprint-review gate: bump the workspace
-# version, build the FULL binary (real UI bundle, default features), commit
+# version (and the plugin's, in plugin.json), build the FULL binary (real UI bundle, default features), commit
 # `release(X.Y.Z)`, install to ~/.logos-bin/X.Y.Z and smoke the INSTALLED binary.
 # Never tags or pushes — releasing stays with the user. It never touches PATH
 # either: `logos` on PATH is the released one (Homebrew), which the gates, the git
@@ -15,7 +15,7 @@
 # scripts/check-public-terms.sh, and with --push tags it vX.Y.Z and pushes both.
 # The tag push starts .github/workflows/release.yml, which checks out the tag and
 # builds with `dist --tag=vX.Y.Z`: the version this script writes to Cargo.toml
-# must match the tag, or the workflow refuses it (and publish-public.sh refuses a
+# and to plugins/logos/.claude-plugin/plugin.json must match the tag, or the workflow refuses it (and publish-public.sh refuses a
 # tag that disagrees with it first). See docs/howto/ci-integration.md.
 #
 # Usage: swe-build.sh [--dry-run] [--bump patch|minor]
@@ -50,13 +50,13 @@ export CARGO_TARGET_DIR="$ROOT/target"
 
 # 1. Version source + changelog: the coordinator writes release notes under
 #    `## [Unreleased]`; they become this version's section.
+#    The plugin's version is the release's (CR-272): Cargo.toml and plugin.json are
+#    written together by one helper, or neither is and the build stops here, before
+#    anything is committed.
+python3 scripts/lib/set-release-version.py "$ROOT" "$NEXT"
 python3 - "$NEXT" <<'PY'
-import re, sys, datetime
+import sys, datetime
 nxt = sys.argv[1]
-p = "Cargo.toml"; s = open(p).read()
-s2 = re.sub(r'(\[workspace\.package\]\n(?:[^\[\n].*\n)*?version\s*=\s*")[^"]+(")', r'\g<1>' + nxt + r'\2', s, count=1)
-if s2 == s: sys.exit("version not rewritten in Cargo.toml")
-open(p, "w").write(s2)
 p = "CHANGELOG.md"; c = open(p).read()
 head = "## [Unreleased]\n"
 if head not in c: sys.exit("CHANGELOG.md has no '## [Unreleased]' heading")
@@ -72,8 +72,9 @@ touch web/src/spa.rs
 # 4. The full build the user runs.
 cargo build -p logos --release
 
-# 5. Release commit — version, changelog, lockfile only (dist/ stays unstaged).
-git add Cargo.toml Cargo.lock CHANGELOG.md
+# 5. Release commit — versions (Cargo.toml and the plugin's plugin.json), changelog,
+#    lockfile only (dist/ stays unstaged).
+git add Cargo.toml plugins/logos/.claude-plugin/plugin.json Cargo.lock CHANGELOG.md
 git commit -q -m "release($NEXT)"
 
 # 6. Install from the REAL bundle, reusing the workspace target dir.

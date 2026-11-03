@@ -13,6 +13,19 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.22.4] — 2026-11-03
+
+### Fixed
+
+- **The Claude Code plugin's version now follows the release.** `version` in the
+  plugin's `plugin.json` had been moved only by hand and stayed at 1.20.5 through
+  1.21.2, 1.22.1 and 1.22.3, so `claude plugin update` saw nothing newer and
+  marketplace installs never received a hook change. The release build now writes
+  the release's version into `plugin.json` beside the workspace version, and a
+  release whose two versions differ is refused before it is tagged. **Plugin users:
+  run `claude plugin update logos@logos` once to pick up the hook changes made
+  since 1.20.5**, then restart Claude Code.
+
 ## [1.22.3] — 2026-11-02
 
 ### Fixed

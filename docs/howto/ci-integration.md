@@ -499,7 +499,9 @@ ancestor of the release commit: a commit built over `origin/main` from a tree th
 lacks something merged there would publish it reverted, so otherwise the script
 exits 2 naming `git fetch origin && git merge origin/main` and writes no object.
 The version must be newer than
-origin's newest, the release tree's `Cargo.toml` must carry it, `CHANGELOG.md`
+origin's newest, the release tree's `Cargo.toml` must carry it, and so must its
+`plugins/logos/.claude-plugin/plugin.json` (the plugin's version is the release's;
+`claude plugin update` reads that field), `CHANGELOG.md`
 must hold its section and origin's newest one below it, and no local tag of that
 version may exist. Then `scripts/check-public-terms.sh` runs on the message and on
 the release tree exactly as published (read from the commit, never from the

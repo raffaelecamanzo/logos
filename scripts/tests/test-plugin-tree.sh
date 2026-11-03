@@ -6,7 +6,8 @@
 # without editing this suite.
 #
 #   1. manifests: the marketplace lists the plugin once; plugin.json carries the
-#      version, metadata.minBinaryVersion and the one MCP server, and nothing
+#      version (the release's: it equals the root Cargo.toml [workspace.package]
+#      version, CR-272), metadata.minBinaryVersion and the one MCP server, and nothing
 #      else declares a server (a second declaration lists every tool twice);
 #      no file of the tree is ignored by git, so none silently stays out of a
 #      commit;
@@ -87,6 +88,17 @@ sem = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 t = lambda s: tuple(int(x) for x in s.split("."))
 print(d["name"], bool(sem.fullmatch(v)), bool(sem.fullmatch(m)), sem.fullmatch(v) and sem.fullmatch(m) and t(m) <= t(v))')" \
     "logos True True True"
+
+# The plugin's version is the release's (CR-272): `claude plugin update` reads this
+# field, so a release that leaves it behind reaches no marketplace user. The output
+# names both versions, the file that holds each, and the build step that moves them.
+CARGO_VERSION="$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{gsub(/[" ]/,""); sub(/version=/,""); print; exit}' "$HERE/Cargo.toml")"
+PLUGIN_VERSION="$(py 'import json,sys; print(json.load(open(sys.argv[1] + "/plugins/logos/.claude-plugin/plugin.json"))["version"])')"
+if [ -n "$CARGO_VERSION" ] && [ "$PLUGIN_VERSION" = "$CARGO_VERSION" ]; then
+    ok "[manifest] plugin.json version equals the root Cargo.toml [workspace.package] version ($CARGO_VERSION)"
+else
+    bad "[manifest] plugin.json version '$PLUGIN_VERSION' differs from Cargo.toml [workspace.package] version '$CARGO_VERSION': scripts/swe-build.sh writes both at a release (scripts/lib/set-release-version.py)"
+fi
 
 expect "[manifest] plugin.json declares exactly one MCP server, logos" "$(py '
 import json, sys
