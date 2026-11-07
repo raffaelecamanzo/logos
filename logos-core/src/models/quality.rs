@@ -2313,6 +2313,16 @@ pub struct Violation {
     /// [FR-GV-23]: ../../../docs/specs/requirements/FR-GV-23.md
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ratchet: Option<RatchetMark>,
+    /// Which rules tier declared the budget this finding breaks ([FR-CF-08]):
+    /// set on a `[constraints]` finding when the member resolves over a
+    /// workspace rules tier, and omitted otherwise — so a single-root report
+    /// carries no origin and is byte-identical to before ([ADR-52]). Not
+    /// persisted, like [`ratchet`](Self::ratchet).
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::config::RuleOrigin>,
 }
 
 /// One ratchet offender's identity and verdict ([FR-GV-23], [ADR-73]).
@@ -3159,11 +3169,15 @@ pub struct RulesReport {
     /// require-tested contract + one per require-documented contract + the
     /// `[security]` table's ratchet and each cap it sets (FR-SC-10).
     pub checked_rules: u32,
-    /// `true` when a `rules.toml` contract was loaded; `false` when none exists
-    /// (the default `<root>/.logos/rules.toml` is absent and an empty contract
-    /// was evaluated). The honest "no contract authored yet" signal a surface
-    /// needs to tell an empty result apart from an absent one — `checked_rules`
-    /// cannot, since the CR-005 structural budgets always evaluate (NFR-CC-04).
+    /// `true` when a `rules.toml` contract was loaded — the member's own, or at
+    /// least one rule inherited from the workspace rules tier ([FR-CF-08]);
+    /// `false` when neither exists (the default `<root>/.logos/rules.toml` is
+    /// absent and an empty contract was evaluated). The honest "no contract
+    /// authored yet" signal a surface needs to tell an empty result apart from
+    /// an absent one — `checked_rules` cannot, since the CR-005 structural
+    /// budgets always evaluate (NFR-CC-04).
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
     pub rules_present: bool,
     pub violations: Vec<Violation>,
     /// Unix-seconds timestamp of the run marker this run recorded (S-313,
@@ -3208,6 +3222,15 @@ pub struct RulesReport {
     /// [FR-SC-10]: ../../../docs/specs/requirements/FR-SC-10.md
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub missing_scans: Vec<MissingScan>,
+    /// The origin of each declared `[constraints]` / `[metric_thresholds]` key
+    /// of the effective contract ([FR-CF-08]) — `member` or `workspace`; a key
+    /// with no entry is unset. `None`, and elided, without a workspace rules
+    /// tier, so a single-root report is byte-identical to before ([ADR-52]).
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origins: Option<crate::config::RuleOrigins>,
 }
 
 impl RulesReport {

@@ -171,6 +171,9 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // S-464 / [FR-WS-33]: the build-dependency relation — a GET like the rest,
     // so the `200`+CSP, single-root `404` and write-free loops all walk it.
     "/api/v1/workspace/build-deps",
+    // S-491 / [FR-WS-36]: the declared-topic relation the service map draws — a
+    // GET like the rest, walked by the same three loops.
+    "/api/v1/workspace/declared-topics",
     "/api/v1/workspace/search?q=user",
     "/api/v1/workspace/callers?symbol=get_user",
     "/api/v1/workspace/impact?symbol=get_user",
@@ -205,10 +208,14 @@ const WORKSPACE_ENDPOINTS: &[&str] = &[
     // S-740 / [FR-CV-16]: the workspace coverage roll-up. A GET over the member
     // fan-out, walked by the same three loops; it must store no coverage.
     "/api/v1/workspace/coverage",
+    // S-508 / [FR-UI-38] (CR-165): the workspace rules contract the app-level
+    // editor's Rules section loads; its save twin sits in the write list below.
+    "/api/v1/workspace/rules",
 ];
 
 /// The **mutating** workspace routes — S-450's two config-root writes
-/// ([FR-WS-30]) and S-430's manifest save ([FR-UI-38]), all under [NFR-SE-06] —
+/// ([FR-WS-30]), S-430's manifest save ([FR-UI-38]) and S-508's workspace rules
+/// save, all under [NFR-SE-06] —
 /// with a well-formed body each. Kept apart from [`WORKSPACE_ENDPOINTS`] because every
 /// loop over that list issues a `GET`, which these answer `405`; the route-table
 /// guard reads the union of the two lists.
@@ -226,6 +233,12 @@ const WORKSPACE_WRITE_ENDPOINTS: &[(&str, &str)] = &[
     (
         "/api/v1/workspace/manifest/save",
         "content=%5Bworkspace%5D%0Aname%20%3D%20%22shop%22%0Amembers%20%3D%20%5B%22api%22%2C%20%22web%22%5D%0Adefault%20%3D%20%22api%22%0A&fingerprint=never-loaded",
+    ),
+    // S-508 / [FR-UI-38] (CR-165): the workspace rules contract, saved against the
+    // absent file's fingerprint — the fixture declares none.
+    (
+        "/api/v1/workspace/rules/save",
+        "content=%5Bconstraints%5D%0Amax_cc%20%3D%2015%0A&fingerprint=af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
     ),
 ];
 
@@ -1060,6 +1073,118 @@ async fn workspace_build_deps_reports_each_members_rows_and_repo_scopes() {
     let runtime = router.oneshot(get("/api/v1/workspace/route-providers")).await.unwrap();
     let (_s, body, _h) = body_string(runtime).await;
     assert!(!body.contains("com.acme"), "no build row among the runtime bindings: {body}");
+}
+
+/// S-491 / [FR-WS-36]: `declared-topics` serializes the read-model the CLI and
+/// MCP print, over three real members — `api` publishes `orders`, `billing`
+/// subscribes to it and also declares it in its committed configuration
+/// (already observed), and `audit` only declares it (net-new, config-only). A
+/// `?repo=` scope narrows the rows while the headline stays workspace-wide, and
+/// the runtime `route-providers` answer over the same workspace names no
+/// declaring member: a declaration is never an observed broker edge ([BR-54]).
+///
+/// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
+/// [BR-54]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[cfg(feature = "lang-all")]
+#[tokio::test]
+async fn workspace_declared_topics_lists_net_new_and_observed_declarations_and_repo_scopes() {
+    const PUBLISHER: &str = "package com.acme;\nclass OrderService {\n    \
+        private KafkaTemplate<String, String> kafkaTemplate;\n    \
+        public void emitOrder(String p) { kafkaTemplate.send(\"orders\", p); }\n}\n";
+    const SUBSCRIBER: &str = "package com.acme;\nclass BillingListener {\n    \
+        @KafkaListener(topics = \"orders\")\n    public void onOrder(String msg) {}\n}\n";
+    const DECLARES: &str = "spring:\n  kafka:\n    topics:\n      orders: orders\n";
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    init_repo(&root.join("api"), "src/main/java/com/acme/OrderService.java", PUBLISHER);
+    init_repo(&root.join("billing"), "src/main/java/com/acme/BillingListener.java", SUBSCRIBER);
+    write(&root.join("billing"), "src/main/resources/application.yml", DECLARES);
+    sh_git(&root.join("billing"), &["add", "."]);
+    sh_git(&root.join("billing"), &["commit", "-q", "-m", "config"]);
+    init_repo(&root.join("audit"), "src/main/resources/application-docker.yml", DECLARES);
+    for member in ["api", "billing", "audit"] {
+        let engine = Engine::start(root.join(member)).expect("member engine");
+        engine.pipeline().index();
+        let _ = engine.pipeline().sync(&[] as &[std::path::PathBuf]);
+    }
+    std::fs::write(
+        root.join("logos.workspace.toml"),
+        "[workspace]\nname = \"shop\"\nmembers = [\"api\", \"billing\", \"audit\"]\ndefault = \"api\"\n",
+    )
+    .unwrap();
+    let router = ws_router(&tmp);
+
+    let resp = router.clone().oneshot(get("/api/v1/workspace/declared-topics")).await.unwrap();
+    let (status, body, headers) = body_string(resp).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_self_only_csp(&headers, "/api/v1/workspace/declared-topics");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v.get("scope").is_none(), "no scope without ?repo=: {body}");
+    let topics = v["topics"].as_array().unwrap();
+    assert_eq!(topics.len(), 1, "{body}");
+    assert_eq!(topics[0]["topic"], "orders");
+    let marks: Vec<(String, String, String, String, serde_json::Value)> = topics[0]["declarations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| {
+            (
+                d["member"].as_str().unwrap().to_string(),
+                d["status"].as_str().unwrap().to_string(),
+                d["key"].as_str().unwrap().to_string(),
+                d["file"].as_str().unwrap().to_string(),
+                d["profile"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marks,
+        vec![
+            (
+                "audit".to_string(),
+                "net-new".to_string(),
+                "spring.kafka.topics.orders".to_string(),
+                "src/main/resources/application-docker.yml".to_string(),
+                serde_json::json!("docker"),
+            ),
+            (
+                "billing".to_string(),
+                "observed".to_string(),
+                "spring.kafka.topics.orders".to_string(),
+                "src/main/resources/application.yml".to_string(),
+                serde_json::Value::Null,
+            ),
+        ],
+        "{body}"
+    );
+    assert_eq!(topics[0]["declarations"][0]["site"]["site"], "config-only", "{body}");
+    assert!(topics[0]["declarations"][1].get("site").is_none(), "an observed declaration has no split: {body}");
+    let headline = &v["headline"];
+    assert_eq!(headline["declared_topic_pairs"], 2, "{body}");
+    assert_eq!(headline["already_observed"]["pairs"], 1, "{body}");
+    assert_eq!(headline["net_new"]["pairs"], 1, "{body}");
+    assert_eq!(headline["net_new"]["config_only"], 1, "{body}");
+    assert_eq!(headline["members"]["read"], 3, "{body}");
+
+    let scoped = router.clone().oneshot(get("/api/v1/workspace/declared-topics?repo=audit")).await.unwrap();
+    let (_s, body, _h) = body_string(scoped).await;
+    let w: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(w["scope"], "audit");
+    assert_eq!(w["topics"][0]["declarations"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(w["topics"][0]["declarations"][0]["member"], "audit");
+    assert_eq!(w["headline"], v["headline"], "the headline is workspace-wide under a scope");
+
+    let runtime = router.oneshot(get("/api/v1/workspace/route-providers")).await.unwrap();
+    let (_s, body, _h) = body_string(runtime).await;
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let ends: Vec<(&str, &str)> = r["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["from"]["member"].as_str().unwrap(), p["to"]["member"].as_str().unwrap()))
+        .collect();
+    assert_eq!(ends, vec![("api", "billing")], "a declaration is never a runtime binding: {body}");
 }
 
 // ── Single-root regression: the workspace surface is inert in a plain repo ────
@@ -2734,11 +2859,11 @@ async fn a_workspace_save_repairs_a_broken_workspace_file_the_member_read_fails_
     assert_eq!(v["config"]["parsed"]["chat"]["model"], "ws/repaired", "the workspace read parses again: {v}");
 }
 
-/// The workspace tier carries the chat policy and its credential, and nothing
-/// else: `file=rules` — or any `file` other than `config` — is refused `400` and
-/// writes nothing there, because
-/// workspace governance is declared in the manifest ([FR-WS-13]) and a rules file
-/// at the root would be read by nothing.
+/// The workspace config save carries the config document and nothing else:
+/// `file=rules` — or any `file` other than `config` — is refused `400` and writes
+/// nothing there. The workspace rules contract has its own save (S-508,
+/// `workspace_rules_api.rs`), which refuses the member-only tables a root
+/// contract may not declare.
 #[tokio::test]
 async fn the_workspace_save_accepts_the_config_document_only() {
     let tmp = workspace();

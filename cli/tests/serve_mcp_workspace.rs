@@ -135,6 +135,9 @@ fn serve_mcp_at_a_workspace_root_answers_for_the_member_repo_names() {
         .filter_map(|tool| tool["name"].as_str())
         .collect();
     assert!(names.contains(&"xservice_search"), "the workspace server lists the cross-service tools: {names:?}");
+    // S-490: the declared-topics twin is reachable on the served path, not
+    // only on the in-process router.
+    assert!(names.contains(&"xservice_declared_topics"), "the workspace server lists the declared-topics twin: {names:?}");
 
     let unscoped = payload(&response(&rx, 3));
     assert_eq!(unscoped["member"], "svc-a", "the default member answers, and says so: {unscoped}");

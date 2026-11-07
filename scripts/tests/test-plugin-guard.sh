@@ -27,11 +27,21 @@
 #      (HF-1: a file tool's `..` placed only when its text and its links agree;
 #      HF-2: a leading cd's or pushd's `..` places nothing);
 #   8. an unattended session (S-848, FR-IN-17): LOGOS_GUARD_MODE=unattended
-#      denies what layers 1-4, 6 and 7 ask (each of their cases runs in both
+#      denies what layers 1-4, 6, 7 and 10 ask (each of their cases runs in both
 #      modes, and each pass passes in both; layer 5's runs interactive only),
 #      other values ask, and LOGOS_GUARD_ALLOW admits a listed contract file to a
 #      file tool and nothing else;
-#   9. the manual states both variables and the deny's sentence.
+#   9. the manual states both variables and the deny's sentence;
+#  10. (S-849, CR-268) a quoted string and an interpreter's inline code are data:
+#      a separator inside quotes is no command boundary, a shell's own -c string
+#      is read as a command line, and the quoted code after python* -c, node -e,
+#      deno eval, ruby -e, perl -e or php -r is not read; quoting the guard cannot
+#      be sure of is cut as before. Its cases run in both modes, as layer 7's do;
+#  11. (S-850, CR-268) an unattended session's LOGOS_GUARD_ALLOW admits a shell
+#      write whose target the guard places exactly at a listed path, and nothing
+#      it cannot place; a heredoc body fed to a non-shell stays data beside a later
+#      shell, while one a shell may receive is still read as commands; and a
+#      refusal calls a word the command only where it read the line for sure.
 #
 # Usage: bash scripts/tests/test-plugin-guard.sh
 # Exit:  0 all cases behaved, 1 a case did not
@@ -111,6 +121,21 @@ ln -s "$OUTSIDE/sub" "$ENROLLED/ext"
 ln -s "$OUTSIDE" "$ENROLLED/ext2"
 ln -s "$ENROLLED/sub" "$OUTSIDE/in"
 ln -s "$OUTSIDE/sub" "$WORK/out3/q"
+# S-850: a project whose listed file is a symlink to another guarded file of its own.
+SYMFX="$WORK/symfx"
+mkdir -p "$SYMFX/.logos" && : >"$SYMFX/.logos/rules.toml"
+ln -s rules.toml "$SYMFX/.logos/security-ignore.toml"
+# S-506 (sprint review): a logos workspace whose members api and web are repositories
+# of their own, and a linked worktree of api placed outside the workspace. A member
+# inherits the root's .logos/rules.toml, so from api (or its worktree) that file is
+# the project's contract; web's is not.
+WSROOT="$WORK/wsroot"
+WSWT="$WORK/wswt"
+mkdir -p "$WSROOT/.logos" "$WSROOT/api/.logos" "$WSROOT/web/.logos" "$WSROOT/api/.git/worktrees/w" "$WSWT/.logos"
+repo "$WSROOT/api" && repo "$WSROOT/web"
+: >"$WSROOT/logos.workspace.toml"
+: >"$WSROOT/.logos/rules.toml"
+echo "gitdir: $WSROOT/api/.git/worktrees/w" >"$WSWT/.git"
 
 # json STRING — STRING as a JSON string literal, for building payloads.
 json() { python3 -I -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1"; }
@@ -282,6 +307,20 @@ save("quoted-globs.json", "Bash", {"command": "sqlite3 .logos/logos.db " + "\"co
 save("quoted-globs-rm.json", "Bash", {"command": "sqlite3 .logos/logos.db " + "\"count(*)\" '?' " * 4000 + "&& rm .logos/rules.toml"})
 save("heredocs-6000.json", "Bash", {"command": "cat " + " ".join("<<A%d" % i for i in range(6000)) + "\n"
      + "\n".join("A%d" % i for i in range(6000)) + "\nlogos check --bless"})
+# S-849: quoted separators and inline code, each sized past a quadratic shape.
+save("quoted-seps-64k.json", "Bash", {"command": "echo '" + "(x); a|b & c .logos/rules.toml\n" * 2200 + "'"})
+save("python-code-64k.json", "Bash", {"command": "python3 -c '" + "print(1); f = (\".logos/rules.toml\")\n" * 1700 + "'"})
+save("quoted-parens-rm.json", "Bash", {"command": "echo " + "'(a)' " * 8000 + "&& rm .logos/rules.toml"})
+save("interp-openings.json", "Bash", {"command": "python3 -c 'f = \".logos/rules.toml\"'; " * 2000})
+save("ansi-quotes-rm.json", "Bash", {"command": "echo " + "$'a\\'b' " * 8000 + "&& rm .logos/rules.toml"})
+save("continuations-quoted.json", "Bash", {"command": "logos security status 'x' " + "a\\\n" * 8000})
+# S-850: a long heredoc body, and a long tail, beside a later shell; many allowed shell writes.
+save("heredoc-then-bash.json", "Bash", {"command": "python3 - <<'EOF'\n" + "x = 'rm .logos/security-ignore.toml'\n" * 20000
+     + "EOF\nbash -n f"})
+save("heredoc-long-tail.json", "Bash", {"command": "python3 - <<'EOF'\nx = 'rm .logos/rules.toml'\nEOF\n" + "bash -n f\n" * 20000})
+with open(os.path.join(w, "allowed-writes.json"), "w", encoding="utf-8") as f:
+    json.dump({"session_id": "t", "cwd": os.path.join(w, "enrolled"), "hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": "rm" + " .logos/security-ignore.toml" * 4000}}, f)
 PY
 
 for B in "${BASHES[@]}"; do
@@ -1133,6 +1172,18 @@ rm -f .logos/*   # it's regenerated")" ".logos/rules.toml"
         "$(file_payload Write file_path "$OUTSIDE/.logos/rules.toml")"
     passes "a redirection into a guarded file outside the project passes" \
         "$(bash_payload "echo x > $OUTSIDE/.logos/rules.toml")"
+    # S-506: a member inherits its workspace root's rules.toml, so from a member that
+    # root's .logos/ is never placed elsewhere; a sibling member's still is.
+    asks "from a workspace member, a Write of the root's inherited rules.toml asks" \
+        "$(file_payload Write file_path "$WSROOT/.logos/rules.toml")" ".logos/rules.toml" "$WSROOT/api"
+    asks "from a workspace member, a redirection into the root's rules.toml asks" \
+        "$(bash_payload_at "$WSROOT/api" "printf x >> $WSROOT/.logos/rules.toml")" ".logos/rules.toml" "$WSROOT/api"
+    asks "from a workspace member, a leading cd to the root, then rm of its rules.toml, asks" \
+        "$(bash_payload_at "$WSROOT/api" "cd $WSROOT && rm .logos/rules.toml")" ".logos/rules.toml" "$WSROOT/api"
+    asks "from a member's linked worktree outside the workspace, the root its main checkout inherits asks" \
+        "$(file_payload Write file_path "$WSROOT/.logos/rules.toml")" ".logos/rules.toml" "$WSWT"
+    passes "from a workspace member, a sibling member's contract is placed elsewhere and passes" \
+        "$(file_payload Write file_path "$WSROOT/web/.logos/rules.toml")" "$WSROOT/api"
     # HF-1: a file tool's `..` may be resolved as text (PROJ/ext/.. is the project
     # root) or through the links (PROJ/ext/.. is where ext leads, then up), so such a
     # path is placed only when both readings are outside the project.
@@ -1292,6 +1343,215 @@ rm -f .logos/*   # it's regenerated")" ".logos/rules.toml"
     bounded passes "8000 quoted globs beside a .logos path: passes" "$WORK/quoted-globs.json"
     bounded asks "8000 quoted globs, then a guarded rm: asks" "$WORK/quoted-globs-rm.json" ".logos/rules.toml"
     bounded asks "6000 heredocs on one line, then a guarded command: asks" "$WORK/heredocs-6000.json" "logos check --bless"
+
+    # --- 10. quoted strings and inline code are data (S-849, CR-268) ------------
+    # A separator inside quotes is no command boundary.
+    passes "a parenthesis in a quoted string is no command boundary" "$(bash_payload "echo '(.logos/rules.toml)'")"
+    passes "a ; in a double-quoted string is no command boundary" "$(bash_payload 'echo "a; b .logos/rules.toml"')"
+    passes "a | in a quoted grep pattern is no pipe" "$(bash_payload "grep -n 'x|y' .logos/rules.toml")"
+    passes "a newline in a quoted string is no command boundary" "$(bash_payload "echo 'a
+rm .logos/rules.toml'")"
+    passes "a separator in \$'…' is quoted too" "$(bash_payload "echo \$'(.logos/rules.toml)'")"
+    passes "an escaped quote in \$'…' closes nothing" "$(bash_payload "echo \$'a\\'b (.logos/rules.toml)'")"
+    passes "a separator after an escaped quote in \$'…' is still quoted" \
+        "$(bash_payload "echo \$'a\\'; rm .logos/rules.toml; echo '")"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: \$\$'…' is the PID then a plain '…', where \\' closes" \
+        "$(bash_payload "echo \$\$'a\\'; rm .logos/rules.toml; echo ''\\'")" '`rm` may write or delete .logos/rules.toml'
+    passes "a commit message's parenthesis and ; are its own" \
+        "$(bash_payload 'git commit -m "fix (x); see .logos/rules.toml"')"
+    # The coordinator's own command (2026-11-03), and its two minimal shapes.
+    passes "git ls-files piped into a grep -E of the contract's names passes" \
+        "$(bash_payload "cd ~/source/logos && git ls-files | grep -E '(^|/)\\.logos/(rules\\.toml|rules-baseline\\.json|security-ignore\\.toml|security-baseline\\.json)\$' | head")"
+    passes "a grep -E group before a contract path passes" "$(bash_payload "grep -E '(^x)\\.logos/rules\\.toml' f")"
+    passes "a grep -E alternation before a contract path passes" "$(bash_payload "grep -E 'a|\\.logos/rules\\.toml' f")"
+    passes "near miss: a grep -E of a contract path with no group passes" "$(bash_payload "grep -E '\\.logos/rules\\.toml' f")"
+    # A quoted separator ends the word beside it, as a blank does: what the word names is read as before.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a contract path glued to a quoted ; is still a path: ssh h 'rm …; ls' asks" \
+        "$(bash_payload "ssh h 'rm .logos/rules.toml; ls'")" '`ssh` may write or delete .logos/rules.toml'
+    asks "logos gate --save glued to a quoted ; still asks" "$(bash_payload "ssh h 'logos gate --save; ls'")" "logos gate --save"
+    asks "logos check --bless glued to a quoted ; still asks" \
+        "$(bash_payload "tmux send-keys 'logos check --bless;' Enter")" "logos check --bless"
+    asks "logos security bless glued to a quoted & still asks" "$(bash_payload 'ssh h "logos security bless&"')" \
+        "logos security bless"
+    asks "logos gate --save inside a quoted ( ) still asks" "$(bash_payload "ssh h '(logos gate --save)'")" "logos gate --save"
+    asks "a quoted redirection glued to a ; still writes its target" \
+        "$(bash_payload "ssh h 'cat x>.logos/rules.toml;'")" "writes .logos/rules.toml through a shell redirection"
+    # Outside quotes a separator still cuts, and quoting the guard cannot be sure of is cut as before.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a ; outside quotes still starts a command: echo x; rm asks" "$(bash_payload 'echo x; rm .logos/rules.toml')" \
+        '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a quoted string beside a writer: echo \"a\" && rm asks" "$(bash_payload 'echo "a" && rm ".logos/rules.toml"')" \
+        '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "an unbalanced quote is cut as before, and asks" "$(bash_payload "echo '(.logos/rules.toml")" \
+        '`rules.toml` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks and $( ), for the guard to read
+    asks "quotes on a line with a command substitution are cut as before" \
+        "$(bash_payload 'echo "$(rm .logos/rules.toml)"')" '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a backslash in '…' is plain, so the quote after it closes" "$(bash_payload "echo 'a\\'(.logos/rules.toml)")" \
+        '`rules.toml` may write or delete .logos/rules.toml'
+    # A cut that still yields a bare directory names it, never an empty command.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a reason names the command word it read, never an empty one" \
+        "$(bash_payload "bash -c \"grep -E '(^|/)\\.logos/(rules\\.toml)\$' f\"")" '`.logos/` may write or delete .logos/'
+
+    # A shell's own -c string is a command line, read as one.
+    passes "bash -c of a reader passes" "$(bash_payload "bash -c 'cat .logos/rules.toml'")"
+    passes "sh -c, by path, and zsh -c of a reader pass" \
+        "$(bash_payload "sh -c 'cat .logos/rules.toml' && /bin/zsh -c 'wc -l .logos/rules.toml'")"
+    passes "bash -ec (a cluster holding c) of a reader passes" "$(bash_payload "bash -ec 'cat .logos/rules.toml'")"
+    passes "bash -c nested in bash -c, of a reader, passes" \
+        "$(bash_payload "bash -c \"bash -c 'cat .logos/rules.toml'\"")"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "bash -c of rm asks" "$(bash_payload "bash -c 'rm .logos/rules.toml'")" '`rm` may write or delete .logos/rules.toml'
+    asks "sh -c of logos check --bless asks" "$(bash_payload 'sh -c "logos check --bless"')" "logos check --bless"
+    asks "env bash -c of a redirection into the contract asks" "$(bash_payload "env bash -c 'cat > .logos/rules.toml'")" \
+        "writes .logos/rules.toml through a shell redirection"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "rtk bash -c of rm asks" "$(bash_payload "rtk bash -c 'rm .logos/rules.toml'")" '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a separator inside bash -c's string still cuts it" \
+        "$(bash_payload "bash -c 'cat .logos/rules.toml; rm .logos/rules.toml'")" '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks and $0, for the guard to read
+    asks "bash -c's positional words are read too" "$(bash_payload "bash -c 'rm \"\$0\"' .logos/rules.toml")" \
+        '`bash` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks and $0, for the guard to read
+    asks "bash -c redirecting into \$0, a positional word naming the contract, asks" \
+        "$(bash_payload "bash -c 'cat > \"\$0\"' .logos/rules.toml")" '`bash` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks and $1, for the guard to read
+    asks "env bash -c redirecting into \$1 asks" \
+        "$(bash_payload "env bash -c 'printf x > \"\$1\"' _ .logos/rules-baseline.json")" \
+        '`bash` may write or delete .logos/rules-baseline.json'
+    # shellcheck disable=SC2016 # literal backticks and $@, for the guard to read
+    asks "rtk bash -c appending to \"\$@\" asks" \
+        "$(bash_payload "rtk bash -c 'echo x >> \"\$@\"' _ .logos/security-ignore.toml")" \
+        '`bash` may write or delete .logos/security-ignore.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: a shell given a script, not -c, is the command" \
+        "$(bash_payload 'bash -x script.sh .logos/rules.toml')" '`bash` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: bash -C (noclobber) is no -c" "$(bash_payload 'bash -C cat .logos/rules.toml')" \
+        '`bash` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a shell's own options are its words when no -c follows" \
+        "$(bash_payload "bash --rcfile=.logos/rules.toml x")" '`bash` may write or delete .logos/rules.toml'
+
+    # A named interpreter's inline code is data; its other words and redirections are not.
+    passes "python3 -c printing a contract path passes (Sprint 110 I-9 a)" \
+        "$(bash_payload "python3 -c 'print(\".logos/rules.toml\")'")"
+    passes "node -e reading a contract file passes" \
+        "$(bash_payload "node -e 'require(\"fs\").readFileSync(\".logos/rules.toml\")'")"
+    # The criteria's own .logos/x cases name no guarded file, so they passed before
+    # too: a php -r naming one is chained on, which only the inline-code rule passes.
+    passes "ruby -e, perl -e and php -r naming .logos/x pass, and php -r naming a contract file" \
+        "$(bash_payload "ruby -e 'puts \".logos/x\"' && perl -e 'print \".logos/x\"' && php -r 'echo \".logos/x\";' && php -r 'echo \".logos/rules.toml\" . PHP_EOL;'")"
+    passes "python3 -c whose code names a contract file as a word passes" \
+        "$(bash_payload "python3 -c 'import sys; f = \".logos/rules.toml\"'")"
+    passes "node -e and node --eval= whose code names a contract file pass" \
+        "$(bash_payload "node -e 'const f = \".logos/rules.toml\"' && node --eval='const g = \".logos/rules.toml\"'")"
+    passes "deno eval whose code names a contract file passes" \
+        "$(bash_payload "deno eval 'const f = \".logos/rules.toml\"'")"
+    passes "ruby -e whose code names a contract file passes, and a second -e too" \
+        "$(bash_payload "ruby -e 'puts File.read \".logos/rules.toml\"' && ruby -e 'a' -e 'f = \".logos/rules.toml\"'")"
+    passes "perl -e and perl -ne whose code names a contract file pass" \
+        "$(bash_payload "perl -e 'unlink \".logos/rules.toml\"' && perl -ne 'print \".logos/rules.toml\"' f")"
+    passes "php -r whose code names a contract file passes" \
+        "$(bash_payload "php -r 'echo \".logos/rules.toml\" . PHP_EOL;'")"
+    passes "an interpreter by path, a cluster (-Ic), \$'…' code and an rtk prefix pass" \
+        "$(bash_payload "/usr/bin/python3.12 -c 'f = \".logos/rules.toml\"' && python3 -Ic 'f = \".logos/rules.toml\"' && python3 -c \$'f = \".logos/rules.toml\"' && rtk proxy python3 -c 'f = \".logos/rules.toml\"'")"
+    passes "python -c, double-quoted code, perl -E and node --eval CODE pass" \
+        "$(bash_payload "python -c 'f = \".logos/rules.toml\"' && python3 -c \"f = '.logos/rules.toml'\" && perl -E 'say \".logos/rules.toml\"' && node --eval 'const f = \".logos/rules.toml\"'")"
+    asks "a redirection after python3 -c still asks" "$(bash_payload "python3 -c 'x' > .logos/rules.toml")" \
+        "writes .logos/rules.toml through a shell redirection"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "python3 -c's argument words are read" "$(bash_payload "python3 -c 'f = 1' .logos/rules.toml")" \
+        '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "perl -pi -e's file operand is read" "$(bash_payload "perl -pi -e 's/a/b/' .logos/rules.toml")" \
+        '`perl` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "an unbalanced quote after python3 -c is cut as before, and asks" \
+        "$(bash_payload "python3 -c 'print(\".logos/rules.toml\")")" '`rules.toml` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "code glued after a quote closes is read" "$(bash_payload "python3 -c 'a'\"b; rm .logos/rules.toml\"")" \
+        '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: a quoted argument to a python script is read" \
+        "$(bash_payload "python3 script.py 'f = .logos/rules.toml'")" '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: an option's value before -c leaves the code read" \
+        "$(bash_payload "python3 -W ignore -c 'f = \".logos/rules.toml\"'")" '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: -c after python3 -m belongs to the module" \
+        "$(bash_payload "python3 -m mod -c 'f = .logos/rules.toml'")" '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: a command named like an interpreter is no interpreter" \
+        "$(bash_payload "echo x; mypython3 -c 'f = \".logos/rules.toml\"'")" '`mypython3` may write or delete .logos/rules.toml'
+    # An interpreter that is an operand, after a glued { or a redirection's & or |, opens no code.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: python3 after a { glued to a word is an operand" \
+        "$(bash_payload "rm x{ python3 -c '.logos/rules.toml'")" '`rm` may write or delete'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: python3 after >& is a redirection target" \
+        "$(bash_payload "rm -f x >& python3 -c '.logos/rules.toml'")" '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: python3 after >| is a redirection target" \
+        "$(bash_payload "rm -f x >| python3 -c '.logos/rules.toml'")" '`rm` may write or delete .logos/rules.toml'
+    passes "python3 -c after a { of its own, a pipe and |& opens code" \
+        "$(bash_payload "{ python3 -c 'f = \".logos/rules.toml\"'; } && echo x | python3 -c 'g = \".logos/rules.toml\"' && echo y |& python3 -c 'h = \".logos/rules.toml\"'")"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: python3 -C is no -c" "$(bash_payload "python3 -C 'f = .logos/rules.toml'")" \
+        '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: node -p is not an inline-code option the guard reads" \
+        "$(bash_payload "node -p 'f = .logos/rules.toml'")" '`node` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: an unquoted word after -c is the code's start only, the rest is read" \
+        "$(bash_payload "python3 -c x' .logos/rules.toml'")" '`python3` may write or delete .logos/rules.toml'
+    # A heredoc body left in the text is not scanned: here its apostrophe, and the
+    # escaped quote after it, would pair and swallow the rm into one quoted string.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a heredoc body kept in the text opens no quote" \
+        "$(bash_payload "cat > n <<EOF"$'\n'"don't \\"$'\n'"x"$'\n'"EOF"$'\n'"rm .logos/rules.toml; echo \\'")" \
+        '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "python3 -c \"…\"'s argument words are read: inline code ends at its closing quote" \
+        "$(bash_payload "python3 -c \"x\" '.logos/rules.toml'")" '`python3` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a command after python3 -c \"…\" is read" "$(bash_payload "python3 -c \"x\"; rm '.logos/rules.toml'")" \
+        '`rm` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: a long option holding c is no -c" "$(bash_payload 'bash --norc cat .logos/rules.toml')" \
+        '`bash` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a shell with options and no word after them is the command" \
+        "$(bash_payload 'bash --rcfile=.logos/rules.toml')" '`bash` may write or delete .logos/rules.toml'
+    passes "a & in a quoted string is no command boundary" "$(bash_payload "echo 'a & b .logos/rules.toml'")"
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a reason shows a quoted separator as itself" "$(bash_payload "'(' .logos/rules.toml")" \
+        '`(` may write or delete .logos/rules.toml'
+    asks "a reason shows a quoted newline as itself" "$(bash_payload "'"$'\n'"' .logos/rules.toml")" \
+        "\`"$'\n'"\` may write or delete .logos/rules.toml"
+    passes "options before the code option, and code glued to it, are read as the interpreter's" \
+        "$(bash_payload "python3 -I -c 'f = \".logos/rules.toml\"' && python3 -c'f = \".logos/rules.toml\"' && php -r'echo \".logos/rules.toml\" . PHP_EOL;' && node --no-warnings -e 'f = \".logos/rules.toml\"' && perl -n -e 'print \".logos/rules.toml\"' f && php -n -r 'echo \".logos/rules.toml\" . PHP_EOL;' && deno eval --ext=ts 'const f = \".logos/rules.toml\"'")"
+    # The last-character filter lets any line naming deno reach the match; the match still wants `deno eval`.
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: deno run is no deno eval" "$(bash_payload "deno run x '.logos/rules.toml'")" \
+        '`deno` may write or delete .logos/rules.toml'
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "near miss: a command ending in deno is no deno" "$(bash_payload "echo x; xdeno eval '.logos/rules.toml'")" \
+        '`xdeno` may write or delete .logos/rules.toml'
+    passes "dash -c and ksh -c of a reader pass" "$(bash_payload "dash -c 'cat .logos/rules.toml' && ksh -c 'wc .logos/rules.toml'")"
+    bounded passes "a 64 KB quoted string of separators passes" "$WORK/quoted-seps-64k.json"
+    bounded passes "64 KB of python3 -c code passes" "$WORK/python-code-64k.json"
+    bounded asks "8000 quoted parentheses, then a guarded rm: asks" "$WORK/quoted-parens-rm.json" ".logos/rules.toml"
+    bounded passes "2000 python3 -c openings, each read for inline code, pass" "$WORK/interp-openings.json"
+    bounded asks "8000 \$'…' strings, then a guarded rm: asks" "$WORK/ansi-quotes-rm.json" ".logos/rules.toml"
+    bounded passes "a quote beside 8000 backslash-newlines in one logos command: passes" "$WORK/continuations-quoted.json"
 
     # --- 4. malformed payloads, and an unenrolled project -----------------------
     for m in "empty|" "not JSON|garbage" "a JSON array|[]" "no tool_name|{\"tool_input\":{}}" \
@@ -1453,6 +1713,241 @@ rm -f .logos/*   # it's regenerated")" ".logos/rules.toml"
             ask ".logos/security-ignore.toml"
     done
     MODE_ARG="" ALLOW_ARG=""
+
+    # --- 11. an allowed shell write; a heredoc beside a later shell (S-850, CR-268) ---
+    # In an unattended session LOGOS_GUARD_ALLOW admits a shell writer whose target the
+    # guard places exactly at a listed path: spelled out (no expansion, glob, brace or
+    # `..`), read from the payload's cwd or a leading cd's directory, its directory
+    # reached through the links in the project, the target itself no symlink. A
+    # target it cannot place so denies; interactive, every one of these
+    # asks as it did.
+    SIP=".logos/security-ignore.toml"
+    ALLOW_SI="LOGOS_GUARD_ALLOW=$SIP"
+    for cmd in "printf x >> $SIP" "printf x > $SIP" "printf x >$SIP" "rm $SIP" "rm -f $SIP" "cp /tmp/x $SIP" \
+        "tee $SIP" "printf x | tee -a $SIP" "dd if=/tmp/x of=$SIP" "rm $ENROLLED/$SIP" \
+        "rtk rm $SIP" "cd $ENROLLED/.logos && rm security-ignore.toml" "cd $ENROLLED && printf x >> $SIP" \
+        "printf x >> $SIP && cat $SIP" "rm \"$SIP\"" "printf '[[x]]\\n' >> $SIP" "install -m 644 /tmp/x $SIP" \
+        "xargs rm $SIP" "printf x >> $SIP && bash -n f"; do
+        MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG="$ALLOW_SI"
+        verdict "allow (shell): '$cmd' passes" "$(bash_payload_at "$ENROLLED" "$cmd")" pass
+        MODE_ARG="" ALLOW_ARG="$ALLOW_SI"
+        verdict "allow (shell): '$cmd' still asks when the session is attended" "$(bash_payload_at "$ENROLLED" "$cmd")" \
+            ask "$SIP"
+        MODE_ARG="LOGOS_GUARD_MODE=Unattended" ALLOW_ARG="$ALLOW_SI"
+        verdict "allow (shell): '$cmd' asks under mode 'Unattended', the list unread" \
+            "$(bash_payload_at "$ENROLLED" "$cmd")" ask "$SIP"
+        MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG=""
+        verdict "allow (shell): '$cmd' denies with no list" "$(bash_payload_at "$ENROLLED" "$cmd")" deny "$SIP"
+        MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG="LOGOS_GUARD_ALLOW=.logos/rules.toml"
+        verdict "allow (shell): '$cmd' denies when the list holds another file" "$(bash_payload_at "$ENROLLED" "$cmd")" \
+            deny "$SIP"
+    done
+    # A cd from another directory places what follows it.
+    MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG="$ALLOW_SI"
+    verdict "allow (shell): a leading cd into the project from outside it places the write: passes" \
+        "$(bash_payload_at "$OUTSIDE" "cd $ENROLLED && rm $SIP")" pass
+    # Each of these the guard cannot place at a listed path (or places at another file),
+    # or the listed word is not what the command writes (a source a destination is
+    # built from: pax, rsync -R, cp --parents or into a directory, find -execdir, git
+    # submodule foreach), or a < or > on the line sits in quotes: interactive they ask,
+    # unattended they deny, the list notwithstanding.
+    # shellcheck disable=SC2016 # literal $F, for the guard to read
+    for c in "printf x >> .logos/rules.toml|.logos/rules.toml" "rm .logos/rules.toml|.logos/rules.toml" \
+        "cp /tmp/x .logos/rules.toml|.logos/rules.toml" "tee .logos/rules.toml|.logos/rules.toml" \
+        "cp $SIP .logos/rules.toml|.logos/rules.toml" "rm $SIP .logos/rules-baseline.json|.logos/rules-baseline.json" \
+        'F=.logos/security-ignore.toml; printf x >> $F|into `$F`' 'F=.logos/security-ignore.toml; rm $F|`rm` is given `$F`' \
+        "rm .logos/security-ignore.tom?|$SIP" "rm .logos/*|.logos/*" "printf x >> .logos/security-ignore.t*|$SIP" \
+        "printf x >> .lo{gos,}/security-ignore.toml|brace expansion" "rm ext/../$SIP|$SIP" \
+        "rm $ENROLLED/ext/../$SIP|$SIP" "rm $ENROLLED/sub/../$SIP|$SIP" "rm .LOGOS/security-ignore.toml|$SIP" \
+        "rm scratch/member/$SIP|$SIP" "cd .logos && rm security-ignore.toml|$SIP" "ln -sf /tmp/x y; rm $SIP|$SIP" \
+        "mv /tmp/x $SIP|$SIP" "git -C sub rm $SIP|$SIP" "rm .logos|the directory holding the quality contract" \
+        "cd /tmp; rm $SIP|$SIP" "(cd /tmp && rm $SIP)|$SIP" \
+        "pax -rw $SIP sub|$SIP" "rsync -R $SIP sub/|$SIP" "find sub -name m -execdir rm $SIP \\;|$SIP" \
+        "git submodule foreach rm $SIP|$SIP" "cp --parents $SIP sub/|$SIP" "cp $SIP sub|$SIP" "cp -a /tmp/l $SIP|$SIP" \
+        "cp -R /tmp/d $SIP|$SIP" "cp -t sub /tmp/x $SIP|$SIP" "git submodule foreach 'printf x > $SIP'|$SIP" \
+        "echo '>' > $SIP|$SIP" "sed -i s/a/b/ $SIP|$SIP" "$SIP|$SIP" \
+        'F=.logos/security-ignore.toml; cp /tmp/x $F|`cp` is given `$F`' \
+        'F=.logos/security-ignore.toml; tee $F|`tee` is given `$F`' "cp /tmp/x .logos/security-ignore.tom?|$SIP" \
+        "tee .logos/security-ignore.t*|$SIP" "cp /tmp/x ext/../$SIP|$SIP" "tee ext/../$SIP|$SIP" \
+        "cat <<EOF
+printf x >> $SIP|$SIP"; do
+        cmd="${c%|*}" want="${c##*|}" said="${c##*|}"
+        # Attended, the listed file is a mention like any other, and is named first; so is
+        # it unattended where it is not what the command writes (cp's source).
+        case "$cmd" in "cp $SIP "*) said="$SIP" want="$SIP" ;; "rm $SIP "*) said="$SIP" ;; esac
+        MODE_ARG="" ALLOW_ARG="$ALLOW_SI"
+        verdict "allow (shell): '$cmd' asks when attended" "$(bash_payload_at "$ENROLLED" "$cmd")" ask "$said"
+        MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG="$ALLOW_SI"
+        verdict "allow (shell): '$cmd' cannot be placed at a listed path: denies" "$(bash_payload_at "$ENROLLED" "$cmd")" \
+            deny "$want"
+    done
+    MODE_ARG="$UNATTENDED_ARG" ALLOW_ARG="$ALLOW_SI"
+    verdict "allow (shell): with no cwd in the payload a relative target is not placed: denies" \
+        "$(bash_payload "printf x >> $SIP")" deny "$SIP"
+    RUN_PROJECT="$ENROLLED" verdict "allow (shell): a relative target that climbs from the payload's cwd denies" \
+        "$(bash_payload_at "$ENROLLED/sub" "rm ../$SIP")" deny "$SIP" "$ENROLLED/sub"
+    verdict "allow (shell): a listed file that is a symlink to another guarded file denies" \
+        "$(bash_payload_at "$SYMFX" "printf x >> $SIP")" deny "$SIP" "$SYMFX"
+    verdict "allow (shell): from a linked worktree, the main checkout's listed file is not the worktree's: denies" \
+        "$(bash_payload_at "$WT" "rm $MAIN/$SIP")" deny "$SIP" "$WT"
+    RUN_NO_PROJECT_DIR=1 verdict "allow (shell): the host naming no project places nothing: denies" \
+        "$(bash_payload_at "$ENROLLED" "rm $SIP")" deny "$SIP"
+    verdict "allow (shell): logos security bless still denies" "$(bash_payload_at "$ENROLLED" 'logos security bless')" \
+        deny "logos security bless"
+    ALLOW_ARG="LOGOS_GUARD_ALLOW=.logos/security-baseline.json"
+    verdict "allow (shell): a listed security-baseline.json never admits logos security bless" \
+        "$(bash_payload_at "$ENROLLED" 'logos security bless')" deny "logos security bless"
+    ALLOW_ARG="LOGOS_GUARD_ALLOW=.logos/*"
+    verdict "allow (shell): an entry '.logos/*' admits no glob target" "$(bash_payload_at "$ENROLLED" 'rm .logos/*')" \
+        deny ".logos/*"
+    # A glob or brace word that equals its own entry is still a pattern the shell expands.
+    for g in ".logos/rules.tom?" ".logos/rules.tom[l]" ".logos/rules.toml{,}"; do
+        ALLOW_ARG="LOGOS_GUARD_ALLOW=$g"
+        verdict "allow (shell): an entry '$g' admits no 'rm $g'" "$(bash_payload_at "$ENROLLED" "rm $g")" deny ".logos/rules.tom"
+    done
+    ALLOW_ARG="LOGOS_GUARD_ALLOW=.logos/rules.toml:./.logos/security-ignore.toml"
+    verdict "allow (shell): a later, ./-spelt entry of the list admits its file" "$(bash_payload_at "$ENROLLED" "rm $SIP")" pass
+    SLOWEST=0 ALLOW_ARG="$ALLOW_SI"
+    verdict "allow (shell): 4000 placed writes of the listed file pass" "$(cat "$WORK/allowed-writes.json")" pass
+    expect "$T ... decided within ${BOUND}s" "$([ "$SLOWEST" -le "$BOUND" ] && echo yes || echo "no (${SLOWEST}s)")" yes
+    MODE_ARG="" ALLOW_ARG=""
+
+    # A heredoc body is data to the non-shell that reads it, a later shell in the same
+    # call notwithstanding (owner, 2026-11-04): that shell reads its own input, not the
+    # body. A body a shell may still receive (a pipe or substitution after it, a read
+    # into a variable, exec's descriptor) is read as commands, as before.
+    passes "a python heredoc, then bash -n f: the body is data" "$(bash_payload "python3 - <<'EOF'
+x='rm .logos/security-ignore.toml'
+EOF
+bash -n f")"
+    passes "a python heredoc, then && bash: the body is data" "$(bash_payload "python3 - <<'EOF'
+variable = '.logos/rules.toml'
+EOF
+[ -f f ] && bash -n f")"
+    passes "a script written by cat from a heredoc, then bash -n on it: the body is data" \
+        "$(bash_payload "cat > spawn.sh <<'EOF'
+rm .logos/rules.toml
+logos check --bless
+EOF
+bash -n spawn.sh")"
+    passes "a heredoc, then a shell named on a later line: data" "$(bash_payload "git commit -F - <<'EOF'
+Ran rm .logos/rules.toml by hand
+EOF
+sh scripts/x.sh")"
+    asks "a heredoc read by bash, then bash -n f: still commands" "$(bash_payload "bash <<'EOF'
+rm .logos/rules.toml
+EOF
+bash -n f")" ".logos/rules.toml"
+    asks "a heredoc read by bash names rm .logos/rules.toml: commands" "$(bash_payload "bash <<'EOF'
+rm .logos/rules.toml
+EOF")" ".logos/rules.toml"
+    asks "a heredoc whose line pipes onward, then sh after the body: commands" "$(bash_payload "cat <<'EOF' |
+rm .logos/rules.toml
+EOF
+sh")" ".logos/rules.toml"
+    asks "a heredoc in a loop piped into sh after the body: commands" "$(bash_payload "while :; do
+cat <<'EOF'
+rm .logos/rules.toml
+EOF
+done | sh")" ".logos/rules.toml"
+    # shellcheck disable=SC2016 # literal $x and $( ), for the guard to read
+    asks "a heredoc captured by a substitution, then bash -c of it: commands" "$(bash_payload 'x=$(cat <<'"'"'EOF'"'"'
+rm .logos/rules.toml
+EOF
+)
+bash -c "$x"')" ".logos/rules.toml"
+    # shellcheck disable=SC2016 # literal $x, for the guard to read
+    asks "a heredoc read into a variable, then eval of it: commands" "$(bash_payload 'IFS= read -r x <<'"'"'EOF'"'"'
+rm .logos/rules.toml
+EOF
+eval "$x"')" ".logos/rules.toml"
+    asks "a heredoc on exec's descriptor, then bash reading it: commands" "$(bash_payload "exec 3<<'EOF'
+rm .logos/rules.toml
+EOF
+bash <&3")" ".logos/rules.toml"
+    asks "a shell between two heredocs keeps both read as commands" "$(bash_payload "python3 - <<'A'
+print(1)
+A
+bash -n f
+python3 - <<'B'
+x='rm .logos/rules.toml'
+B")" ".logos/rules.toml"
+    # shellcheck disable=SC2016 # literal $x and $( ), for the guard to read
+    asks "a substitution closed before a second heredoc, then bash -c of it: commands" "$(bash_payload 'x=$(cat <<'"'"'A'"'"'
+rm .logos/rules.toml
+A
+)
+python3 - <<'"'"'B'"'"'
+print(1)
+B
+bash -c "$x"')" ".logos/rules.toml"
+    asks "a heredoc read by git apply, then bash -n f: still a patch" "$(bash_payload "git apply <<'EOF'
+--- a/.logos/rules.toml
++++ b/.logos/rules.toml
+EOF
+bash -n f")" ".logos/rules.toml"
+    # shellcheck disable=SC2016 # literal ${a[0]}, for the guard to read
+    for r in mapfile readarray; do
+        asks "a heredoc read by $r into an array, then eval of it: commands" "$(bash_payload "$r -t a <<'EOF'
+rm .logos/rules.toml
+EOF
+eval \"\${a[0]}\"")" ".logos/rules.toml"
+    done
+    # The shell runs the text out of its written order where a function or alias is
+    # defined, or a loop may run the heredoc's line again: still commands. (With the
+    # body read, a `function NAME {` line's brace is the first word a refusal names;
+    # with the body taken out, the call names nothing guarded and would pass.)
+    asks "a heredoc whose command is a function defined later as bash: commands" "$(bash_payload "function g { h <<'EOF'
+rm .logos/rules.toml
+EOF
+}
+function h { bash; }
+g")" "may write or delete"
+    asks "the same with NAME() definitions: commands" "$(bash_payload "g() { h <<'EOF'
+rm .logos/rules.toml
+EOF
+}
+h() { source /dev/stdin; }
+g")" ".logos/rules.toml"
+    asks "a loop that redefines the heredoc's command after it: commands" "$(bash_payload "function f { cat >/dev/null; }
+for i in 1 2; do
+f <<'EOF'
+rm .logos/rules.toml
+EOF
+function f { bash; }
+done")" "may write or delete"
+    asks "a loop that may change what the heredoc's command runs: commands" "$(bash_payload "for i in 1 2; do
+python3 - <<'EOF'
+rm .logos/rules.toml
+EOF
+ln -sf /bin/bash python3
+done
+bash -n f")" ".logos/rules.toml"
+    asks "an alias for the heredoc's command: commands" "$(bash_payload "alias py=bash
+py <<'EOF'
+rm .logos/rules.toml
+EOF
+bash -n f")" ".logos/rules.toml"
+    bounded passes "a 20000-line python heredoc, then bash -n f: passes" "$WORK/heredoc-then-bash.json"
+    bounded passes "a python heredoc, then 20000 lines of bash -n f: passes" "$WORK/heredoc-long-tail.json"
+    # A refusal names a command only where the guard read the line into commands for
+    # sure; where it cannot tell commands from data, it says so.
+    # shellcheck disable=SC2016 # literal $( ), for the guard to read
+    for c in "python3 - <<EOF
+variable = .logos/rules.toml|variable|.logos/rules.toml" "git apply <<EOF
+--- .logos/rules.toml
+EOF|rules.toml|.logos/rules.toml" "bash -c \"x='rm .logos/rules.toml'\"|rules.toml|.logos/rules.toml" \
+        "echo '(.logos/rules.toml|rules.toml|.logos/rules.toml"; do
+        cmd="${c%%|*}" rest="${c#*|}"
+        word="${rest%%|*}" want="${rest#*|}"
+        asks "a refusal of '${cmd%%$'\n'*}…' names its target" "$(bash_payload "$cmd")" "$want"
+        named=no
+        case "$REASON" in *"the command \`$word\`"*) named="named: $REASON" ;; esac
+        expect "$T ... and never calls \`$word\` the command" "$named" no
+    done
+    # shellcheck disable=SC2016 # literal backticks, for the guard to read
+    asks "a refusal on a line read into commands for sure names the command" \
+        "$(bash_payload 'echo "a;b" && rm .logos/rules.toml')" 'the command `rm` may write or delete .logos/rules.toml'
 done
 
 # --- 5. hooks.json ----------------------------------------------------------------

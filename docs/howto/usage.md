@@ -225,6 +225,18 @@ by each relation's payload token), read live from the graph.
 >   a member read by an out-of-line definition; it binds to `T`'s `m` or its
 >   nearest base's, as a written `T::m()` does;
 >   Rust's, [FR-RS-42](../specs/requirements/FR-RS-42.md), below).
+>   A Java static call written on a capitalised name, `Helper.slug(s)`, is
+>   recorded as the type-qualified call `Helper::slug` when no variable,
+>   parameter or field of the file declares `Helper` and no static import
+>   brings it in, so a `Helper` of the caller's own package binds it with no
+>   import ([FR-RS-10](../specs/requirements/FR-RS-10.md),
+>   [CR-271](../requests/CR-271-a-static-call-on-a-same-package-type-binds-without-an-import.md)).
+>   A type of another package that the file does not import, and a JDK type
+>   (`Math.max(…)`), stay unbound and count under `external-type`; an
+>   all-capitals name (`LOG.info(…)`) is read as a constant, not a type; a call
+>   to an overloaded method binds only when its argument count picks one
+>   overload. A store written before this release binds these calls after its
+>   next `logos scan`, which re-extracts every file once.
 >   Where the caller sits — its file, class or module — is not evidence of what
 >   `x` is: an `other.foo()` inside a method `foo` never binds to that method
 >   itself, and never to a same-named function beside it
@@ -1209,6 +1221,21 @@ documents read, and bound calls over the no-provider REST rows with their
 refusals. A bound call **stays under *No provider here***: the binding is
 reported beside its row, and no runtime figure counts it. A workspace with no
 vendored spec and no `kind` shows no declared edge, legend section or card.
+
+**The declared-topic layer (since S-491).** When a member's committed `src/main`
+configuration names a broker topic (`spring.kafka.topics.<k>`, or a key whose last
+segment is or ends in `topic` / `topics`) that another member's code captures, but its
+own code neither publishes nor subscribes to it, the service map draws that
+**net-new** membership as a **dotted, arrowless** line from the member to the topic, in
+its own `declares-topic` class and hue — never in the teal of the `publishes` /
+`subscribes` hops, because a declaration is not an observed broker edge. A declaration
+the code already shows is not drawn again. The legend gains a **Declared topics**
+section with the edge row and the server's headline line, and a **Declared topics**
+widget below the map lists each net-new declaration with its member, topic, key, file
+and profile, and counts the already-observed declarations beside it without listing
+them. The same relation is `GET /api/v1/workspace/declared-topics`. The map reads it
+only when the workspace has broker topics; one that declares nothing shows no line,
+legend section or widget.
 
 In a plain single repo
 (no manifest) **no selector is rendered and the UI is byte-for-byte unchanged**;

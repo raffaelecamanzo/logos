@@ -239,6 +239,208 @@ fn modularity_assigns_unbound_nodes_a_community() {
     assert_eq!(snap.modularity.raw, 0.0);
 }
 
+// ── S-851 / CR-269: a declared module file owns its sibling directory ────────
+
+/// The graph dimensions' persisted figures, bit for bit: Modularity's pair,
+/// Acyclicity's and Depth's raw values and the cross-module edge count their
+/// applicability is decided on — everything the module partition feeds.
+fn partition_figures(s: &crate::models::quality::MetricSnapshot) -> [u64; 5] {
+    [
+        s.modularity.raw.to_bits(),
+        s.modularity.normalized.to_bits(),
+        s.acyclicity.raw.to_bits(),
+        s.depth.raw.to_bits(),
+        s.cross_module_edge_count.expect("compute records the count"),
+    ]
+}
+
+/// One function per file, ids from 1 in `files` order.
+fn one_function_per_file(files: &[&str]) -> Vec<NodeRow> {
+    files
+        .iter()
+        .enumerate()
+        .map(|(i, file)| node(i as i64 + 1, &format!("f{}", i + 1), NodeKind::Function, Some(file)))
+        .collect()
+}
+
+/// A module `foo` called from `src/main.rs`, coupled to its two submodules
+/// `a` and `b` (which call each other), beside a module `bar` of two files.
+/// `foo_root` is where `foo`'s own code sits: `src/foo.rs` (the 2018-edition
+/// layout) or `src/foo/mod.rs`; `ext` swaps every file's extension.
+fn module_with_submodules(foo_root: &str, ext: &str) -> crate::models::quality::MetricSnapshot {
+    let files = ["src/main.rs", foo_root, "src/foo/a.rs", "src/foo/b.rs", "src/bar/x.rs", "src/bar/y.rs"]
+        .map(|f| f.replace(".rs", ext));
+    let nodes = one_function_per_file(&files.each_ref().map(String::as_str));
+    let edges = [
+        edge(1, 2, EdgeKind::Calls), // main → foo
+        edge(2, 3, EdgeKind::Calls), // foo → foo::a
+        edge(2, 4, EdgeKind::Calls), // foo → foo::b
+        edge(3, 4, EdgeKind::Calls), // foo::a → foo::b
+        edge(5, 6, EdgeKind::Calls), // bar::x → bar::y
+        edge(1, 5, EdgeKind::Calls), // main → bar::x
+    ];
+    run(&nodes, &edges, &[])
+}
+
+/// S-851 AC1 ([CR-269], [FR-QM-01]): Rust's `src/foo.rs` + `src/foo/` is one
+/// module — the same partition as `src/foo/mod.rs` — so the two layouts score
+/// the same Modularity, bit for bit. Under the directory partition (semantics
+/// 10, still what an undeclaring language's files get: the `.ts` twin) the
+/// `foo.rs` layout puts `foo` in `src` beside `main` and scores lower:
+/// Q = 0.1528 against 0.2361 (hand-computed, m = 6).
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_rust_module_file_and_its_directory_score_as_its_mod_rs_layout() {
+    let file_layout = module_with_submodules("src/foo.rs", ".rs");
+    let mod_layout = module_with_submodules("src/foo/mod.rs", ".rs");
+    assert_eq!(
+        partition_figures(&file_layout),
+        partition_figures(&mod_layout),
+        "foo.rs + foo/ is the foo/mod.rs module: {} vs {}",
+        file_layout.modularity.raw,
+        mod_layout.modularity.raw
+    );
+    assert!((mod_layout.modularity.raw - 17.0 / 72.0).abs() < 1e-12, "{}", mod_layout.modularity.raw);
+
+    let directory_partition = module_with_submodules("src/foo.ts", ".ts");
+    assert!((directory_partition.modularity.raw - 11.0 / 72.0).abs() < 1e-12, "{}", directory_partition.modularity.raw);
+    assert!(
+        directory_partition.modularity.raw < file_layout.modularity.raw,
+        "the directory partition splits foo in two and scores lower: {} vs {}",
+        directory_partition.modularity.raw,
+        file_layout.modularity.raw
+    );
+}
+
+/// S-851 AC1 ([CR-269]): `src/foo.rs` owns `src/foo/` when the production
+/// `.rs` files sit only deeper — `foo::inner` laid out as `foo/inner/mod.rs` and
+/// `foo/inner/a.rs`, with nothing directly in `foo/`. The `foo.rs` layout still
+/// scores as `foo/mod.rs` does, Depth and the cross-module count included.
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_rust_module_file_owns_a_directory_holding_only_a_nested_submodule() {
+    let layout = |foo_root: &str| {
+        let nodes = one_function_per_file(&["src/main.rs", foo_root, "src/foo/inner/mod.rs", "src/foo/inner/a.rs", "src/bar/x.rs"]);
+        let edges = [
+            edge(1, 2, EdgeKind::Calls), // main → foo
+            edge(2, 3, EdgeKind::Calls), // foo → foo::inner
+            edge(3, 4, EdgeKind::Calls), // foo::inner → foo::inner::a
+            edge(1, 5, EdgeKind::Calls), // main → bar::x
+        ];
+        run(&nodes, &edges, &[])
+    };
+    assert_eq!(
+        partition_figures(&layout("src/foo.rs")),
+        partition_figures(&layout("src/foo/mod.rs")),
+        "foo.rs owns foo/ through foo/inner/"
+    );
+}
+
+/// S-851 ([CR-269], [FR-QM-03]): Depth rolls symbols up to the same module
+/// partition. `foo → foo::a → bar::x` is two modules deep — `src/foo` then
+/// `src/bar` — whether `foo`'s code sits in `src/foo.rs` or `src/foo/mod.rs`;
+/// the directory partition, which an undeclaring language's `.ts` twin still
+/// gets, reads three layers (`src` → `src/foo` → `src/bar`).
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [FR-QM-03]: ../../../docs/specs/requirements/FR-QM-03.md
+#[cfg(feature = "lang-rust")]
+#[test]
+fn depth_rolls_a_rust_module_file_up_with_its_directory() {
+    let chain = |files: [&str; 3]| {
+        let edges = [edge(1, 2, EdgeKind::Calls), edge(2, 3, EdgeKind::Calls)];
+        run(&one_function_per_file(&files), &edges, &[])
+    };
+    let file_layout = chain(["src/foo.rs", "src/foo/a.rs", "src/bar/x.rs"]);
+    assert_eq!(file_layout.depth.raw, 2.0, "foo → bar is two modules deep");
+    assert_eq!(
+        partition_figures(&file_layout),
+        partition_figures(&chain(["src/foo/mod.rs", "src/foo/a.rs", "src/bar/x.rs"])),
+        "the foo.rs and foo/mod.rs layouts are one rollup"
+    );
+    assert_eq!(
+        chain(["src/foo.ts", "src/foo/a.ts", "src/bar/x.ts"]).depth.raw,
+        3.0,
+        "the directory partition reads src → src/foo → src/bar"
+    );
+}
+
+/// S-851 AC2 ([CR-269], [FR-QM-02]): a cycle between `src/foo.rs` and
+/// `src/foo/a.rs` stays inside the module `foo`, so Acyclicity counts none; a
+/// cycle between `src/foo.rs` and `src/bar/x.rs` still spans two modules and
+/// counts one — `foo.rs` owning `foo/` (here through `foo/a.rs`) moves it out of
+/// `src`, not into every module.
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [FR-QM-02]: ../../../docs/specs/requirements/FR-QM-02.md
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_cycle_between_a_rust_module_file_and_its_submodule_is_no_cross_module_cycle() {
+    let nodes = one_function_per_file(&["src/foo.rs", "src/foo/a.rs", "src/bar/x.rs"]);
+    let within = run(&nodes, &[edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)], &[]);
+    assert_eq!(within.acyclicity.raw, 0.0, "foo ↔ foo::a is one module's recursion");
+    let across = run(&nodes, &[edge(1, 3, EdgeKind::Calls), edge(3, 1, EdgeKind::Calls)], &[]);
+    assert_eq!(across.acyclicity.raw, 1.0, "foo ↔ bar::x spans two modules");
+
+    // An undeclaring language keeps the directory partition: the same cycle
+    // between `foo.ts` and `foo/a.ts` spans `src` and `src/foo`.
+    let ts = one_function_per_file(&["src/foo.ts", "src/foo/a.ts", "src/bar/x.ts"]);
+    let ts_within = run(&ts, &[edge(1, 2, EdgeKind::Calls), edge(2, 1, EdgeKind::Calls)], &[]);
+    assert_eq!(ts_within.acyclicity.raw, 1.0, "foo.ts ↔ foo/a.ts spans two directories");
+}
+
+/// S-851 AC3 ([CR-269]): a module file owns its sibling directory only when a
+/// production file of a declaring language sits beneath it. `src/foo.rs` keeps
+/// `src` when there is no `src/foo/`, when `src/foo/` holds only a file of an
+/// undeclaring language (`fixture.ts`), when the nearest directory merely
+/// shares the prefix (`src/foobar/`), and when `src/foo/` holds only test code
+/// ([FR-QM-08]: adding or removing a test never moves the production
+/// partition). Each case is bit-identical to the directory partition, which the
+/// all-`.ts` twin of the same fixture still gets.
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+#[cfg(feature = "lang-rust")]
+#[test]
+fn a_rust_module_file_without_a_production_submodule_keeps_its_directory() {
+    // `lib → main` makes `src` heavier than `foo/`, so `foo` grouped with
+    // `main` and `foo` grouped with the file beneath it score apart (Q −0.04
+    // against 0.04): without it the two groupings mirror each other and score
+    // alike, and a partition that moved `foo` would pass unseen.
+    let edges = [
+        edge(1, 2, EdgeKind::Calls), // main → foo
+        edge(2, 3, EdgeKind::Calls), // foo → the file beside or beneath it
+        edge(3, 4, EdgeKind::Calls), // → bar::x
+        edge(1, 4, EdgeKind::Calls), // main → bar::x
+        edge(5, 1, EdgeKind::Calls), // lib → main
+    ];
+    for third in ["src/util.rs", "src/foo/fixture.ts", "src/foobar/x.rs", "src/foo/tests.rs"] {
+        let rs = one_function_per_file(&["src/main.rs", "src/foo.rs", third, "src/bar/x.rs", "src/lib.rs"]);
+        let ts = one_function_per_file(&["src/main.ts", "src/foo.ts", &third.replace(".rs", ".ts"), "src/bar/x.ts", "src/lib.ts"]);
+        // `tests.rs` is test code: the vertex in it leaves the production scope.
+        let tests: &[i64] = if third.ends_with("tests.rs") { &[3] } else { &[] };
+        let (rs, ts) = (run_scoped(&rs, &edges, &[], tests), run_scoped(&ts, &edges, &[], tests));
+        assert_eq!(partition_figures(&rs), partition_figures(&ts), "{third}: foo.rs stays in src");
+    }
+
+    // TypeScript declares nothing: `foo.ts` beside a `foo/` is still in `src`,
+    // exactly as if it were named `other.ts` — whether `foo/` holds TypeScript
+    // or a declaring language's files.
+    for beneath in ["src/foo/a.ts", "src/foo/a.rs"] {
+        let files = |module_file: &str| one_function_per_file(&["src/main.ts", module_file, beneath, "src/bar/x.ts", "src/lib.ts"]);
+        assert_eq!(
+            partition_figures(&run(&files("src/foo.ts"), &edges, &[])),
+            partition_figures(&run(&files("src/other.ts"), &edges, &[])),
+            "an undeclaring language's foo.ts keeps its directory beside {beneath}"
+        );
+    }
+}
+
 // ── FR-QM-02 / UAT-QM-02: acyclicity counts SCCs ─────────────────────────────
 
 /// One two-vertex cycle **spanning two directories** → cycles = 1 → normalized
@@ -385,22 +587,24 @@ fn unbound_directory_membership_follows_the_partition() {
     );
 }
 
-/// The metric-semantics version pins at 10 ([CR-257]): a Rust trait impl's
-/// method counting toward no container changes what Focus measures, so the
-/// constant advanced 9 → 10 **once** for the sprint and the first post-upgrade
-/// gate auto-re-baselines ([FR-GV-10]) exactly as the v2..v9 bumps did (v9 was
-/// [CR-252]'s Cohesion changes, v8 [CR-171]'s graph-dimension and
-/// `member_access` gates, v7 [CR-163]'s declarative-code fixes, v6
-/// [CR-156]'s small-graph Modularity drop-out).
+/// The metric-semantics version pins at 11 ([CR-269]): a Rust module file and
+/// its sibling directory becoming one module changes the partition Modularity,
+/// Acyclicity and Depth read, so the constant advanced 10 → 11 **once** for the
+/// sprint and the first post-upgrade `session_start` or gate resets the
+/// baseline ([FR-GV-10]) exactly as the v2..v10 bumps did (v10 was [CR-257]'s
+/// trait-impl Focus change, v9 [CR-252]'s Cohesion changes, v8 [CR-171]'s
+/// graph-dimension and `member_access` gates, v7 [CR-163]'s declarative-code
+/// fixes, v6 [CR-156]'s small-graph Modularity drop-out).
 ///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
 /// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
 /// [CR-252]: ../../../docs/requests/CR-252-findings-and-offenders-without-the-noise.md
 /// [CR-156]: ../../../docs/requests/CR-156-modularity-drops-out-of-a-too-small-graph.md
 /// [CR-163]: ../../../docs/requests/CR-163-structural-metrics-stop-misfiring-on-declarative-code.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
 #[test]
-fn metric_semantics_version_is_v10() {
-    assert_eq!(super::METRIC_SEMANTICS_VERSION, 10);
+fn metric_semantics_version_is_v11() {
+    assert_eq!(super::METRIC_SEMANTICS_VERSION, 11);
 }
 
 // ── FR-QM-03 / UAT-QM-03: depth over the module-rollup condensation ───────────

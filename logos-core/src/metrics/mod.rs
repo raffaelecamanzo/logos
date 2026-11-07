@@ -5,30 +5,33 @@
 //! production-scope node/edge snapshot, and combines them into the deterministic
 //! 0–10000 integer signal. The five original macro-structural metrics:
 //!
-//! 1. **Modularity** ([FR-QM-01]) — Newman's Q under the **directory
+//! 1. **Modularity** ([FR-QM-01]) — Newman's Q under the **module
 //!    partition**: every vertex belongs to the directory of its defining
-//!    file, so intra-directory dependency edges count as community-internal
-//!    (the rolled-up "module self-loops" the SRS §7.4 trap warns about — drop
-//!    them and Q ≈ 0 always). Normalized `(Q+0.5)/1.5` clamped to [0,1];
-//!    `m == 0` → `1/3`. **Not applicable** below [`MIN_CROSS_MODULE_EDGES`]
-//!    cross-module edges ([FR-QM-18], metric-semantics v8; every edge counted
-//!    since [CR-156], v6): the computed pair is kept, but the dimension drops
-//!    out of the aggregate.
+//!    file — or, for a module file whose plugin declares that it owns its
+//!    sibling directory (Rust's `foo.rs` beside `foo/`, metric-semantics v11),
+//!    to that directory ([`ModulePartition`]) — so intra-module dependency
+//!    edges count as community-internal (the rolled-up "module self-loops" the
+//!    SRS §7.4 trap warns about — drop them and Q ≈ 0 always). Normalized
+//!    `(Q+0.5)/1.5` clamped to [0,1]; `m == 0` → `1/3`. **Not applicable**
+//!    below [`MIN_CROSS_MODULE_EDGES`] cross-module edges ([FR-QM-18],
+//!    metric-semantics v8; every edge counted since [CR-156], v6): the
+//!    computed pair is kept, but the dimension drops out of the aggregate.
 //! 2. **Acyclicity** ([FR-QM-02], [ADR-61], extends [ADR-30]) — count of
 //!    `tarjan_scc` components with `len > 1` **whose members span more than one
-//!    directory** (a cross-module dependency cycle); a singleton self-loop /
-//!    self-recursion (metric-semantics v4, [CR-022]) and a multi-node SCC
-//!    confined to a single directory (metric-semantics v5, [CR-087]) both count
-//!    zero; normalized `1/(1+cycles)`. The narrowed count is the single source
-//!    the DSM and the `max_cycles` rule read, so the gate and the rule can never
-//!    disagree. Not applicable under Modularity's condition ([FR-QM-18], v8).
+//!    module** of that partition (a cross-module dependency cycle); a
+//!    singleton self-loop / self-recursion (metric-semantics v4, [CR-022]) and
+//!    a multi-node SCC confined to a single module (metric-semantics v5,
+//!    [CR-087]) both count zero; normalized `1/(1+cycles)`. The narrowed count
+//!    is the single source the DSM and the `max_cycles` rule read, so the gate
+//!    and the rule can never disagree. Not applicable under Modularity's
+//!    condition ([FR-QM-18], v8).
 //! 3. **Depth** ([FR-QM-03], [ADR-62], [CR-088]) — longest path (vertex count)
 //!    over the SCC condensation of the **module-rollup graph** (the same
-//!    `directory_of` partition Modularity uses, metric-semantics v5): symbols
-//!    roll up to their directory, so a long call chain inside a single directory
-//!    scores depth 1 and a dependency cycle among directories collapses to one
-//!    layer. It measures architectural layering, not intra-file call length.
-//!    Normalized `1/(1+depth/8)`. Not applicable under Modularity's condition
+//!    module partition Modularity uses, metric-semantics v5): symbols roll up
+//!    to their module, so a long call chain inside a single module scores
+//!    depth 1 and a dependency cycle among modules collapses to one layer. It
+//!    measures architectural layering, not intra-file call length. Normalized
+//!    `1/(1+depth/8)`. Not applicable under Modularity's condition
 //!    ([FR-QM-18], v8).
 //! 4. **Equality** ([FR-QM-04]) — `1 − Gini` of per-function cyclomatic
 //!    complexity; `n==0`, `n==1`, or `Σx==0` → 1.0.
@@ -93,7 +96,7 @@
 //!
 //! [`compute`] is **pure** — it takes the hydrated [`GraphView`] (the
 //! `ExcludeContains` dependency view, [FR-DB-06]) the original five run on, the
-//! node snapshot the view was built from (for the directory partition and the
+//! node snapshot the view was built from (for the module partition and the
 //! class-like containers Cohesion/Focus read), the **whole** edge set (the
 //! `Contains`/`Accesses`/`Calls` edges Cohesion/Focus need, absent from the
 //! dependency view), the per-function metric rows, the `is_test` set, and the
@@ -173,7 +176,7 @@ pub const WORST_OFFENDER_CAP: usize = 10;
 #[cfg(test)]
 mod tests;
 
-/// The directory community of a vertex bound to no file ([FR-QM-01]'s
+/// The module community of a vertex bound to no file ([FR-QM-01]'s
 /// partition needs *every* vertex in exactly one community).
 ///
 /// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
@@ -184,8 +187,8 @@ const UNBOUND_DIR: &str = "<unbound>";
 /// ([FR-QM-18], [CR-171], metric-semantics v8; Modularity alone, counted over
 /// every edge, since [CR-156], v6).
 ///
-/// A cross-module edge is one whose two endpoints lie in different directories
-/// (the [`directory_of`] partition all three read), both bound to a file. Below
+/// A cross-module edge is one whose two endpoints lie in different modules
+/// (the [`ModulePartition`] all three read), both bound to a file. Below
 /// the threshold the graph carries too little module structure to score: on a
 /// graph whose language binds nothing across files, Acyclicity's `1.0` and
 /// Depth's single layer measure nothing, and Newman's Q is computed over
@@ -374,7 +377,20 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 ///   many were set aside (`trait_impl`) beside the denominator, which still
 ///   counts them. Inherent impls, Go receivers, ids, symbols, edges and
 ///   Cohesion are unchanged.
+/// - **v11** — a module file owns its sibling directory where its plugin
+///   declares it ([CR-269], [FR-QM-01], [FR-QM-02], S-851): Rust's `D/X.rs` is
+///   in the module `D/X` when a production `.rs` file sits beneath `D/X/`, the
+///   partition `D/X/mod.rs` already had ([`ModulePartition`]). Modularity's
+///   communities, Acyclicity's cross-module test, Depth's rollup and the
+///   cross-module edge count the three are applicable on read that one
+///   partition, so a Rust repository's graph dimensions can move; a v10
+///   baseline is incomparable and the first post-upgrade `session_start` or
+///   gate resets it ([FR-GV-10]). A file without the shape, and every file of an
+///   undeclaring language, keeps its directory and its v10 figures; ids,
+///   symbols, edges, the DSM and `max_fan_out` are unchanged.
 ///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [FR-QM-02]: ../../../docs/specs/requirements/FR-QM-02.md
 /// [CR-257]: ../../../docs/requests/CR-257-trait-impl-methods-do-not-count-toward-a-type.md
 /// [FR-EX-34]: ../../../docs/specs/requirements/FR-EX-34.md
 /// [FR-EX-31]: ../../../docs/specs/requirements/FR-EX-31.md
@@ -413,7 +429,7 @@ pub const MIN_CROSS_MODULE_EDGES: u64 = 5;
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 /// [FR-QM-12]: ../../../docs/specs/requirements/FR-QM-12.md
 /// [FR-QM-20]: ../../../docs/specs/requirements/FR-QM-20.md
-pub const METRIC_SEMANTICS_VERSION: i64 = 10;
+pub const METRIC_SEMANTICS_VERSION: i64 = 11;
 
 /// Compute the five metrics and the aggregate signal over the **production
 /// scope** of a hydrated dependency view — pure, no I/O ([FR-QM-01]..[FR-QM-06],
@@ -421,7 +437,7 @@ pub const METRIC_SEMANTICS_VERSION: i64 = 10;
 ///
 /// `view` should be the `ExcludeContains` dependency view ([FR-DB-06]);
 /// `nodes` is the node snapshot the view was hydrated from (supplies the
-/// directory partition); `functions` is the per-function metric slice
+/// module partition); `functions` is the per-function metric slice
 /// ([`GraphStore::function_metrics`](crate::graph_store::GraphStore::function_metrics));
 /// `test_ids` is the persisted `is_test` node set
 /// ([`GraphStore::test_node_ids`](crate::graph_store::GraphStore::test_node_ids)) —
@@ -497,7 +513,7 @@ pub fn compute(
     // count, one decision, so the three can never disagree.
     let cross_module_edges = cross_module_edge_count(&graph, &dirs);
     let graph_not_applicable = GraphDimensionNotApplicable::for_cross_module_edges(cross_module_edges);
-    // Acyclicity counts cross-module SCCs (>1 directory, ADR-61) over the
+    // Acyclicity counts cross-module SCCs (>1 module, ADR-61) over the
     // symbol-level SCC set — the single narrowed source the DSM and the
     // `max_cycles` rule read. Depth measures architectural layering over its own
     // module-rollup condensation (CR-088, ADR-62), reading the same `dirs`
@@ -1546,11 +1562,11 @@ impl OwnedSnapshotFields {
 }
 
 /// The production metric graph [`compute`] scores and [`all_offenders`]
-/// explains, with two per-vertex facts indexed by vertex index: the directory
+/// explains, with two per-vertex facts indexed by vertex index: the module
 /// community and the node id.
 struct MetricGraph {
     graph: DiGraph<(), ()>,
-    /// Each vertex's directory community ([`directory_of`], or [`UNBOUND_DIR`]).
+    /// Each vertex's module community ([`ModulePartition`], or [`UNBOUND_DIR`]).
     dirs: Vec<String>,
     /// Each vertex's node id — what an offender row is named by ([CR-209]).
     /// `None` only for a rollup view's aggregate vertex, which the metrics'
@@ -1561,7 +1577,7 @@ struct MetricGraph {
 }
 
 /// Build the metric graph: the hydrated view minus derived governance
-/// artifacts and test code, plus each vertex's directory community and node id.
+/// artifacts and test code, plus each vertex's module community and node id.
 ///
 /// Filters `Layer`/`Boundary` policy vertices and `ForbiddenDependency`
 /// edges — annotation-materialised flags, not dependencies — the dispatch
@@ -1590,7 +1606,7 @@ fn metric_graph(
 
     let source = view.graph();
     let mut graph = DiGraph::<(), ()>::with_capacity(source.node_count(), source.edge_count());
-    let mut dirs: Vec<String> = Vec::with_capacity(source.node_count());
+    let mut files: Vec<Option<&str>> = Vec::with_capacity(source.node_count());
     let mut ids: Vec<Option<NodeId>> = Vec::with_capacity(source.node_count());
     let mut kept: HashMap<NodeIndex, NodeIndex> = HashMap::with_capacity(source.node_count());
 
@@ -1625,14 +1641,15 @@ fn metric_graph(
         if vertex.node_id.is_some_and(|id| test_ids.contains(&id)) {
             continue; // is_test vertex — excluded from the production scope (FR-QM-08)
         }
-        let dir = vertex
-            .node_id
-            .and_then(|id| file_of.get(&id))
-            .map_or(UNBOUND_DIR.to_string(), |path| directory_of(path));
         kept.insert(index, graph.add_node(()));
-        dirs.push(dir);
+        files.push(vertex.node_id.and_then(|id| file_of.get(&id).copied()));
         ids.push(vertex.node_id);
     }
+    let modules = ModulePartition::new(files.iter().flatten().copied());
+    let dirs: Vec<String> = files
+        .iter()
+        .map(|file| file.map_or(UNBOUND_DIR.to_string(), |path| modules.module_of(path)))
+        .collect();
 
     for edge in source.edge_references() {
         if edge.weight().kind == Some(EdgeKind::ForbiddenDependency) {
@@ -1659,10 +1676,70 @@ fn directory_of(path: &str) -> String {
     }
 }
 
-/// Modularity — Newman's Q under the directory partition ([FR-QM-01]).
+/// The module partition the graph dimensions read ([FR-QM-01], [FR-QM-02],
+/// [CR-269], metric-semantics v11): each file's module is its directory
+/// ([`directory_of`]), except that a module file of a language whose plugin
+/// declares [`sibling_module_dir`](crate::plugin::ModuleModel::sibling_module_dir)
+/// — Rust's `D/X.rs` — is in the module `D/X` when a production file of a
+/// declaring language sits beneath `D/X/`. That is the partition `D/X/mod.rs`
+/// already gets, so the 2018-edition layout and the `mod.rs` one score alike.
+///
+/// Built from the **production** file set alone — the files of the vertices
+/// the metric graph keeps — so adding or removing test code (a `foo/tests.rs`)
+/// never moves a production file's module ([FR-QM-08]); and a file of an
+/// undeclaring language beneath `D/X/` (a `fixture.ts`) owns nothing. The
+/// partition depends only on that set, never on its order, so a sync and a cold
+/// index of one tree agree ([NFR-RA-06]).
+///
+/// [FR-QM-01]: ../../../docs/specs/requirements/FR-QM-01.md
+/// [FR-QM-02]: ../../../docs/specs/requirements/FR-QM-02.md
+/// [FR-QM-08]: ../../../docs/specs/requirements/FR-QM-08.md
+/// [NFR-RA-06]: ../../../docs/specs/requirements/NFR-RA-06.md
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+struct ModulePartition {
+    /// The extensions whose plugin declares `sibling_module_dir`.
+    declaring: &'static HashSet<String>,
+    /// Every directory with a production file of a declaring language somewhere
+    /// beneath it.
+    owning: HashSet<String>,
+}
+
+impl ModulePartition {
+    fn new<'a>(production_files: impl Iterator<Item = &'a str>) -> Self {
+        let declaring = crate::plugin::registry::sibling_module_dir_extensions();
+        let mut owning = HashSet::new();
+        for path in production_files.filter(|&path| Self::declares(declaring, path)) {
+            let mut dir = directory_of(path);
+            // An ancestor already held means every ancestor of it is held too.
+            while !dir.is_empty() && owning.insert(dir.clone()) {
+                dir = directory_of(&dir);
+            }
+        }
+        Self { declaring, owning }
+    }
+
+    fn declares(declaring: &HashSet<String>, path: &str) -> bool {
+        crate::plugin::registry::declares_by_extension(Some(path), declaring)
+    }
+
+    /// The module `path` is in: `D/X` for a module file `D/X.<ext>` of a
+    /// declaring language whose `D/X/` holds a production file of a declaring
+    /// language, else its directory.
+    fn module_of(&self, path: &str) -> String {
+        let name_at = path.rfind(['/', '\\']).map_or(0, |idx| idx + 1);
+        let stem_path = path[name_at..].rfind('.').filter(|&dot| dot > 0).map(|dot| &path[..name_at + dot]);
+        match stem_path {
+            Some(module) if self.owning.contains(module) && Self::declares(self.declaring, path) => module.to_string(),
+            _ => directory_of(path),
+        }
+    }
+}
+
+/// Modularity — Newman's Q under the module partition ([FR-QM-01],
+/// [`ModulePartition`]).
 ///
 /// `Q = Σ_c [ e_c/m − (d_c/2m)² ]` where `e_c` counts edges internal to
-/// community `c` (this is where intra-directory edges are *retained* — the
+/// community `c` (this is where intra-module edges are *retained* — the
 /// rolled-up self-loop mandate) and `d_c` sums vertex degrees. Community sums
 /// iterate a `BTreeMap` so the float reduction is canonical ([ADR-08]).
 ///
@@ -1723,15 +1800,15 @@ pub(crate) fn graph_dimensions_not_applicable(view: &GraphView, nodes: &[NodeRow
 /// figure the three graph dimensions' applicability is decided on ([FR-QM-18],
 /// [`MIN_CROSS_MODULE_EDGES`]).
 ///
-/// A module is a directory ([`directory_of`]), the partition Modularity,
+/// A module is a community of [`ModulePartition`], the partition Modularity,
 /// Acyclicity and Depth all read. An edge counts when its endpoints lie in two
-/// different directories **and both are bound to a file**: a vertex with no
+/// different modules **and both are bound to a file**: a vertex with no
 /// file sits in [`UNBOUND_DIR`], which is no module of the repository, so an
-/// edge into it is no evidence of module structure. Intra-directory edges never
+/// edge into it is no evidence of module structure. Intra-module edges never
 /// count — they cleared the v6 Modularity threshold on graphs whose language
 /// binds nothing across files, which is the defect [CR-171] removes. Counted
 /// symbol edge by symbol edge, as v6 counted every edge, so parallel edges
-/// between two directories each count.
+/// between two modules each count.
 ///
 /// [FR-QM-18]: ../../../docs/specs/requirements/FR-QM-18.md
 /// [CR-171]: ../../../docs/requests/CR-171-the-quality-signal-and-test-classification-stay-honest-on-a-thin-graph.md
@@ -1749,14 +1826,14 @@ fn cross_module_edge_count(graph: &DiGraph<(), ()>, dirs: &[String]) -> u64 {
 /// [ADR-61], extends [ADR-30]).
 ///
 /// A cycle is an SCC with `len > 1` **whose members span more than one
-/// directory** — a dependency cycle *between distinct modules* (the
-/// `directory_of` partition [`modularity`] already uses, threaded in as `dirs`).
+/// module** — a dependency cycle *between distinct modules* (the
+/// module partition [`modularity`] already uses, threaded in as `dirs`).
 /// Two narrowings compose here:
 ///
 /// - A singleton vertex with a self-loop (self-recursion) is a unit depending on
 ///   **itself**, so it contributes zero ([CR-022] / [ADR-30], metric-semantics
 ///   v4).
-/// - A multi-node SCC confined to a **single directory** (idiomatic intra-module
+/// - A multi-node SCC confined to a **single module** (idiomatic intra-module
 ///   mutual recursion — recursive-descent walkers, name resolvers) is control
 ///   flow, not a layering tangle, so it too contributes zero (metric-semantics
 ///   v5, [CR-087] / [ADR-61]).
@@ -1767,7 +1844,7 @@ fn cross_module_edge_count(graph: &DiGraph<(), ()>, dirs: &[String]) -> u64 {
 ///
 /// `dirs` is indexed by `graph` vertex index, exactly as the [`tarjan_scc`]
 /// `NodeIndex`es in `sccs` are, so `dirs[vertex.index()]` is the vertex's
-/// directory.
+/// module.
 ///
 /// [FR-QM-02]: ../../../docs/specs/requirements/FR-QM-02.md
 /// [ADR-30]: ../../../docs/specs/architecture/decisions/ADR-30.md
@@ -1783,7 +1860,7 @@ fn acyclicity(sccs: &[Vec<NodeIndex>], dirs: &[String]) -> MetricValue {
 }
 
 /// The SCCs [`acyclicity`] counts as cycles: more than one member, spanning more
-/// than one directory ([ADR-61]). The one filter both the count and the
+/// than one module ([ADR-61]). The one filter both the count and the
 /// Acyclicity offender list ([`all_offenders`], [CR-209]) read, so the list
 /// names exactly the cycles the dimension scores.
 ///
@@ -1794,7 +1871,7 @@ fn cross_module_cycles<'a>(
     dirs: &'a [String],
 ) -> impl Iterator<Item = &'a Vec<NodeIndex>> {
     sccs.iter().filter(|scc| scc.len() > 1).filter(|scc| {
-        // Spans >1 directory ⇔ some member's directory differs from the first
+        // Spans >1 module ⇔ some member's module differs from the first
         // member's. Order-independent, allocation-free, deterministic.
         let first = dirs[scc[0].index()].as_str();
         scc.iter().any(|&vertex| dirs[vertex.index()].as_str() != first)
@@ -1805,17 +1882,17 @@ fn cross_module_cycles<'a>(
 /// **module-rollup graph** ([FR-QM-03], [ADR-62], [CR-088], metric-semantics v5).
 ///
 /// Depth measures *architectural layering*, not intra-file call length: the
-/// symbol graph is first rolled up to one vertex per directory — the same
-/// `directory_of` partition [`modularity`] and [`acyclicity`] read, threaded in
-/// as `dirs` — with cross-directory dependencies as the inter-module edges. The
+/// symbol graph is first rolled up to one vertex per module — the same
+/// [`ModulePartition`] [`modularity`] and [`acyclicity`] read, threaded in as
+/// `dirs` — with cross-module dependencies as the inter-module edges. The
 /// longest path over that module graph's SCC condensation is the depth:
 ///
-/// - a long call chain confined to one directory rolls up to a single module
+/// - a long call chain confined to one module rolls up to a single module
 ///   vertex and scores depth 1 (the intra-file recursion CR-088 stops reporting
 ///   as layering);
-/// - a dependency cycle among directories collapses to one condensed layer and
+/// - a dependency cycle among modules collapses to one condensed layer and
 ///   also scores 1;
-/// - a linear chain of `L` directories scores `L`.
+/// - a linear chain of `L` modules scores `L`.
 ///
 /// `tarjan_scc` returns components in reverse topological order, so a single
 /// forward sweep over the condensed successor sets is the longest-path DP
@@ -1835,20 +1912,20 @@ fn depth(graph: &DiGraph<(), ()>, dirs: &[String]) -> MetricValue {
     }
 }
 
-/// Roll the symbol-level metric graph up to its **module (directory) graph**:
-/// one vertex per distinct directory in `dirs`, one edge per *cross-directory*
-/// dependency ([ADR-62], [CR-088]). Intra-directory edges would be module
+/// Roll the symbol-level metric graph up to its **module graph**: one vertex
+/// per distinct module in `dirs`, one edge per *cross-module* dependency
+/// ([ADR-62], [CR-088]). Intra-module edges would be module
 /// self-loops that cannot lengthen any path, so they are dropped; parallel
 /// inter-module edges are deduplicated (the longest path is unchanged by them,
-/// and the compact graph keeps the condensation bounded by the directory-pair
+/// and the compact graph keeps the condensation bounded by the module-pair
 /// count rather than the symbol-edge count).
 ///
 /// `dirs` is indexed by `graph` vertex index (as produced by [`metric_graph`]),
 /// the same partition [`modularity`] reads — so Depth and Modularity share one
 /// rollup by construction. Module vertices are created in first-appearance order
 /// over the deterministic vertex order, so the rebuilt graph is reproducible
-/// ([NFR-RA-06]). Each module vertex keeps its directory, which is what a Depth
-/// offender row spells ([CR-209]).
+/// ([NFR-RA-06]). Each module vertex keeps its module directory, which is what
+/// a Depth offender row spells ([CR-209]).
 ///
 /// [ADR-62]: ../../../docs/specs/architecture/decisions/ADR-62.md
 /// [CR-088]: ../../../docs/requests/CR-088-depth-module-granularity.md
@@ -1870,7 +1947,7 @@ fn module_rollup<'a>(graph: &DiGraph<(), ()>, dirs: &'a [String]) -> ModuleGraph
         let src = dirs[edge.source().index()].as_str();
         let dst = dirs[edge.target().index()].as_str();
         if src == dst {
-            continue; // intra-directory edge — a module self-loop, no effect on depth
+            continue; // intra-module edge — a module self-loop, no effect on depth
         }
         let (src, dst) = (module_of[src], module_of[dst]);
         if seen.insert((src, dst)) {

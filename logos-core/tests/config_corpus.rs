@@ -258,6 +258,42 @@ fn a_project_with_no_configuration_corpus_writes_no_corpus_row() {
     );
 }
 
+// ── S-489: the engine serves its whole committed configuration ──────────────
+
+/// The declared-topic intake reads a member's configuration through
+/// `MemberContracts::committed_config` on the real `Engine` — the one path from
+/// a store to the relation. It serves every key the index recorded, each with
+/// exactly the definitions the per-key read returns ([FR-WS-36]).
+///
+/// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
+#[test]
+fn the_engine_serves_its_whole_committed_configuration() {
+    use logos_core::federation::MemberContracts;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write(
+        root,
+        "src/main/resources/application.yml",
+        "spring:\n  kafka:\n    topics:\n      orders: orders\napp:\n  name: svc\n",
+    );
+    write(root, "src/main/resources/application-dev.yml", "spring:\n  kafka:\n    topics:\n      orders: orders-dev\n");
+
+    let engine = index(root);
+    let corpus = MemberContracts::committed_config(&engine).expect("the engine serves its corpus");
+    let rt = engine.runtime().expect("runtime present");
+
+    assert!(
+        corpus.contains_key("spring.kafka.topics.orders") && corpus.contains_key("app.name"),
+        "every recorded key is served: {:?}",
+        corpus.keys().collect::<Vec<_>>()
+    );
+    for (key, defs) in &corpus {
+        assert_eq!(defs, &definitions(rt, key), "{key}: the whole corpus is the per-key read");
+    }
+    assert_eq!(corpus["spring.kafka.topics.orders"].len(), 2, "both overlays are kept");
+}
+
 // ── AC5: the reference-workspace census ──────────────────────────────────────
 
 /// The census [CR-121] plans on, reproduced from the estate source.

@@ -3425,7 +3425,10 @@ fn annotate_pass(
     // (S-024-HF). The measured wall-clock rides back for the per-phase index
     // breakdown (FR-OB-06, CR-057).
     let (res, ms) = crate::observability::traced_timed(Tool::Annotate, || {
-        let rules = config::load_rules_from_root(root)?;
+        // FR-CF-08: the effective contract, so the clone groups an index
+        // computes use the same (possibly inherited) near-clone thresholds the
+        // gate hashes and `check` re-materialises under (CR-013).
+        let rules = config::load_effective_rules(root)?.rules;
         // CR-043 / ADR-39: dead-code reachability is computed only for languages
         // that declare the reachability capability on their descriptor; the
         // others render `is_dead = NULL`. The capable-extension set — and the

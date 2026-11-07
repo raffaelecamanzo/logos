@@ -30,7 +30,7 @@ the global flags `--project <PATH>`, `--json`, and `--quiet`; see
 | [`stats`](#stats) | ✅ | Usage/performance statistics |
 | [`languages`](#languages) | ✅ | Registered language grammars |
 | [`serve`](#serve) | ✅ | MCP server over stdio and/or the localhost web UI (`--ui`: the `ui` feature is on by default and absent from the slim build) |
-| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` / `type-refs` (`--repo` to scope) |
+| [`xservice`](#xservice-workspace-federation-queries) | ✅ | Cross-service queries over a workspace: `route-providers` / `callers` / `impact` / `search` / `build-deps` / `type-refs` / `declared-topics` (`--repo` to scope) |
 | [`workspace status`](#workspace-status) | ✅ | Per-member freshness, warm state and open state + the 3-state cross-service coverage summary — exits 1 if a member could not be opened |
 | [`workspace reachability`](#workspace-reachability) | ✅ | App-wide cross-service dead-code union view — advisory, never a gate input; exits 1 if a member could not be opened |
 | [`workspace check`](#workspace-check) | ✅ | Evaluate workspace governance rules over cross-service bindings — advisory: a violation never moves the exit code (an unopenable member exits 1) |
@@ -420,9 +420,14 @@ returned is currently not reported anywhere: it simply stays un-indexed and
 shows as `deferred` in [`workspace status`](#workspace-status) until its first
 real use indexes it. stdout stays machine-clean (the approval prompt is on
 stderr), so `logos init --workspace --yes` is safe to script. Re-running is
-incremental — `manifest` and `mcp` report `unchanged`, `root_ignore` reports
+incremental — `manifest`, `mcp` and `root_rules` report `unchanged`, `root_ignore` reports
 `unchanged` on a tracked root and `skipped` on one that is not a repository, and
 neither a duplicate MCP entry nor a second managed ignore block is written.
+`root_rules` is the workspace rules contract, `<workspace-root>/.logos/rules.toml`
+([FR-IN-10](../specs/requirements/FR-IN-10.md)): `created` on the first run, with
+every key commented out so nothing is enforced until you uncomment one, and
+`unchanged` — the file byte-identical — whenever it already exists (see
+[configuration](configuration.md#the-workspace-tier--one-policy-for-every-member)).
 When the workspace root **is** a git working tree, `root_ignore` reports the
 managed `.gitignore` block keeping the warm sidecar out of version control; at
 a root that is not a repository — the ordinary parent-of-repos shape — it
@@ -1434,7 +1439,7 @@ endpoints under [`serve --ui`](#serve) (both live now) — so the
 coverage/service-map/impact numbers are always the same whichever way you reach
 them. The matching `xservice_*` and `workspace_*` MCP tools are served by
 `serve --mcp` started in a workspace (the build with the web UI): the host then
-sees 44 tools, the 35 single-root ones plus these nine, and the read-only tools
+sees 45 tools, the 35 single-root ones plus these ten, and the read-only tools
 take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
 `--standalone`, and the slim headless build, serve the one repository instead.
 
@@ -1443,6 +1448,14 @@ take `repo` ([usage.md](usage.md#asking-about-one-workspace-member-repo)).
 twins only. `/api/v1/workspace/callers` and `/api/v1/workspace/impact` answer
 without the section — exactly the bytes they answered before — and there is no
 `type-refs` web route.
+
+**Since S-490,** `xservice declared-topics` and its MCP twin
+`xservice_declared_topics` list the topics members' committed configuration
+declares, and the `declared_topics` section rides on `workspace status` — in the
+CLI, the MCP `workspace_status` tool and the web status payload alike, since all
+three serialize one read-model. There is no `declared-topics` web route yet. The
+MCP twin is served by `serve --mcp` started in a workspace, like the other
+cross-service tools.
 
 ### `xservice` (workspace federation queries)
 
@@ -1453,6 +1466,7 @@ logos xservice callers <SYMBOL> [--limit <N>] [--repo <MEMBER>] [--json]
 logos xservice impact <SYMBOL> [--depth <N>] [--repo <MEMBER>] [--json]
 logos xservice build-deps [--repo <MEMBER>] [--json]          # what each member builds against — never a runtime coupling
 logos xservice type-refs [--repo <MEMBER>] [--json]           # which members import each member's types — advisory, never a coupling
+logos xservice declared-topics [--repo <MEMBER>] [--json]     # which topics members' configuration declares — a declaration, never an observed broker edge
 ```
 
 **Method wildcards.** A provider declared without an explicit verb — Spring's
@@ -1524,11 +1538,17 @@ included. A router mounted at two paths has a route under each, and one mounted 
 a mounted router joins both paths. A `use` that mounts a router is no route of its
 own; a `use` with middleware keeps its `ANY` route. A route on a router mounted at a
 path that is not a written string (a variable, a template, an expression), or on a
-router no framework file mounts, produces **no** route and is counted in
-`routes_not_composed`. Mounts are read only in the files the framework pass reads —
-those that import the framework or receive an `app`/`router` parameter — and a
-router that reaches its mount by being returned from a function, or passed to one,
-is not followed, so its routes are counted the same way. A route registered on an
+router no file mounts, produces **no** route and is counted in
+`routes_not_composed`. A mount is read in **any** indexed JavaScript or TypeScript
+file, not only in the files the framework pass reads (those that import the
+framework or receive an `app`/`router` parameter): `app.use('/api', items)` in a
+`server.js` that requires only `./app` and `./items` gives the routes of the router
+`items.js` exports the prefix `/api`. Such a file is read for its mounts alone — it
+promotes no route of its own and is not counted in `files_scanned` — and is parsed
+only when its text calls `use`. A `.use('/x', name)` whose `name` is no Express
+router (another library's `use`) composes nothing. A router that reaches its mount
+by being returned from a function, or passed to one, is not followed, so its routes
+are counted the same way. A route registered on an
 `app` or `router` parameter keeps its written path. An Express path written as a template literal is a route in JavaScript and
 TypeScript alike, with its leading `${…}` kept in the path.
 
@@ -1540,13 +1560,23 @@ inline (`r.Group("/api").GET(…)`), a group nested in a group, a group after
 whose prefix Logos cannot prove produces **no** route and is counted in
 `routes_not_composed`: a group whose path is not a written string, a
 `*gin.RouterGroup` parameter (a group handed to another file's function is refused
-there), a `range` variable, a name assigned a group after it is declared, and any
-other call made on a group. A receiver that never passes through `Group` in the
-file — `gin.Default()`, an engine parameter, a field like `s.router` — keeps its
-written path, and so does a group Logos does not recognise as one: a group kept in a
-field, returned by a helper, passed as a `gin.IRouter`, or declared at package level
-in another file of the package (`var api = r.Group("/api")` in `routes.go`, used in
-`handlers.go`). Gin's verb-first `Handle("GET", "/p", h)` promotes no route.
+there), a `range` variable, a name assigned a group after it is declared, any
+other call made on a group, and a group declared at package level in **another file
+of the package** (`var api = r.Group("/api")` in `routes.go`, `api.GET("/x", h)` in
+`handlers.go`: Gin serves `/api/x`, and the file that registers it cannot state the
+prefix). A chain or a local that starts at such a group (`api.Group("/v1").GET(…)`,
+`g := api.Group("/v1")`) is refused the same way. A package is a directory and its
+package clause, and the file that declares the group is read even when it names no
+Gin of its own. The same two lines in one file give `GET /api/x`; a function-local
+`api := r.Group(…)` in the other file, and a package-level variable that is not a
+group (`var engine = gin.Default()`), are unaffected. A receiver that never passes
+through `Group` in the file — `gin.Default()`, an engine parameter, a field like
+`s.router` — keeps its written path, and so does a group Logos does not recognise as
+one: a group kept in a field, returned by a helper (`var api = newGroup()`, at
+package level too), declared at package level without a value and assigned in a
+function (`var api *gin.RouterGroup`, then `api = r.Group("/api")`), or passed as a
+`gin.IRouter`. Gin's verb-first
+`Handle("GET", "/p", h)` promotes no route.
 
 
 - **`route-providers`** — the workspace service map: every cross-service binding
@@ -1751,6 +1781,50 @@ in another file of the package (`var api = r.Group("/api")` in `routes.go`, used
         "importers": [ { "member": "app", "file": "src/main/java/com/acme/app/App.java", "line": 3,
                          "symbol": "logos . example.com/app . src/main/java/com/acme/app/`App.java`/",
                          "naming": "exact", "form": "import", "evidence": { "via": "build" } } ] } ] } ] }
+  ```
+- **`declared-topics`** (since S-490) — the topics members' **committed
+  `src/main` configuration declares**
+  ([FR-WS-36](../specs/requirements/FR-WS-36.md)): per captured topic, under
+  `topics`, every declaring member with the canonical configuration `key`, the
+  `file` and the `profile` (`null` for the unprofiled base) that name it, and a
+  `status` mark: `observed` when the member already shows on the topic through an
+  observed producer or consumer, `net-new` when configuration adds the pair — a
+  net-new row carries `site`, why the member shows no observed edge
+  (`config-only`: no broker site at all; `site-refused`; `site-uncaptured`;
+  `site-unread`). A value no member's broker site names is not a topic: it is
+  listed apart under `declared_only`, and a topic-named value the placeholder hop
+  refused under `refused`, with its reason. The `headline` is the
+  `declared_topics` section of `workspace status` — `declared_topic_pairs` beside
+  `declarations_considered` and the `members` read — and stays workspace-wide
+  under `--repo`. `--repo X` lists the declarations of member `X` alone; a name
+  that is not a member read answers an empty list **with** a `scope_note` stating
+  which, and exits 0. A member whose engine or facts could not be read is named
+  inside the answer, in `headline.members.unread` with `unread_reasons`, never
+  an abort ([ADR-53](../specs/architecture/decisions/ADR-53.md)). The MCP twin is
+  `xservice_declared_topics`.
+
+  **A declaration is never an observed broker edge**
+  ([BR-54](../specs/software-spec.md#327-workspace-federation)): no row is a
+  bridge edge, a resolved call, a producer or a consumer, and nothing in
+  `coverage` or `topics` counts it. Application sources named `.properties` are
+  not indexed, so they declare nothing here.
+
+  ```jsonc
+  // logos xservice declared-topics --repo ledger --json (the fixture in cli/tests/xservice_declared_topics.rs)
+  { "scope": "ledger",
+    "headline": { "declared_topic_pairs": 2, "declarations_considered": 4,
+                  "already_observed": { "pairs": 1, "declarations": 1 },
+                  "net_new": { "pairs": 1, "declarations": 2, "config_only": 1, … },
+                  "declared_only": { "pairs": 1, "declarations": 1 },
+                  "members": { "members": 3, "read": 3, "declaring": 3 }, "summary": "…" },
+    "topics": [ { "topic": "orders", "declarations": [
+        { "member": "ledger", "topic": "orders", "key": "ledger.topic", "file": "src/main/resources/application-prod.yml",
+          "provenance": "config-declared", "profile": "prod", "shape": "last-segment", "status": "net-new",
+          "site": { "site": "config-only" } },
+        { "member": "ledger", "topic": "orders", "key": "ledger.topic", "file": "src/main/resources/application.yml",
+          "provenance": "config-declared", "profile": null, "shape": "last-segment", "status": "net-new",
+          "site": { "site": "config-only" } } ] } ],
+    "declared_only": [], "refused": [] }
   ```
 
 `--repo` constructs only the member engines the answer needs (a one-shot never
@@ -2298,6 +2372,26 @@ it is listed under `members.unread` with `"declared types not yet extracted"`.
 The web coverage tab does not render this section yet. A workspace with no
 Java/Kotlin/Avro member, every member indexed, prints exactly what it printed
 before.
+
+Members also declare topics in their committed configuration. When any member's
+`src/main` configuration holds a topic-named value (`spring.kafka.topics.*`, or a
+key whose last segment is, or ends in, `topic`/`topics`), both renderings carry a
+`declared_topics` section after `topics`, apart from it.
+`declared_topic_pairs` counts the distinct (member, topic) pairs whose
+configuration declares a topic some member's broker site captures — split
+`already_observed` (the member also shows on it through an observed producer or
+consumer) and `net_new` (configuration adds it; split by why the member shows no
+observed edge) — beside `declarations_considered`, every topic-named value read,
+resolved or refused, and the `members` read. A value no broker site names sits
+apart under `declared_only`. A declaration is never an observed broker edge: it
+is not a bridge edge, and nothing in `topics` or `coverage` moves with it. The
+rows behind it are [`xservice declared-topics`](#xservice-workspace-federation-queries).
+A workspace that declares nothing prints exactly what it printed before. The
+status reads each member's committed configuration in the walk that already
+opens it, so it makes no walk of its own. A member whose facts could not be read
+is named in `members.unread`, but alone it does not make the section appear: a
+status over a workspace where nothing was declared still omits it, and `xservice
+declared-topics` always names such a member.
 
 ##### Each reference names the other end
 

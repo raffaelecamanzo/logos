@@ -16,6 +16,7 @@ import type {
   WorkspaceGovernanceAnswer,
   WorkspaceManifestDocument,
   WorkspaceRoster,
+  TierRulesFile,
   WorkspaceTierDocument,
 } from "../../api/types.ts";
 import { WorkspaceProvider, useWorkspace } from "../../workspace/WorkspaceContext.tsx";
@@ -89,6 +90,24 @@ const CLEAN_CHECK: WorkspaceGovernanceAnswer = {
   },
 } as WorkspaceGovernanceAnswer;
 
+/** The workspace rules contract as `GET /api/v1/workspace/rules` serves it (S-508). */
+const RULES_CONTENT = "# the workspace contract\n[constraints]\nmax_cc = 15\n";
+function rulesDoc(over: Partial<TierRulesFile> = {}): TierRulesFile {
+  return {
+    path: ".logos/rules.toml",
+    exists: true,
+    content: RULES_CONTENT,
+    fingerprint: "rules-loaded",
+    parsed: { constraints: { max_cc: 15 }, metric_thresholds: {} },
+    error: null,
+    refused: [],
+    ...over,
+  };
+}
+
+/** The Rules group's raw pane. */
+const RULES_RAW = /^Raw TOML — <workspace-root>\/\.logos\/rules\.toml/;
+
 interface Posted {
   url: string;
   form: URLSearchParams;
@@ -103,11 +122,14 @@ function stubApi({
   saves = [],
   probeStatus = 200,
   tiers = [],
+  rules = [rulesDoc()],
 }: {
   /** `null` answers that read with a `500`. */
   manifests?: (WorkspaceManifestDocument | null)[];
   /** The workspace-root config reads, served in turn like `manifests`. */
   tiers?: WorkspaceTierDocument[];
+  /** The workspace rules contract reads (S-508), served in turn like `manifests`. */
+  rules?: TierRulesFile[];
   check?: WorkspaceGovernanceAnswer;
   saves?: { status: number; body: unknown }[];
   probeStatus?: number;
@@ -117,6 +139,7 @@ function stubApi({
   let m = 0;
   let s = 0;
   let t = 0;
+  let r = 0;
   const respond = (body: unknown, status = 200) =>
     Promise.resolve({
       ok: status >= 200 && status < 300,
@@ -144,6 +167,7 @@ function stubApi({
       }
       if (url.startsWith("/api/v1/workspace/check")) return respond(check);
       if (url.startsWith("/api/v1/workspace/config")) return respond(tiers[Math.min(t++, tiers.length - 1)]);
+      if (url.startsWith("/api/v1/workspace/rules")) return respond(rules[Math.min(r++, rules.length - 1)]);
       return respond({});
     }),
   );
@@ -156,6 +180,9 @@ function CaptureSwitch() {
   return null;
 }
 
+/** The manifest's raw pane — named, since the Rules group has a raw pane too (S-508). */
+const MANIFEST_RAW = /^Raw TOML — logos\.workspace\.toml/;
+
 async function mount(opts: Parameters<typeof stubApi>[0] = {}) {
   const api = stubApi(opts);
   render(
@@ -164,12 +191,12 @@ async function mount(opts: Parameters<typeof stubApi>[0] = {}) {
       <WorkspaceConfigView />
     </WorkspaceProvider>,
   );
-  if ((opts.probeStatus ?? 200) === 200) await screen.findByLabelText(/^Raw TOML/);
+  if ((opts.probeStatus ?? 200) === 200) await screen.findByLabelText(MANIFEST_RAW);
   return api;
 }
 
 function rawPane(): HTMLTextAreaElement {
-  return screen.getByLabelText(/^Raw TOML/) as HTMLTextAreaElement;
+  return screen.getByLabelText(MANIFEST_RAW) as HTMLTextAreaElement;
 }
 
 afterEach(() => {
@@ -305,7 +332,7 @@ describe("validate, then write (FR-UI-38 AC2)", () => {
       </WorkspaceProvider>,
     );
     expect(await screen.findByText(/The request to \/api\/v1\/workspace\/manifest failed \(HTTP 500\)/)).toBeInTheDocument();
-    expect(screen.queryByLabelText(/^Raw TOML/)).toBeNull();
+    expect(screen.queryByLabelText(MANIFEST_RAW)).toBeNull();
   });
 
   it("delivers a manifest broken on disk for repair: the fault named, no fabricated typed fields", async () => {
@@ -456,8 +483,10 @@ describe("after a save, the page describes only the disk it has read (NFR-CC-04)
     await save();
     expect(await screen.findByLabelText("name")).toHaveValue("shop");
     expect(screen.getByText(/Saved logos\.workspace\.toml/)).toBeInTheDocument();
-    expect(screen.getByText("parses")).toBeInTheDocument();
-    expect(screen.queryByText(/does not parse/)).toBeNull();
+    // Within the manifest group: the Rules group states its own parse verdict (S-508).
+    const manifest = within(rawPane().closest("section") as HTMLElement);
+    expect(manifest.getByText("parses")).toBeInTheDocument();
+    expect(manifest.queryByText(/does not parse/)).toBeNull();
   });
 
   it("a re-read that finds bytes this editor did not write is 'unknown', never 'does not parse'", async () => {
@@ -512,10 +541,11 @@ describe("app-scoped (FR-UI-38 AC5, ADR-66)", () => {
 // ── S-617 (CR-203, FR-UI-39/40): each group is a registered tool panel ───────
 
 describe("the workspace Config groups render as registered tool panels in one stack (S-617)", () => {
-  it("the manifest group, under the workspaceConfigGroup key — the one group in this build", async () => {
+  it("the manifest and workspace rules groups, under the workspaceConfigGroup key — the core groups of this build", async () => {
     await mount();
+    await screen.findByLabelText(RULES_RAW);
     const panels = expectOneWidgetStack(document.body);
-    expect(panels.map(widgetTitle)).toEqual(["Workspace manifest"]);
+    expect(panels.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace rules"]);
     for (const panel of panels) expectToolPanel(panel, "workspaceConfigGroup");
   });
 });
@@ -550,7 +580,7 @@ describe("the config panels of the mounted extensions (S-642, FR-UI-51)", () => 
 });
 
 describe("this build composes no extension (FR-DS-05)", () => {
-  it("offers no workspace chat tier and no key card — the manifest group alone", async () => {
+  it("offers no workspace chat tier and no key card — the core groups alone", async () => {
     await mount();
     expect(screen.getByText("Workspace manifest")).toBeInTheDocument();
     expect(screen.queryByText(/chat|wiki/i)).toBeNull();
@@ -601,6 +631,7 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
       </WorkspaceProvider>,
     );
     await screen.findByText("Workspace settings");
+    await screen.findByLabelText(RULES_RAW);
     return api;
   }
 
@@ -621,7 +652,7 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
     expect(screen.queryByText(STUB_NOTE)).toBeNull();
     // Core group first, then the tier the extension's fields edit, then its panel.
     const groups = expectOneWidgetStack(document.body);
-    expect(groups.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace settings"]);
+    expect(groups.map(widgetTitle)).toEqual(["Workspace manifest", "Workspace rules", "Workspace settings"]);
     // Both groups are the registered tool panel, and their copy keeps the vocabulary rule.
     for (const group of groups) expectToolPanel(group, "workspaceConfigGroup");
     const stack = document.body.querySelector("[data-widget-stack]") as HTMLElement;
@@ -681,12 +712,14 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
   it("states the file is on disk once the first save has created it", async () => {
     await mountTier({ tiers: [tier({ exists: false, content: "" })], saves: [WRITTEN] });
     const user = userEvent.setup();
-    expect(screen.getByText("not yet created")).toBeInTheDocument();
+    // Within the tier group: the Rules group states its own (S-508).
+    const group = within(tierRaw().closest("section") as HTMLElement);
+    expect(group.getByText("not yet created")).toBeInTheDocument();
     await user.selectOptions(await screen.findByLabelText("Stub mode"), "fast");
     await user.click(saveTier());
     await screen.findByText(/Saved \.logos\/config\.toml/);
-    expect(screen.queryByText("not yet created")).toBeNull();
-    expect(screen.getByText("on disk")).toBeInTheDocument();
+    expect(group.queryByText("not yet created")).toBeNull();
+    expect(group.getByText("on disk")).toBeInTheDocument();
   });
 
   it("offers no typed field over a tier that does not parse, leaving the raw pane as the repair path", async () => {
@@ -765,5 +798,100 @@ describe("the mounted extensions' workspace field groups (S-730, FR-UI-54)", () 
     );
     expect(await screen.findByText("Workspace settings")).toBeInTheDocument();
     expect(await screen.findByLabelText("Stub count")).toHaveValue(3);
+  });
+});
+
+// ── S-508 (FR-UI-38 as modified by CR-165): the workspace rules contract ──────
+
+describe("the Rules group edits the workspace rules contract (S-508)", () => {
+  function rulesRaw(): HTMLTextAreaElement {
+    return screen.getByLabelText(RULES_RAW) as HTMLTextAreaElement;
+  }
+  const saveRules = () => screen.getByRole("button", { name: "Save the workspace rules.toml" });
+  const confirm = () => screen.getByRole("checkbox", { name: /every member's gate/ });
+
+  it("loads the root contract into its raw pane and says what members inherit", async () => {
+    await mount();
+    expect(await screen.findByLabelText(RULES_RAW)).toHaveValue(RULES_CONTENT);
+    const group = rulesRaw().closest("section") as HTMLElement;
+    expect(group).toHaveTextContent(/inherits each \[constraints\] and \[metric_thresholds\] key/);
+    expect(group).toHaveTextContent(/\[\[layers\]\]/);
+  });
+
+  it("saves only after confirmation, posting the raw pane with its load fingerprint", async () => {
+    const written = { outcome: "written", path: ".logos/rules.toml", bytes_written: 60, fingerprint: "rules-mine" };
+    const stamped = rulesDoc({ content: "# Written by the Logos web config editor\n[constraints]\nmax_cc = 12\n", fingerprint: "rules-mine" });
+    const { posts } = await mount({ saves: [{ status: 200, body: written }], rules: [rulesDoc(), stamped] });
+    await userEvent.clear(await screen.findByLabelText(RULES_RAW));
+    // `[[` is user-event's escape for a literal `[`.
+    await userEvent.type(rulesRaw(), "[[constraints]{enter}max_cc = 12{enter}");
+
+    await userEvent.click(saveRules());
+    expect(await screen.findByText(/Confirm the change before saving/)).toBeInTheDocument();
+    expect(posts).toHaveLength(0);
+
+    await userEvent.click(confirm());
+    await userEvent.click(saveRules());
+    expect(await screen.findByText(/Saved \.logos\/rules\.toml \(60 bytes\)/)).toBeInTheDocument();
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/v1/workspace/rules/save");
+    expect(posts[0].form.get("content")).toBe("[constraints]\nmax_cc = 12\n");
+    expect(posts[0].form.get("fingerprint")).toBe("rules-loaded");
+    expect(posts[0].intent).toBe("test-intent-token");
+    // Re-seeded from disk, which now carries the provenance stamp.
+    await waitFor(() => expect(rulesRaw().value).toContain("# Written by the Logos web config editor"));
+  });
+
+  it("refuses a path-based table inline with the server's stated reason, nothing written", async () => {
+    const reason =
+      "not saved: the workspace rules contract inherits only [constraints] and [metric_thresholds] to its members, and nothing was written; [[layers]] is member-only — it names member paths, and member source layouts differ, so declare it in a member's own .logos/rules.toml";
+    await mount({ saves: [{ status: 422, body: { error: reason } }] });
+    await userEvent.type(await screen.findByLabelText(RULES_RAW), "{enter}[[[[layers]]{enter}");
+    await userEvent.click(confirm());
+    await userEvent.click(saveRules());
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Validation error — nothing was written");
+    expect(alert).toHaveTextContent("[[layers]] is member-only — it names member paths");
+  });
+
+  it("opens over a contract broken on disk as its repair path: the fault stated, the pane still saving", async () => {
+    const broken = rulesDoc({ content: "[constraints\n", parsed: null, error: ".logos/rules.toml is not valid TOML (at line 1, column 13)." });
+    const written = { outcome: "written", path: ".logos/rules.toml", bytes_written: 30, fingerprint: "rules-mine" };
+    const { posts } = await mount({ rules: [broken, rulesDoc({ fingerprint: "rules-mine" })], saves: [{ status: 200, body: written }] });
+    const group = within((await screen.findByLabelText(RULES_RAW)).closest("section") as HTMLElement);
+    expect(group.getByText("does not parse")).toBeInTheDocument();
+    expect(group.getByText(/every member's check fails on it until it is repaired/)).toHaveTextContent("line 1, column 13");
+    await userEvent.clear(rulesRaw());
+    await userEvent.type(rulesRaw(), "[[constraints]{enter}");
+    await userEvent.click(confirm());
+    await userEvent.click(saveRules());
+    expect(await screen.findByText(/Saved \.logos\/rules\.toml/)).toBeInTheDocument();
+    expect(posts[0].form.get("content")).toBe("[constraints]\n");
+  });
+
+  it("states a member-only table declared on disk as refused, with its reason", async () => {
+    await mount({
+      rules: [rulesDoc({ refused: [{ table: "[history]", reason: "it tunes one member's own evidence" }] })],
+    });
+    await screen.findByLabelText(RULES_RAW);
+    expect(screen.getByText(/\[history\] — it tunes one member's own evidence/)).toBeInTheDocument();
+  });
+
+  it("refuses a stale save with the conflict, and overwrites only on the explicit choice", async () => {
+    const conflict = {
+      outcome: "conflict", path: ".logos/rules.toml", loaded_fingerprint: "rules-loaded",
+      disk_fingerprint: "rules-disk", disk_content: "[constraints]\nmax_cc = 30\n",
+    };
+    const written = { outcome: "written", path: ".logos/rules.toml", bytes_written: 70, fingerprint: "rules-mine" };
+    const { posts } = await mount({ saves: [{ status: 409, body: conflict }, { status: 200, body: written }] });
+    await userEvent.type(await screen.findByLabelText(RULES_RAW), "max_fn_lines = 80{enter}");
+    await userEvent.click(confirm());
+    await userEvent.click(saveRules());
+    expect(await screen.findByLabelText("The workspace rules.toml on disk now")).toHaveValue("[constraints]\nmax_cc = 30\n");
+    expect(posts).toHaveLength(1);
+
+    await userEvent.click(screen.getByRole("button", { name: "Overwrite it with my edits" }));
+    expect(await screen.findByText(/Overwrote the changes on disk/)).toBeInTheDocument();
+    expect(posts[1].form.get("fingerprint")).toBe("rules-disk");
   });
 });

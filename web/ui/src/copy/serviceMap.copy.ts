@@ -41,6 +41,13 @@ export const assertedLinks: CopyEntry = {
   why: "A declared link is a claim, never an observed call, so none of these is a binding above or part of any coverage figure; it records a coupling the code does not show.",
 };
 
+// ── Declared topics (S-491) ──────────────────────────────────────────────────
+
+export const declaredTopics: CopyEntry = {
+  what: "The broker topics a member's committed configuration names that its code does not show it publishing or subscribing to, drawn dotted on the map: one row per declaration, with its key, file and profile.",
+  why: "A declared topic is written in configuration, never observed in code, so none of these is a binding above or a broker edge; it shows which services name a topic their code does not reach.",
+};
+
 // ── Cross-context model hint (item 9) ────────────────────────────────────────
 
 export const crossContextHint: CopyEntry = {
@@ -102,6 +109,14 @@ export const SERVICE_MAP_TEXT = {
     `${pairs} asserted ${plural(pairs, "coupling", "couplings")}, from ${links} declared ${plural(links, "link", "links")}`,
   /** The legend row for the asserted layer. */
   assertedLegend: "Asserted — declared in [[links]], never observed",
+  /** The declared-topic legend row. */
+  declaredTopicLegend: "Declares the topic in configuration — never observed",
+  /** The declared-topic count beside the panel: the already-observed
+   *  declarations, counted and not listed (the server's tally). */
+  declaredTopicsObserved: (pairs: number, declarations: number) =>
+    `${pairs} already observed ${plural(pairs, "pair", "pairs")} (${declarations} ${plural(declarations, "declaration", "declarations")}) — drawn as broker hops above, counted here and not listed as new.`,
+  /** No net-new declaration: every declared topic is already observed. */
+  noNetNewDeclarations: "No net-new declaration: every topic a member's configuration names is one its code already publishes or subscribes to.",
   /** The hint figure. */
   hintFigure: (n: number) =>
     `${n} ${plural(n, "member depends", "members depend")} on the model libraries of two or more contexts`,

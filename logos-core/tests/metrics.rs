@@ -823,3 +823,87 @@ fn a_language_binding_across_files_gets_no_coverage_warning() {
     // An absent warning list leaves the session-start payload as it was.
     assert!(serde_json::to_value(&session).unwrap().get("warnings").is_none());
 }
+
+// ── S-851 / CR-269: a Rust module file owns its sibling directory ────────────
+
+/// The `foo` module of the [S-851] fixture, declaring the submodule `a`: once
+/// `foo/a.rs` exists, `helper` and `a::step` recurse into each other across
+/// `foo.rs` and `foo/a.rs`.
+///
+/// [S-851]: ../../docs/planning/journal.md#s-851-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity
+const FOO_WITH_A: &str = "\
+pub mod a;
+pub fn start() -> u32 {
+    a::step(3)
+}
+pub fn helper(n: u32) -> u32 {
+    if n == 0 { crate::bar::x::go(n) } else { a::step(n - 1) }
+}
+";
+
+/// `foo::a`, recursing back into `foo::helper`.
+const FOO_A: &str = "pub fn step(n: u32) -> u32 {\n    super::helper(n)\n}\n";
+
+/// A tree holding `lib.rs`, `bar/` and the given `foo` module files.
+fn foo_tree(root: &Path, module_files: &[(&str, &str)]) {
+    write(root, "src/lib.rs", "pub mod foo;\npub mod bar;\n");
+    write(root, "src/bar/mod.rs", "pub mod x;\n");
+    write(root, "src/bar/x.rs", "pub fn go(n: u32) -> u32 {\n    n + 1\n}\n");
+    for (rel, text) in module_files {
+        write(root, rel, text);
+    }
+}
+
+/// The metrics a snapshot of `engine`'s current graph records.
+fn current_metrics(engine: &Engine) -> MetricSnapshot {
+    let view = engine.graph().hydrate(Granularity::ExcludeContains).expect("view hydrates");
+    let member_access = engine.registry().expect("a started engine holds its registry").member_access_extensions();
+    metrics::snapshot(engine.runtime().unwrap(), &view, None, metrics::Thresholds::default(), &member_access)
+        .expect("snapshot runs")
+        .metrics
+}
+
+/// A cold index of a fresh tree holding the `foo` module files, and its metrics.
+fn cold_metrics(module_files: &[(&str, &str)]) -> MetricSnapshot {
+    let tmp = TempDir::new().unwrap();
+    foo_tree(tmp.path(), module_files);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    current_metrics(&engine)
+}
+
+/// [S-851] ([CR-269], [NFR-RA-06]): the module partition is read off the
+/// indexed file set, so a sync of `src/foo/a.rs` alone moves `src/foo.rs` — a
+/// file it never re-reads — into the module `foo`, and a sync of its removal
+/// moves it back, each exactly as a cold index of the edited tree scores. The
+/// recursion between `foo.rs` and `foo/a.rs` is one module's, so Acyclicity
+/// counts no cycle; under the directory partition it counted one.
+///
+/// [S-851]: ../../docs/planning/journal.md#s-851-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity
+/// [CR-269]: ../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+/// [NFR-RA-06]: ../../docs/specs/requirements/NFR-RA-06.md
+#[test]
+fn a_sync_moves_a_rust_module_file_into_its_new_directory_as_a_cold_index_does() {
+    let declared = [("src/foo.rs", FOO_WITH_A)];
+    let with_a = [("src/foo.rs", FOO_WITH_A), ("src/foo/a.rs", FOO_A)];
+    let tmp = TempDir::new().unwrap();
+    foo_tree(tmp.path(), &declared);
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    assert!(engine.pipeline().index().warnings.is_empty());
+    let synced = [tmp.path().canonicalize().expect("canonicalize root").join("src/foo/a.rs")];
+
+    write(tmp.path(), "src/foo/a.rs", FOO_A);
+    engine.pipeline().sync(&synced);
+    let added = current_metrics(&engine);
+    let cold = cold_metrics(&with_a);
+    assert_metrics_byte_identical(&added, &cold);
+    assert_eq!(added.cross_module_edge_count, cold.cross_module_edge_count);
+    assert_eq!(added.acyclicity.raw, 0.0, "helper ↔ a::step is one module's recursion");
+
+    fs::remove_file(tmp.path().join("src/foo/a.rs")).unwrap();
+    engine.pipeline().sync(&synced);
+    let removed = current_metrics(&engine);
+    let cold = cold_metrics(&declared);
+    assert_metrics_byte_identical(&removed, &cold);
+    assert_eq!(removed.cross_module_edge_count, cold.cross_module_edge_count);
+}

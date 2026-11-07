@@ -509,6 +509,19 @@ pub struct ModuleModel {
     /// [FR-RS-40]: ../../../docs/specs/requirements/FR-RS-40.md
     #[serde(default)]
     pub link_unit: bool,
+    /// The `path` model's **sibling module directory** (S-851, [CR-269]): when
+    /// `true`, a module file `D/X.<ext>` owns its sibling directory `D/X/` —
+    /// Rust's 2018-edition layout, where `foo.rs` is the root of the module
+    /// whose submodules sit in `foo/`. Modularity, Acyclicity and Depth then
+    /// read `D/X.<ext>` in the module `D/X` whenever a production file of a
+    /// declaring language sits beneath `D/X/`
+    /// ([`sibling_module_dir_extensions`](super::registry::sibling_module_dir_extensions)).
+    /// Binding and the file's module key are unchanged. Defaults to `false`,
+    /// so a language that does not declare it keeps the directory partition.
+    ///
+    /// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+    #[serde(default)]
+    pub sibling_module_dir: bool,
     /// The `namespace` model's **companion objects** (S-573, [FR-RS-36]): when
     /// `true`, a type and the same-named singleton declared beside it in one
     /// file — Scala's `class Chain` and `object Chain` — are one name. A path
@@ -2124,8 +2137,9 @@ fn validate_module_model(
 /// `companion_name` (I4-INT), `global_function_fallback` (S-551, which needs
 /// `top_level_callables` beside it) and `type_arity` (S-602) are the
 /// `namespace` model's data, and
-/// `lexical_constants` (S-565), `directory_packages` (S-528) and `link_unit`
-/// (S-584) the `path` model's: each is refused under any other kind for the same reason. A file
+/// `lexical_constants` (S-565), `directory_packages` (S-528), `link_unit`
+/// (S-584) and `sibling_module_dir` (S-851) the `path` model's: each is refused
+/// under any other kind for the same reason. A file
 /// facade's suffix and a companion's name are bare identifiers: one is spelled
 /// into a class name, the other names a declaration.
 fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
@@ -2175,6 +2189,7 @@ fn validate_path_model_data(m: &ModuleModel) -> Result<(), String> {
         ("lexical_constants", m.lexical_constants),
         ("directory_packages", m.directory_packages),
         ("link_unit", m.link_unit),
+        ("sibling_module_dir", m.sibling_module_dir),
     ];
     if let Some((key, _)) = path_flags.iter().find(|(_, on)| *on && m.kind != ModuleModelKind::Path) {
         return Err(format!(
@@ -2805,6 +2820,32 @@ mod tests {
         assert!(with("[module_model]\nkind = \"path\"\nlink_unit = \"yes\"\n").is_err());
         let one = with("[module_model]\nkind = \"path\"\nlink_unit = true\n").unwrap();
         assert!(!one.directory_packages());
+    }
+
+    /// The path model's sibling-module-directory key (S-851, CR-269) sits
+    /// beside `kind`: it parses under `path`, defaults to off — the table
+    /// omitted, or present without it — and is refused under any other kind
+    /// and when it is not a boolean.
+    #[test]
+    fn the_sibling_module_dir_key_is_the_path_models_data() {
+        let with = |extra: &str| PluginManifest::parse("x/plugin.toml", &format!("{GOOD}\n{extra}"));
+        let declares = |extra: &str| with(extra).unwrap().module_model.is_some_and(|m| m.sibling_module_dir);
+        assert!(declares("[module_model]\nkind = \"path\"\nsibling_module_dir = true\n"));
+        assert!(!declares("[module_model]\nkind = \"path\"\nsibling_module_dir = false\n"));
+        assert!(!declares("[module_model]\nkind = \"path\"\n"));
+        assert!(!declares(""));
+        for kind in ["namespace", "package"] {
+            let err = with(&format!("[module_model]\nkind = \"{kind}\"\nsibling_module_dir = true\n"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("x/plugin.toml") && err.contains("`sibling_module_dir`") && err.contains(&format!("kind '{kind}'")),
+                "{err}"
+            );
+        }
+        assert!(with("[module_model]\nkind = \"path\"\nsibling_module_dir = \"yes\"\n").is_err());
+        let one = with("[module_model]\nkind = \"path\"\nsibling_module_dir = true\n").unwrap();
+        assert!(!one.link_unit() && !one.directory_packages() && !one.lexical_constants());
     }
 
     /// The path model's data (S-519, FR-RS-14) sits beside `kind` in the one

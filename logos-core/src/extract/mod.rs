@@ -2283,10 +2283,8 @@ fn collect_refs(
                         continue;
                     };
                     let is_static = match_capture(m.captures, capture_names, "ref.import.static").is_some();
-                    if let (Some(receivers), RefForm::Path, Some(name), false) =
-                        (receivers.as_mut(), form, alias.as_deref(), is_static)
-                    {
-                        receivers.type_import(name);
+                    if let (Some(receivers), RefForm::Path, Some(name)) = (receivers.as_mut(), form, alias.as_deref()) {
+                        receivers.single_import(name, is_static);
                     }
                     out.push(RefFact {
                         source: source_symbol,

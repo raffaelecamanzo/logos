@@ -1333,14 +1333,37 @@ pub(crate) fn claim_key(path: &str) -> Option<String> {
 /// [FR-QM-11]: ../../../docs/specs/requirements/FR-QM-11.md
 pub(crate) fn bodied_trait_container_extensions() -> &'static HashSet<String> {
     static EXTENSIONS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    EXTENSIONS.get_or_init(|| compiled_code_extensions_declaring(|m| m.bodied_traits_are_containers))
+}
+
+/// The file extensions (normalised as in [`declares_by_extension`]) whose code
+/// plugin declares that a module file owns its sibling directory
+/// ([`ModuleModel::sibling_module_dir`](super::ModuleModel::sibling_module_dir),
+/// S-851, [CR-269]): the module partition Modularity, Acyclicity and Depth read
+/// puts such a `D/X.<ext>` in the module `D/X`. Read off the compiled-in
+/// descriptors once per process, as [`bodied_trait_container_extensions`] is,
+/// for the same reason: a descriptor is never overridden on disk, so the
+/// metrics engine needs no registry to read it.
+///
+/// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+pub(crate) fn sibling_module_dir_extensions() -> &'static HashSet<String> {
+    static EXTENSIONS: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
     EXTENSIONS.get_or_init(|| {
-        grammars::compiled()
-            .iter()
-            .filter_map(|entry| PluginManifest::parse(entry.manifest_label, entry.manifest_toml).ok())
-            .filter(|m| !m.documentation && !m.artifact && m.bodied_traits_are_containers)
-            .flat_map(|m| m.extensions.into_iter().map(|e| normalize_ext(&e)).collect::<Vec<_>>())
-            .collect()
+        compiled_code_extensions_declaring(|m| m.module_model.as_ref().is_some_and(|model| model.sibling_module_dir))
     })
+}
+
+/// The normalised extensions of every compiled-in code descriptor `declares`
+/// holds for — the one walk the registry-free declaration sets above share. A
+/// descriptor that fails to parse contributes nothing here; it already fails
+/// [`LanguageRegistry::load`] loudly.
+fn compiled_code_extensions_declaring(declares: impl Fn(&PluginManifest) -> bool) -> HashSet<String> {
+    grammars::compiled()
+        .iter()
+        .filter_map(|entry| PluginManifest::parse(entry.manifest_label, entry.manifest_toml).ok())
+        .filter(|m| !m.documentation && !m.artifact && declares(m))
+        .flat_map(|m| m.extensions.into_iter().map(|e| normalize_ext(&e)).collect::<Vec<_>>())
+        .collect()
 }
 
 #[cfg(all(test, feature = "lang-rust"))]
@@ -1890,6 +1913,22 @@ mod tests {
         assert!(declares_by_extension(Some("src/Svc.SCALA"), bodied_trait_container_extensions()));
         assert!(!declares_by_extension(Some("src/lib.rs"), bodied_trait_container_extensions()));
         assert!(!declares_by_extension(Some("src/Svc.php"), bodied_trait_container_extensions()));
+    }
+
+    /// S-851 ([CR-269]): exactly Rust's extension declares that a module file
+    /// owns its sibling directory — no other shipped plugin does, TypeScript's
+    /// `foo.ts` + `foo/` and Python's `foo.py` + `foo/` included.
+    ///
+    /// [CR-269]: ../../../docs/requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md
+    #[cfg(all(feature = "lang-typescript", feature = "lang-python"))]
+    #[test]
+    fn sibling_module_dir_extensions_are_exactly_rusts() {
+        let mut exts: Vec<&str> = sibling_module_dir_extensions().iter().map(String::as_str).collect();
+        exts.sort_unstable();
+        assert_eq!(exts, ["rs"]);
+        assert!(declares_by_extension(Some("src/foo.rs"), sibling_module_dir_extensions()));
+        assert!(!declares_by_extension(Some("src/foo.ts"), sibling_module_dir_extensions()));
+        assert!(!declares_by_extension(Some("src/foo.py"), sibling_module_dir_extensions()));
     }
 
     /// The path-grammar extension map covers exactly the grammars that declare

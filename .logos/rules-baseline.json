@@ -3,11 +3,6 @@
   "entries": [
     {
       "rule": "no_god_containers",
-      "symbol": "logos-core/src/`engine.rs`/Engine#",
-      "value": 163
-    },
-    {
-      "rule": "no_god_containers",
       "symbol": "logos-core/src/coverage/`mod.rs`/CoverageRunner#",
       "value": 20
     },
@@ -28,11 +23,6 @@
     },
     {
       "rule": "no_god_containers",
-      "symbol": "logos-core/src/graph_store/`mod.rs`/SqliteGraphStore#",
-      "value": 91
-    },
-    {
-      "rule": "no_god_containers",
       "symbol": "logos-core/src/plugin/`manifest.rs`/PluginManifest#",
       "value": 20
     },
@@ -40,16 +30,6 @@
       "rule": "no_god_containers",
       "symbol": "logos-core/src/plugin/`registry.rs`/LanguageRegistry#",
       "value": 56
-    },
-    {
-      "rule": "no_god_containers",
-      "symbol": "logos-core/src/resolve/`binder.rs`/Ctx#",
-      "value": 182
-    },
-    {
-      "rule": "no_god_containers",
-      "symbol": "logos-core/src/resolve/`binder.rs`/Index#",
-      "value": 54
     },
     {
       "rule": "no_god_containers",
@@ -68,13 +48,8 @@
     },
     {
       "rule": "no_god_containers",
-      "symbol": "logos-ext/src/`host.rs`/ExtensionHost#",
-      "value": 20
-    },
-    {
-      "rule": "no_god_containers",
       "symbol": "mcp/src/`server.rs`/LogosMcp#",
-      "value": 58
+      "value": 57
     }
   ]
 }

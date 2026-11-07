@@ -910,12 +910,30 @@ fn adapter_lines() -> usize {
 /// `Findings::reconfirm_with_evidence`'s.
 ///
 /// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+///
+/// **S-490 1169→1178** for `xservice declared-topics` ([FR-WS-36]), measured
+/// 1169→1178 (+9), no headroom. Sibling sessions in Sprint 111 Iteration 2 do
+/// not touch the CLI adapter's production lines; the merged budget is the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `xservice.rs`: the `DeclaredTopics` variant of `XserviceCommands` (`#[command]`, the optional `--repo`, header and close) | **+5** |
+/// | `xservice.rs`: its dispatch arm (one `relation`, one `xservice_declared_topics` print) | **+4** |
+/// | `xservice.rs`: the two names join the existing `use` list | **0** |
+/// | `lib.rs`: the `MCP_SURFACE` row (test table, outside the production count) and the help text (comments) | **0** |
+/// | | **+9** |
+///
+/// Routing, not logic: the relation, the scope note and the per-member
+/// `unread` are `logos_core::federation`'s, so the MCP twin prints the same
+/// read-model.
+///
+/// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
 #[test]
 fn cli_surface_line_budget() {
     let lines = adapter_lines();
     assert!(
-        lines <= 1169,
-        "cli adapter exceeds the 1169 production-LOC budget (NFR-MA-02): \
+        lines <= 1178,
+        "cli adapter exceeds the 1178 production-LOC budget (NFR-MA-02): \
          found {lines} lines across cli/src/*.rs — move logic to logos-core"
     );
 }

@@ -1136,9 +1136,9 @@ fn a_pre_migration_snapshot_reads_its_offender_values_not_recorded() {
 /// [BR-61]: ../../docs/specs/software-spec.md#311-quality-metrics
 #[test]
 fn offender_values_and_the_uncapped_list_move_no_signal_gate_or_semantics_version() {
-    // S-676 did not move the semantics; S-816 moved them to v9 (FR-QM-11) and
-    // S-826 to v10 (FR-QM-12).
-    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 10, "S-676 does not move the semantics");
+    // S-676 did not move the semantics; S-816 moved them to v9 (FR-QM-11),
+    // S-826 to v10 (FR-QM-12) and S-851 to v11 (FR-QM-01, FR-QM-02).
+    assert_eq!(logos_core::metrics::METRIC_SEMANTICS_VERSION, 11, "S-676 does not move the semantics");
     let tampers: [(&str, &str); 3] = [
         ("emptied", "DELETE FROM metric_snapshot_offenders_uncapped;"),
         (

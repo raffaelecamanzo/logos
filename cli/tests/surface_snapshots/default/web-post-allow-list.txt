@@ -13,6 +13,7 @@
 /api/v1/workspace/config/save
 /api/v1/workspace/config/secret
 /api/v1/workspace/manifest/save
+/api/v1/workspace/rules/save
 /config/apply
 /config/save
 /config/secret

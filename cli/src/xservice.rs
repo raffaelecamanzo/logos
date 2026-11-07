@@ -19,8 +19,8 @@ use anyhow::{Context, Result};
 use clap::Subcommand;
 use logos_core::federation::{
     cross_service_coverage, discover, open_state, query, xservice_build_deps,
-    BuildDependencies, ContractBridge, EngineRegistry, ReachabilityScope,
-    RegistryMode, TypeReferenceIndex, TypeReferences,
+    xservice_declared_topics, BuildDependencies, ContractBridge, DeclaredTopics,
+    EngineRegistry, ReachabilityScope, RegistryMode, TypeReferenceIndex, TypeReferences,
 };
 use logos_core::{model::NodeKind, Engine};
 
@@ -162,6 +162,30 @@ pub(crate) enum XserviceCommands {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// The topics members' committed `src/main` configuration declares
+    /// ([FR-WS-36]): per captured topic, each declaring member with the
+    /// configuration `key`, `file` and `profile` that names it, marked
+    /// `observed` (the member already shows on the topic through an observed
+    /// producer or consumer) or `net-new` (configuration adds the pair, with
+    /// its member's broker-site split).
+    ///
+    /// A **declaration, never an observed broker edge** ([BR-54]): nothing here
+    /// is a bridge edge, a resolved call or a coverage figure. Values no broker
+    /// site names are listed apart under `declared_only`, and the ones the
+    /// placeholder hop refused under `refused`. The `headline` rides beside the
+    /// rows with every denominator, workspace-wide whatever the scope; a member
+    /// whose facts could not be read is named in `headline.members.unread`.
+    /// `--repo` scopes the rows to one declaring member; a name that is not a
+    /// member read says so in `scope_note`.
+    ///
+    /// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
+    /// [BR-54]: ../../docs/specs/software-spec.md#327-workspace-federation
+    #[command(name = "declared-topics", alias = "declared_topics")]
+    DeclaredTopics {
+        /// Scope to one declaring member.
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
 
 /// `workspace` sub-subcommands ([FR-WS-05], [FR-WS-12], [FR-WS-13]).
@@ -191,6 +215,13 @@ pub(crate) enum WorkspaceCommands {
     /// reference, never a coupling, apart from both sections above ([FR-WS-35],
     /// [BR-60]).
     ///
+    /// When a member's committed `src/main` configuration declares a topic,
+    /// `declared_topics` — after `topics`, apart from it — states
+    /// `declared_topic_pairs` beside the values considered, the members read
+    /// and the net-new and declared-only splits: a declaration, never an
+    /// observed broker edge ([FR-WS-36], [BR-54]); `xservice declared-topics`
+    /// lists the rows. A workspace that declares nothing omits the section.
+    ///
     /// When a member holds a vendored spec, `coverage.declared_contracts` states
     /// `declared_contract_pairs` beside the spec documents read, and
     /// `coverage.bound_external` the calls bound to a named external beside the
@@ -203,6 +234,8 @@ pub(crate) enum WorkspaceCommands {
     /// [FR-WS-32]: ../../docs/specs/requirements/FR-WS-32.md
     /// [FR-WS-33]: ../../docs/specs/requirements/FR-WS-33.md
     /// [FR-WS-35]: ../../docs/specs/requirements/FR-WS-35.md
+    /// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
+    /// [BR-54]: ../../docs/specs/software-spec.md#327-workspace-federation
     /// [BR-58]: ../../docs/specs/software-spec.md#327-workspace-federation
     /// [BR-60]: ../../docs/specs/software-spec.md#327-workspace-federation
     Status,
@@ -304,6 +337,10 @@ pub(crate) fn run_xservice(command: XserviceCommands, root: &Path, out: &Output)
         }
         XserviceCommands::TypeRefs { repo } => {
             out.print(&query::xservice_type_refs(&type_references(&registry), repo.as_deref()))?;
+        }
+        XserviceCommands::DeclaredTopics { repo } => {
+            let relation = DeclaredTopics::new().relation(&registry);
+            out.print(&xservice_declared_topics(&relation, repo.as_deref()))?;
         }
     }
     Ok(0)

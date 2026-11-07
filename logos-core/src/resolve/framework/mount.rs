@@ -15,7 +15,9 @@
 //!
 //! `router.get('/items')` is `GET /api/items`. Neither file states that alone, so
 //! [`group`](super::group)'s per-file receiver walk cannot compose it; the join is
-//! run once per framework run, over every candidate file's facts ([`join`]).
+//! run once per framework run, over the facts of every file that may state
+//! either half ([`join`]): each candidate, and each other file that writes a
+//! mount ([`Reach`]).
 //!
 //! The dialect's query captures, as plain syntactic facts:
 //!
@@ -58,13 +60,25 @@
 //! [NFR-RA-05]), never promoted at the partial path: a registration on a router
 //! mounted at a path that is not a written literal (a variable, a template, an
 //! expression — or a first argument that may be one), and one on a router that
-//! is never mounted, or mounted only from a file outside the candidates.
+//! is never mounted.
 //!
-//! A candidate is a file the framework pass reads at all (it names the framework,
-//! or binds an `app`/`router` parameter): a mount in any other indexed file is
-//! not read. And a router that reaches its mount by being returned from a
-//! function or passed to one is not followed — the stated ceiling — so it counts
-//! as mounted nowhere.
+//! # A mount is read wherever it is written (S-853, [CR-270])
+//!
+//! A candidate is a file the full framework pass reads (it names the framework,
+//! or binds an `app`/`router` parameter). A mount needs neither: `app.use('/api',
+//! items)` in a file that requires only `./app` and `./items` mounts the router
+//! `items.js` exports. So once a candidate holds a registration back, every other
+//! indexed file of a language whose query states mounts is read for its mount
+//! facts alone ([`mounts_only`]) — never for a route — and joins as a
+//! candidate's do. Only a file whose text calls the method the dialect's mount
+//! patterns name ([`VERB_SETTING`]) is parsed at all ([`Reach::admits`]). Such a
+//! mount composes only an argument the join reads as a router, as any mount
+//! does — so another library's `.use(str, ident)`, whose identifier names no
+//! router, composes nothing and leaves every count as it was.
+//!
+//! A router that reaches its mount by being returned from a function or passed
+//! to one is not followed — the stated ceiling — so it counts as mounted
+//! nowhere.
 //!
 //! A registration on any other receiver — an `app` or `router` parameter (the
 //! [S-541] module shape), `this.router`, a name the facts do not bind to a router
@@ -73,9 +87,14 @@
 //! # Sync ≡ reindex
 //!
 //! The join reads only the facts of this run's scans. On a sync with a framework
-//! footprint the pass re-scans every candidate file, so an edit to the mounting
-//! file moves the mounted module's routes exactly as a fresh index does
-//! ([NFR-RA-06]).
+//! footprint the pass re-scans every candidate file and, once a candidate holds a
+//! registration back, re-reads every other file that may write a mount
+//! ([`Reach`]) — the same files, by the same rule, that a fresh index reads. So
+//! an edit to the mounting file, a candidate or not, moves the mounted module's
+//! routes exactly as a fresh index does ([NFR-RA-06]). With nothing held, no
+//! mount outside the candidates can change a route, and none is read.
+//!
+//! [CR-270]: ../../../../docs/requests/CR-270-a-route-group-or-mount-across-files-composes-or-is-refused.md
 //!
 //! [CR-255]: ../../../../docs/requests/CR-255-route-groups-and-mounts-compose-their-prefixes.md
 //! [S-541]: ../../../../docs/planning/journal.md#s-541-express-router-modules-and-template-literal-paths-yield-routes
@@ -462,6 +481,138 @@ pub(super) fn join(scanned: &mut [(&str, &mut FileMatches)], resolve: impl Fn(&s
         drop_non_path_routes(&mut out.routes);
         dedup_routes(&mut out.routes);
     }
+}
+
+/// The setting each mount pattern carries: the method name its `#eq?` matches
+/// on `@fw.mount.verb` (`use`), which the pass reads to tell a file that may
+/// hold a mount from one that cannot ([`Reach`]).
+pub(super) const VERB_SETTING: &str = "fw.mount.verb.name";
+
+/// Which files of a language that are no framework candidate the pass reads for
+/// their mount facts alone (S-853): a mount written in a file that names no
+/// framework composes as a candidate's does. Read off the dialect's query, so a
+/// language whose query states no mount reads nothing more.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Reach {
+    /// No pattern captures `@fw.mount.callee`: the dialect states no mount.
+    Nothing,
+    /// Every mount pattern names its method ([`VERB_SETTING`]): only a file
+    /// whose text calls one of these names is parsed ([`Reach::admits`]).
+    Calling(Vec<String>),
+    /// A mount pattern names no method: every file is parsed.
+    Every,
+}
+
+impl Reach {
+    /// What `query` says about where a mount may be written.
+    pub(super) fn of(query: &tree_sitter::Query) -> Self {
+        let Some(callee) = query.capture_index_for_name("fw.mount.callee") else {
+            return Self::Nothing;
+        };
+        let mut verbs: Vec<String> = Vec::new();
+        for pattern in 0..query.pattern_count() {
+            if query.capture_quantifiers(pattern)[callee as usize] == tree_sitter::CaptureQuantifier::Zero {
+                continue;
+            }
+            match crate::plugin::queries::pattern_setting(query, pattern, VERB_SETTING).filter(|v| !v.is_empty()) {
+                Some(verb) => verbs.push(verb.to_string()),
+                None => return Self::Every,
+            }
+        }
+        verbs.sort();
+        verbs.dedup();
+        if verbs.is_empty() {
+            Self::Nothing
+        } else {
+            Self::Calling(verbs)
+        }
+    }
+
+    /// `true` when `source` may hold a mount this reach reads, without parsing
+    /// it: for [`Reach::Calling`], some name is written as a whole word followed,
+    /// past whitespace and comments, by what opens a call's arguments — `(`, a
+    /// type argument list `<`, or the `?.` of an optional call. Whitespace is
+    /// JavaScript's (Unicode spaces and the byte-order mark included) and a
+    /// `//` comment ends at any line terminator. A superset of what the mount
+    /// patterns match, so a file it turns away holds no mount: `'use strict'`,
+    /// `useState(` and `usex(` are turned away, and `use` in a comment or a
+    /// string is admitted and then matched by nothing.
+    pub(super) fn admits(&self, source: &str) -> bool {
+        match self {
+            Self::Nothing => false,
+            Self::Every => true,
+            Self::Calling(verbs) => verbs.iter().any(|verb| calls(source, verb)),
+        }
+    }
+}
+
+/// `true` when `verb` is written in `src` as a whole word followed by a call.
+///
+/// Read as characters, not bytes, so the check stays a superset of what the
+/// parser reads: only a character that can continue a JavaScript identifier
+/// makes `use` part of a longer name (`usex`, `éuse`), while any other one — an
+/// ASCII separator, a no-break space, a byte-order mark — leaves it whole.
+fn calls(src: &str, verb: &str) -> bool {
+    // A letter or digit of any script, `_`, `$`, and the two joiners JavaScript
+    // allows inside a name. Marks and other continuations are read as a
+    // boundary, which can only admit a file, never turn one away.
+    let identifier = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '\u{200c}' | '\u{200d}');
+    let Some(first) = verb.chars().next() else {
+        return false;
+    };
+    let mut from = 0;
+    while let Some(found) = src[from..].find(verb) {
+        let (start, end) = (from + found, from + found + verb.len());
+        from = start + first.len_utf8();
+        let whole = !src[..start].chars().next_back().is_some_and(identifier)
+            && !src[end..].chars().next().is_some_and(identifier);
+        if whole && matches!(src[skip_trivia(src, end)..].chars().next(), Some('(' | '<' | '?')) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The index of the first character at or after `at` that is neither
+/// whitespace nor inside a comment; `src.len()` when there is none.
+/// Whitespace is JavaScript's, Unicode spaces and the byte-order mark
+/// included.
+fn skip_trivia(src: &str, mut at: usize) -> usize {
+    let blank = |c: char| c.is_whitespace() || c == '\u{feff}';
+    loop {
+        let rest = &src[at..];
+        let trimmed = rest.trim_start_matches(blank);
+        at += rest.len() - trimmed.len();
+        match comment_len(trimmed) {
+            Some(len) => at += len,
+            None => return at,
+        }
+    }
+}
+
+/// The length of the comment `text` starts with, `None` when it starts with
+/// none. An unclosed comment runs to the end of `text`, and a `//` comment ends
+/// at any of JavaScript's line terminators (`\n`, `\r`, U+2028, U+2029).
+fn comment_len(text: &str) -> Option<usize> {
+    if let Some(body) = text.strip_prefix("/*") {
+        return Some(body.find("*/").map_or(text.len(), |close| 2 + close + 2));
+    }
+    let body = text.strip_prefix("//")?;
+    let line_end = |c: char| matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}');
+    Some(body.find(line_end).map_or(text.len(), |end| 2 + end))
+}
+
+/// The mount facts of a file the pass reads for them alone, without its
+/// routes, components or any other fact: it promotes nothing and refuses
+/// nothing, so only what it mounts reaches the join.
+pub(super) fn mounts_only(mut matches: FileMatches) -> FileMatches {
+    FileMatches { mounts: std::mem::take(&mut matches.mounts), ..FileMatches::default() }
+}
+
+/// `true` when a scanned file holds a registration back for a mount: only then
+/// can a mount in a file the pass does not otherwise read change a route.
+pub(super) fn holds_registrations(matches: &FileMatches) -> bool {
+    !matches.mounts.pending.is_empty()
 }
 
 /// The `@fw.mount.*` captures of one query match, read off during

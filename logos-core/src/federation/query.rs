@@ -47,8 +47,13 @@ use crate::graph_store::BuildManifestRow;
 use super::build_deps::{self, BuildDependencyHeadline, MemberBuildFacts};
 use super::coverage::{coverage_and_bound_sites, CrossServiceCoverage, ReferenceCoverage};
 use super::reference_resolution::{self, WorkspaceReferenceResolution};
+use crate::resolve::binding::MemberCorpus;
 use crate::resolve::reference_classes::MemberReferenceFacts;
 use super::declared_contracts::DeclaredContractRelation;
+use super::declared_topics::{
+    self, DeclarationStatus, DeclaredTopicHeadline, DeclaredTopicRelation, MemberTopicFacts, RefusedDeclaration,
+    SiteEvidence, TopicDeclaration,
+};
 use super::external_join::BoundExternal;
 use super::links::{self, LinkStatus};
 use super::manifest::MemberKind;
@@ -166,6 +171,15 @@ fn fan<T>(
 /// facts yet is returned by name, apart, so the join names it unread with that
 /// reason rather than as a member with no manifests or no types.
 ///
+/// # And each member's committed configuration
+/// The `declared_topics` section ([FR-WS-36]) joins each member's committed
+/// configuration with the topic surface the topics walk reads, so the
+/// configuration is read **here** too, on the same open engine: a fifth
+/// all-member read would add a resident-engine reconstruction per member under
+/// the connection budget ([NFR-PE-10]). A member whose configuration cannot be
+/// read is left out of the join with a warning, and the relation names it
+/// unread ([ADR-53]).
+///
 /// # And the facts its reference classes are re-read by
 /// The workspace reference resolution (S-637) re-reads each member's provably
 /// external and unbound rows. They are kept by the member's own status read
@@ -176,12 +190,19 @@ fn fan<T>(
 /// [BR-44]: ../../../docs/specs/software-spec.md#327-workspace-federation
 /// [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 /// [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
 /// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
 fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>>, FactsWalked) {
     let mut walked = FactsWalked::default();
     let freshness = answer
         .fan_out(|_, engine| {
-            (engine.graph().try_status_with_reference_facts(), engine.build_manifests(), engine.type_facts())
+            (
+                engine.graph().try_status_with_reference_facts(),
+                engine.build_manifests(),
+                engine.type_facts(),
+                MemberContracts::committed_config(&**engine),
+            )
         })
         .into_iter()
         .map(|scoped| split_status_and_facts(scoped, &mut walked))
@@ -191,11 +212,13 @@ fn fan_status(answer: &AnswerScope<'_, Engine>) -> (Vec<MemberResult<StatusInfo>
 
 /// What the freshness walk reads off one member's engine: its freshness read,
 /// its build-manifest facts and its declared-type facts (`None`: not yet
-/// extracted), each with its own failure channel.
+/// extracted), and its committed configuration, each with its own failure
+/// channel.
 type StatusAndFacts = (
     anyhow::Result<(StatusInfo, MemberReferenceFacts)>,
     anyhow::Result<Option<Vec<BuildManifestRow>>>,
     anyhow::Result<Option<MemberTypeFacts>>,
+    anyhow::Result<MemberCorpus>,
 );
 
 /// The facts the freshness walk read, as [`build_deps::join`] and
@@ -209,6 +232,11 @@ struct FactsWalked {
     types_not_extracted: Vec<String>,
     /// Each member's reference facts, read with its status (S-637).
     references: BTreeMap<String, MemberReferenceFacts>,
+    /// Each member's committed configuration, read with its status — what the
+    /// `declared_topics` join takes ([FR-WS-36]); a member not read has none.
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    config: BTreeMap<String, MemberCorpus>,
 }
 
 /// One member of the freshness walk: its freshness row, with its build and
@@ -230,7 +258,17 @@ fn split_status_and_facts(
     walked: &mut FactsWalked,
 ) -> MemberResult<StatusInfo> {
     let member = scoped.member;
-    let value = scoped.value.map(|(status, facts, types)| {
+    let value = scoped.value.map(|(status, facts, types, config)| {
+        match config {
+            Ok(corpus) => {
+                walked.config.insert(member.clone(), corpus);
+            }
+            Err(err) => tracing::warn!(
+                member = %member,
+                "reading a workspace member's committed configuration failed; \
+                 the declared-topic relation reports it unread: {err:#}"
+            ),
+        }
         match types {
             Ok(read) => build_deps::sort_read(
                 member.clone(),
@@ -1257,6 +1295,113 @@ pub fn xservice_route_providers(read: &BridgeRead, repo: Option<&str>) -> Xservi
     }
 }
 
+/// One captured topic of an [`XserviceDeclaredTopics`] answer, with every
+/// member's configuration declaring it ([FR-WS-36]).
+///
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeclaredTopicEntry {
+    /// The topic identity — one some member's broker site captures.
+    pub topic: String,
+    /// Its declarations, sorted by `(member, file, key, profile)`; each marked
+    /// [`observed`](DeclarationStatus::Observed) or
+    /// [`net-new`](DeclarationStatus::NetNew), a net-new one with its member's
+    /// site split.
+    pub declarations: Vec<TopicDeclaration>,
+}
+
+/// The `xservice declared-topics` read-model — one per surface; the CLI, MCP
+/// and web twins serialize it alike ([FR-WS-36], [CR-157] D).
+///
+/// Per captured topic, the members whose committed `src/main` configuration
+/// declares it, each with key, file, profile and its `observed` / `net-new`
+/// mark; the declared-only values and the refused ones listed apart; and the
+/// workspace-wide headline with its denominators beside them ([BR-51]). A
+/// declaration, never an observed broker edge ([BR-54]).
+///
+/// [BR-51]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [BR-54]: ../../../docs/specs/software-spec.md#327-workspace-federation
+/// [CR-157]: ../../../docs/requests/CR-157-config-declared-topics-the-half-that-held.md
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct XserviceDeclaredTopics {
+    /// The `--repo` scope, when one was applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Set when the scope names no member the relation was read over — so an
+    /// empty listing is never read as "declares nothing" ([NFR-CC-04]). It
+    /// states why: [`UNREAD_FAILED`](super::declared_topics::UNREAD_FAILED), or
+    /// "not in the workspace".
+    ///
+    /// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_note: Option<String>,
+    /// The workspace-wide headline, whatever the scope: the denominator the
+    /// rows are read against.
+    pub headline: DeclaredTopicHeadline,
+    /// The captured topics declared, sorted by topic — within the scope, when
+    /// one was applied.
+    pub topics: Vec<DeclaredTopicEntry>,
+    /// Declarations whose value no member's broker site names — not a topic,
+    /// never drawn ([ADR-72] decision point 1).
+    ///
+    /// [ADR-72]: ../../../docs/specs/architecture/decisions/ADR-72.md
+    pub declared_only: Vec<TopicDeclaration>,
+    /// Topic-named values the hop refused, with their existing reason.
+    pub refused: Vec<RefusedDeclaration>,
+}
+
+/// The `xservice declared-topics` answer over `read` — the
+/// [`DeclaredTopics`](super::DeclaredTopics) relation — scoped to one declaring
+/// member when `repo` is given ([FR-WS-36], [FR-WS-05]).
+///
+/// Shaped like [`xservice_route_providers`]: a read built once, a scope applied
+/// to its rows, the headline beside them unscoped. The single accessor every
+/// surface serializes, so the CLI, the MCP twin and the web route cannot list
+/// the relation three ways.
+///
+/// [FR-WS-05]: ../../../docs/specs/requirements/FR-WS-05.md
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+pub fn xservice_declared_topics(read: &DeclaredTopicRelation, repo: Option<&str>) -> XserviceDeclaredTopics {
+    let in_scope = |member: &str| repo.is_none_or(|scoped| member == scoped);
+    let mut topics: BTreeMap<&str, Vec<TopicDeclaration>> = BTreeMap::new();
+    let mut declared_only = Vec::new();
+    for d in read.declarations.iter().filter(|d| in_scope(&d.member)) {
+        match d.status {
+            DeclarationStatus::DeclaredOnly => declared_only.push(d.clone()),
+            DeclarationStatus::Observed | DeclarationStatus::NetNew => {
+                topics.entry(d.topic.as_str()).or_default().push(d.clone());
+            }
+        }
+    }
+    let topics = topics
+        .into_iter()
+        .map(|(topic, mut declarations)| {
+            declarations.sort_by(|a, b| {
+                (&a.member, &a.file, &a.key, &a.profile, &a.via)
+                    .cmp(&(&b.member, &b.file, &b.key, &b.profile, &b.via))
+            });
+            DeclaredTopicEntry {
+                topic: topic.to_string(),
+                declarations,
+            }
+        })
+        .collect();
+    XserviceDeclaredTopics {
+        scope: repo.map(str::to_string),
+        scope_note: build_deps::scope_note(
+            repo,
+            repo.is_some_and(|member| read.was_read(member)),
+            &read.headline.members.unread_reasons,
+            "declared-topic relation was read over",
+        ),
+        headline: read.headline.clone(),
+        topics,
+        declared_only,
+        refused: read.refused.iter().filter(|r| in_scope(&r.member)).cloned().collect(),
+    }
+}
+
 /// One member's row in a [`WorkspaceStatus`]: its index freshness, its warm
 /// state, and its open state, in **one** record ([FR-WS-05], [FR-WS-15],
 /// [FR-WS-16]).
@@ -1430,6 +1575,23 @@ pub struct WorkspaceStatus {
     ///
     /// [FR-WS-11]: ../../../docs/specs/requirements/FR-WS-11.md
     pub topics: Vec<MemberTopics>,
+    /// The **declared-topic** headline — the `(member, topic)` pairs a member's
+    /// committed `src/main` configuration declares, beside every value
+    /// considered, the members read and what is net-new or declared-only
+    /// ([FR-WS-36], [ADR-72]).
+    ///
+    /// **A declaration, never an observed broker edge** ([BR-54]): it sits
+    /// after [`topics`](Self::topics) and apart from it, and nothing in
+    /// [`coverage`](Self::coverage), [`topics`](Self::topics) or the bridge
+    /// reads it. **Absent** when the workspace declares nothing — no topic-named
+    /// value was considered — so such a workspace serializes exactly as before
+    /// the relation existed. `xservice declared-topics` lists the rows.
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    /// [ADR-72]: ../../../docs/specs/architecture/decisions/ADR-72.md
+    /// [BR-54]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_topics: Option<DeclaredTopicHeadline>,
     /// Members that **look like** documentation or mock repositories and
     /// declare no kind (of any kind, `platform` included) — a hint for a human,
     /// never a classification
@@ -1754,6 +1916,13 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
     let (coverage, bound_sites) = coverage_and_bound_sites(&answer);
     let reference_resolution = pool_reference_resolution(&freshness, std::mem::take(&mut build_facts.references), &bound_sites);
     let topics = workspace_topics(&answer);
+    let declared_topics = declared_topics_section(
+        registry,
+        &answer,
+        std::mem::take(&mut build_facts.config),
+        &topics,
+        &coverage,
+    );
     // Reads nothing when the manifest declares no link. Otherwise it computes the
     // evidence edges a link must not duplicate over this same answer — two more
     // all-member walks, plus the configuration reads of members whose call sites
@@ -1816,6 +1985,7 @@ pub fn workspace_status(registry: &EngineRegistry<Engine>) -> WorkspaceStatus {
         members,
         coverage,
         topics,
+        declared_topics,
         kind_candidates,
         build_dependency,
         type_reference,
@@ -1905,6 +2075,53 @@ fn declared_types_of(freshness: &[MemberResult<StatusInfo>]) -> std::collections
 fn build_dependency_section(relation: build_deps::BuildDependencyRelation) -> Option<BuildDependencyHeadline> {
     let members = &relation.headline.members;
     (members.with_manifests > 0 || !members.unread.is_empty()).then_some(relation.headline)
+}
+
+/// The `declared_topics` headline over the relation [`declared_topics::derive`]
+/// joins from what `workspace status` has already read ([FR-WS-36]), or `None`
+/// when no topic-named value was considered anywhere — so a workspace that
+/// declares nothing serializes exactly as before the relation existed.
+///
+/// It costs no walk: each member's committed configuration came with the
+/// freshness walk ([`fan_status`]), its topic surface with the topics walk, and
+/// the coverage payload the status already built feeds a net-new pair's site
+/// split instead of a second walk of the contract surface ([NFR-PE-10]). A
+/// member absent from either read is skipped, and the relation names it in
+/// `members.unread` ([ADR-53]). The omission rule is the relation's own
+/// ([`DeclaredTopicRelation::is_empty`]), so an unread member alone does not
+/// surface the section — `xservice declared-topics` always names it.
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+/// [NFR-PE-10]: ../../../docs/specs/requirements/NFR-PE-10.md
+fn declared_topics_section(
+    registry: &EngineRegistry<Engine>,
+    answer: &AnswerScope<'_, Engine>,
+    config: BTreeMap<String, MemberCorpus>,
+    topics: &[MemberTopics],
+    coverage: &CrossServiceCoverage,
+) -> Option<DeclaredTopicHeadline> {
+    let facts = join_declared_facts(topics, config);
+    let roster: Vec<String> = registry.federation().members.iter().map(|m| m.name.clone()).collect();
+    let relation = declared_topics::derive(&roster, &facts, || {
+        SiteEvidence::from_coverage(coverage, answer.reads().unread.into_keys())
+    });
+    (!relation.is_empty()).then_some(relation.headline)
+}
+
+/// Each member whose topic surface **and** committed configuration were both
+/// read, as [`declared_topics::derive`] takes it, in the topics walk's order. A
+/// member missing from either read is left out — never joined with an empty
+/// half — so the relation names it unread rather than as a member declaring
+/// nothing ([ADR-53], [NFR-CC-04]).
+///
+/// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+/// [NFR-CC-04]: ../../../docs/specs/requirements/NFR-CC-04.md
+fn join_declared_facts(topics: &[MemberTopics], mut config: BTreeMap<String, MemberCorpus>) -> Vec<MemberTopicFacts> {
+    topics
+        .iter()
+        .filter_map(|read| Some((read.member.clone(), config.remove(&read.member)?, read.topics.clone())))
+        .collect()
 }
 
 /// The bridge edge set the query surface stitches over, resolved once per call
@@ -2463,7 +2680,12 @@ mod tests {
         let mut walked = FactsWalked::default();
 
         let row = split_status_and_facts(
-            scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(Some(Vec::new())), Ok(Some(MemberTypeFacts::default()))))),
+            scoped(Ok((
+                Ok((StatusInfo::default(), MemberReferenceFacts::default())),
+                Ok(Some(Vec::new())),
+                Ok(Some(MemberTypeFacts::default())),
+                Ok(MemberCorpus::default()),
+            ))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
@@ -2471,7 +2693,15 @@ mod tests {
         assert_eq!(walked.types.len(), 1, "declared types read are pushed, even when empty");
 
         let row =
-            split_status_and_facts(scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(None), Ok(None)))), &mut walked);
+            split_status_and_facts(
+                scoped(Ok((
+                    Ok((StatusInfo::default(), MemberReferenceFacts::default())),
+                    Ok(None),
+                    Ok(None),
+                    Ok(MemberCorpus::default()),
+                ))),
+                &mut walked,
+            );
         assert!(row.result.is_some() && row.error.is_none(), "the freshness row is untouched");
         assert_eq!(walked.facts.len(), 1, "a store with no extracted facts is never counted read");
         assert_eq!(walked.not_extracted, ["api"], "…it is named apart");
@@ -2483,6 +2713,7 @@ mod tests {
                 Ok((StatusInfo::default(), MemberReferenceFacts::default())),
                 Err(anyhow::anyhow!("store read failed")),
                 Err(anyhow::anyhow!("store read failed")),
+                Ok(MemberCorpus::default()),
             ))),
             &mut walked,
         );
@@ -2496,7 +2727,12 @@ mod tests {
 
         // The two fact channels are independent: build facts read, type facts failed.
         let row = split_status_and_facts(
-            scoped(Ok((Ok((StatusInfo::default(), MemberReferenceFacts::default())), Ok(Some(Vec::new())), Err(anyhow::anyhow!("read failed"))))),
+            scoped(Ok((
+                Ok((StatusInfo::default(), MemberReferenceFacts::default())),
+                Ok(Some(Vec::new())),
+                Err(anyhow::anyhow!("read failed")),
+                Ok(MemberCorpus::default()),
+            ))),
             &mut walked,
         );
         assert!(row.result.is_some() && row.error.is_none());
@@ -2509,6 +2745,63 @@ mod tests {
 
         let headline = build_dependency_headline(&two_member_federation(), &[], &[]).unwrap();
         assert_eq!(headline.members.unread, ["a", "b"], "no fact pushed ⇒ named unread");
+    }
+
+    /// The configuration channel of the freshness walk ([FR-WS-36], S-490): a
+    /// member whose committed configuration was read is kept for the
+    /// declared-topic join; one whose read failed on a live engine, or whose
+    /// engine never started, is not — the relation then names it unread — and
+    /// its freshness row is untouched either way.
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    #[test]
+    fn a_failed_configuration_read_is_left_out_of_the_join_and_leaves_the_freshness_row_alone() {
+        let scoped = |member: &str, value| MemberScoped { member: member.to_string(), value };
+        let status = || Ok((StatusInfo::default(), MemberReferenceFacts::default()));
+        let mut walked = FactsWalked::default();
+
+        let read = split_status_and_facts(
+            scoped("a", Ok((status(), Ok(None), Ok(None), Ok(MemberCorpus::default())))),
+            &mut walked,
+        );
+        let failed = split_status_and_facts(
+            scoped("b", Ok((status(), Ok(None), Ok(None), Err(anyhow::anyhow!("corpus read failed"))))),
+            &mut walked,
+        );
+        let never_started =
+            split_status_and_facts(scoped("c", Err(anyhow::anyhow!("store is corrupt"))), &mut walked);
+
+        assert!(read.result.is_some() && failed.result.is_some(), "a failed read leaves the freshness row alone");
+        assert!(never_started.error.is_some());
+        assert_eq!(
+            walked.config.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["a"],
+            "only the member whose configuration was read is joined"
+        );
+    }
+
+    /// The declared-topic join ([FR-WS-36], S-490): a member read on both halves
+    /// is joined; one whose topic surface was read but whose configuration was
+    /// not — or the reverse — is left out, never joined with an empty half, so
+    /// the relation names it unread instead of counting it as declaring nothing
+    /// ([ADR-53]). End to end this is unreachable (an unopenable store drops
+    /// out of both walks), so it is pinned here.
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    #[test]
+    fn a_member_missing_either_half_is_left_out_of_the_declared_topic_join() {
+        let topics = |member: &str| MemberTopics { member: member.to_string(), topics: Vec::new() };
+        let read = [topics("a"), topics("b"), topics("c")];
+        // `a` has both halves; `b`'s configuration read failed; `d` has a
+        // configuration but its topic read failed (it is not in `read`).
+        let config = BTreeMap::from([
+            ("a".to_string(), MemberCorpus::default()),
+            ("c".to_string(), MemberCorpus::default()),
+            ("d".to_string(), MemberCorpus::default()),
+        ]);
+        let joined: Vec<String> = join_declared_facts(&read, config).into_iter().map(|f| f.0).collect();
+        assert_eq!(joined, ["a", "c"], "only members read on both halves, in the topics walk's order");
     }
 
     /// **Not yet extracted keeps the section and says so** ([FR-WS-33], S-462

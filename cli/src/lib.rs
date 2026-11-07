@@ -538,8 +538,10 @@ pub(crate) enum Commands {
     Hook(HookArgs),
     /// Cross-service workspace queries (federation, FR-WS-05): route-providers,
     /// callers, impact, search, build-deps (a build dependency, never a
-    /// runtime coupling) and type-refs (an advisory type reference, never a
-    /// coupling) — each with an optional `--repo` member filter.
+    /// runtime coupling), type-refs (an advisory type reference, never a
+    /// coupling) and declared-topics (a topic a member's configuration
+    /// declares, never an observed broker edge) — each with an optional
+    /// `--repo` member filter.
     Xservice {
         #[command(subcommand)]
         command: XserviceCommands,
@@ -1243,7 +1245,10 @@ impl Output {
     ) -> Result<i32> {
         let report = f(&engine(root, false)?)?;
         if !self.json && !self.quiet && report.passed.is_none() {
-            println!("no rules contract found — nothing was evaluated");
+            // FR-CF-08: a workspace tier that declares only member-only tables
+            // leaves the member here, and each refusal must still be stated —
+            // one `warning:` line per entry, inside the line budget (NFR-MA-02).
+            println!("no rules contract found — nothing was evaluated{}", report.warnings.iter().map(|w| format!("\nwarning: {w}")).collect::<String>());
         } else {
             self.print(&report)?;
         }
@@ -1522,6 +1527,7 @@ mod surface_parity {
         ("xservice_search", Twin("xservice search")),
         ("xservice_build_deps", Twin("xservice build-deps")),
         ("xservice_type_refs", Twin("xservice type-refs")),
+        ("xservice_declared_topics", Twin("xservice declared-topics")),
         ("workspace_status", Twin("workspace status")),
         ("workspace_reachability", Twin("workspace reachability")),
         ("workspace_check", Twin("workspace check")),

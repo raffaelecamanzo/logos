@@ -111,9 +111,12 @@
 ; under the path the router is mounted at — `app.use('/api', router)`, usually in
 ; another file. This file CAPTURES the facts and never joins them
 ; (`resolve::framework::mount`): the pass holds a registration on a router back,
-; and a run-level join over every candidate file gives it each mount's path. A
-; router no candidate file mounts, or mounted at a path that is not a written
-; literal, is refused and counted; a `use` that mounts a router is not a route.
+; and a run-level join gives it each mount's path. Once a candidate holds a
+; registration back, the mount facts are read in every indexed file of the
+; language that calls the mount method, a framework candidate or not (S-853): a
+; file that names no framework is read for them alone and promotes nothing. A
+; router no file mounts, or mounted at a path that is not a written literal, is
+; refused and counted; a `use` that mounts a router is not a route.
 ;
 ; Each `@fw.route.*` pattern above carries `@fw.mount.route.receiver` on the
 ; registration's receiver. The facts below are plain syntax:
@@ -144,7 +147,10 @@
 ;                      argument (`@fw.mount.first`) — a path when it is a string
 ;                      (`@fw.mount.path`), none when it is middleware
 ;                      (`@fw.mount.middleware`: a call or a function), otherwise a
-;                      value that may hold a path, which refuses.
+;                      value that may hold a path, which refuses. Each mount
+;                      pattern sets `fw.mount.verb.name` to the method name its
+;                      `#eq?` matches: a file the pass reads for mounts alone is
+;                      parsed only when its text calls that name.
 
 ; Express serves a router's `/` at its mount path (`router.get('/')` under `/api`
 ; is `GET /api`): its routers absorb (`@fw.mount.absorbs`).
@@ -373,7 +379,8 @@
     object: (_) @fw.mount.receiver
     property: (property_identifier) @fw.mount.verb) @fw.mount.callee
   arguments: (arguments (identifier) @fw.mount.arg))
-  (#eq? @fw.mount.verb "use"))
+  (#eq? @fw.mount.verb "use")
+  (#set! fw.mount.verb.name "use"))
 
 ((call_expression
   function: (member_expression
@@ -384,19 +391,22 @@
       function: (identifier) @_require
       arguments: (arguments . (string) @fw.mount.arg.module .))))
   (#eq? @fw.mount.verb "use")
-  (#eq? @_require "require"))
+  (#eq? @_require "require")
+  (#set! fw.mount.verb.name "use"))
 
 ((call_expression
   function: (member_expression
     property: (property_identifier) @fw.mount.verb) @fw.mount.callee
   arguments: (arguments . (_) @fw.mount.first))
-  (#eq? @fw.mount.verb "use"))
+  (#eq? @fw.mount.verb "use")
+  (#set! fw.mount.verb.name "use"))
 
 ((call_expression
   function: (member_expression
     property: (property_identifier) @fw.mount.verb) @fw.mount.callee
   arguments: (arguments . (string) @fw.mount.path))
-  (#eq? @fw.mount.verb "use"))
+  (#eq? @fw.mount.verb "use")
+  (#set! fw.mount.verb.name "use"))
 
 ((call_expression
   function: (member_expression
@@ -404,7 +414,8 @@
   arguments: (arguments
     .
     [(call_expression) (arrow_function) (function_expression)] @fw.mount.middleware))
-  (#eq? @fw.mount.verb "use"))
+  (#eq? @fw.mount.verb "use")
+  (#set! fw.mount.verb.name "use"))
 
 ; Next.js/React component: an exported PascalCase function declaration —
 ; the UI building block (FR-FW-02, UAT-FW-02).
