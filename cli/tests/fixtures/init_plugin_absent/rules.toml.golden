@@ -3,19 +3,42 @@
 # is optional: an omitted constraint is simply not enforced.
 # Reference: docs/howto/configuration.md
 
+# The values shown are the curated recommended baselines and the threshold
+# defaults. Uncomment a key to enforce it; an omitted constraint is not enforced.
 # [constraints]
-# max_cycles     = 0    # maximum allowed dependency cycles
-# max_cc         = 15   # maximum cyclomatic complexity per function
-# max_fn_lines   = 100  # maximum lines per function
-# no_god_files   = 50   # maximum symbols per file
-# max_fan_in     = 30   # max inbound dependency edges for any one symbol (FR-GV-11)
-# max_fan_out    = 30   # max outbound dependency edges for any one symbol (FR-GV-11)
-# max_dead       = 0    # max project-wide dead functions, absolute (FR-GV-11)
-#   # — or, delta-from-blessed-baseline (CR-043/ADR-39): fail only when the dead
-#   # count rises above the blessed steady-state. Re-bless `baseline` after the
-#   # dead-code count legitimately changes (the gate-baseline re-bless discipline).
-# max_dead       = { baseline = 0, delta = 0 }
-# max_duplicates = 0    # max project-wide duplicate functions (FR-GV-11)
+# max_cycles = 0  # maximum allowed dependency cycles
+# max_cc = 15  # maximum cyclomatic complexity per function
+# max_fn_lines = 80  # maximum lines per function
+# no_god_files = 40  # maximum symbols per file
+# max_fan_in = 30  # max inbound dependency edges for any one symbol (FR-GV-11)
+# max_fan_out = 30  # max outbound dependency edges for any one symbol (FR-GV-11)
+# max_dead = 0  # max project-wide dead functions (FR-GV-11)
+# max_duplicates = 0  # max project-wide duplicate functions (FR-GV-11)
+# max_nesting_depth = 4  # max nesting depth per function (CR-005)
+# max_brain_methods = 0  # max project-wide brain methods (CR-005)
+# max_clone_ratio = 0.0  # max near-clone function ratio, 0.0-1.0 (CR-005)
+# no_god_containers = true  # no class-like container over the god thresholds (CR-005)
+#
+# Ratchet adoption (FR-GV-23): a budget that names symbols may be declared
+# as a table instead of a number, to tolerate today's offenders and fail only
+# on new or worsened ones:
+#   max_cc = { max = 15, ratchet = true }
+# `logos check --bless` records today's offenders in .logos/rules-baseline.json.
+# A blessed offender at or below its blessed value is a warning; a new or worse
+# one is an error. `max_dead` and `max_cycles` also take the count form
+# `{ baseline = N, delta = 0 }`.
+
+# [metric_thresholds]
+# nesting_depth = 4  # depth at which a function counts as deeply nested
+# brain_complexity = 15  # complexity floor of a brain method
+# brain_lines = 100  # line-count floor of a brain method
+# brain_nesting = 3  # nesting floor of a brain method
+# god_methods = 20  # method count at which a container is a god container
+# god_span = 500  # line span at which a container is a god container
+# clone_similarity = 0.85  # near-clone similarity threshold, (0, 1]
+# clone_min_tokens = 50  # token floor below which a function is never a near clone
+# duplicate_min_tokens = 50  # token floor a body needs to be an exact duplicate
+# cohesion_min_classes = 5  # fewest scoreable classes Cohesion needs to apply
 
 # Ordered layers: a higher `order` may not depend on a lower one. Files not
 # matching any layer are exempt from layer ordering (DL-05).

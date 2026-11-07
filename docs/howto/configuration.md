@@ -55,6 +55,7 @@ directories documented above — a member keeps its own `.logos/` and its own
 | `logos.workspace.toml` | The manifest: approved members plus your hand-written `default` / `autodiscover` / `exclude` / `[workspace.warm]` / `[workspace.member.<name>]` / `[[links]]` / `[governance]`. Re-running `init --workspace` preserves their keys and values; it re-serialises the file, so comments and formatting are not kept. Editable in the app — see [Editing the manifest from the app](#editing-the-manifest-from-the-app). | Yes |
 | `.logos.workspace.warm.json` | Machine-written record of the last background warm's per-member outcome. Derived, host-local, safe to delete. | No |
 | `.mcp.json` | Gains a single `logos-workspace` server key, deliberately distinct from a member's own `logos` key so neither shadows the other. | Yes |
+| `.logos/rules.toml` | The workspace rules contract every member inherits key by key — see [The workspace tier](#the-workspace-tier--one-policy-for-every-member). `init --workspace` writes it **only when absent**, every key commented out, so nothing is enforced until you uncomment one; an existing file is left byte-identical (`root_rules: unchanged`). Its directory gets the managed `.logos/.gitignore` a member's has. | Yes |
 | `.gitignore` | A managed block ignoring the warm sidecar and the other host-local files under the root's `.logos/`, maintained **only when the root is a git working tree** — a parent-of-repos root that is not a repository gains no file (`init --workspace` then reports `root_ignore: skipped`). | Yes |
 
 **Unknown keys in the manifest fail loud.** It parses under `deny_unknown_fields`,
@@ -1439,6 +1440,83 @@ non-exported symbols are exempt. The same gap set is available read-only via
 metric-neutral, this contract gates `logos check` without ever moving the
 quality signal.
 
+### The workspace tier — one policy for every member
+
+In a workspace (a directory holding `logos.workspace.toml`), the root's own
+`.logos/rules.toml` is a **second tier** of every member's contract
+([FR-CF-08](../specs/requirements/FR-CF-08.md)). It is parsed exactly as a
+member's file is — unknown keys and bad values still fail with exit 2, naming the
+root's file.
+
+- **`[constraints]` and `[metric_thresholds]` inherit key by key.** A member that
+  declares a key keeps its own value; every key it leaves out comes from the root.
+  A member with no `rules.toml` at all is evaluated against the root's keys.
+- **Every other table is member-only.** `[[layers]]`, `[[boundaries]]`,
+  `[[forbidden_imports]]`, `[[require_tested]]`, `[[require_documented]]`,
+  `[history]`, `[coverage]`, `[security]` and `[review]` name member paths or tune
+  one member's own evidence or gate. Declared at the root, each is refused: `check`
+  and `scan` print a warning naming the table and the reason, and no member
+  applies it.
+- **Every effective key reports where it came from.** `check --json` carries an
+  `origins` map (`member` or `workspace` per declared key) and an `origin` on each
+  constraint finding; the recorded check marker counts how many of the evaluated
+  rules were inherited.
+- **A rule from either tier is a loaded contract.** A member with no `rules.toml`
+  that inherits a constraint exits `0`/`1`, not `4`.
+- **A root threshold edit re-baselines every member**, with the announced
+  "baseline reset: metric thresholds changed" notice on each member's next gate.
+
+```toml
+# <workspace-root>/.logos/rules.toml — inherited by every member
+[constraints]
+max_cc       = 15
+max_fn_lines = 80
+
+# <workspace-root>/svc-b/.logos/rules.toml — svc-b's own value wins for max_cc;
+# max_fn_lines = 80 still comes from the root.
+[constraints]
+max_cc = 25
+```
+
+The root is found by walking up from the project's parent to the nearest
+`logos.workspace.toml`; the manifest is not parsed for this. So **every project
+under that directory inherits the tier**, whether or not the manifest lists it as a
+member — an unlisted repository, one matched by `[workspace] exclude`, and a member's
+worktree checked out below the root all read the root's keys. A `check --rules FILE`
+evaluates that file alone, with no tier. A project with no manifest above it, or a
+workspace whose root has no `rules.toml`, is unchanged: no origin appears anywhere.
+
+A root `rules.toml` that does not parse or validate fails loud (exit 2, naming the
+root's file) for **every** project below it — `check`, `scan` and `gate`, and also
+`index`/`sync`, which read the inherited thresholds — until it is fixed.
+
+**Writing and editing the root contract**
+([FR-IN-10](../specs/requirements/FR-IN-10.md), [S-508](../planning/journal.md#s-508-init-writes-the-workspace-contract-and-the-config-editors-show-where-each-rule-comes-from)):
+
+- `logos init --workspace` writes `<workspace-root>/.logos/rules.toml` when it is
+  absent. Every key is commented out, at its curated value, with comments on
+  inheritance and ratchet adoption — uncomment the keys you want every member to
+  inherit. A member's own template (`logos init`) is rendered from the same curated
+  set, so both show `max_fn_lines = 80`, `no_god_files = 40`, the four CR-005
+  budgets and every `[metric_thresholds]` default. While every key stays commented
+  the members' results are unchanged; `check --json` carries an empty `origins` map.
+- The **workspace Config view** (app level) has a **Workspace rules** group over
+  this file. Save validates the whole document, refuses a member-only table inline
+  with the reason above, refuses a save made against a file that changed on disk
+  since it loaded (you then choose which copy wins), and stamps the same provenance
+  comment a member's browser-saved `rules.toml` carries. It writes nothing in any
+  member and reindexes nothing; each member's next check reads the new contract.
+- A **member's Config view** badges each `[constraints]` / `[metric_thresholds]`
+  field the member leaves unset and the root declares **Inherited from workspace**,
+  with the root's value. The field stays empty and Save never writes the inherited
+  value into the member's file; typing a value creates a member override, which
+  the field then labels with the workspace value it replaces. A root contract that
+  does not parse is stated above the member's rules fields, and nothing is badged.
+- The **Rule findings** view lists ratchet warnings (blessed debt) in their own
+  **Blessed debt** panel, apart from the findings that fail `check`, with
+  "N blessed · M fixed since bless". A member that inherits rules from the root
+  never shows the "no architecture rules yet" onboarding.
+
 ### Ratchet constraints — adopt a budget on an existing codebase
 
 An absolute budget fails every existing violation on day one, so a codebase with
@@ -1839,7 +1917,7 @@ block of your Claude Code settings):
 | `LOGOS_STOP_HOOK_DISABLE` | unset | `1` turns the Stop check off: the hook exits 0 with no output. |
 | `LOGOS_STOP_HOOK_BUDGET_MS` | `15000` | The Stop check's budget, in milliseconds, shared by its `check`, `review` and `security` legs. A value that is not a number reads as the default. The plugin declares a 30-second timeout for the hook, so a value above `25000` is held at `25000`, and a leg still running then is reported as not measured. |
 | `LOGOS_GUARD_MODE` | unset | `unattended` makes the guardrail answer `deny` wherever it would answer `ask`, its reason saying the session runs unattended; any other value, or none, asks. |
-| `LOGOS_GUARD_ALLOW` | unset | In an unattended session, a colon-separated list of project-relative contract files a file tool may still write; never a shell command or a guarded command. |
+| `LOGOS_GUARD_ALLOW` | unset | In an unattended session, a colon-separated list of project-relative contract files a file tool may still write, and a shell writer too when the guard places its target exactly at a listed file; never a target it cannot place, never a guarded command. |
 
 The guardrail that asks before an agent edits `.logos/rules.toml`,
 `.logos/rules-baseline.json` or `.logos/security-ignore.toml` has no off switch;
@@ -2189,6 +2267,24 @@ build file (`Makefile`, CMake,
 `compile_commands.json`) is read, so a definition no binary links with the
 caller is still a candidate; the exactly-one rule keeps the guess out. The key
 defaults to `false`, so a plugin that does not declare it binds as before.
+
+**`sibling_module_dir` (`path` model only).** Since the 2018 edition a Rust
+module's root sits in `foo.rs` and its submodules in `foo/`. A plugin whose
+language lays modules out this way opts in, and the Rust plugin does:
+
+```toml
+[module_model]
+kind = "path"
+sibling_module_dir = true   # refused under any other kind
+```
+
+The key changes no binding and no module key; it changes the partition the
+graph-shape metrics read. A file `D/X.rs` is in the module `D/X` — not `D` —
+whenever a production file of a declaring language sits beneath `D/X/`, so
+Modularity, Acyclicity and Depth score `foo.rs` + `foo/` exactly as they score
+`foo/mod.rs` (see [Metrics](metrics.md#1-modularity--do-directories-form-real-modules)).
+The key defaults to `false`, so a plugin that does not declare it keeps the
+directory partition.
 
 **`extension_functions` and `file_facade` (`namespace` model only).** Kotlin
 declares functions that extend a type (`fun String.toSlug()`), and Java reaches

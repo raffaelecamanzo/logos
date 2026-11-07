@@ -150,6 +150,66 @@ fn existing_member_config_is_never_overwritten() {
     );
 }
 
+/// S-508 / FR-IN-10: `init --workspace` writes the workspace rules contract,
+/// `<root>/.logos/rules.toml`, when it is absent — every key commented out, so
+/// nothing is enforced until a human uncomments one (BR-62), and the comments
+/// say how members inherit it and how to adopt a rule by ratchet. A re-run
+/// leaves it byte-identical and reports it unchanged.
+#[test]
+fn the_workspace_rules_contract_is_written_once_with_every_key_commented() {
+    let tmp = two_member_fixture();
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["root_rules"]["target"], ".logos/rules.toml", "{report}");
+    assert_eq!(report["root_rules"]["action"], "created", "{report}");
+
+    let path = tmp.path().join(".logos").join("rules.toml");
+    let written = fs::read_to_string(&path).expect("the root contract is written");
+    let uncommented: Vec<&str> = written
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(uncommented.is_empty(), "every line is a comment: {uncommented:?}");
+    for key_line in ["# max_fn_lines = 80", "# no_god_files = 40", "# max_nesting_depth = 4"] {
+        assert!(
+            written.lines().any(|l| l == key_line || l.starts_with(&format!("{key_line} "))),
+            "the root contract carries `{key_line}`:\n{written}"
+        );
+    }
+    let lower = written.to_lowercase();
+    assert!(
+        lower.contains("inherits each") && lower.contains("key by key"),
+        "the comments explain key-by-key inheritance:\n{written}"
+    );
+    assert!(lower.contains("ratchet = true"), "the comments show the ratchet form:\n{written}");
+    let parsed = logos_core::config::parse_rules(&written, &path).expect("the contract parses");
+    assert_eq!(parsed, logos_core::config::Rules::default(), "nothing is enforced");
+
+    let again = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&again), 0, "{}", String::from_utf8_lossy(&again.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(report["root_rules"]["action"], "unchanged", "{report}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), written, "a re-run rewrites nothing");
+}
+
+/// S-508 / FR-IN-10 + FR-IN-01: a root contract that already exists is the
+/// owner's, whatever it holds — `init --workspace` leaves it byte-identical.
+#[test]
+fn an_existing_workspace_rules_contract_stays_byte_identical() {
+    let tmp = two_member_fixture();
+    let dir = tmp.path().join(".logos");
+    fs::create_dir_all(&dir).unwrap();
+    let own = "# the owner's contract\n[constraints]\nmax_cc = 12\n";
+    fs::write(dir.join("rules.toml"), own).unwrap();
+
+    let out = logos(tmp.path(), &["--json", "init", "--workspace", "--yes"]);
+    assert_eq!(exit_code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["root_rules"]["action"], "unchanged", "{report}");
+    assert_eq!(fs::read_to_string(dir.join("rules.toml")).unwrap(), own);
+}
+
 /// stdout carries only the machine-readable report; the approval gate (when
 /// it would prompt) writes to stderr, never stdout (FR-CL-02). Without a TTY
 /// on stdin, `ask()` degrades to its default without printing at all — so
@@ -353,8 +413,19 @@ fn the_supervisor_warms_a_two_member_fixture_and_releases_every_store() {
     // The supervisor opens no store of its own: it ran with `--project <parent>`,
     // which has no index at all. Had it gone through the Engine-guarded dispatch
     // path it would have exited 3 (CoreError::NoIndex) instead of 0.
-    assert!(
-        !tmp.path().join(".logos").exists(),
+    //
+    // S-508: enablement now writes the workspace rules contract into the root's
+    // `.logos/` (FR-IN-10), so the directory exists. What must not exist is a
+    // store: the directory holds the contract and its managed ignore file, and
+    // nothing the supervisor could have opened.
+    let mut at_root: Vec<String> = fs::read_dir(tmp.path().join(".logos"))
+        .expect("the workspace rules contract's directory")
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    at_root.sort();
+    assert_eq!(
+        at_root,
+        [".gitignore", "rules.toml"],
         "the supervisor must not create a store at the workspace root"
     );
 }

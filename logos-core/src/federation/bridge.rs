@@ -435,6 +435,32 @@ pub trait MemberContracts {
         Ok(std::collections::BTreeMap::new())
     }
 
+    /// Read this member's **whole committed configuration** — every canonical
+    /// key every configuration source defines, each with every definition, as
+    /// [`config_definitions`](Self::config_definitions) would return it key by
+    /// key (S-489, [FR-WS-36], [ADR-72]).
+    ///
+    /// The declared-topic relation ([`super::declared_topics`]) cannot ask for
+    /// keys by name, because which keys name a topic is what it is looking for;
+    /// so it reads them all, once per member, on the first query. Read-only and
+    /// member-local ([ADR-52]); nothing in the bridge, the coverage tier or a
+    /// member's scan reads it.
+    ///
+    /// The default is **empty** — a member with no committed configuration, and
+    /// every lightweight test double, declares nothing.
+    ///
+    /// # Errors
+    /// Propagates a read failure so the caller can skip the member as degraded
+    /// rather than aborting the whole workspace ([ADR-53]).
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [ADR-53]: ../../../docs/specs/architecture/decisions/ADR-53.md
+    /// [ADR-72]: ../../../docs/specs/architecture/decisions/ADR-72.md
+    fn committed_config(&self) -> Result<crate::resolve::binding::MemberCorpus> {
+        Ok(std::collections::BTreeMap::new())
+    }
+
     /// Read this member's **reachability surface** — every node with the per-repo
     /// tri-state dead-code verdict its own graph last computed, plus the
     /// `Calls`/`RoutesTo` adjacency the app-wide union view walks ([FR-WS-12],
@@ -681,6 +707,14 @@ impl MemberContracts for crate::Engine {
             }
             Ok(out)
         })
+    }
+
+    fn committed_config(&self) -> Result<crate::resolve::binding::MemberCorpus> {
+        let runtime = self.runtime().context(
+            "reading a member's committed configuration requires a long-lived engine \
+             (Engine::start) with a read-only pool",
+        )?;
+        runtime.submit_read(|store| store.config_corpus())
     }
 
     fn resolve_target(&self, target: &str) -> Result<Vec<LogosSymbol>> {

@@ -181,3 +181,99 @@ it("leads with 'no rules checked', never '0 rule findings', over a contract decl
   expect(await screen.findByText("no rules checked")).toBeInTheDocument();
   expect(screen.queryByText("0 rule findings")).toBeNull();
 });
+
+// ── S-508 (CR-165, FR-GV-23): blessed debt apart from errors ──────────────────
+
+/** A ratchet report over `max_cc`: one new offender (an error) and two blessed
+ *  ones (warnings), with one blessed entry fixed since the bless. */
+function ratchetRules(over: Partial<RulesReport> = {}): RulesReport {
+  return {
+    passed: false,
+    checked_rules: 2,
+    rules_present: true,
+    violations: [
+      {
+        rule: "max_cc", rule_type: "constraint", severity: "error", file: "src/new.rs", node_id: 1, message: "new_fn CC 22 exceeds 15",
+        ratchet: { symbol: "crate/new_fn().", value: 22, blessed: null, status: "new" },
+      },
+      {
+        rule: "max_cc", rule_type: "constraint", severity: "warning", file: "src/old.rs", node_id: 2, message: "old_fn CC 20 — blessed debt",
+        ratchet: { symbol: "crate/old_fn().", value: 20, blessed: 20, status: "blessed" },
+      },
+      {
+        rule: "max_fn_lines", rule_type: "constraint", severity: "warning", file: "src/long.rs", node_id: 3, message: "long_fn 120 lines — blessed debt",
+        ratchet: { symbol: "crate/long_fn().", value: 120, blessed: 130, status: "blessed" },
+      },
+    ],
+    freshness: "fresh",
+    warnings: [],
+    ratchet: {
+      blessed_file: ".logos/rules-baseline.json",
+      blessed_file_present: true,
+      bless_command: "logos check --bless",
+      rules: ["max_cc", "max_fn_lines"],
+      blessed: 2,
+      worsened: 0,
+      new: 1,
+      fixed: [{ rule: "max_cc", symbol: "crate/gone_fn().", blessed: 18 }],
+    },
+    ...over,
+  };
+}
+
+describe("Rule findings render blessed debt apart from errors (S-508, FR-GV-23)", () => {
+  it("lists blessed warnings in their own widget, with 'N blessed · M fixed since bless'", async () => {
+    stub(model({ rules: ratchetRules() }));
+    render(<GapsView />);
+    const findings = await screen.findByRole("table", { name: "Rule findings" });
+    expect(within(findings).getByText("src/new.rs")).toBeInTheDocument();
+    expect(within(findings).queryByText("src/old.rs")).toBeNull();
+    expect(within(findings).queryByText("src/long.rs")).toBeNull();
+    const debt = screen.getByRole("table", { name: "Blessed debt" });
+    expect(within(debt).getByText("src/old.rs")).toBeInTheDocument();
+    expect(within(debt).getByText("src/long.rs")).toBeInTheDocument();
+    expect(within(debt).queryByText("src/new.rs")).toBeNull();
+    expect(screen.getByText("2 blessed · 1 fixed since bless")).toBeInTheDocument();
+    // The verdict counts the error alone: blessed debt does not fail `check`.
+    expect(screen.getByText("1 rule finding")).toBeInTheDocument();
+  });
+
+  it("only blessed debt is a pass with its debt stated, never a FAIL", async () => {
+    const all = ratchetRules();
+    stub(
+      model({
+        rules: ratchetRules({
+          passed: true,
+          violations: all.violations.slice(1),
+          ratchet: { ...all.ratchet!, new: 0, fixed: [] },
+        }),
+      }),
+    );
+    render(<GapsView />);
+    expect(await screen.findByText("No findings — 2 rules checked")).toBeInTheDocument();
+    expect(screen.getByText("PASS")).toBeInTheDocument();
+    expect(screen.queryByText("FAIL")).toBeNull();
+    expect(screen.getByText("2 blessed · 0 fixed since bless")).toBeInTheDocument();
+  });
+
+  it("a member that inherits its rules from the workspace never shows the no-rules onboarding", async () => {
+    // No member rules.toml, two rules inherited from the workspace root (S-506:
+    // `rules_present` is true, the checked rules count the inherited ones).
+    stub(
+      model({
+        rules: {
+          passed: true,
+          checked_rules: 2,
+          rules_present: true,
+          violations: [],
+          freshness: "fresh",
+          warnings: [],
+          origins: { constraints: { max_cc: "workspace", max_fn_lines: "workspace" }, metric_thresholds: {} },
+        },
+      }),
+    );
+    render(<GapsView />);
+    expect(await screen.findByText("No findings — 2 rules checked")).toBeInTheDocument();
+    expect(screen.queryByText(/No architecture rules yet/i)).toBeNull();
+  });
+});

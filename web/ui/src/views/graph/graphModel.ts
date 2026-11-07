@@ -118,6 +118,11 @@ export const EDGE_STYLE: Record<string, "solid" | "dashed" | "dotted"> = {
   // The service map's asserted layer (S-709, FR-WS-41): a `[[links]]` entry —
   // DECLARED by a human, never measured (BR-75). Dashed, in its own hue.
   "asserted-link": "dashed",
+  // The service map's declared-topic layer (S-491, FR-WS-36): a member's
+  // committed configuration DECLARING a topic — never an observed broker edge
+  // (BR-54). Dotted and arrowless ({@link UNDIRECTED_EDGE_TYPES}), so it never
+  // reads as the solid/dashed `publishes`/`subscribes` hops.
+  "declares-topic": "dotted",
 };
 
 /** Edge color by relationship kind — distinct, mutually-legible hues (CR-030). */
@@ -155,7 +160,16 @@ export const EDGE_COLOR: Record<string, string> = {
   // The asserted layer (S-709) takes one more, so a declared link never shares
   // a measured arm's colour.
   "asserted-link": "#a16207",
+  // The declared-topic layer (S-491) takes one more, never the broker teal: a
+  // declared membership must not share the producer→consumer hops' hue (nor
+  // the code-layer blue every service node is filled with).
+  "declares-topic": "#86198f",
 };
+
+/** Edge types drawn with no arrowhead: a declaration that names no direction
+ *  (S-491, CR-157 §2.4 — "a declared, directionless layer"). Every other type
+ *  keeps the series' default arrow. */
+export const UNDIRECTED_EDGE_TYPES: ReadonlySet<string> = new Set(["declares-topic"]);
 
 /** Node sizing — a base scaled gently by degree; the selection is bumped so it pops. */
 export const NODE_BASE = 12;
@@ -332,6 +346,9 @@ export function nodeIdsWithinDepth(set: LoadedSet, rootId: string, depth: number
   return seen;
 }
 
+/** The service-map edge classes that are drawn but are not a measured coupling. */
+const NOT_A_COUPLING: ReadonlySet<string> = new Set(["build", "declares-contract", "asserted-link", "declares-topic"]);
+
 /** Visible-degree of each node (edges with both endpoints visible) — drives sizing.
  *
  *  The service map's `build` layer (S-464) is drawn but never counted: node size
@@ -339,11 +356,13 @@ export function nodeIdsWithinDepth(set: LoadedSet, rootId: string, depth: number
  *  (BR-58), so switching the layer on must not grow a node. A `declares-contract`
  *  edge (S-461) is not counted either, for the same reason: a declared contract
  *  is never an observed call (BR-57) — nor an `asserted-link` edge (S-709): an
- *  asserted link is a claim, never a measured coupling (BR-75). */
+ *  asserted link is a claim, never a measured coupling (BR-75) — nor a
+ *  `declares-topic` edge (S-491): a configuration declaration, never an observed
+ *  broker edge (BR-54). */
 export function degreeMap(set: LoadedSet, visible: Set<string>): Record<string, number> {
   const deg: Record<string, number> = {};
   for (const e of set.edges) {
-    if (e.edge_type === "build" || e.edge_type === "declares-contract" || e.edge_type === "asserted-link") continue;
+    if (NOT_A_COUPLING.has(e.edge_type ?? "")) continue;
     if (visible.has(e.source) && visible.has(e.target)) {
       deg[e.source] = (deg[e.source] || 0) + 1;
       deg[e.target] = (deg[e.target] || 0) + 1;

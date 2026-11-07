@@ -30,8 +30,11 @@ import type {
   ConfigApplyOutcome,
   ConfigReadModel,
   ConfigWriteOutcome,
+  ManifestSaveOutcome,
   SecretWriteOutcome,
+  TierRulesFile,
   VerifyReport,
+  WorkspaceTierSaveOutcome,
 } from "./types.ts";
 
 /** Which policy file a Save/Apply targets — the `file=` form value. */
@@ -185,4 +188,48 @@ export async function verifyGraph(): Promise<VerifyReport> {
   const res = await apiMutate(apiUrl("verify"), { credentials: "same-origin" });
   if (!res.ok) throw new ConfigMutateError(res.status, await detailOf(res));
   return (await res.json()) as VerifyReport;
+}
+
+/**
+ * `GET /api/v1/workspace/rules` (S-508, FR-UI-38 as modified by CR-165) — the
+ * workspace rules contract, `<workspace-root>/.logos/rules.toml`, as the app-level
+ * editor's Rules section loads it: the literal document, its load fingerprint, its
+ * parse verdict and the member-only tables it declares. A broken contract still
+ * loads, with its fault, because the editor is its repair path.
+ *
+ * App-level: no `?repo=`, like every `workspace/*` read.
+ */
+export function fetchWorkspaceRules(): Promise<TierRulesFile> {
+  return apiFetch<TierRulesFile>("workspace/rules");
+}
+
+/**
+ * `POST /api/v1/workspace/rules/save` (S-508) — validate-before-write of the
+ * candidate root contract, made against the load whose `fingerprint` it posts
+ * back. Resolves with `written` / `unchanged`, or with `conflict` on a `409` (the
+ * file changed on disk since the load; nothing was written). Throws a
+ * {@link ConfigMutateError} carrying the server's message for a refused save — a
+ * `422` for a candidate the parser rejects or one declaring a member-only table,
+ * stated with each table's reason; the file is then byte-identical.
+ */
+export function saveWorkspaceRules(content: string, fingerprint: string): Promise<WorkspaceTierSaveOutcome> {
+  return saveFingerprinted("workspace/rules/save", { content, fingerprint });
+}
+
+/**
+ * One fingerprint-checked save of a workspace-root document (the manifest, the
+ * config tier, the rules contract) through the intent-guarded {@link apiMutate}
+ * seam: resolves with the outcome for `written`, `unchanged` AND `conflict` (a
+ * `409` is the server declining to clobber, its body what is on disk now); every
+ * other non-2xx throws a {@link ConfigMutateError} carrying the server's message.
+ * One spelling for all three saves, so their handling cannot drift apart.
+ */
+export async function saveFingerprinted(route: string, fields: Record<string, string>): Promise<ManifestSaveOutcome> {
+  const res = await apiMutate(apiUrl(route), {
+    headers: FORM_HEADERS,
+    body: formBody(fields),
+    credentials: "same-origin",
+  });
+  if (res.ok || res.status === 409) return (await res.json()) as ManifestSaveOutcome;
+  throw new ConfigMutateError(res.status, await apiErrorDetail(res));
 }

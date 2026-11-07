@@ -67,6 +67,7 @@ use logos_core::federation::{
     ContractBridge, DegradedRollup, EngineRegistry, Federation, ReachabilityScope,
     WorkspaceGovernance, WorkspaceStatistics,
 };
+use logos_core::federation::DeclaredTopics;
 use logos_core::federation::manifest::{self, ManifestDocument, ManifestSaveOutcome};
 use logos_core::history::security::Selector;
 use logos_core::history::{CoverageStatus, HotspotReport, TemporalReport};
@@ -1375,6 +1376,39 @@ pub(crate) async fn workspace_build_deps(
     .await
 }
 
+/// `GET /api/v1/workspace/declared-topics[?repo=<member>]` — the declared-topic
+/// relation ([`xservice_declared_topics`](fed_query::xservice_declared_topics),
+/// [FR-WS-36], [FR-UI-29]): per captured topic, the members whose committed
+/// `src/main` configuration declares it, each with key, file and profile and its
+/// `observed` / `net-new` mark; the declared-only and refused values apart; and
+/// the workspace-wide headline beside them, whatever the scope.
+///
+/// A **declaration**, never an observed broker edge ([BR-54]): the service map
+/// draws a net-new one in its own edge class and lists it in its own panel, and
+/// no binding or coverage figure reads it. The relation is derived on the first
+/// request and cached on member sync-stamps in the holder beside the bridge
+/// ([ADR-52]); nothing is read at startup. The SPA requests it when the service
+/// map opens over a workspace whose status carries a topic inventory — with no
+/// captured topic there is nothing a declaration can name — and never over one
+/// without. The same read-model the CLI and MCP print.
+///
+/// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
+/// [FR-UI-29]: ../../docs/specs/requirements/FR-UI-29.md
+/// [BR-54]: ../../docs/specs/software-spec.md#327-workspace-federation
+/// [ADR-52]: ../../docs/specs/architecture/decisions/ADR-52.md
+pub(crate) async fn workspace_declared_topics(
+    State(backing): State<Arc<Backing<Engine>>>,
+    State(bridge): State<Arc<ContractBridge>>,
+    State(topics): State<Arc<DeclaredTopics>>,
+    Query(q): Query<HashMap<String, String>>,
+) -> Response {
+    let repo = opt_param(&q, "repo");
+    workspace_fan(backing, bridge, "api_v1_workspace_declared_topics", Surface::Web, move |registry, _bridge| {
+        fed_query::xservice_declared_topics(&topics.relation(registry), repo.as_deref())
+    })
+    .await
+}
+
 /// `GET /api/v1/workspace/search?q=<term>[&kind=<k>][&limit=<n>][&repo=<member>]` —
 /// cross-service full-text search fanned across the members
 /// ([`xservice_search`](fed_query::xservice_search)). A missing/empty `q` is a
@@ -1894,11 +1928,7 @@ pub(crate) async fn config(
 /// [FR-WS-30]: ../../docs/specs/requirements/FR-WS-30.md
 /// [FR-UI-38]: ../../docs/specs/requirements/FR-UI-38.md
 pub(crate) async fn workspace_config(WorkspaceRoot(root): WorkspaceRoot) -> Response {
-    let model = run_blocking("api_v1_workspace_config", Surface::Web, move || {
-        core_config::read_workspace_documents(&root)
-    })
-    .await;
-    respond(model)
+    read_at_root(root, "api_v1_workspace_config", core_config::read_workspace_documents).await
 }
 
 /// One member's **effective** chat read roots, as the Workspace Chat's consent
@@ -1992,10 +2022,11 @@ fn member_chat_read_roots(federation: &Federation) -> Vec<MemberChatReadRoots> {
 /// `content=<toml>`, `fingerprint=<hex>` (the one the read returned), and
 /// optionally `file=config` — the only document accepted.
 ///
-/// - `400` for any `file` other than `config` — workspace governance is declared
-///   in the manifest ([FR-WS-13]), so a `rules.toml` here would be read by
-///   nothing — and `400` when `fingerprint` is missing: a save that cannot say
-///   what it was made against cannot be checked for a clobber.
+/// - `400` for any `file` other than `config` — the workspace rules contract has
+///   its own save, [`workspace_rules_save`] (S-508), which refuses the member-only
+///   tables this one would not know to — and `400` when `fingerprint` is missing:
+///   a save that cannot say what it was made against cannot be checked for a
+///   clobber.
 /// - `200` with `outcome: "written"`, or `"unchanged"` for a candidate
 ///   byte-identical to disk (nothing written).
 /// - `409` with `outcome: "conflict"` and the document on disk now: the file
@@ -2008,7 +2039,6 @@ fn member_chat_read_roots(federation: &Federation) -> Vec<MemberChatReadRoots> {
 /// succeeds and repairs it. It writes only under `<workspace-root>/.logos/`.
 ///
 /// [`write_workspace_config`]: logos_core::config::write_workspace_config
-/// [FR-WS-13]: ../../docs/specs/requirements/FR-WS-13.md
 pub(crate) async fn workspace_config_save(
     WorkspaceRoot(root): WorkspaceRoot,
     Form(form): Form<HashMap<String, String>>,
@@ -2019,23 +2049,8 @@ pub(crate) async fn workspace_config_save(
     if !matches!(form.get("file").map(String::as_str), None | Some("config")) {
         return refuse("the workspace root carries the config document only (expected file=config)");
     }
-    let Some(loaded) = form.get("fingerprint").map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
-    else {
-        return refuse(
-            "a workspace config save must carry the fingerprint its read returned (fingerprint=…)",
-        );
-    };
-    let content = form.get("content").cloned().unwrap_or_default();
-    let outcome = run_blocking("api_v1_workspace_config_save", Surface::Web, move || {
-        core_config::write_workspace_config(&root, &content, &loaded)
-    })
-    .await;
-    match outcome {
-        Ok(conflict @ TierSaveOutcome::Conflict { .. }) => {
-            (StatusCode::CONFLICT, Json(conflict)).into_response()
-        }
-        other => written(other),
-    }
+    let save = FingerprintedSave { root, form, what: "workspace config", view: "api_v1_workspace_config_save" };
+    save.run(core_config::write_workspace_config, TierSaveOutcome::is_conflict).await
 }
 
 /// `POST /api/v1/workspace/config/secret` → [`write_workspace_secret`], the [`write_secret`] writer at the workspace root
@@ -2155,28 +2170,8 @@ pub(crate) async fn workspace_manifest_save(
     WorkspaceRoot(root): WorkspaceRoot,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    let Some(loaded) = form.get("fingerprint").map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "a manifest save must carry the fingerprint its read returned (fingerprint=…)"
-                    .to_string(),
-            }),
-        )
-            .into_response();
-    };
-    let content = form.get("content").cloned().unwrap_or_default();
-    let outcome = run_blocking("api_v1_workspace_manifest_save", Surface::Web, move || {
-        manifest::save_workspace_manifest(&root, &content, &loaded)
-    })
-    .await;
-    match outcome {
-        Ok(conflict @ ManifestSaveOutcome::Conflict { .. }) => {
-            (StatusCode::CONFLICT, Json(conflict)).into_response()
-        }
-        other => written(other),
-    }
+    let save = FingerprintedSave { root, form, what: "manifest", view: "api_v1_workspace_manifest_save" };
+    save.run(manifest::save_workspace_manifest, |o| matches!(o, ManifestSaveOutcome::Conflict { .. })).await
 }
 
 /// Render a workspace-root write or a security-triage write (S-672): the
@@ -2190,6 +2185,105 @@ fn written<T: Serialize>(outcome: anyhow::Result<T>) -> Response {
             (config_write_status(&err), Json(ApiError { error: format!("{err:#}") })).into_response()
         }
     }
+}
+
+/// A GET of one workspace-root document, engine-free (S-450, S-508): `read` run
+/// on the blocking pool under the `view` telemetry name, its result rendered by
+/// [`respond`].
+async fn read_at_root<T: Serialize + Send + 'static>(
+    root: std::path::PathBuf,
+    view: &'static str,
+    read: fn(&std::path::Path) -> anyhow::Result<T>,
+) -> Response {
+    respond(run_blocking(view, Surface::Web, move || read(&root)).await)
+}
+
+/// One fingerprint-checked save of a workspace-root document (the manifest, the
+/// config tier, the rules contract): the posted `content` and `fingerprint` form
+/// fields, `what` names the document in the `400` a save with no fingerprint
+/// gets, and `view` is the telemetry name. One spelling of the shape all three
+/// saves share, so their status mapping cannot drift apart.
+struct FingerprintedSave {
+    root: std::path::PathBuf,
+    form: HashMap<String, String>,
+    what: &'static str,
+    view: &'static str,
+}
+
+impl FingerprintedSave {
+    /// Run `save(root, content, fingerprint)` on the blocking pool and render
+    /// it: `400` with no fingerprint (a save that cannot say what it was made
+    /// against cannot be checked for a clobber), `409` with the body for an
+    /// outcome `conflict` accepts, else [`written`] (`200`, or `422`/`500`).
+    async fn run<T: Serialize + Send + 'static>(
+        self,
+        save: fn(&std::path::Path, &str, &str) -> anyhow::Result<T>,
+        conflict: fn(&T) -> bool,
+    ) -> Response {
+        let Some(loaded) = self.form.get("fingerprint").map(|f| f.trim().to_string()).filter(|f| !f.is_empty())
+        else {
+            let error = format!("a {} save must carry the fingerprint its read returned (fingerprint=…)", self.what);
+            return (StatusCode::BAD_REQUEST, Json(ApiError { error })).into_response();
+        };
+        let content = self.form.get("content").cloned().unwrap_or_default();
+        let root = self.root;
+        let outcome = run_blocking(self.view, Surface::Web, move || save(&root, &content, &loaded)).await;
+        match outcome {
+            Ok(outcome) if conflict(&outcome) => (StatusCode::CONFLICT, Json(outcome)).into_response(),
+            other => written(other),
+        }
+    }
+}
+
+// ── The workspace rules contract ([FR-UI-38] as modified by [CR-165], S-508) ──
+//
+// One read and one write over `<workspace-root>/.logos/rules.toml`, the contract
+// every member inherits key by key ([FR-CF-08]), through core's engine-free
+// `read_workspace_rules` / `write_workspace_rules` — the workspace config tier's
+// posture above: the read is the repair path, the save validates the candidate,
+// writes nothing for a byte-identical one and refuses a stale fingerprint. It
+// adds one refusal of its own: a member-only table ([[layers]], [history], …) is
+// refused with its reason, since the root would apply it to no member.
+//
+// [FR-CF-08]: ../../docs/specs/requirements/FR-CF-08.md
+// [CR-165]: ../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
+
+/// `GET /api/v1/workspace/rules` — the workspace rules contract as the app-level
+/// editor's Rules section loads it ([`TierRulesFile`]): the literal document, its
+/// load fingerprint, its parse verdict and the member-only tables it declares.
+/// A file that does not parse is a `200` with the fault in `error` (the editor is
+/// its repair path); only an unreadable file is a `500`. Single-root answers the
+/// family's `404`.
+///
+/// [`TierRulesFile`]: logos_core::config::TierRulesFile
+pub(crate) async fn workspace_rules(WorkspaceRoot(root): WorkspaceRoot) -> Response {
+    read_at_root(root, "api_v1_workspace_rules", core_config::read_workspace_rules).await
+}
+
+/// `POST /api/v1/workspace/rules/save` → [`write_workspace_rules`]. Form fields:
+/// `content=<toml>` and `fingerprint=<hex>` (the one the read returned).
+///
+/// - `400` when `fingerprint` is missing: a save that cannot say what it was made
+///   against cannot be checked for a clobber.
+/// - `200` with `outcome: "written"` (the contract replaced atomically, stamped
+///   with its provenance comment), or `"unchanged"` for a candidate byte-identical
+///   to disk (nothing written).
+/// - `409` with `outcome: "conflict"` and the document on disk now: the file
+///   changed since the load, and nothing was written.
+/// - `422` for a candidate the parser rejects or one declaring a member-only
+///   table, stated with each table's reason; the file is byte-identical. `500`
+///   for an I/O fault.
+///
+/// It writes only under `<workspace-root>/.logos/`, starts no member engine and
+/// reindexes nothing: members read the contract on their next governance run.
+///
+/// [`write_workspace_rules`]: logos_core::config::write_workspace_rules
+pub(crate) async fn workspace_rules_save(
+    WorkspaceRoot(root): WorkspaceRoot,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response {
+    let save = FingerprintedSave { root, form, what: "workspace rules", view: "api_v1_workspace_rules_save" };
+    save.run(core_config::write_workspace_rules, TierSaveOutcome::is_conflict).await
 }
 
 // ── Deep verify (the one intent-guarded read-model POST, [FR-UI-25]/[FR-GV-19]) ─

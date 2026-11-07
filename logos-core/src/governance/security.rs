@@ -645,5 +645,6 @@ fn violation(rule: String, f: &SummaryFinding, message: String) -> Violation {
         node_id: None,
         message,
         ratchet: None,
+        origin: None,
     }
 }

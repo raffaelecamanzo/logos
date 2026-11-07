@@ -49,6 +49,8 @@ for (const [path, view] of Object.entries(CASES)) {
 test("/workspace-config renders no extension field when the served build composes no extension", async ({ page, request }) => {
   test.skip(!(await composesNoExtension(request)), "the served build composes an extension");
   const { titles } = await layoutCase(page, "/workspace-config", CASES["/workspace-config"]);
-  expect(titles).toEqual(["Workspace manifest"]);
+  // S-508 added the app-level "Workspace rules" editor over the workspace root's
+  // rules.toml; it is built in, not an extension's group.
+  expect(titles).toEqual(["Workspace manifest", "Workspace rules"]);
   await expect(page.locator("[data-extension-fields]")).toHaveCount(0);
 });

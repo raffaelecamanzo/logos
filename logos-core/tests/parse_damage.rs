@@ -268,7 +268,9 @@ fn an_upgraded_store_states_its_files_unrecorded_until_a_scan_records_them() {
     drop(engine);
     let db = rusqlite::Connection::open(tmp.path().join(".logos/logos.db")).expect("the store opens");
     db.execute_batch(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
@@ -279,7 +281,7 @@ fn an_upgraded_store_states_its_files_unrecorded_until_a_scan_records_them() {
     .expect("back to what the release before S-571 left on disk");
     drop(db);
 
-    let engine = Engine::start(tmp.path()).expect("engine reopens, applying migrations 44 to 47");
+    let engine = Engine::start(tmp.path()).expect("engine reopens, applying migrations 44 to 49");
     assert_eq!(
         status_row(&engine, "cpp")["parse_damage"],
         serde_json::json!({ "files": 0, "unrecorded": 2, "share_percent": 0 })

@@ -19,19 +19,33 @@ better):
 
 ### 1. Modularity — *do directories form real modules?*
 
-Newman's Q over the **directory partition**: every symbol belongs to the
-directory of its defining file, and dependency edges inside a directory count
+Newman's Q over the **module partition**: every symbol belongs to the
+directory of its defining file, and dependency edges inside a module count
 as community-internal. A codebase whose directories are cohesive units scores
 high; one where every directory reaches into every other scores low.
 Normalized `(Q + 0.5) / 1.5`; an edgeless graph computes the neutral `1/3`.
 
+**A Rust module file owns its sibling directory.** Since the 2018 edition a
+Rust module's root sits in `foo.rs` and its submodules in `foo/`. Where a
+production `.rs` file sits beneath `src/foo/`, `src/foo.rs` belongs to the
+module `src/foo` — the community `src/foo/mod.rs` already had — so the two
+layouts score the same, and the coupling between a module and its own
+submodules is internal. `src/foo.rs` keeps `src` when there is no `src/foo/`,
+or when `src/foo/` holds only test code or files of another language. The
+rule is plugin data (`sibling_module_dir` under `[module_model]`); only the
+Rust plugin declares it, so a TypeScript `foo.ts` beside `foo/` keeps its
+directory. The same partition feeds Acyclicity, Depth and the cross-module
+edge count below; the DSM and `max_fan_out` keep their own per-file module
+rows and are unchanged. Since
+[metric semantics version 11](#metric-semantics-version-11--a-rust-module-file-and-its-directory-are-one-module).
+
 **Not applicable below 5 cross-module edges.** A *cross-module edge* is a
-production dependency edge between two different directories, both in an
+production dependency edge between two different modules, both in an
 indexed file. When the graph has fewer than **5** of them (an edgeless graph
 included), the three graph-shape dimensions — Modularity, Acyclicity and Depth —
 are **not applicable** together: with so few edges between modules there is no
-module structure to measure. Edges inside one directory do not count, so a
-graph whose edges all stay within their directories drops out as well. A small
+module structure to measure. Edges inside one module do not count, so a
+graph whose edges all stay within their modules drops out as well. A small
 library whose one to four edges all cross between two directories — a model
 depending on its enum — computes Q = −0.5, which normalizes to exactly 0 and
 would otherwise zero the whole signal. Instead the snapshot keeps each
@@ -45,9 +59,11 @@ The threshold is a fixed part of the metric semantics (since version 8), not a
 
 ### 2. Acyclicity — *are there dependency cycles?*
 
-Counts strongly-connected components larger than one symbol — mutual
-recursion between distinct units. A single function that calls itself
-(self-recursion) is *not* a dependency cycle and is not counted.
+Counts strongly-connected components larger than one symbol whose members
+span more than one module of Modularity's partition — a dependency cycle
+between modules. A single function that calls itself (self-recursion) is *not*
+a dependency cycle, and neither is mutual recursion inside one module — a
+Rust `foo.rs` and its `foo/a.rs` included — so neither is counted.
 Normalized `1 / (1 + cycles)` — zero cycles scores a perfect 1,
 one cycle exactly ½, and each further cycle decays the score. The same
 cycle-detection feeds the `max_cycles` rule in `rules.toml`, so the gate and
@@ -57,9 +73,9 @@ Modularity and Depth, below 5 cross-module edges (see
 
 ### 3. Depth — *how long are dependency chains?*
 
-The longest path through the graph after collapsing each cycle to a single
-node (so a tangle can't masquerade as healthy layering — a pure cycle has
-depth 1). Normalized `1 / (1 + depth/8)`: shallow, wide structures score
+The longest path through the module graph — symbols rolled up to the modules
+of Modularity's partition — after collapsing each cycle to a single node (so a
+tangle can't masquerade as healthy layering — a pure cycle has depth 1). Normalized `1 / (1 + depth/8)`: shallow, wide structures score
 higher than deep chains. Not applicable, with Modularity and Acyclicity, below
 5 cross-module edges.
 
@@ -511,10 +527,10 @@ semantics** *and* the **same effective thresholds** (the structural detection
 thresholds plus the two near-clone parameters). Two fields guard this:
 
 - **`metric_version`** records which semantics each row used; the current version
-  is **10** (a Rust trait impl's methods count toward no container — see
-  [Metric semantics version 10](#metric-semantics-version-10--a-rust-trait-impls-methods-count-toward-no-container)).
-  A formula change bumps it, so the first `gate` after an upgrade that bumps it
-  re-baselines once.
+  is **11** (a Rust module file and its directory are one module — see
+  [Metric semantics version 11](#metric-semantics-version-11--a-rust-module-file-and-its-directory-are-one-module)).
+  A formula change bumps it, so the first `session_start` or `gate` after an
+  upgrade that bumps it re-baselines once.
 - **`thresholds_hash`** records the effective `[metric_thresholds]` set the row
   was scored under. Editing any threshold (or a budget that feeds one) changes
   the hash.
@@ -533,6 +549,34 @@ pass it always was. Either way, the *next* gate finds a matching version/hash
 and compares normally — so an existing project can upgrade across a semantics change, or an operator can re-tune
 a threshold, without a spurious gate failure. (The version guard is checked
 first, so a pre-v3 baseline re-baselines once on the upgrade, not twice.)
+
+### Metric semantics version 11 — a Rust module file and its directory are one module
+
+Version 11 ([CR-269](../requests/CR-269-a-rust-module-file-and-its-directory-are-one-module-for-modularity-and-acyclicity.md))
+changes the partition the graph-shape dimensions read, so a project re-baselines
+**once**.
+
+| Change | Before (v10) | Since v11 |
+|---|---|---|
+| **Rust `foo.rs` beside `foo/`** (Modularity, Acyclicity, Depth, cross-module edges) | `src/foo.rs` was in the community `src`, its submodules in `src/foo`: the coupling between them was cross-module, and a recursion between them a cross-module cycle | `src/foo.rs` is in the module `src/foo` whenever a production `.rs` file sits beneath `src/foo/` — the community `src/foo/mod.rs` always had |
+
+**Why signals move.** The directory line split one Rust module into two
+communities, so a module laid out the way the edition recommends scored lower
+than the same code under `mod.rs`. A Rust repository's Modularity can move at
+upgrade — usually up, since a module's coupling to its own submodules turns
+internal — and its Acyclicity can rise where a cycle ran between `foo.rs` and
+`foo/`; Depth and the cross-module edge count read the same partition. Logos's
+own repository, at the change's base: signal 8264 → 8299, Modularity raw
+0.6517 → 0.7012, cross-module edges 3813 → 3225, Acyclicity and Depth
+unchanged — a record of one repository, not a promise for yours. A file
+without the shape, and every file of a language whose plugin does not declare
+`sibling_module_dir`, scores exactly as under v10; node ids, symbols, edges,
+the DSM and `max_fan_out` are unchanged.
+
+**What you see on upgrade.** The first `session_start` (or `gate`) after the
+upgrade reports `baseline reset: metric semantics changed (v10 8264 → v11 8299)`
+and the next comparison is normal. Nothing is re-extracted: the next `scan`
+scores under v11, and a sync scores what a cold index of the same tree scores.
 
 ### Metric semantics version 10 — a Rust trait impl's methods count toward no container
 

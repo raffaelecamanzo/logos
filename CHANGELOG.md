@@ -13,6 +13,170 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.23.0] — 2026-11-05
+
+### Added
+
+- **A workspace root's `rules.toml` is now a second rules tier for every member.**
+  `[constraints]` and `[metric_thresholds]` keys declared at
+  `<workspace-root>/.logos/rules.toml` are inherited key by key, and a member's own
+  key wins. Path-based and member-local tables (`[[layers]]`, `[[boundaries]]`,
+  `[[forbidden_imports]]`, `[[require_tested]]`, `[[require_documented]]`,
+  `[history]`, `[coverage]`, `[security]`, `[review]`) are refused at the root with a
+  stated reason. `check --json` reports each key's origin (`member` or `workspace`)
+  and each constraint finding's; a member that only inherits rules exits `0`/`1`
+  rather than `4`; editing an inherited threshold re-baselines each member's gate
+  with the usual notice. The store gains migration 49 (the check marker's inherited
+  rule count); it upgrades in place with no re-index. A project with no workspace,
+  or whose workspace root has no `rules.toml`, is unchanged.
+- **The topics a member's configuration declares are listed.** `logos xservice
+  declared-topics [--repo] [--json]` and its MCP twin `xservice_declared_topics` list,
+  per captured topic, the members whose committed `src/main` configuration declares
+  it, each with its key, file and profile and marked `observed` (the member also shows
+  on the topic through an observed producer or consumer) or `net-new` (configuration
+  adds the pair, with the reason its member shows no observed edge). `workspace status`
+  gains a `declared_topics` section after `topics` stating `declared_topic_pairs` beside
+  the values considered and the members read; a workspace that declares nothing
+  prints exactly what it printed before. A declaration is never an observed broker
+  edge: no producer, consumer, bridge edge or coverage figure counts it. `--repo` naming
+  a non-member answers a `scope_note`, and a member that cannot be read is named inside
+  the answer. `workspace status` reads each member's committed configuration in the
+  walk that already opens it, so its walk count is unchanged.
+
+- **The workspace service map draws the topics a member's configuration declares.**
+  A member whose committed `src/main` configuration names a broker topic its code
+  neither publishes nor subscribes to now gets a dotted, arrowless line to that topic
+  in its own `declares-topic` class, with a **Declared topics** legend entry — never in
+  the style of a `publishes`/`subscribes` hop. A **Declared topics** widget lists each
+  net-new declaration with its key, file and profile, and counts the declarations the
+  code already shows beside the list rather than as new. The relation is served at
+  `GET /api/v1/workspace/declared-topics` (`?repo=` scopes it). A workspace that
+  declares nothing renders the map as before.
+
+- **`init --workspace` writes the workspace rules contract, and the Config editors
+  show where each rule comes from.** `logos init --workspace` writes
+  `<workspace-root>/.logos/rules.toml` when it is absent — every key commented out,
+  with comments on inheritance and ratchet adoption — and reports it as
+  `root_rules`; an existing file is left byte-identical. Both rules templates are
+  now rendered from the curated recommended set, so a fresh `rules.toml` shows
+  `max_fn_lines = 80` and `no_god_files = 40` (not 100 and 50), the four CR-005
+  budgets and every `[metric_thresholds]` default. The member Config editor badges
+  each inherited constraint or threshold "Inherited from workspace" with the root's
+  value and never writes it back; typing a value creates a member override. The
+  workspace Config view gains a **Workspace rules** group that saves the root
+  contract with validate-before-write and the fingerprint conflict check, and
+  refuses a member-only table inline with its reason. The Rule findings view lists
+  blessed ratchet debt apart from errors, with "N blessed · M fixed since bless".
+
+### Changed
+
+- **The plugin guardrail reads a quoted string and an interpreter's inline code as
+  data.** A command line is cut into commands only at a separator outside quotes,
+  so `echo '(.logos/rules.toml)'`, `grep -n 'x|y' .logos/rules.toml` and
+  `git ls-files | grep -E '(^|/)\.logos/(rules\.toml|…)$'` pass, while
+  `echo x; rm .logos/rules.toml` asks. A shell's own `-c` string is read as the
+  command line it is: `bash -c 'cat .logos/rules.toml'` passes, `bash -c 'rm …'`
+  and `sh -c "logos check --bless"` ask, and beside an expansion the shell stays
+  the command (`bash -c 'cat > "$1"' _ .logos/rules.toml` asks). A quoted
+  separator still ends the word beside it, so `ssh h 'logos gate --save; ls'`
+  asks. The quoted code after `python* -c`,
+  `node -e`/`--eval`, `deno eval`, `ruby -e`, `perl -e`/`-E` or `php -r` is data,
+  as a heredoc body fed to the interpreter is: `python3 -c 'print(".logos/rules.toml")'`
+  passes, while the interpreter's other words and redirections are still read
+  (`python3 -c 'x' > .logos/rules.toml` asks). Quoting the guard cannot be sure of
+  (quotes that do not pair, a substitution, a comment, a line naming a shell) is
+  cut as before, and a reason never names an empty command
+  ([the guardrail](docs/howto/plugin.md#the-guardrail)).
+
+- **An unattended session may write an allowed contract file from the shell.** With
+  `LOGOS_GUARD_MODE=unattended` and `LOGOS_GUARD_ALLOW=.logos/security-ignore.toml`,
+  `printf x >> .logos/security-ignore.toml`, `rm`, `cp /tmp/x …` and `tee …` of that
+  file now pass when the guard places the target exactly and the command writes it
+  itself (a redirection, `rm`, `unlink`, `tee`, `truncate`, a plain `cp` or `install`
+  destination, `dd of=`): spelled out, read from the payload's working directory or
+  a leading `cd /dir &&`, its directory inside the project through any symlink, the
+  file itself no symlink. A target it cannot place (`$F`, a glob, a `..` such as
+  `ext/../.logos/security-ignore.toml`, a line running `ln` or `mv`, a quoted `>`),
+  a word the command builds another path from (`pax -rw`, `rsync -R`,
+  `cp --parents`, `find … -execdir`), a file the list does not hold and every
+  guarded command (`logos security bless`) still deny. Without unattended mode every
+  one of these asks as before ([in an unattended session](docs/howto/plugin.md#in-an-unattended-session)).
+
+- **A Rust module file and its directory are one module (metric semantics 11).** Since
+  the 2018 edition a Rust module's root sits in `foo.rs` and its submodules in `foo/`, and
+  Modularity scored the two as separate communities: a module laid out the way the
+  edition recommends scored lower than the same code under `foo/mod.rs`, and a recursion
+  between `foo.rs` and `foo/` counted as a cross-module cycle. `src/foo.rs` is now in the
+  module `src/foo` whenever a production `.rs` file sits beneath `src/foo/`, and
+  Modularity, Acyclicity, Depth and the cross-module edge count read that one partition.
+  The rule is plugin data (`sibling_module_dir` under `[module_model]`) that only the
+  Rust plugin declares, so other languages score as before; node ids, symbols, edges,
+  the DSM and `max_fan_out` are unchanged. **A Rust repository's signal can move at
+  upgrade** — Logos's own rose 8264 → 8299, all of it Modularity. The metric semantics
+  move to version 11, so a baseline taken before resets once: the first `session_start`
+  or `gate` after upgrading re-baselines informationally
+  ([metrics](docs/howto/metrics.md#metric-semantics-version-11--a-rust-module-file-and-its-directory-are-one-module)).
+
+### Fixed
+
+- **From a workspace member, the guardrail guards the workspace root's contract.**
+  A member now inherits `<workspace-root>/.logos/rules.toml`, but the guardrail
+  placed that file outside the member's project and let a Write, Edit or shell write
+  of it through unasked, so an agent in a member could relax its own inherited
+  rules unseen. That root's `.logos/` is now the project's, from the member and from
+  a linked worktree of it; a sibling member's contract is still placed elsewhere.
+- **A heredoc fed to a non-shell stays data when a later command runs a shell.**
+  `python3 - <<'EOF'` … `EOF` followed by `bash -n f` in the same Bash call made the
+  guardrail read the Python body as shell, so a `.logos/` path in a string asked (or
+  denied, unattended), naming a word such as `variable` as the command. A shell
+  named only after the last heredoc's line now reads its own input and the bodies
+  stay data; a body a shell may still receive — `bash <<'EOF'`, a pipe
+  (`cat <<'EOF' |` … `sh`), a substitution, a `read` or an `exec` descriptor — is
+  read as commands as before. A refusal calls a word "the command" only where the
+  guard cut the line into commands for sure
+  ([the guardrail](docs/howto/plugin.md#the-guardrail)).
+
+- **A Java static call on a type of the caller's own package binds without an
+  import.** `Helper.slug(s)` in a file of package `app`, where `Helper` is declared
+  in another file of `app`, bound nothing: the call was recorded as a bare `slug`
+  unless the file imported or declared `Helper`, which a same-package type never
+  needs. A capitalised receiver that no variable, parameter or field of the file
+  declares, and no static import brings in, is now recorded as `Helper::slug`, and
+  the package's own type binds it, so `callers`, `impact` and dead-code answers
+  count these calls. A call to an overloaded method still binds only when its
+  argument count picks one overload. A type of another
+  package the file does not import stays unbound, and so does `Math.max(…)`. Both
+  are now reported `external-type` rather than `no-receiver-evidence` in `status`.
+  An all-capitals name (`LOG.info(…)`) is read as a constant, not a type. The
+  store's logos.db migration 48 makes the next scan re-extract every file once.
+
+- **A Gin group used from another file of its package is refused, not promoted at
+  its written path.** With `var api = router.Group("/api")` in `routes.go` and
+  `api.GET("/x", h)` in `handlers.go`, Logos promoted `GET /x` where Gin serves
+  `GET /api/x` — a provider at an address the service does not serve, which a
+  consumer in another service could bind to. The registration now produces no route
+  and is counted in `routes_not_composed`, as every other group Logos cannot prove
+  is; the same two lines in one file still give `GET /api/x`. A chain or a local
+  that starts at the sibling file's group is refused too. A function-local group of
+  the same name, a package-level variable that is not a group, and the same name in
+  another directory or package are unaffected. A sync after editing either file
+  equals a fresh index. `docs/howto/commands.md` § "Gin route groups" states the rule
+  in place of the ceiling it replaces.
+
+- **An Express mount composes wherever it is written.** `app.use('/api', items)` in a
+  file that imports no framework — a `server.js` requiring only `./app` and
+  `./items` — was never read, so the routes of the router `items.js` exports were
+  refused and counted in `routes_not_composed`. A mount is now read in every
+  indexed JavaScript and TypeScript file: those routes are promoted under `/api`,
+  linked to their handlers, and leave the refusal count. Such a file is read for its
+  mounts alone (it promotes no route of its own and is not counted in
+  `files_scanned`), and only when its text calls `use`. A mount whose prefix is not
+  a written string stays refused and counted, and another library's
+  `.use('/x', name)` whose `name` is no Express router composes nothing. A sync
+  after editing the mounting file equals a fresh index. `docs/howto/commands.md`
+  § "Express routers and their mounts" states the rule in place of the ceiling it
+  replaces.
+
 ## [1.22.4] — 2026-11-03
 
 ### Fixed

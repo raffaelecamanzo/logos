@@ -1,0 +1,78 @@
+{
+  "html": "<div class=\"_view_eeb9c8\"><section class=\"_callout_655266 _signal_655266\" role=\"status\"><span class=\"_label_655266\">Workspace</span><div class=\"_body_655266\"><span><span class=\"mono\">shop</span> · 2 services · no cross-service references yet</span></div></section><div class=\"_tabs_e505a5\"><div role=\"tablist\" aria-label=\"Workspace views\" class=\"_tablist_e505a5\"><button type=\"button\" role=\"tab\" id=\"«r»-tab-map\" aria-selected=\"true\" aria-controls=\"«r»-panel-map\" tabindex=\"0\" class=\"_tab_e505a5 _active_e505a5\">Service map</button><button type=\"button\" role=\"tab\" id=\"«r»-tab-coverage\" aria-selected=\"false\" aria-controls=\"«r»-panel-coverage\" tabindex=\"-1\" class=\"_tab_e505a5\">Cross-service coverage</button></div><div role=\"tabpanel\" id=\"«r»-panel-map\" aria-labelledby=\"«r»-tab-map\" tabindex=\"0\" class=\"_panel_e505a5\"><div class=\"_stack_bf74ae\" data-widget-stack=\"\"><div class=\"_panel_eeb9c8\"><div class=\"_canvasWrap_df5af0\"><div class=\"_canvasMount_df5af0\" role=\"application\" aria-label=\"Interactive code graph (an accessible node and edge table is below)\" style=\"user-select: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0);\" _echarts_instance_=\"ec\"><div style=\"position: relative; width: 800px; height: 600px; padding: 0px; margin: 0px; border-width: 0px;\"><canvas style=\"position: absolute; left: 0px; top: 0px; width: 800px; height: 600px; user-select: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0); padding: 0px; margin: 0px; border-width: 0px;\" data-zr-dom-id=\"zr.0\" width=\"800\" height=\"600\"></canvas></div></div></div><details class=\"_legend_df5af0\" open=\"\"><summary>Legend</summary><div class=\"_legendBody_df5af0\"><span class=\"_legendHeading_df5af0\">Cross-service bindings</span><ul class=\"_legendList_df5af0\"><li class=\"_legendRow_df5af0\"><svg width=\"22\" height=\"8\" aria-hidden=\"true\" class=\"_legendLine_df5af0\"><line x1=\"1\" y1=\"4\" x2=\"21\" y2=\"4\" stroke=\"#db2777\" stroke-width=\"2\" stroke-dasharray=\"6 4\"></line></svg><span>route</span></li><li class=\"_legendRow_df5af0\"><svg width=\"22\" height=\"8\" aria-hidden=\"true\" class=\"_legendLine_df5af0\"><line x1=\"1\" y1=\"4\" x2=\"21\" y2=\"4\" stroke=\"#7c3aed\" stroke-width=\"2\" stroke-dasharray=\"0\"></line></svg><span>grpc-call</span></li><li class=\"_legendRow_df5af0\"><svg width=\"22\" height=\"8\" aria-hidden=\"true\" class=\"_legendLine_df5af0\"><line x1=\"1\" y1=\"4\" x2=\"21\" y2=\"4\" stroke=\"#0891b2\" stroke-width=\"2\" stroke-dasharray=\"2 3\"></line></svg><span>broker-topic</span></li></ul><span class=\"_legendHeading_df5af0\">Broker topics</span><ul class=\"_legendList_df5af0\"><li class=\"_legendRow_df5af0\"><svg width=\"22\" height=\"8\" aria-hidden=\"true\" class=\"_legendLine_df5af0\"><line x1=\"1\" y1=\"4\" x2=\"21\" y2=\"4\" stroke=\"#0891b2\" stroke-width=\"2\" stroke-dasharray=\"0\"></line></svg><span>publishes</span></li><li class=\"_legendRow_df5af0\"><svg width=\"22\" height=\"8\" aria-hidden=\"true\" class=\"_legendLine_df5af0\"><line x1=\"1\" y1=\"4\" x2=\"21\" y2=\"4\" stroke=\"#0891b2\" stroke-width=\"2\" stroke-dasharray=\"6 4\"></line></svg><span>subscribes</span></li></ul></div></details><p class=\"muted\">2 topics · a topic is drawn as its own node, so a coupling reads as <span class=\"mono\">publisher → topic → subscriber</span>. A topic with no subscriber yet is still drawn — it is unconsumed, not absent.</p></div><section class=\"_card_a63395 _widget_41aefc\"><div class=\"_frame_41aefc\" data-widget=\"\"><div class=\"_titleRow_41aefc\" data-widget-part=\"title\"><h3 class=\"_title_41aefc\">Cross-service bindings</h3></div><div class=\"_figureRow_41aefc\" data-widget-part=\"figure\"><p class=\"_absence_41aefc\" data-widget-absence=\"\">No service calls another directly yet; the map draws 2 broker topics, and a topic is a coupling even before anything subscribes to it.</p></div><div class=\"_explanation_41aefc\" data-widget-part=\"explanation\"><p class=\"_body_41aefc\" data-widget-copy=\"what\">Which service calls which: one row per consumer, provider and binding kind, with the number of calls each line on the map stands for.</p><p class=\"_body_41aefc\" data-widget-copy=\"why\">A change to a provider can break every consumer listed against it, so this is where to find who depends on a service before changing it.</p></div></div></section></div></div><div role=\"tabpanel\" id=\"«r»-panel-coverage\" aria-labelledby=\"«r»-tab-coverage\" hidden=\"\" tabindex=\"0\" class=\"_panel_e505a5\"><div class=\"_stack_bf74ae\" data-widget-stack=\"\"><section class=\"_card_a63395 _widget_41aefc\"><div class=\"_frame_41aefc\" data-widget=\"\"><div class=\"_titleRow_41aefc\" data-widget-part=\"title\"><h3 class=\"_title_41aefc\">Resolved cross-service edges</h3><div class=\"_badge_41aefc\"><span class=\"_badge_590927 _muted_590927\">Advisory</span></div></div><div class=\"_figureRow_41aefc\" data-widget-part=\"figure\"><p class=\"_absence_41aefc\" data-widget-absence=\"\">Nothing measured: no cross-boundary references found in this workspace, so no coverage is reported (never a fabricated 100%).</p></div><div class=\"_explanation_41aefc\" data-widget-part=\"explanation\"><p class=\"_body_41aefc\" data-widget-copy=\"what\">How many of the outbound calls captured in this workspace's code reach a service in the workspace, and how many cross-service edges they resolve to.</p><p class=\"_body_41aefc\" data-widget-copy=\"why\">The service map and impact analysis see only resolved calls, so every unresolved call is a coupling they miss.</p></div><div class=\"_evidence_41aefc\" data-widget-part=\"evidence\"><p class=\"_figureNote_41aefc\" data-figure-note=\"\">Edges and <dfn class=\"_term_35b003\" tabindex=\"0\" aria-describedby=\"«r»\" data-term=\"egress\">egress<span id=\"«r»\" role=\"tooltip\" class=\"_tip_35b003\">Outbound: calls that leave this service for another one.</span></dfn> rate, as the server reports them: <span class=\"mono\">0 resolved cross-service edges; egress resolution not measured (0 of 0 egress sites)</span></p></div></div></section><section class=\"_card_a63395 _widget_41aefc\"><div class=\"_frame_41aefc\" data-widget=\"\"><div class=\"_titleRow_41aefc\" data-widget-part=\"title\"><h3 class=\"_title_41aefc\">Spec conformance (declared endpoints vs controllers)</h3><div class=\"_badge_41aefc\"><span class=\"_badge_590927 _muted_590927\">Advisory</span></div></div><div class=\"_figureRow_41aefc\" data-widget-part=\"figure\"><p class=\"_absence_41aefc\" data-widget-absence=\"\">Nothing measured: no cross-boundary references found in this workspace, so no coverage is reported (never a fabricated 100%). </p></div><div class=\"_explanation_41aefc\" data-widget-part=\"explanation\"><p class=\"_body_41aefc\" data-widget-copy=\"what\">How many cross-service references — endpoints declared in API documents and calls captured in code — match exactly one provider in this workspace, of those that could match here.</p><p class=\"_body_41aefc\" data-widget-copy=\"why\">An endpoint that matches no controller is an API document that has drifted from the code; the figure is mostly declared endpoints, so it is not a measure of coupling.</p></div><div class=\"_evidence_41aefc\" data-widget-part=\"evidence\"><p class=\"muted mono\">0 of 0 measured; 0 excluded as no-provider-in-workspace</p></div></div></section><section class=\"_card_a63395 _widget_41aefc\"><div class=\"_frame_41aefc\" data-widget=\"\"><div class=\"_titleRow_41aefc\" data-widget-part=\"title\"><h3 class=\"_title_41aefc\">Coverage by <dfn class=\"_term_35b003\" tabindex=\"0\" aria-describedby=\"«r»\" data-term=\"intake\">intake<span id=\"«r»\" role=\"tooltip\" class=\"_tip_35b003\">Where a cross-service reference was read from: a call site in the code, or a declared contract such as an API document.</span></dfn></h3></div><div class=\"_figureRow_41aefc\" data-widget-part=\"figure\"><p class=\"_absence_41aefc\" data-widget-absence=\"\">Nothing measured: no cross-boundary references found in this workspace, so no coverage is reported (never a fabricated 100%).</p></div><div class=\"_explanation_41aefc\" data-widget-part=\"explanation\"><p class=\"_body_41aefc\" data-widget-copy=\"what\">The same references split by <dfn class=\"_term_35b003\" tabindex=\"0\" aria-describedby=\"«r»\" data-term=\"intake\">intake<span id=\"«r»\" role=\"tooltip\" class=\"_tip_35b003\">Where a cross-service reference was read from: a call site in the code, or a declared contract such as an API document.</span></dfn>: endpoints declared in API documents, and calls captured in code.</p><p class=\"_body_41aefc\" data-widget-copy=\"why\">A healthy count of declared endpoints can hide outbound calls that resolve nowhere; the split shows which of the two carries the figure.</p></div></div></section><section class=\"_card_a63395 _widget_41aefc\"><div class=\"_frame_41aefc\" data-widget=\"\"><div class=\"_titleRow_41aefc\" data-widget-part=\"title\"><h3 class=\"_title_41aefc\">Build dependencies</h3></div><div class=\"_figureRow_41aefc\" data-widget-part=\"figure\"><p class=\"_absence_41aefc\" data-widget-absence=\"\">No member holds a Maven or Gradle build manifest, so no build dependency was read.</p></div><div class=\"_explanation_41aefc\" data-widget-part=\"explanation\"><p class=\"_body_41aefc\" data-widget-copy=\"what\">What each member builds against, read from its Maven or Gradle manifests.</p><p class=\"_body_41aefc\" data-widget-copy=\"why\">A build dependency is never a runtime call, so it is counted apart from every figure above; it shows which services share a library or a parent build.</p></div></div></section></div></div></div></div>",
+  "marks": [
+    {
+      "kind": "stroke",
+      "color": "#0891b2",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#0891b2",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#0891b2",
+      "dash": [
+        8,
+        4
+      ]
+    },
+    {
+      "kind": "fill",
+      "color": "#0891b2",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#0891b2",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#0891b2",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#2563eb",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#ffffff",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#2563eb",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#ffffff",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#d97706",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#ffffff",
+      "dash": []
+    },
+    {
+      "kind": "fill",
+      "color": "#d97706",
+      "dash": []
+    },
+    {
+      "kind": "stroke",
+      "color": "#ffffff",
+      "dash": []
+    }
+  ]
+}

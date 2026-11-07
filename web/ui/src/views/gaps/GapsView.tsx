@@ -17,7 +17,7 @@
 
 import { fetchGaps } from "../../api/client.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
-import type { GapsModel, RulesReport } from "../../api/types.ts";
+import type { GapsModel, RulesReport, Violation } from "../../api/types.ts";
 import {
   Badge,
   Callout,
@@ -28,7 +28,13 @@ import {
   WidgetStack,
 } from "../../components/index.ts";
 import type { BadgeTone, Column } from "../../components/index.ts";
-import { RULE_FINDINGS_TEXT, ruleFindings, ruleFindingsState } from "../../copy/ruleFindings.copy.ts";
+import {
+  RULE_FINDINGS_TEXT,
+  blessedDebt,
+  isBlessedDebt,
+  ruleFindings,
+  ruleFindingsState,
+} from "../../copy/ruleFindings.copy.ts";
 import { plural } from "../../copy/types.ts";
 import styles from "./GapsView.module.css";
 
@@ -59,6 +65,7 @@ function RuleFindings({ model }: { model: GapsModel }) {
         </span>
       </Callout>
       <RulesCard report={model.rules} />
+      <BlessedDebtCard report={model.rules} />
     </WidgetStack>
   );
 }
@@ -78,6 +85,24 @@ function severityTone(severity: string): BadgeTone {
   return "muted";
 }
 
+/** One violation as a table row, for both the findings and the blessed-debt tables. */
+function violationRow(v: Violation): ViolationRow {
+  return { rule: v.rule, severity: v.severity, location: v.file || "—", message: v.message };
+}
+
+/** The violation table's columns, shared by both tables. */
+const VIOLATION_COLUMNS: Column<ViolationRow>[] = [
+  { key: "rule", header: "Rule", mono: true, sortValue: (r) => r.rule, cell: (r) => r.rule },
+  {
+    key: "sev",
+    header: "Severity",
+    sortValue: (r) => r.severity,
+    cell: (r) => <Badge tone={severityTone(r.severity)}>{r.severity}</Badge>,
+  },
+  { key: "loc", header: "Location", mono: true, sortValue: (r) => r.location, cell: (r) => r.location },
+  { key: "msg", header: "Message", sortValue: (r) => r.message, cell: (r) => r.message },
+];
+
 /** The rule-findings widget — three honest states (NFR-CC-04): the findings
  *  table, a clean check over at least one rule, or the no-rules onboarding (no
  *  `.logos/rules.toml`, or one declaring no rule). Findings are checked first so
@@ -86,23 +111,8 @@ function RulesCard({ report }: { report: RulesReport }) {
   const state = ruleFindingsState(report);
   const { findings, checked } = state;
   if (findings > 0) {
-    const rows: ViolationRow[] = report.violations.map((v) => ({
-      rule: v.rule,
-      severity: v.severity,
-      location: v.file || "—",
-      message: v.message,
-    }));
-    const columns: Column<ViolationRow>[] = [
-      { key: "rule", header: "Rule", mono: true, sortValue: (r) => r.rule, cell: (r) => r.rule },
-      {
-        key: "sev",
-        header: "Severity",
-        sortValue: (r) => r.severity,
-        cell: (r) => <Badge tone={severityTone(r.severity)}>{r.severity}</Badge>,
-      },
-      { key: "loc", header: "Location", mono: true, sortValue: (r) => r.location, cell: (r) => r.location },
-      { key: "msg", header: "Message", sortValue: (r) => r.message, cell: (r) => r.message },
-    ];
+    // Blessed ratchet debt renders in its own widget below (S-508, FR-GV-23).
+    const rows = report.violations.filter((v) => !isBlessedDebt(v)).map(violationRow);
     return (
       <Widget
         title="Rule findings"
@@ -112,7 +122,7 @@ function RulesCard({ report }: { report: RulesReport }) {
       >
         <DataTable
           caption="Rule findings"
-          columns={columns}
+          columns={VIOLATION_COLUMNS}
           rows={rows}
           rowKey={(r, i) => `${r.rule}#${i}`}
           pageSize={DEFAULT_TABLE_PAGE_SIZE}
@@ -134,6 +144,33 @@ function RulesCard({ report }: { report: RulesReport }) {
       copy={ruleFindings}
       figure={<span>{RULE_FINDINGS_TEXT.clean(checked)}</span>}
     />
+  );
+}
+
+/** Blessed ratchet debt, apart from the findings that fail the check (S-508,
+ *  FR-GV-23): the offenders the checked-in blessed set tolerates, each a warning,
+ *  with "N blessed · M fixed since bless". Rendered only when a rule ratchets —
+ *  the report then carries its ratchet summary. */
+function BlessedDebtCard({ report }: { report: RulesReport }) {
+  const ratchet = report.ratchet;
+  if (!ratchet) return null;
+  const rows = report.violations.filter(isBlessedDebt).map(violationRow);
+  return (
+    <Widget
+      title="Blessed debt"
+      copy={blessedDebt}
+      figure={<span>{RULE_FINDINGS_TEXT.blessed(ratchet.blessed, ratchet.fixed.length)}</span>}
+    >
+      {rows.length > 0 && (
+        <DataTable
+          caption="Blessed debt"
+          columns={VIOLATION_COLUMNS}
+          rows={rows}
+          rowKey={(r, i) => `${r.rule}#${i}`}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
+    </Widget>
   );
 }
 

@@ -35,6 +35,15 @@
  * an observed call (BR-57), and a workspace with no vendored spec draws no
  * declared layer and renders no declared widget (FR-UI-29 AC8, kept by CR-203).
  *
+ * The declared-topic layer (S-491, CR-157 E, FR-WS-36): over a workspace whose
+ * status carries a topic inventory, the map reads `workspace/declared-topics` and
+ * draws each NET-NEW member–topic declaration in its own dotted, arrowless
+ * `declares-topic` class with a legend section — never as a `publishes` /
+ * `subscribes` hop — and a Declared topics widget lists those declarations (key,
+ * file, profile) with the already-observed ones counted beside them. A
+ * declaration is never an observed broker edge (BR-54); a workspace that declares
+ * nothing renders the map as before.
+ *
  * The coverage tab (S-613, CR-203 §3.2 D items 4 and 10): its widgets — the
  * three coverage boards, Declared contracts (when a member vendors a spec) and
  * Build dependencies — sit in one `WidgetStack`, with their words in
@@ -71,6 +80,7 @@ import { AsyncResource, useApiResource } from "../../api/index.ts";
 import {
   fetchWorkspaceBindings,
   fetchWorkspaceBuildDeps,
+  fetchWorkspaceDeclaredTopics,
   fetchWorkspaceImpact,
   fetchWorkspaceStatus,
 } from "../../api/workspaceClient.ts";
@@ -85,9 +95,11 @@ import type {
   ImpactResult,
   MemberResolved,
   MemberTopics,
+  TopicDeclaration,
   WorkspaceLink,
   WorkspaceStatus,
   XserviceBuildDeps,
+  XserviceDeclaredTopics,
   XserviceImpact,
   XserviceRouteProviders,
 } from "../../api/types.ts";
@@ -121,6 +133,7 @@ import {
   crossContextHint,
   crossServiceBindings,
   declaredContracts,
+  declaredTopics,
   SERVICE_MAP_TEXT,
 } from "../../copy/serviceMap.copy.ts";
 import { useWorkspace } from "../../workspace/WorkspaceContext.tsx";
@@ -144,7 +157,9 @@ import {
   buildServiceMap,
   CONFIG_REFUSAL_LABEL,
   DECLARED_EDGE_TYPE,
+  DECLARED_TOPIC_EDGE_TYPE,
   declaredLayer,
+  declaredTopicLayer,
   filterLinks,
   groupEvidence,
   hasNonLiteralBinding,
@@ -160,6 +175,7 @@ import {
   type BuildLink,
   type DeclaredLayer,
   type DeclaredLink,
+  type DeclaredTopicLayer,
   type EvidenceGroup,
   type LinkFilter,
   type ServiceLink,
@@ -317,6 +333,14 @@ function ServiceMapPanel({
     () => (hasBuild ? fetchWorkspaceBuildDeps() : Promise.resolve(null)),
     [hasBuild],
   );
+  // The declared-topic relation (S-491): read beside the bindings, never over a
+  // workspace whose status carries no topic — with no captured topic there is
+  // nothing a declaration can name, so the map is the pre-S-491 map unread.
+  const hasTopics = topics.length > 0;
+  const topicDeclarations = useApiResource<XserviceDeclaredTopics | null>(
+    () => (hasTopics ? fetchWorkspaceDeclaredTopics() : Promise.resolve(null)),
+    [hasTopics],
+  );
   return (
     <AsyncResource resource={bindings} loadingLabel="Loading the service map…">
       {(model) => (
@@ -329,6 +353,8 @@ function ServiceMapPanel({
           links={links}
           deps={deps.data ?? null}
           depsError={deps.error ?? null}
+          declaredTopics={topicDeclarations.data ?? null}
+          declaredTopicsError={topicDeclarations.error ?? null}
         />
       )}
     </AsyncResource>
@@ -1101,6 +1127,8 @@ function ServiceMap({
   links,
   deps,
   depsError,
+  declaredTopics: topicAnswer,
+  declaredTopicsError,
 }: {
   services: ServiceMember[];
   providers: XserviceRouteProviders;
@@ -1110,6 +1138,10 @@ function ServiceMap({
   links?: WorkspaceLink[];
   deps: XserviceBuildDeps | null;
   depsError: Error | null;
+  /** The `workspace/declared-topics` answer (S-491); `null` until it is read,
+   *  and over a workspace with no topic, where it is never read. */
+  declaredTopics: XserviceDeclaredTopics | null;
+  declaredTopicsError: Error | null;
 }) {
   const { selectMember } = useWorkspace();
   // OFF by default (CR-148 §3.2 D, BR-58): runtime coupling stays the picture a
@@ -1121,16 +1153,21 @@ function ServiceMap({
   const declared = declaredLayer(coverage.declared_contracts, coverage.bound_external, services);
   // Drawn whenever a valid `[[links]]` entry exists (S-709); `null` otherwise.
   const asserted = assertedLayer(links, services);
+  // Drawn whenever a net-new declaration lands on two drawn nodes (S-491);
+  // `null` when the workspace declares nothing.
+  const topicDeclared = declaredTopicLayer(topicAnswer, map);
+  const topicEdges = topicDeclared?.edges ?? [];
   // With no layer the canvas gets the runtime set itself, not a copy — the
   // map is the pre-S-464 map, object for object.
   const loaded =
-    layer || declared || asserted
+    layer || declared || asserted || topicEdges.length > 0
       ? {
           nodes: declared ? { ...map.loaded.nodes, ...declared.nodes } : map.loaded.nodes,
           edges: [
             ...map.loaded.edges,
             ...(declared?.edges ?? []),
             ...(asserted?.edges ?? []),
+            ...topicEdges,
             ...(layer?.edges ?? []),
           ],
         }
@@ -1243,6 +1280,18 @@ function ServiceMap({
                 )}
               </>
             )}
+            {/* The declared-topic layer (S-491): its own dotted, arrowless class,
+                rendered only when a declared membership is drawn — never the
+                `publishes`/`subscribes` rows above. */}
+            {topicDeclared && topicEdges.length > 0 && (
+              <>
+                <span className={graphStyles.legendHeading}>Declared topics</span>
+                <ul className={graphStyles.legendList}>
+                  <EdgeRow type={DECLARED_TOPIC_EDGE_TYPE} label={SERVICE_MAP_TEXT.declaredTopicLegend} />
+                </ul>
+                <p className={graphStyles.legendNote}>{topicDeclared.headline.summary}</p>
+              </>
+            )}
             {/* The build layer's toggle (S-464): rendered only when a relation
                 exists, and unchecked until the reader checks it. */}
             {build && (
@@ -1282,6 +1331,15 @@ function ServiceMap({
           </ErrorPanel>
         ) : (
           showBuild && !deps && <LoadingState label="Reading the build relation…" />
+        )}
+
+        {/* A failed declared-topic read is stated, never read as "declares
+            nothing" (NFR-CC-04). Only a workspace with a topic reads it. */}
+        {declaredTopicsError && (
+          <ErrorPanel>
+            The declared-topic relation could not be read: {declaredTopicsError.message} — declared
+            topics are unknown, not absent.
+          </ErrorPanel>
         )}
 
         {layer && layer.collapsed.length > 0 && (
@@ -1344,6 +1402,8 @@ function ServiceMap({
       )}
 
       {asserted && <AssertedLinksCard layer={asserted} />}
+
+      {topicDeclared && <DeclaredTopicsCard layer={topicDeclared} />}
 
       {layer && layer.links.length > 0 && (
         <Widget panel="buildLayerTable" title="Build dependencies">
@@ -1409,6 +1469,101 @@ function AssertedLinksCard({ layer }: { layer: AssertedLayer }) {
         rowKey={(l) => `${l.from}->${l.to}`}
         pageSize={DEFAULT_TABLE_PAGE_SIZE}
       />
+    </Widget>
+  );
+}
+
+// ── The declared-topic layer (S-491, FR-WS-36) ──────────────────────────────
+
+/** How a net-new declaration's member stands against its broker sites — the
+ *  server's split, worded; an unknown token is shown as sent, never as a split. */
+function siteLabel(d: TopicDeclaration): string {
+  const site = d.site;
+  switch (site?.site) {
+    case "config-only":
+      return "No broker site in the code";
+    case "site-refused":
+      return `Broker sites refused (${site.refusals.length})`;
+    case "site-uncaptured":
+      return "Broker sites, none on this topic";
+    case "site-unread":
+      return "Broker sites not read — split unknown";
+    default:
+      // The wire is not runtime-validated: a token this build does not know
+      // is shown as sent rather than worded as a known split.
+      return (site as { site?: string } | undefined)?.site ?? "—";
+  }
+}
+
+/** The panel's rows: one per net-new declaration, with key, file and profile —
+ *  never a binding. */
+const DECLARED_TOPIC_COLUMNS: Column<TopicDeclaration>[] = [
+  { key: "member", header: "Member", mono: true, cell: (d) => d.member, sortValue: (d) => d.member },
+  { key: "topic", header: "Topic", mono: true, cell: (d) => d.topic, sortValue: (d) => d.topic },
+  { key: "key", header: "Key", mono: true, cell: (d) => d.key, sortValue: (d) => d.key },
+  { key: "file", header: "File", mono: true, cell: (d) => d.file, sortValue: (d) => d.file },
+  {
+    key: "profile",
+    header: "Profile",
+    mono: true,
+    // `null` is the unprofiled base, which every profile reads — said, never
+    // left as an empty cell that reads as "no profile known".
+    cell: (d) => d.profile ?? <span className="muted">base (every profile)</span>,
+    sortValue: (d) => d.profile ?? "",
+  },
+  { key: "site", header: "Code", cell: siteLabel, sortValue: siteLabel },
+];
+
+/** The net-new declarations (S-491, CR-157 E) — listed with key, file and
+ *  profile; the already-observed ones counted beside them, never listed as new.
+ *  Declared, so the badge says so and none of it is a binding above. */
+function DeclaredTopicsCard({ layer }: { layer: DeclaredTopicLayer }) {
+  const observed = layer.headline.already_observed;
+  const unread = layer.headline.members.unread ?? [];
+  const reasons = layer.headline.members.unread_reasons ?? {};
+  // Own keys only: a member named `constructor` must never read an inherited value.
+  const reasonOf = (member: string) => (Object.hasOwn(reasons, member) ? reasons[member] : undefined);
+  return (
+    <Widget
+      title="Declared topics"
+      badge={<Badge tone="muted">Declared</Badge>}
+      copy={declaredTopics}
+      figure={
+        <div className={styles.figure}>
+          <p className={styles.statement}>{layer.headline.summary}</p>
+        </div>
+      }
+    >
+      <p className="muted">{SERVICE_MAP_TEXT.declaredTopicsObserved(observed.pairs, observed.declarations)}</p>
+      {layer.netNew.length === 0 ? (
+        // Only a relation that considered something can say none of it is new.
+        layer.headline.declarations_considered > 0 && (
+          <p className="muted">{SERVICE_MAP_TEXT.noNetNewDeclarations}</p>
+        )
+      ) : (
+        <DataTable
+          caption="Net-new topic declarations (the accessible twin of the dotted declared-topic layer)"
+          columns={DECLARED_TOPIC_COLUMNS}
+          rows={layer.netNew}
+          rowKey={(d) => [d.member, d.topic, d.file, d.key, d.profile ?? "", JSON.stringify(d.via ?? null)].join("\u0000")}
+          pageSize={DEFAULT_TABLE_PAGE_SIZE}
+        />
+      )}
+      {/* Every member read or named unread (NFR-CC-04, ADR-53): an unread
+          member's declarations are unknown, never counted as none. */}
+      {unread.length > 0 && (
+        <p className="muted">
+          Declared-topic facts could not be read for{" "}
+          {unread.map((member, i) => (
+            <span key={member}>
+              {i > 0 && ", "}
+              <span className="mono">{member}</span>
+              {reasonOf(member) && ` (${reasonOf(member)})`}
+            </span>
+          ))}{" "}
+          — their declared topics are unknown, not absent.
+        </p>
+      )}
     </Widget>
   );
 }

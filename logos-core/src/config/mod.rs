@@ -98,10 +98,11 @@ pub(crate) use globs::ConfigGlobs;
 pub(crate) use globs::DocGlobs;
 pub use rules::{
     Boundary, Budget, Constraints, CountBaseline, CountBudget, Coverage, DriftBudget,
-    EffectiveCoverage, EffectiveHistory, ForbiddenImport, GodContainersBudget, History, Layer,
+    EffectiveCoverage, EffectiveRules, EffectiveHistory, ForbiddenImport, GodContainersBudget, History,
+    InheritedRules, Layer,
     MaxDead, MaxDeadBaseline, MetricThresholds, RatchetBudget, RatchetFlag, RatioBaseline,
-    RatioBudget, RequireDocumented, RequireTested, ReviewAccept, ReviewRules, Rules,
-    SecurityRules,
+    RatioBudget, RefusedRootTable, RefusedRootTables, RequireDocumented, RequireTested, ReviewAccept, ReviewRules,
+    RuleOrigin, RuleOrigins, Rules, SecurityRules,
 };
 pub use project::{
     derive_project_id, is_valid_coordinate, normalise_remote, resolve_project_id, Project,
@@ -146,9 +147,11 @@ pub(crate) const fn admits_zero_admission_diagnosis(admitted: usize) -> bool {
 }
 pub use wiki::{EffectiveWikiModel, WikiConfig};
 pub use workspace_tier::{
-    read_workspace_documents, write_workspace_config, write_workspace_secret, TierConfigFile,
-    TierSaveOutcome, WorkspaceTierDocument,
+    load_effective_rules, read_rules_tier, read_workspace_documents, workspace_root_of,
+    write_workspace_config, write_workspace_secret, RulesTier, TierConfigFile, TierSaveOutcome,
+    WorkspaceTierDocument,
 };
+pub use workspace_tier::{inherited_rules, read_workspace_rules, write_workspace_rules, TierRulesFile};
 pub use writeback::{
     read_documents, write_config, write_rules, write_secret, ConfigApplyOutcome, ConfigDefaults,
     ConfigFileView, ConfigReadModel, ConfigWriteOutcome, EffectiveChat, EffectiveWiki, FileView,

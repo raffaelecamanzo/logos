@@ -36,11 +36,19 @@
 //! - **The reconciliation** reads [S-411]'s own [`judgement`] over the same copy.
 //!
 //! The only rules this module owns are the ones [CR-157] §3.2 A states and the
-//! shipped code has no word for: [`key_shape`] (what a topic-named key is),
-//! [`Reading::admits`] (what `src/main` means), [`classify`] (declared-only /
-//! observed / net-new), [`site_state`] (the B3 split) and [`mechanism`] (why a
-//! declaration differs from [S-411]'s). Each is one function and each is pinned
-//! by always-run fixtures.
+//! shipped code had no word for when the gate ran: [`key_shape`] (what a
+//! topic-named key is), [`Reading::admits`] (what `src/main` means),
+//! [`classify`] (declared-only / observed / net-new), [`site_state`] (the B3
+//! split) and [`mechanism`] (why a declaration differs from [S-411]'s). Each is
+//! one function and each is pinned by always-run fixtures.
+//!
+//! **Since [S-489] two of them ship**, as
+//! `logos_core::federation::declared_topics::{key_shape, refusal_of}`, and this
+//! module now **calls** them instead of keeping a second copy: the rule is the
+//! same text that ran, and the fixtures below pin the product's version from
+//! here on. The recorded floor and finding are untouched.
+//!
+//! [S-489]: ../../../docs/planning/journal.md#s-489-the-declared-topic-intake-reported-apart-from-observed-broker-edges
 //!
 //! # A private copy only
 //!
@@ -148,18 +156,19 @@ impl KeyShape {
 ///
 /// Applied to the relaxed-binding canonical form the corpus stores, so
 /// `default-topic` arrives as `defaulttopic` and still ends in `topic`.
+///
+/// The shipped rule, called ([S-489]): this module keeps its own [`KeyShape`]
+/// only for the labels its report prints.
+///
+/// [S-489]: ../../../docs/planning/journal.md#s-489-the-declared-topic-intake-reported-apart-from-observed-broker-edges
 pub fn key_shape(canonical: &str) -> Option<KeyShape> {
-    if canonical.starts_with("spring.kafka.topics.") {
-        return Some(KeyShape::SpringKafkaTopics);
-    }
-    let last = canonical.rsplit('.').next().unwrap_or(canonical);
-    if last == "topic" || last == "topics" {
-        Some(KeyShape::LastSegment)
-    } else if last.ends_with("topic") || last.ends_with("topics") {
-        Some(KeyShape::LastSegmentSuffix)
-    } else {
-        None
-    }
+    use logos_core::federation::declared_topics::key_shape as shipped;
+    use logos_core::federation::KeyShape as Shipped;
+    shipped(canonical).map(|shape| match shape {
+        Shipped::SpringKafkaTopics => KeyShape::SpringKafkaTopics,
+        Shipped::LastSegment => KeyShape::LastSegment,
+        Shipped::LastSegmentSuffix => KeyShape::LastSegmentSuffix,
+    })
 }
 
 // ── The readings ────────────────────────────────────────────────────────────
@@ -458,16 +467,12 @@ pub fn site_state(broker_rows: usize, has_promoted_topics: bool, refusals: &[Str
 /// refusal the product carries on the row (the site keeps its placeholder), so
 /// it counts too, whatever its bucket. Recorded in `declared_topics_finding.txt`;
 /// on the recorded run every refusal is `topic-not-literal`, so no figure moves.
+///
+/// The shipped rule, called ([S-489]).
+///
+/// [S-489]: ../../../docs/planning/journal.md#s-489-the-declared-topic-intake-reported-apart-from-observed-broker-edges
 pub fn refusal_of(state: &CoverageState, provenance: &ValueProvenance) -> Option<String> {
-    if let ValueProvenance::ConfigUnresolved { refusal, .. } = provenance {
-        return Some(format!("config-unresolved: {}", refusal.label()));
-    }
-    match state {
-        CoverageState::Unbound { reason } if *reason != UnboundReason::NoProviderInWorkspace => {
-            Some(reason.as_str().to_string())
-        }
-        _ => None,
-    }
+    logos_core::federation::declared_topics::refusal_of(state, provenance)
 }
 
 // ── The measurement ─────────────────────────────────────────────────────────

@@ -16,6 +16,8 @@
 //! [FR-GV-02]: ../../../../docs/specs/requirements/FR-GV-02.md
 //! [governance-engine]: ../../../../docs/specs/architecture/components/governance-engine.md
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The parsed `rules.toml` read-model — the architecture contract.
@@ -1020,6 +1022,41 @@ pub struct MetricThresholds {
 }
 
 impl MetricThresholds {
+    /// Every key declared at its documented default ([`Thresholds::default`]) —
+    /// the `[metric_thresholds]` table the `rules.toml` templates render
+    /// ([FR-IN-10]). Built by an **exhaustive** destructure (no `..`), so a
+    /// threshold added to the engine fails this to compile rather than leaving
+    /// the templates a key short.
+    ///
+    /// [`Thresholds::default`]: crate::metrics::Thresholds
+    /// [FR-IN-10]: ../../../../docs/specs/requirements/FR-IN-10.md
+    pub fn documented_defaults() -> Self {
+        let crate::metrics::Thresholds {
+            nest,
+            brain_cc,
+            brain_loc,
+            brain_nest,
+            god_methods,
+            god_span,
+            clone_similarity,
+            clone_min_tokens,
+            duplicate_min_tokens,
+            cohesion_min_classes,
+        } = crate::metrics::Thresholds::default();
+        Self {
+            nesting_depth: Some(nest),
+            brain_complexity: Some(brain_cc),
+            brain_lines: Some(brain_loc),
+            brain_nesting: Some(brain_nest),
+            god_methods: Some(god_methods),
+            god_span: Some(god_span),
+            clone_similarity: Some(clone_similarity),
+            clone_min_tokens: Some(clone_min_tokens),
+            duplicate_min_tokens: Some(duplicate_min_tokens),
+            cohesion_min_classes: Some(cohesion_min_classes),
+        }
+    }
+
     /// Compose the raw `[metric_thresholds]` overrides onto the documented
     /// [`Thresholds::default`](crate::metrics::Thresholds) values to build the
     /// **effective** detection-threshold set ([BR-25], [FR-QM-14]). An omitted
@@ -1548,6 +1585,335 @@ impl Rules {
             review.validate()?;
         }
         Ok(())
+    }
+}
+
+// ── The workspace rules tier (S-506, FR-CF-08, ADR-73) ──────────────────────
+
+/// Where one effective `[constraints]` or `[metric_thresholds]` key came from
+/// ([FR-CF-08], [ADR-73] §4): the member's own `rules.toml`, or the workspace
+/// root's. A key declared by neither tier is **unset** and has no entry in
+/// [`RuleOrigins`] — "not enforced" is not a third origin.
+///
+/// The sibling of [`ChatOrigin`](super::ChatOrigin): origin is part of the
+/// result, never inferred by a consumer ([NFR-CC-04]).
+///
+/// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+/// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+/// [NFR-CC-04]: ../../../../docs/specs/requirements/NFR-CC-04.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleOrigin {
+    /// Declared by the member's own `rules.toml`.
+    Member,
+    /// Inherited from `<workspace-root>/.logos/rules.toml`.
+    Workspace,
+}
+
+/// The origin of every **declared** effective key, per inheritable table
+/// ([FR-CF-08]). A key with no entry is unset.
+///
+/// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleOrigins {
+    /// `[constraints]` key → origin.
+    pub constraints: BTreeMap<String, RuleOrigin>,
+    /// `[metric_thresholds]` key → origin.
+    pub metric_thresholds: BTreeMap<String, RuleOrigin>,
+}
+
+impl RuleOrigins {
+    /// The origin of the `[constraints]` key `key` — also a constraint
+    /// violation's `rule` — or `None` when neither tier declares it.
+    pub fn constraint(&self, key: &str) -> Option<RuleOrigin> {
+        self.constraints.get(key).copied()
+    }
+}
+
+/// A member-only table declared at the workspace root, refused there
+/// ([FR-CF-08], [ADR-73] §3): it is applied to no member, and the reason is
+/// stated rather than the table silently dropped.
+///
+/// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+/// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RefusedRootTable {
+    /// The table as written in `rules.toml` (`[[layers]]`, `[history]`, …).
+    pub table: &'static str,
+    /// Why it cannot be inherited.
+    pub reason: &'static str,
+}
+
+impl RefusedRootTable {
+    /// The one-line refusal a surface reports, naming the root file `path`.
+    pub fn message(&self, path: &str) -> String {
+        format!(
+            "workspace rules tier {path}: {} is member-only — {}; refused, applied to no member \
+             (only [constraints] and [metric_thresholds] inherit)",
+            self.table, self.reason
+        )
+    }
+}
+
+/// What a member inherits from the workspace rules tier, as its Config editor
+/// shows it ([FR-UI-12] as modified by [CR-165]): the tier's own declared
+/// `[constraints]` / `[metric_thresholds]` values, and the origin of every key
+/// the member's effective contract declares.
+///
+/// Carried **beside** the member's literal document, never merged into it, so
+/// an inherited value can never be posted back into the member's `rules.toml`
+/// on save ([NFR-RA-05]).
+///
+/// [FR-UI-12]: ../../../../docs/specs/requirements/FR-UI-12.md
+/// [CR-165]: ../../../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InheritedRules {
+    /// The tier's file, `<workspace-root>/.logos/rules.toml`.
+    pub path: String,
+    /// The origin of each declared effective key; `None` exactly when the tier
+    /// does not parse ([`error`](Self::error) then says why).
+    pub origins: Option<RuleOrigins>,
+    /// The tier's `[constraints]` as declared there — the value an inherited row
+    /// shows. All unset when the tier does not parse.
+    pub constraints: Constraints,
+    /// The tier's `[metric_thresholds]` as declared there.
+    pub metric_thresholds: MetricThresholds,
+    /// Why the tier does not parse — by file and position only, never a fragment
+    /// of it; `None` when it parses.
+    pub error: Option<String>,
+}
+
+/// A workspace rules document that declares member-only tables, refused by its
+/// save ([FR-UI-38] as modified by [CR-165]): the root inherits only
+/// `[constraints]` and `[metric_thresholds]`, so a table it would apply to no
+/// member is refused with its reason before anything is written.
+///
+/// [FR-UI-38]: ../../../../docs/specs/requirements/FR-UI-38.md
+/// [CR-165]: ../../../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusedRootTables(pub Vec<RefusedRootTable>);
+
+impl std::fmt::Display for RefusedRootTables {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "not saved: the workspace rules contract inherits only [constraints] and \
+             [metric_thresholds] to its members, and nothing was written"
+        )?;
+        for refused in &self.0 {
+            write!(
+                f,
+                "; {} is member-only — {}, so declare it in a member's own .logos/rules.toml",
+                refused.table, refused.reason
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for RefusedRootTables {}
+
+/// Why a path-based table is member-only ([ADR-73] §3).
+const NAMES_MEMBER_PATHS: &str = "it names member paths, and member source layouts differ";
+/// Why `[history]` / `[coverage]` are member-only.
+const MEMBER_LOCAL_TUNING: &str = "it tunes one member's own evidence";
+/// Why `[security]` / `[review]` are member-only (they postdate [ADR-73]).
+const MEMBER_GATE_POLICY: &str = "it is one member's own gate policy";
+
+/// The effective rules contract of one member: its own `rules.toml` over the
+/// workspace tier, resolved key by key ([FR-CF-08], [ADR-73]) — the output of
+/// [`Rules::inherit`].
+///
+/// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+/// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveRules {
+    /// The contract every evaluation reads: the member's own tables, with each
+    /// `[constraints]` / `[metric_thresholds]` key the member leaves undeclared
+    /// taken from the workspace tier.
+    pub rules: Rules,
+    /// The origin of each declared inheritable key — `None` exactly when there
+    /// is no workspace tier, so a single-root project carries no origin at all
+    /// ([ADR-52]).
+    ///
+    /// [ADR-52]: ../../../../docs/specs/architecture/decisions/ADR-52.md
+    pub origins: Option<RuleOrigins>,
+    /// The member-only tables the workspace tier declared and this resolution
+    /// refused, in `rules.toml` table order.
+    pub refused: Vec<RefusedRootTable>,
+}
+
+impl EffectiveRules {
+    /// The rules this member evaluates **because** the workspace tier declares
+    /// them: the `[constraints]` keys of origin [`RuleOrigin::Workspace`], each a
+    /// rule `check_rules` counts once — except a `no_god_containers` that is
+    /// declared but not [enforced](GodContainersBudget::enforced), which
+    /// `check` does not count either. Zero without a tier.
+    ///
+    /// Counted over [`RuleOrigins::constraints`], which [`Rules::inherit`] fills
+    /// key by key from an exhaustive struct literal, so a constraint added later
+    /// is counted without a second list to keep in step.
+    pub fn inherited_rules(&self) -> u32 {
+        let Some(origins) = &self.origins else {
+            return 0;
+        };
+        let counted = |key: &str| {
+            key != "no_god_containers"
+                || self
+                    .rules
+                    .constraints
+                    .no_god_containers
+                    .as_ref()
+                    .is_some_and(GodContainersBudget::enforced)
+        };
+        let inherited = origins
+            .constraints
+            .iter()
+            .filter(|(key, origin)| **origin == RuleOrigin::Workspace && counted(key))
+            .count();
+        u32::try_from(inherited).unwrap_or(u32::MAX)
+    }
+}
+
+/// One key of a per-key merge: the member's value when it declares one, else
+/// the workspace tier's, recording the origin of whichever was taken.
+fn inherit_key<T>(
+    key: &str,
+    member: Option<T>,
+    workspace: Option<T>,
+    origins: &mut BTreeMap<String, RuleOrigin>,
+) -> Option<T> {
+    let (value, origin) = match (member, workspace) {
+        (Some(value), _) => (value, RuleOrigin::Member),
+        (None, Some(value)) => (value, RuleOrigin::Workspace),
+        (None, None) => return None,
+    };
+    origins.insert(key.to_string(), origin);
+    Some(value)
+}
+
+/// Merge two instances of an all-`Option` table key by key, with origins.
+///
+/// The struct literal names every field and has no `..` rest, so a key added to
+/// the table without being added here fails to compile — inheritance can never
+/// silently skip a new key.
+macro_rules! inherit_table {
+    ($table:ident, $member:expr, $workspace:expr, $origins:expr, [$($key:ident),+ $(,)?]) => {{
+        let (member, workspace, origins) = ($member, $workspace, $origins);
+        $table {
+            $($key: inherit_key(stringify!($key), member.$key, workspace.$key, origins),)+
+        }
+    }};
+}
+
+impl Rules {
+    /// Resolve this member contract over the workspace tier `workspace`
+    /// ([FR-CF-08], [ADR-73]).
+    ///
+    /// - `[constraints]` and `[metric_thresholds]` inherit **key by key**: a
+    ///   member key wins over the root key of the same name, and every declared
+    ///   key records its [`RuleOrigin`]. Every key in both tables is an
+    ///   `Option`, so "declared" is observable on the parsed value — which is why
+    ///   this is not [ADR-67]'s whole-table rule.
+    /// - Every other table is member-only. Declared at the root it is
+    ///   [refused](EffectiveRules::refused) and applied to no member: the member's
+    ///   own table is the effective one.
+    /// - With `None` there is no second tier: the contract is returned unchanged
+    ///   and carries no origin ([ADR-52]).
+    ///
+    /// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+    /// [ADR-52]: ../../../../docs/specs/architecture/decisions/ADR-52.md
+    /// [ADR-67]: ../../../../docs/specs/architecture/decisions/ADR-67.md
+    /// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+    pub fn inherit(self, workspace: Option<Rules>) -> EffectiveRules {
+        let Some(workspace) = workspace else {
+            return EffectiveRules {
+                rules: self,
+                origins: None,
+                refused: Vec::new(),
+            };
+        };
+        // Destructured without `..`: a table added to `Rules` must be classified
+        // here — inherited or refused — before this compiles.
+        let Rules {
+            constraints,
+            metric_thresholds,
+            layers,
+            boundaries,
+            forbidden_imports,
+            require_tested,
+            require_documented,
+            history,
+            coverage,
+            security,
+            review,
+        } = workspace;
+        let refused = [
+            ("[[layers]]", !layers.is_empty(), NAMES_MEMBER_PATHS),
+            ("[[boundaries]]", !boundaries.is_empty(), NAMES_MEMBER_PATHS),
+            ("[[forbidden_imports]]", !forbidden_imports.is_empty(), NAMES_MEMBER_PATHS),
+            ("[[require_tested]]", !require_tested.is_empty(), NAMES_MEMBER_PATHS),
+            ("[[require_documented]]", !require_documented.is_empty(), NAMES_MEMBER_PATHS),
+            ("[history]", history != History::default(), MEMBER_LOCAL_TUNING),
+            ("[coverage]", coverage != Coverage::default(), MEMBER_LOCAL_TUNING),
+            ("[security]", security.is_some(), MEMBER_GATE_POLICY),
+            ("[review]", review.is_some(), MEMBER_GATE_POLICY),
+        ]
+        .into_iter()
+        .filter(|(_, declared, _)| *declared)
+        .map(|(table, _, reason)| RefusedRootTable { table, reason })
+        .collect();
+
+        let mut origins = RuleOrigins::default();
+        let member = self;
+        let constraints = inherit_table!(
+            Constraints,
+            member.constraints,
+            constraints,
+            &mut origins.constraints,
+            [
+                max_cycles,
+                max_cc,
+                max_fn_lines,
+                no_god_files,
+                max_fan_in,
+                max_fan_out,
+                max_dead,
+                max_duplicates,
+                max_nesting_depth,
+                max_brain_methods,
+                max_clone_ratio,
+                no_god_containers,
+            ]
+        );
+        let metric_thresholds = inherit_table!(
+            MetricThresholds,
+            member.metric_thresholds,
+            metric_thresholds,
+            &mut origins.metric_thresholds,
+            [
+                nesting_depth,
+                brain_complexity,
+                brain_lines,
+                brain_nesting,
+                god_methods,
+                god_span,
+                clone_similarity,
+                clone_min_tokens,
+                duplicate_min_tokens,
+                cohesion_min_classes,
+            ]
+        );
+        EffectiveRules {
+            rules: Rules {
+                constraints,
+                metric_thresholds,
+                ..member
+            },
+            origins: Some(origins),
+            refused,
+        }
     }
 }
 
@@ -2538,5 +2904,137 @@ mod tests {
         listed.push("modularity");
         listed.sort_unstable();
         assert_eq!(sorted, listed);
+    }
+
+    // ── S-506 / FR-CF-08: the workspace rules tier ──────────────────────────
+
+    fn parse(text: &str) -> Rules {
+        super::super::parse_rules(text, std::path::Path::new("rules.toml")).expect("the fixture parses")
+    }
+
+    /// [ADR-52]: with no second tier the contract is returned as parsed and
+    /// carries no origin and no refusal.
+    ///
+    /// [ADR-52]: ../../../../docs/specs/architecture/decisions/ADR-52.md
+    #[test]
+    fn without_a_tier_the_contract_is_unchanged_and_carries_no_origin() {
+        let member = parse("[constraints]\nmax_cc = 15\n[[layers]]\nname = \"a\"\npaths = [\"src/**\"]\norder = 1\n");
+        let effective = member.clone().inherit(None);
+        assert_eq!(effective.rules, member);
+        assert_eq!(effective.origins, None);
+        assert!(effective.refused.is_empty());
+        assert_eq!(effective.inherited_rules(), 0);
+    }
+
+    /// [FR-CF-08]: every `[constraints]` and `[metric_thresholds]` key inherits
+    /// on its own, and a member key wins only for itself — pinned over every
+    /// key, so a key the merge skipped would show here as unset.
+    ///
+    /// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+    #[test]
+    fn every_inheritable_key_inherits_and_the_member_wins_per_key() {
+        let mut root = Rules {
+            constraints: Constraints::recommended(),
+            ..Rules::default()
+        };
+        let all = MetricThresholds::default().effective();
+        root.metric_thresholds = MetricThresholds {
+            nesting_depth: Some(all.nest),
+            brain_complexity: Some(all.brain_cc),
+            brain_lines: Some(all.brain_loc),
+            brain_nesting: Some(all.brain_nest),
+            god_methods: Some(all.god_methods),
+            god_span: Some(all.god_span),
+            clone_similarity: Some(all.clone_similarity),
+            clone_min_tokens: Some(all.clone_min_tokens),
+            duplicate_min_tokens: Some(all.duplicate_min_tokens),
+            cohesion_min_classes: Some(all.cohesion_min_classes),
+        };
+        let member = parse("[constraints]\nmax_cc = 25\n[metric_thresholds]\nnesting_depth = 6\n");
+
+        let effective = member.inherit(Some(root.clone()));
+        let mut expected = root.constraints.clone();
+        expected.max_cc = Some(Budget::Absolute(25));
+        assert_eq!(effective.rules.constraints, expected);
+        assert_eq!(effective.rules.metric_thresholds.nesting_depth, Some(6));
+        assert_eq!(effective.rules.metric_thresholds.god_span, root.metric_thresholds.god_span);
+
+        let origins = effective.origins.clone().expect("a tier reports origins");
+        assert_eq!(origins.constraints.len(), 12, "{origins:?}");
+        assert_eq!(origins.metric_thresholds.len(), 10, "{origins:?}");
+        for (key, origin) in origins.constraints.iter().chain(&origins.metric_thresholds) {
+            let member_key = key == "max_cc" || key == "nesting_depth";
+            let want = if member_key { RuleOrigin::Member } else { RuleOrigin::Workspace };
+            assert_eq!(*origin, want, "{key}");
+        }
+        // Eleven inherited constraints, every one enforced (the recommended
+        // `no_god_containers` is `true`).
+        assert_eq!(effective.inherited_rules(), 11);
+    }
+
+    /// A key neither tier declares is unset — no entry, not a third origin —
+    /// and a declared-but-unenforced `no_god_containers` is not an inherited
+    /// rule.
+    #[test]
+    fn an_undeclared_key_is_unset_and_an_unenforced_flag_is_no_inherited_rule() {
+        let root = parse("[constraints]\nmax_fn_lines = 80\nno_god_containers = false\n");
+        let effective = Rules::default().inherit(Some(root));
+        let origins = effective.origins.as_ref().unwrap();
+        assert_eq!(origins.constraint("max_cc"), None);
+        assert_eq!(origins.constraint("no_god_containers"), Some(RuleOrigin::Workspace));
+        assert_eq!(effective.inherited_rules(), 1, "only max_fn_lines is a rule check counts");
+    }
+
+    /// [FR-CF-08] / [ADR-73] §3: every member-only table declared at the root
+    /// is refused, in table order, with a reason — and the member's own table
+    /// is the effective one.
+    ///
+    /// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+    /// [ADR-73]: ../../../../docs/specs/architecture/decisions/ADR-73.md
+    #[test]
+    fn every_member_only_root_table_is_refused_and_the_members_own_is_kept() {
+        let root = parse(
+            "[[layers]]\nname = \"r\"\npaths = [\"src/**\"]\norder = 1\n\
+             [[layers]]\nname = \"s\"\npaths = [\"lib/**\"]\norder = 2\n\
+             [[boundaries]]\nfrom = \"r\"\nto = \"s\"\n\
+             [[forbidden_imports]]\nfrom = \"src/**\"\nto = \"lib/**\"\n\
+             [[require_tested]]\npaths = [\"src/**\"]\n\
+             [[require_documented]]\npaths = [\"src/**\"]\n\
+             [history]\nwindow_months = 6\n\
+             [coverage]\npath_strip_prefixes = [\"build/\"]\n\
+             [security]\nmax_severity = \"critical\"\n\
+             [review]\ndrift_budget = 2\n",
+        );
+        let member = parse("[[layers]]\nname = \"own\"\npaths = [\"app/**\"]\norder = 1\n");
+        let effective = member.clone().inherit(Some(root));
+        assert_eq!(effective.rules, member, "nothing of the root's reaches the member");
+        let tables: Vec<&str> = effective.refused.iter().map(|r| r.table).collect();
+        assert_eq!(
+            tables,
+            [
+                "[[layers]]",
+                "[[boundaries]]",
+                "[[forbidden_imports]]",
+                "[[require_tested]]",
+                "[[require_documented]]",
+                "[history]",
+                "[coverage]",
+                "[security]",
+                "[review]",
+            ]
+        );
+        let message = effective.refused[0].message(".logos/rules.toml");
+        assert!(message.contains("[[layers]] is member-only"), "{message}");
+        assert!(message.contains("names member paths"), "{message}");
+        assert!(message.contains("refused, applied to no member"), "{message}");
+        assert!(message.contains("tier .logos/rules.toml:"), "the refusal names the root file: {message}");
+    }
+
+    /// A root table declared empty is not refused: there is nothing it could
+    /// have applied.
+    #[test]
+    fn a_root_table_left_at_its_default_is_not_refused() {
+        let root = parse("[history]\n[coverage]\n");
+        assert!(Rules::default().inherit(Some(root)).refused.is_empty());
     }
 }

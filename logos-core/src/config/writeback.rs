@@ -143,6 +143,24 @@ pub struct ConfigReadModel {
     /// [NFR-SE-07]: ../../../docs/specs/requirements/NFR-SE-07.md
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub extension_secrets: BTreeMap<String, MaskedSecret>,
+
+    /// What this root inherits from its workspace rules tier ([FR-CF-08], [S-508])
+    /// — each inherited `[constraints]` / `[metric_thresholds]` key's origin and
+    /// the tier's own value — so the editor can badge an inherited row with its
+    /// root value. Beside [`rules`](Self::rules), never merged into it: the
+    /// literal member document is what the editor round-trips, so an inherited
+    /// value is never written back ([NFR-RA-05]).
+    ///
+    /// `None`, and elided, without a tier; [`read_documents`] leaves it `None`
+    /// and [`Configuration::read`](crate::Configuration::read) fills it, so a
+    /// single-root read-model serializes to the bytes it always did ([ADR-52]).
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    /// [S-508]: ../../../docs/planning/journal.md#s-508-init-writes-the-workspace-contract-and-the-config-editors-show-where-each-rule-comes-from
+    /// [NFR-RA-05]: ../../../docs/specs/requirements/NFR-RA-05.md
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_rules: Option<super::InheritedRules>,
 }
 
 /// The read-model projection of an [`EffectiveWikiModel`] (Sprint 77 HF-1): the
@@ -545,6 +563,7 @@ pub fn read_documents(
         effective_chat,
         effective_wiki,
         extension_secrets,
+        workspace_rules: None,
     })
 }
 
@@ -600,10 +619,7 @@ fn write_config_validated(
 /// if the atomic write itself fails (original unchanged).
 pub fn write_rules(root: &Path, candidate: &str) -> Result<ConfigWriteOutcome, ConfigError> {
     let path = root.join(RULES_RELPATH);
-    let body = candidate
-        .strip_prefix(RULES_PROVENANCE_STAMP)
-        .unwrap_or(candidate);
-    let stamped = format!("{RULES_PROVENANCE_STAMP}{body}");
+    let stamped = stamped_rules(candidate);
     // Validate the EXACT bytes we will write, so "stamped file still parses via
     // load_rules" holds by construction and an invalid edit is rejected before
     // touching the file.
@@ -616,6 +632,17 @@ pub fn write_rules(root: &Path, candidate: &str) -> Result<ConfigWriteOutcome, C
         bytes_written,
         provenance_stamped: true,
     })
+}
+
+/// The exact document [`write_rules`] writes for `candidate`: a pre-existing
+/// copy of [`RULES_PROVENANCE_STAMP`] stripped, then the stamp prepended — so a
+/// caller can compare it with what is on disk before writing (S-508's workspace
+/// rules save) without a second spelling of the rule.
+pub(crate) fn stamped_rules(candidate: &str) -> String {
+    let body = candidate
+        .strip_prefix(RULES_PROVENANCE_STAMP)
+        .unwrap_or(candidate);
+    format!("{RULES_PROVENANCE_STAMP}{body}")
 }
 
 /// Write (or clear) the chat API key in the gitignored `.logos/secrets.toml`

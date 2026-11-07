@@ -472,7 +472,9 @@ the file or command, when an agent tool call would:
 
 - write, edit or delete `.logos/rules.toml`, `.logos/rules-baseline.json`,
   `.logos/security-ignore.toml` or `.logos/security-baseline.json` (under any
-  `.logos/` of the project, so a workspace member's contract is guarded too); or
+  `.logos/` of the project, so a workspace member's contract is guarded too, and,
+  from a member, under its workspace root's `.logos/`, whose `rules.toml` the
+  member inherits); or
 - run `logos gate --save` or `logos check --bless`, as a shell command, or through
   `check --bless`'s MCP twin `bless_rules` (under the plugin's or a project
   `.mcp.json`'s prefix); or
@@ -531,10 +533,15 @@ so are `proxy`, `bypass`, `run`, `err`, `test` and `summary` right after it:
 `rtk rm .logos/rules.toml` asks. A heredoc body is data to the command that reads
 it: a `python3 - <<'EOF'` or `cat > notes.md <<'EOF'` body naming
 `logos check --bless` passes, and the heredoc's own line is read as ever
-(`cat > .logos/rules.toml <<'EOF'` asks). Every body is read as commands when the
-command line names a shell, `eval`, `source` or a patch tool, or runs an
-expansion as a command (`bash <<'EOF'`, `cat <<'EOF' | sh`, `$SHELL <<EOF`,
-`git apply <<'EOF'`); so is a body the shell expands (an unquoted delimiter) that
+(`cat > .logos/rules.toml <<'EOF'` asks). Every body is read as commands when a
+shell, `eval`, `source` or a patch tool may receive it, or an expansion run as a
+command may (`bash <<'EOF'`, `cat <<'EOF' | sh`, `$SHELL <<EOF`,
+`git apply <<'EOF'`). A shell named only after the last heredoc's line reads its
+own input, so the bodies stay data: `python3 - <<'EOF'` … `EOF` then `bash -n f`
+passes. They are read as commands again when a pipe, a command substitution, a
+`read` into a variable or an `exec` descriptor may carry a body to that shell
+(`cat <<'EOF' |` … `EOF` then `sh`, `x=$(cat <<'EOF'` … `)` then `bash -c "$x"`).
+So is a body the shell expands (an unquoted delimiter) that
 holds a command substitution, and so is the whole line when a `<<` sits where the
 guard cannot show it opens a heredoc (inside quotes, a comment, `${…}` or
 arithmetic). A glob character quoted or escaped is literal:
@@ -548,6 +555,41 @@ logos's that takes one (`--project`, `--rules`, `--threshold`, `--label`,
 `--reason`, `--evidence`), is that value: `logos check --project $L/before`
 passes, while a bare `--rules $F` asks as above.
 
+A quoted string is data to the command it is given, and three rules follow from
+that:
+
+- **Quoted separators.** A command line is cut into commands only at a `;`, `&`,
+  `|`, `(`, `)` or newline outside quotes (single, double or `$'…'`). So
+  `echo '(.logos/rules.toml)'`, `echo "a; b .logos/rules.toml"` and
+  `grep -n 'x|y' .logos/rules.toml` pass, while `echo x; rm .logos/rules.toml`
+  asks. The words of a quoted string are still read for what they name.
+- **A shell's `-c` string.** The string after `-c` of `bash`, `sh`, `zsh`, `dash`
+  or `ksh` (by its last path part, after any prefix the guard skips: `env`,
+  `sudo`, `nice`, `nohup`, `time`, `exec`, `command`, `xargs`, `rtk`) is a command
+  line of its own, and is read as one: `bash -c 'cat .logos/rules.toml'` passes,
+  while `bash -c 'rm .logos/rules.toml'`, `sh -c "logos check --bless"` and
+  `env bash -c 'cat > .logos/rules.toml'` ask. A shell given a script, not `-c`,
+  is the command itself (`bash script.sh .logos/rules.toml` asks), and so is a
+  shell whose command line holds an expansion, since the string may write through
+  a positional parameter (`bash -c 'cat > "$1"' _ .logos/rules.toml` asks).
+- **Interpreter inline code.** The quoted code after `python`, `python3` or
+  `pythonX.Y` `-c`, `node` `-e`/`--eval`, `deno eval`, `ruby -e`, `perl -e`/`-E`
+  or `php -r`, with only options between, is data, as a heredoc body fed to the
+  interpreter is: `python3 -c 'print(".logos/rules.toml")'` and
+  `node -e 'require("fs").readFileSync(".logos/rules.toml")'` pass. The
+  interpreter's other words and its redirections are still read:
+  `python3 -c 'x' > .logos/rules.toml` and `perl -pi -e 's/a/b/' .logos/rules.toml`
+  ask. What the code does when it runs is not seen, as with a heredoc. An option
+  that takes a separate value before the code (`python3 -W ignore -c …`), or
+  `-c` after a script or `-m` module, leaves the code read as words.
+
+Where the guard cannot be sure of the quotes, the line is cut at every separator,
+quoted or not, as before: quotes that do not pair, a command or process
+substitution (`$(…)`, backticks, `<(…)`), a comment, a heredoc body the guard
+keeps, and a line that names a shell or `eval`, which may read the quoted text
+again (so a separator inside `bash -c '…'` still starts a command there). A
+reason always names the command word it read, never an empty one.
+
 The guarded files are the project's, its root `CLAUDE_PROJECT_DIR`, so a target the
 guard can place outside the project passes. That is an absolute or `~` path, or a
 relative one read from the shell's directory (the payload's `cwd`) or after a
@@ -555,7 +597,10 @@ leading `cd /DIR &&`, whose directory is outside the project or inside a
 repository of its own below the root (a `.git` directory, as a scratch fixture
 has, in a project that is no `logos.workspace.toml` workspace):
 `rm -rf /tmp/r/.logos` and `cd ~/scratch/r && rm -rf .logos` pass. A linked
-worktree's main checkout, and the worktrees it holds, are the project too. A
+worktree's main checkout, and the worktrees it holds, are the project too. So is
+the `.logos/` of the workspace root the project (or its main checkout) is a member
+of: a member inherits that root's `rules.toml`, so writing it from the member asks
+(denies, unattended), while a sibling member's contract is placed elsewhere. A
 guarded `logos` command passes the same way when its `--project`, or the shell's
 directory, is such a place (`logos check --bless --project /tmp/r`): logos works
 on the git top level holding it. What the guard cannot place is judged as before:
@@ -576,8 +621,8 @@ asks wherever the shell stands
 project is the project.
 
 It is a guardrail against loosening the contract by habit or by mistake, not a
-sandbox: a command that assembles the path at run time (an interpreter one-liner,
-a path piped into `xargs`, a variable set by an earlier Bash call) is not seen. There is no environment variable that
+sandbox: a command that assembles the path at run time (an interpreter's inline
+code, a path piped into `xargs`, a variable set by an earlier Bash call) is not seen. There is no environment variable that
 turns it off. The way to stop it asking is to disable the plugin, which is the
 decision it exists to put in your hands.
 
@@ -602,13 +647,32 @@ MultiEdit or NotebookEdit of a listed file passes. Each entry is compared exactl
 with the file's path inside the project, once both are normalised: no glob, no case
 folding, and an entry that is absolute or climbs out of the project with `..`
 admits nothing. A workspace member's file is listed by its own path
-(`member/.logos/security-ignore.toml`). The list never admits a shell command that
-names a listed file, since the guard cannot tell which directory the shell resolves
-it against, nor any guarded command (`logos check --bless`, `logos gate --save`,
-`logos security bless`, `logos security ingest`, `logos security reconfirm` and
-their MCP twins): whatever the list holds, each is denied wherever the interactive
-guard would ask, and passes where it would pass, as for a target placed outside the
-project.
+(`member/.logos/security-ignore.toml`).
+
+A shell write of a listed file passes too when the guard can place its target
+exactly at that file: `printf x >> .logos/security-ignore.toml`,
+`rm .logos/security-ignore.toml`, `cp /tmp/x .logos/security-ignore.toml` and
+`tee .logos/security-ignore.toml` pass. The file must be what the command writes: a
+redirection's target, an operand of `rm`, `unlink`, `tee` or `truncate`, the last
+operand of a plain `cp` or `install`, or `dd`'s `of=`. A command that builds what it
+writes from the word (`pax -rw`, `rsync -R`, `cp --parents`, `cp -a`, `cp` into a
+directory, `find … -execdir`, `git submodule foreach`) or edits it in place
+(`sed -i`) is no such writer, and denies. The target must be spelled out, and is
+read from the directory the host says the shell stands in, or after a leading
+`cd /absolute/dir &&` on a line the guard can follow (nothing quoted, no pipe or
+subshell); its directory, followed through any symlink, must lie inside the project,
+and the file itself must be no symlink. Whatever the guard cannot place so still
+denies: an expansion (`F=.logos/security-ignore.toml; rm $F`), a glob or brace list,
+a `..` (`ext/../.logos/security-ignore.toml`), a relative `cd` or any other it
+cannot follow, a line that runs `ln` or `mv`, a directory option such as `git -C`, a
+`<` or `>` inside quotes on the line (it may be a redirection another shell runs), a
+line naming a shell beside quotes, and a call whose payload names no working
+directory. A file the list does not hold (`.logos/rules.toml`)
+denies as before. The list never admits a guarded command (`logos check --bless`,
+`logos gate --save`, `logos security bless`, `logos security ingest`,
+`logos security reconfirm` and their MCP twins): whatever the list holds, each is
+denied wherever the interactive guard would ask, and passes where it would pass, as
+for a target placed outside the project.
 
 Any other value of `LOGOS_GUARD_MODE` (`off`, an empty value, `Unattended`) keeps
 the interactive answer, `ask`, and `LOGOS_GUARD_ALLOW` is then not read. No value of
@@ -648,7 +712,7 @@ runs `logos sync` on the files it edits before it re-measures.
 | `LOGOS_STOP_HOOK_BUDGET_MS=<ms>` | the Stop check | the shared budget of its legs; default `15000`, a non-number reads as the default |
 | `LOGOS_PROJECT_DIR=<dir>` | the review skill's scripts | the project to review when `--project` is not given; default the working directory |
 | `LOGOS_GUARD_MODE=unattended` | the guardrail | answers `deny` wherever it would answer `ask`, its reason followed by the unattended sentence; any other value, or none, asks. See [In an unattended session](#in-an-unattended-session) |
-| `LOGOS_GUARD_ALLOW=<path>[:<path>…]` | the guardrail, in an unattended session | the project-relative contract files a Write, Edit, MultiEdit or NotebookEdit may still write; never a shell command, never a guarded command |
+| `LOGOS_GUARD_ALLOW=<path>[:<path>…]` | the guardrail, in an unattended session | the project-relative contract files a Write, Edit, MultiEdit or NotebookEdit may still write, and a shell writer too when the guard can place its target exactly at a listed file (`printf x >> .logos/security-ignore.toml`, `rm`, `cp`, `tee`); a target it cannot place (an expansion such as `$F`, a glob, a `..`, a target that is a symlink or lies through one outside the project) or that the command does not write itself (`pax`, `rsync -R`, `cp --parents`) still denies, and so does every guarded command. See [In an unattended session](#in-an-unattended-session) |
 | `LOGOS_INVOKER` | `logos` itself; set by the plugin, not by you | each hook exports its own (`hook:stop`, `hook:pre-tool-use`, `hook:session-start`) and each skill's scripts theirs (`skill:logos-review`, `skill:logos-sec-review`; a value already set is kept, so a `logos-review` script run by `logos-sec-review` stays the latter). Every `logos` call they make records it, and `logos stats --json` counts calls by it in `calls_by_tool_invoker` |
 
 The guardrail has no off switch: `LOGOS_GUARD_MODE` turns its `ask` into `deny`,

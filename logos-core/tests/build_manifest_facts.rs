@@ -157,14 +157,18 @@ fn extraction_marker(root: &Path) -> Option<String> {
 /// migration 43 (S-712), the dispatch re-bind, of migration 44 (S-571),
 /// the `files.parse_damaged` column and the snapshot entries' `partial_parse`
 /// flags, of migration 45 (S-820), the `nodes.callable_signature` column, and
-/// of migration 46 (S-830), the Go signature re-extraction, and of migration
-/// 47 (S-832), the `files.facade` column; the next
-/// [`Engine::start`] re-applies all twenty-six, as it does
+/// of migration 46 (S-830), the Go signature re-extraction, of migration
+/// 47 (S-832), the `files.facade` column, of migration 48 (S-854), the
+/// Java static-call re-extraction, and of migration 49 (S-506), the
+/// `check_run.workspace_rules` column; the next
+/// [`Engine::start`] re-applies all twenty-eight, as it does
 /// on a real upgrade.
 fn downgrade_to_v21(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \

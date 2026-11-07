@@ -259,14 +259,18 @@ fn runtime_figures_are_byte_identical_with_and_without_build_manifests() {
 /// (S-712, the dispatch re-bind), 44 (S-571, the `files.parse_damaged`
 /// column and the snapshot entries' `partial_parse` flags), 45 (S-820, the
 /// `nodes.callable_signature` column), 46 (S-830, the Go signature
-/// re-extraction) and 47 (S-832, the `files.facade` column); the next open
-/// re-applies all twenty-six, as a real
+/// re-extraction), 47 (S-832, the `files.facade` column), 48 (S-854, the
+/// Java static-call re-extraction) and 49 (S-506, the
+/// `check_run.workspace_rules` column); the next open
+/// re-applies all twenty-eight, as a real
 /// upgrade does. Duplicated from
 /// `build_manifest_facts.rs` (no shared test module).
 fn downgrade_to_v21(member: &Path) {
     let conn = rusqlite::Connection::open(member.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \
@@ -370,7 +374,7 @@ fn an_upgraded_member_reads_unread_with_its_reason_until_a_full_walk_extracts_it
 
     let status = status_over(root, manifest);
     for (name, _) in &members {
-        assert_eq!(user_version(&root.join(name)), 47, "{name} was opened at the latest version (v47)");
+        assert_eq!(user_version(&root.join(name)), 49, "{name} was opened at the latest version (v49)");
     }
     let section = status.get("build_dependency").expect("an unread member keeps the section");
     assert_eq!(section["members"]["read"], 0, "{section:#}");

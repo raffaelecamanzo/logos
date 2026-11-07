@@ -39,12 +39,15 @@ GET      /api/v1/workspace/config/read-roots
 POST     /api/v1/workspace/config/save
 POST     /api/v1/workspace/config/secret
 GET      /api/v1/workspace/coverage
+GET      /api/v1/workspace/declared-topics
 GET      /api/v1/workspace/impact
 GET      /api/v1/workspace/manifest
 POST     /api/v1/workspace/manifest/save
 GET      /api/v1/workspace/reachability
 GET      /api/v1/workspace/roster
 GET      /api/v1/workspace/route-providers
+GET      /api/v1/workspace/rules
+POST     /api/v1/workspace/rules/save
 GET      /api/v1/workspace/search
 GET      /api/v1/workspace/security
 GET      /api/v1/workspace/security/summary

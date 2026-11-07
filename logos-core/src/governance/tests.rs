@@ -4104,9 +4104,9 @@ mod security_gate {
 
     /// [FR-SC-10] acceptance / [ADR-79] §8: the security gate is not a metric
     /// dimension, so it moves no metric semantics and resets no baseline. The
-    /// version is v10 since S-826's trait-impl Focus change, not since it.
+    /// version is v11 since S-851's module-file partition, not since it.
     #[test]
     fn the_security_gate_leaves_the_metric_semantics_version_unchanged() {
-        assert_eq!(crate::metrics::METRIC_SEMANTICS_VERSION, 10);
+        assert_eq!(crate::metrics::METRIC_SEMANTICS_VERSION, 11);
     }
 }

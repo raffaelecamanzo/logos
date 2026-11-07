@@ -59,6 +59,39 @@
 //! returns a *different* group than the one it was called on reads as the same
 //! group.
 //!
+//! # A package-level group used from another file (S-852)
+//!
+//! One file cannot see a name another file of its package declares, so under
+//! `@fw.group.root.default` a name it does not bind reads as a plain router:
+//!
+//! ```text
+//! // routes.go                           // handlers.go
+//! var api = router.Group("/api")         api.GET("/x", h)
+//! ```
+//!
+//! promotes `GET /x` where Gin serves `GET /api/x`. A dialect that captures the
+//! package it declares (`@fw.group.package`) therefore holds back every
+//! registration whose receiver chain ends at such a name — directly, or through
+//! a local bound to a chain that does ([`Facts::unbound_root`]) — and
+//! [`join_packages`] settles them once every file of the run is scanned: a name
+//! that another file of the same package (the same directory and package clause)
+//! declares at package level as a group is refused and counted, anything else
+//! keeps the route it has. A package-level variable is a *group* when its
+//! initializer resolves to anything but a plain builder ([`Facts::package_groups`]);
+//! the package's other files are read for them even where they name no framework
+//! themselves, because the file that declares a group often names none.
+//!
+//! Sync ≡ reindex: the join reads only this run's scans and the indexed files'
+//! text, and a sync with a framework footprint re-scans every candidate, so an
+//! edit to either file moves the route exactly as a fresh index does.
+//!
+//! Known ceilings: a group the package declares through a helper
+//! (`var api = newGroup()`) is read as a plain builder, as it is within one
+//! file; a package-level variable declared without a value and assigned a group
+//! in a function (`var api *gin.RouterGroup`, then `api = r.Group("/api")`) is
+//! no declaration this pass reads; and a group declared in a file the index does
+//! not hold (an ignored file, a build-tagged twin) is not seen.
+//!
 //! # Bracket tokens and absolute paths
 //!
 //! A framework that writes `[controller]` / `[action]` in a route template
@@ -84,7 +117,10 @@ use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
-use super::{is_resolvable_prefix, join_under, refuse, rooted_path, text, FileMatches};
+use super::{
+    dedup_routes, drop_non_path_routes, is_resolvable_prefix, join_under, refuse, rooted_path, text, FileMatches,
+    RouteMatch,
+};
 
 /// How deep a receiver chain or a chain of bindings is followed before the
 /// answer is "unknown". Resolution ends by construction (a link's receiver is a
@@ -227,6 +263,14 @@ pub(super) struct Facts {
     /// the pass cannot read, keep the route's own path. Held per file, like
     /// [`Facts::absorbs`].
     root_default: bool,
+    /// The package the file declares (`@fw.group.package`): present only for a
+    /// dialect whose packages span files, which opts it into [`join_packages`].
+    package: Option<String>,
+    /// Registrations held back from `routes` because their receiver chain ends at
+    /// a name the file does not bind — the name, and the route composed as this
+    /// file reads it. [`join_packages`] refuses the ones whose name a sibling
+    /// file declares as a group and returns the rest.
+    held: Vec<(String, RouteMatch)>,
 }
 
 impl Facts {
@@ -289,6 +333,47 @@ impl Facts {
         }
     }
 
+    /// The name a receiver chain ends at when nothing in this file declares it:
+    /// the chain's links are walked down to their first expression, and a local
+    /// bound to an initializer is followed into it. `None` where the chain ends
+    /// at a name this file binds (a parameter, a plain builder, a proven root),
+    /// at an expression that is no name, or runs past [`MAX_DEPTH`].
+    fn unbound_root(&self, expr: &Expr, at: usize, depth: u8) -> Option<String> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        if let Some(link) = self.links.get(&expr.range) {
+            return self.unbound_root(&link.receiver, at, depth + 1);
+        }
+        let name = expr.name.as_ref()?;
+        match self.visible(name, at) {
+            None => (!self.root_names.contains(name)).then(|| name.clone()),
+            Some(binding) => match &binding.bound {
+                Bound::Init(init) => self.unbound_root(init, binding.reads_from(), depth + 1),
+                Bound::Root | Bound::Opaque => None,
+            },
+        }
+    }
+
+    /// The package-level variables of this file that are groups: a hoisted
+    /// binding whose initializer resolves to a prefix or to anything the pass
+    /// cannot read, or which the file assigns something else. One initialized to
+    /// a plain builder (`var router = gin.Default()`) is not.
+    fn package_groups(&self) -> impl Iterator<Item = &str> {
+        self.bindings.values().flatten().filter_map(|binding| {
+            let Bound::Init(init) = &binding.bound else {
+                return None;
+            };
+            if !binding.hoisted {
+                return None;
+            }
+            let at = binding.reads_from();
+            let group = self.resolve(init, at, 0) != Outcome::Prefix(None)
+                || self.assigned_other_than_a_root(&binding.name, at, 0);
+            group.then_some(binding.name.as_str())
+        })
+    }
+
     fn resolve(&self, expr: &Expr, at: usize, depth: u8) -> Outcome {
         if depth > MAX_DEPTH {
             return Outcome::Unknown;
@@ -347,12 +432,95 @@ pub(super) fn compose(out: &mut FileMatches) {
                     route.path = join_under(&prefix, &route.path, out.groups.absorbs);
                 }
                 finals.push(route.at);
-                out.routes.push(route);
+                match out.groups.package.as_ref().and_then(|_| out.groups.unbound_root(receiver, route.at, 0)) {
+                    Some(name) => out.groups.held.push((name, route)),
+                    None => out.routes.push(route),
+                }
             }
             Outcome::Unknown => refuse(&mut out.refusals, &mut refused, &route),
         }
     }
     out.groups.finals.extend(finals);
+}
+
+/// The directory part of a project-relative path (`""` for one at the root).
+pub(super) fn parent_dir(rel: &str) -> &str {
+    rel.rsplit_once('/').map_or("", |(dir, _)| dir)
+}
+
+/// `true` when the file held back a registration ([`join_packages`] settles it).
+pub(super) fn holds_registrations(out: &FileMatches) -> bool {
+    !out.groups.held.is_empty()
+}
+
+/// Settle the registrations [`compose`] held back, across every scanned file:
+/// one whose receiver chain ends at a name another file of its package declares
+/// at package level as a group is refused and counted, once per registration
+/// ([NFR-RA-05]); every other keeps the route it was composed to.
+///
+/// `siblings` are files of the run's packages that are no candidate themselves
+/// (they name no framework) — they declare groups and promote nothing.
+///
+/// A package is the directory and the package clause the file declares; a file
+/// whose dialect captures no package is in none, so it is never refused here.
+///
+/// [NFR-RA-05]: ../../../../docs/specs/requirements/NFR-RA-05.md
+pub(super) fn join_packages(scanned: &mut [(&str, &mut FileMatches)], siblings: &[(&str, FileMatches)]) {
+    if scanned.iter().all(|(_, m)| m.groups.held.is_empty()) {
+        return;
+    }
+    // Every group each file declares at package level, by package.
+    type Package<'a> = (&'a str, &'a str);
+    let mut declared: HashMap<Package<'_>, Vec<(&str, HashSet<&str>)>> = HashMap::new();
+    let files = scanned
+        .iter()
+        .map(|(rel, m)| (*rel, &**m))
+        .chain(siblings.iter().map(|(rel, m)| (*rel, m)));
+    for (rel, matches) in files {
+        let Some(package) = matches.groups.package.as_deref() else {
+            continue;
+        };
+        declared
+            .entry((parent_dir(rel), package))
+            .or_default()
+            .push((rel, matches.groups.package_groups().collect()));
+    }
+    // Decided before any file is touched: whether each held registration's name
+    // is a group another file of its package declares.
+    let doomed: Vec<Vec<bool>> = scanned
+        .iter()
+        .map(|(rel, m)| {
+            let package = m.groups.package.as_deref().map(|package| (parent_dir(rel), package));
+            m.groups
+                .held
+                .iter()
+                .map(|(name, _)| {
+                    package.and_then(|package| declared.get(&package)).is_some_and(|files| {
+                        files.iter().any(|(other, groups)| other != rel && groups.contains(name.as_str()))
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    for ((_, out), doomed) in scanned.iter_mut().zip(doomed) {
+        let held = std::mem::take(&mut out.groups.held);
+        if held.is_empty() {
+            continue;
+        }
+        let (refusing, kept): (Vec<_>, Vec<_>) = held.into_iter().zip(doomed).partition(|(_, doomed)| *doomed);
+        // A refused registration is one only if it would have been promoted: the
+        // path rule judges it as it judges a route that is kept.
+        let mut refusing: Vec<RouteMatch> = refusing.into_iter().map(|((_, route), _)| route).collect();
+        drop_non_path_routes(&mut refusing);
+        let mut refused: HashSet<usize> = HashSet::new();
+        for route in &refusing {
+            refuse(&mut out.refusals, &mut refused, route);
+        }
+        out.routes.extend(kept.into_iter().map(|((_, route), _)| route));
+        settle_tokens(out);
+        drop_non_path_routes(&mut out.routes);
+        dedup_routes(&mut out.routes);
+    }
 }
 
 /// Substitute the `[controller]` and `[action]` tokens of a route template.
@@ -457,6 +625,7 @@ pub(super) struct Capture<'t> {
     foreign: bool,
     root_default: bool,
     controller: Option<Node<'t>>,
+    package: Option<Node<'t>>,
 }
 
 /// The role a capture plays for [`Capture::take`], or `None` for a capture that
@@ -495,6 +664,7 @@ impl<'t> Capture<'t> {
             "foreign" => self.foreign = true,
             "root.default" => self.root_default = true,
             "token.controller" => self.controller = Some(node),
+            "package" => self.package = Some(node),
             _ => {}
         }
     }
@@ -517,6 +687,9 @@ impl<'t> Capture<'t> {
         }
         facts.absorbs |= self.absorbs;
         facts.root_default |= self.root_default;
+        if let Some(package) = self.package {
+            facts.package = Some(text(package, src).trim().to_string());
+        }
         if let (Some(call), Some(receiver)) = (self.call, self.receiver) {
             let path = self.link_path(src);
             let range = (call.start_byte(), call.end_byte());
@@ -818,6 +991,85 @@ mod tests {
             Outcome::Prefix(Some("/api/v1".to_string()))
         );
         assert_eq!(facts.resolve(&expr(90, 91, Some("a")), 90, 0), Outcome::Unknown);
+    }
+
+    #[test]
+    fn a_chain_is_rooted_at_the_name_nothing_in_the_file_declares() {
+        // `api.Group("/v1")` (10..28) and a local `g = api.Group("/v1")`; `r` is
+        // a bound plain router, `p` a parameter, `gin` a proven root.
+        let mut facts = Facts::default();
+        facts.root_names.insert("gin".to_string());
+        link(&mut facts, (10, 28), expr(10, 13, Some("api")), LinkPath::Literal("/v1".into()));
+        bind(&mut facts, Binding {
+            name: "g".into(),
+            decl: 4,
+            scope: (0, 100),
+            bound: Bound::Init(expr(10, 28, None)),
+            hoisted: false,
+        });
+        bind(&mut facts, Binding { name: "r".into(), decl: 1, scope: (0, 100), bound: Bound::Root, hoisted: false });
+        bind(&mut facts, Binding { name: "p".into(), decl: 2, scope: (0, 100), bound: Bound::Opaque, hoisted: false });
+        let rooted = |expr: Expr| facts.unbound_root(&expr, 50, 0);
+        // The name itself, a chain from it, and a local bound to that chain.
+        assert_eq!(rooted(expr(60, 63, Some("api"))), Some("api".to_string()));
+        assert_eq!(rooted(expr(10, 28, None)), Some("api".to_string()));
+        assert_eq!(rooted(expr(60, 61, Some("g"))), Some("api".to_string()));
+        // A bound name, a proven root and an expression that is no name are not.
+        for bound in [expr(60, 61, Some("r")), expr(60, 61, Some("p")), expr(60, 63, Some("gin")), expr(60, 70, None)] {
+            assert_eq!(rooted(bound.clone()), None, "{bound:?}");
+        }
+    }
+
+    #[test]
+    fn a_hoisted_initializer_that_reads_itself_ends_at_no_name() {
+        // `var a = a.Group("/x")`: the chain starts at the name it initializes, so
+        // the walk loops through its own binding until the depth bound ends it.
+        let mut facts = Facts::default();
+        link(&mut facts, (10, 28), expr(10, 11, Some("a")), LinkPath::Literal("/x".into()));
+        bind(&mut facts, Binding {
+            name: "a".into(),
+            decl: 0,
+            scope: (0, 100),
+            bound: Bound::Init(expr(10, 28, None)),
+            hoisted: true,
+        });
+        assert_eq!(facts.unbound_root(&expr(60, 61, Some("a")), 60, 0), None);
+    }
+
+    #[test]
+    fn a_hoisted_name_assigned_a_group_is_a_package_group() {
+        // `var api = router` (plain), and `api = router.Group("/api")` elsewhere.
+        let mut facts = Facts { root_default: true, ..Facts::default() };
+        link(&mut facts, (30, 50), expr(30, 36, Some("router")), LinkPath::Literal("/api".into()));
+        bind(&mut facts, Binding {
+            name: "api".into(),
+            decl: 0,
+            scope: (0, 100),
+            bound: Bound::Init(expr(10, 16, Some("router"))),
+            hoisted: true,
+        });
+        assert_eq!(facts.package_groups().count(), 0);
+        facts.assigned.entry("api".into()).or_default().insert(60, Some(expr(30, 50, None)));
+        assert_eq!(facts.package_groups().collect::<Vec<_>>(), ["api"]);
+    }
+
+    #[test]
+    fn only_a_hoisted_initializer_that_is_not_a_plain_builder_is_a_package_group() {
+        // `router = gin.Default()` (a plain builder), `api = router.Group("/api")`,
+        // `opaque = router.Group(prefix)` — package-level — and a local `g`.
+        let mut facts = Facts { root_default: true, ..Facts::default() };
+        link(&mut facts, (10, 22), expr(10, 13, Some("gin")), LinkPath::Foreign);
+        link(&mut facts, (30, 50), expr(30, 36, Some("router")), LinkPath::Literal("/api".into()));
+        link(&mut facts, (60, 80), expr(60, 66, Some("router")), LinkPath::Opaque);
+        let init = |span: (usize, usize)| Bound::Init(expr(span.0, span.1, None));
+        for (name, span, hoisted) in
+            [("router", (10, 22), true), ("api", (30, 50), true), ("opaque", (60, 80), true), ("g", (30, 50), false)]
+        {
+            bind(&mut facts, Binding { name: name.into(), decl: 0, scope: (0, 100), bound: init(span), hoisted });
+        }
+        let mut groups: Vec<&str> = facts.package_groups().collect();
+        groups.sort_unstable();
+        assert_eq!(groups, ["api", "opaque"]);
     }
 
     #[test]

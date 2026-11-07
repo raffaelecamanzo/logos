@@ -43,8 +43,10 @@ import type {
   NamedExternal,
   ValueProvenance,
   WorkspaceLink,
+  TopicDeclaration,
   WorkspaceStatus,
   XserviceBuildDeps,
+  XserviceDeclaredTopics,
 } from "../../api/types.ts";
 import type { CanvasEdge, LoadedSet } from "../graph/graphModel.ts";
 
@@ -982,4 +984,76 @@ export function assertedLayer(
     edges: pairs.map((p) => ({ source: serviceId(p.from), target: serviceId(p.to), edge_type: ASSERTED_EDGE_TYPE })),
     links: pairs,
   };
+}
+
+// ── The declared-topic layer (S-491, CR-157 E, FR-WS-36, ADR-72) ─────────────
+// A member's committed configuration DECLARING a topic is never an observed
+// broker edge (BR-54): like the declared and asserted layers it is a separate
+// projection with its own edge class, never folded into `buildServiceMap`'s
+// topic hops, never a binding, never counted in a node's degree. Only a NET-NEW
+// declaration is drawn — the membership the code cannot show. An already
+// observed one is a pair the map already draws as a `publishes`/`subscribes`
+// hop; drawing it again in a second style would put two lines on one fact.
+
+/** The canvas edge type every declared membership is drawn in: dotted, in a hue
+ *  no measured arm uses, with no arrowhead — a declaration has no direction. */
+export const DECLARED_TOPIC_EDGE_TYPE = "declares-topic";
+
+/** The declared-topic layer the service map draws. */
+export interface DeclaredTopicLayer {
+  /** One `declares-topic` canvas edge per drawn net-new `(member, topic node)`
+   *  pair, from the member to each node of the topic (one per schema guard). */
+  edges: CanvasEdge[];
+  /** Every net-new declaration in scope, in payload order (topic, then member,
+   *  file, key, profile) — the panel's rows, drawn or not. */
+  netNew: TopicDeclaration[];
+  /** The server's headline, read, never recomputed (BR-51). */
+  headline: XserviceDeclaredTopics["headline"];
+}
+
+/**
+ * Project the declared-topic relation onto the service map.
+ *
+ * `null` when the workspace declares nothing — no topic-named value was
+ * considered over members all read, or the answer carries no headline at all —
+ * and the map then
+ * renders exactly as it did before the relation existed. A net-new pair whose
+ * member is not a roster service, or whose topic is not a node on `map`, is
+ * listed but not drawn: inventing either endpoint would fabricate a node
+ * (NFR-RA-05). Every figure is the payload's.
+ *
+ * A declaration names a topic WITHOUT its message-schema guard, while the map's
+ * topic nodes carry it (`orders#com.acme.OrderCreated`): the relation strips the
+ * guard (`declared_topics::topic_of`), the inventory does not. So a declared
+ * topic is drawn onto every node whose topic half — the key before `#` — is it.
+ */
+export function declaredTopicLayer(
+  answer: XserviceDeclaredTopics | null | undefined,
+  map: ServiceMap,
+): DeclaredTopicLayer | null {
+  const headline = answer?.headline;
+  // A member the relation could not read keeps the layer: its declarations are
+  // unknown, and an absent panel would read as "declares nothing" (NFR-CC-04).
+  const unread = headline?.members?.unread ?? [];
+  if (!headline || (headline.declarations_considered === 0 && unread.length === 0)) return null;
+  const netNew = (answer.topics ?? []).flatMap((t) => t.declarations.filter((d) => d.status === "net-new"));
+  // Every topic node on the map, by its topic half (the key before `#`).
+  const nodesByTopic = new Map<string, string[]>();
+  for (const t of map.topics) {
+    const half = t.topic.split("#")[0];
+    nodesByTopic.set(half, [...(nodesByTopic.get(half) ?? []), topicId(t.topic)]);
+  }
+  const drawn = new Set<string>();
+  const edges: CanvasEdge[] = [];
+  for (const d of netNew) {
+    const source = serviceId(d.member);
+    if (!map.loaded.nodes[source]) continue;
+    for (const target of nodesByTopic.get(d.topic) ?? []) {
+      const key = `${source}\u0000${target}`;
+      if (drawn.has(key)) continue;
+      drawn.add(key);
+      edges.push({ source, target, edge_type: DECLARED_TOPIC_EDGE_TYPE });
+    }
+  }
+  return { edges, netNew, headline };
 }

@@ -80,6 +80,8 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
     (45, MIGRATION_45),
     (46, MIGRATION_46),
     (47, MIGRATION_47),
+    (48, MIGRATION_48),
+    (49, MIGRATION_49),
 ];
 
 /// Migration 1 — the canonical graph-store schema ([FR-DB-01]).
@@ -3549,6 +3551,69 @@ ALTER TABLE files ADD COLUMN facade TEXT;
 -- 2. Trigger re-extraction: a file with no recorded hash is re-extracted on its
 -- next scan like a modified one, filling the column.
 UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 48 — a Java **static call on a same-package type** written
+/// `T::m` (S-854, [CR-271], [FR-RS-10]): no schema change.
+///
+/// The extractor now writes `T.m(…)` as the type-qualified row `T::m` for a
+/// capitalised receiver no binding of the file declares, where it wrote the
+/// bare `m` unless the file imported or declared `T`; the binder's package
+/// rung then binds a type of the caller's own package. A stored row changes
+/// only by re-extraction, so this migration **triggers it**, as migrations 25,
+/// 28–35 and 41–47 do: every `files.content_hash` is cleared, and the next scan,
+/// index or full-walk sync re-extracts each file like a modified one. Until
+/// then an unchanged file keeps its bare row and binds nothing new — a
+/// missed edge, never an invented one — and a sync equals a cold reindex
+/// afterwards ([NFR-RA-06]). No graph row is deleted. Plugin-agnostic by
+/// construction: no language is named.
+///
+/// Forward-only ([FR-DB-04], [NFR-MA-06]) — asserted on a populated store by
+/// `migration_48_clears_every_hash_and_changes_no_row` in [`super::migrate`].
+///
+/// [CR-271]: ../../../../docs/requests/CR-271-a-static-call-on-a-same-package-type-binds-without-an-import.md
+/// [FR-RS-10]: ../../../../docs/specs/requirements/FR-RS-10.md
+/// [NFR-RA-06]: ../../../../docs/specs/requirements/NFR-RA-06.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_48: &str = "\
+-- Trigger re-extraction (CR-271): a file with no recorded hash is re-extracted
+-- on its next scan like a modified one, writing a Java static call on a
+-- capitalised receiver as T::m.
+UPDATE files SET content_hash = NULL;
+";
+
+/// Migration 49 — the check-run marker records **how much of its evaluated set
+/// was inherited** (S-506, [FR-CF-08], [FR-GV-21]):
+///
+/// - **`check_run.workspace_rules`** — how many of `checked_rules` the member
+///   inherited from the workspace rules tier (`<workspace-root>/.logos/
+///   rules.toml`). With `checked_rules` it splits the evaluated set by origin, so
+///   a member whose whole contract is inherited records a present contract whose
+///   rules came from the root, not one it authored.
+///
+/// Nullable, the [migration-21](MIGRATION_21) convention: `NULL` means the run
+/// had no workspace rules tier — every single-root marker, unchanged
+/// ([ADR-52]) — or the marker predates this migration. Neither reads as an
+/// inherited count, which is the truth for both.
+///
+/// Additive only — one `ALTER TABLE ... ADD COLUMN`. Nothing is re-extracted,
+/// and an existing store upgrades in place with no re-index ([FR-DB-04],
+/// [NFR-MA-06]) — asserted by
+/// `migration_49_adds_the_marker_inherited_rule_count_and_reextracts_nothing` in
+/// [`super::migrate`].
+///
+/// [FR-CF-08]: ../../../../docs/specs/requirements/FR-CF-08.md
+/// [FR-GV-21]: ../../../../docs/specs/requirements/FR-GV-21.md
+/// [ADR-52]: ../../../../docs/specs/architecture/decisions/ADR-52.md
+/// [FR-DB-04]: ../../../../docs/specs/requirements/FR-DB-04.md
+/// [NFR-MA-06]: ../../../../docs/specs/requirements/NFR-MA-06.md
+const MIGRATION_49: &str = "\
+-- check_run gains the ORIGIN SPLIT of its evaluated set (S-506, FR-CF-08):
+-- how many of checked_rules the member inherited from the workspace rules tier.
+-- NULL means no workspace rules tier (every single-root marker), or a marker
+-- written before this migration; neither is an inherited count.
+ALTER TABLE check_run ADD COLUMN workspace_rules INTEGER CHECK (workspace_rules >= 0);
 ";
 
 #[cfg(test)]

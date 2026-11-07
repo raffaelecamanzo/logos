@@ -1024,6 +1024,7 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
             "search" => &["xservice", "search", "f", "--json"],
             "build-deps" => &["xservice", "build-deps", "--json"],
             "type-refs" => &["xservice", "type-refs", "--json"],
+            "declared-topics" => &["xservice", "declared-topics", "--json"],
             other => panic!(
                 "`xservice {other}` has no representative invocation here — add one so its \
                  degraded exit code is pinned (CR-100 §4.4 scope)"
@@ -1043,6 +1044,14 @@ fn the_xservice_group_keeps_exit_zero_over_a_degraded_workspace() {
             let answer: Value = serde_json::from_slice(&out.stdout).expect("type-refs --json is JSON");
             assert_eq!(
                 answer["headline"]["members"]["unread_reasons"]["broken"], "declared types could not be read",
+                "the degraded member is a per-member error inside the answer: {answer}"
+            );
+        }
+        // The declared-topic relation names it the same way (ADR-53, S-490).
+        if name == "declared-topics" {
+            let answer: Value = serde_json::from_slice(&out.stdout).expect("declared-topics --json is JSON");
+            assert_eq!(
+                answer["headline"]["members"]["unread_reasons"]["broken"], "declared-topic facts could not be read",
                 "the degraded member is a per-member error inside the answer: {answer}"
             );
         }

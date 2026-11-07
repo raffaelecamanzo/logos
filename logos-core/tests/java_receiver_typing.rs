@@ -340,9 +340,11 @@ fn a_bare_or_this_call_is_typed_only_where_the_enclosing_class_is_provable() {
     }
 }
 
-/// A static type name is a type only when the file proves it is one — its
-/// single-type import or its own declaration — and no variable of that name
-/// obscures it. A STATIC import names a member, never a type.
+/// A static type name is a type when the file names it as one — its
+/// single-type import, its own declaration or, since S-854, a capitalised name
+/// the binder scopes (`Audit`, a type of the caller's package or none) — and no
+/// variable of that name obscures it. A STATIC import names a member, never a
+/// type, and an all-capitals name (`INSTANCE`) is a constant's.
 const STATIC_FILE: &str = "src/main/java/com/x/svc/Statics.java";
 const STATICS: &str = "package com.x.svc;\n\
 \n\
@@ -359,7 +361,7 @@ public class Statics {\n\
 }\n";
 
 #[test]
-fn a_static_type_name_is_typed_through_the_files_import_or_own_declaration_only() {
+fn a_static_type_name_is_typed_through_its_import_its_declaration_or_its_shape() {
     let tmp = fixture();
     write(tmp.path(), STATIC_FILE, STATICS);
     let engine = index(&tmp);
@@ -368,7 +370,40 @@ fn a_static_type_name_is_typed_through_the_files_import_or_own_declaration_only(
         [
             row("constant", "tick", RefForm::Method),
             row("own", "Nested::make", RefForm::Path),
-            row("undeclared", "make", RefForm::Method),
+            row("undeclared", "Audit::make", RefForm::Path),
+        ]
+    );
+}
+
+/// The import and own-declaration proofs still name a type the shape does
+/// not (S-854 review): an all-capitals type the file imports (`HTTP`) or
+/// declares (`CRC`) is typed through them, where an all-capitals name the file
+/// neither imports nor declares (`MAX`) is a constant's and keeps its bare row.
+const CAPITALS_FILE: &str = "src/main/java/com/x/svc/Capitals.java";
+const CAPITALS: &str = "package com.x.svc;\n\
+\n\
+import com.x.util.HTTP;\n\
+\n\
+public class Capitals {\n\
+    public void imported() { HTTP.get(); }\n\
+    public void own() { CRC.make(); }\n\
+    public void constant() { MAX.tick(); }\n\
+    static class CRC {\n\
+        static void make() {}\n\
+    }\n\
+}\n";
+
+#[test]
+fn an_all_capitals_type_is_typed_through_its_import_or_its_own_declaration() {
+    let tmp = fixture();
+    write(tmp.path(), CAPITALS_FILE, CAPITALS);
+    let engine = index(&tmp);
+    assert_eq!(
+        calls_from(engine.runtime().unwrap(), CAPITALS_FILE),
+        [
+            row("constant", "tick", RefForm::Method),
+            row("imported", "HTTP::get", RefForm::Path),
+            row("own", "CRC::make", RefForm::Path),
         ]
     );
 }

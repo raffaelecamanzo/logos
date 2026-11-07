@@ -42,6 +42,14 @@
 //!   makes and published beside its figures with its own
 //!   `declared_contract_pairs` headline; never a binding candidate
 //!   ([FR-WS-31], [BR-57], [ADR-68]).
+//! - the [`declared_topics`] — the in-memory **declared-topic relation**: a
+//!   topic-named key in a member's committed `src/main` configuration whose
+//!   value names a topic some member's broker site captures declares
+//!   `declares-topic(M → T)`, provenance `config-declared`, marked already
+//!   observed or net-new (split config-only / site-refused / site-uncaptured)
+//!   on first query, with its own `declared_topic_pairs` headline. Directionless
+//!   and never a `BridgeEdge`, a `Producer`, a `Consumer`, a coupling or a gate
+//!   input ([FR-WS-36], [BR-54], [ADR-72]).
 //! - the [`external_join`] — the **external join**: a `no-provider-in-workspace`
 //!   REST call binds `bound-external` to the named external its own member
 //!   declares, on an exact path under a committed base path — a deploy
@@ -89,6 +97,9 @@
 //!
 //! [FR-WS-33]: ../../../docs/specs/requirements/FR-WS-33.md
 //! [FR-WS-35]: ../../../docs/specs/requirements/FR-WS-35.md
+//! [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+//! [ADR-72]: ../../../docs/specs/architecture/decisions/ADR-72.md
+//! [BR-54]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [BR-58]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [BR-60]: ../../../docs/specs/software-spec.md#327-workspace-federation
 //! [ADR-70]: ../../../docs/specs/architecture/decisions/ADR-70.md
@@ -136,6 +147,7 @@ pub mod build_deps;
 pub mod budget;
 pub mod coverage;
 pub mod declared_contracts;
+pub mod declared_topics;
 pub mod enable;
 pub mod external_join;
 pub mod governance;
@@ -175,6 +187,11 @@ pub use declared_contracts::{
     DeclaredContractRelation, DocumentAccounting, ExternalCopy, ExternalId, IdentityCollision,
     NamedExternal, ResolvedTie, VENDORED_SPEC,
 };
+pub use declared_topics::{
+    DeclarationStatus, DeclaredTopicHeadline, DeclaredTopicMembers, DeclaredTopicRelation,
+    DeclaredTopics, KeyShape, NetNewTally, PairTally, PlaceholderHop, RefusedDeclaration,
+    SiteEvidence, SiteRefusal, SiteState, TopicDeclaration, CONFIG_DECLARED,
+};
 pub use external_join::{
     BaseOrigin, BasePath, BasePathEvidence, BaseSource, BoundExternal, BoundExternalHeadline,
     ExternalBinding, ExternalJoinRow, JoinAccounting, JoinOutcome, JoinRefusal, OperationMatch,
@@ -194,9 +211,10 @@ pub use reach::{
     RowsApart, UNION_VIEW,
 };
 pub use query::{
-    workspace_status, xservice_callers, xservice_impact, xservice_route_providers, xservice_search,
-    CrossServiceImpact, KindCandidates, MemberResult, MemberStatus, WorkspaceStatus,
-    XserviceCallers, XserviceImpact, XserviceRouteProviders, XserviceSearch,
+    workspace_status, xservice_callers, xservice_declared_topics, xservice_impact,
+    xservice_route_providers, xservice_search, CrossServiceImpact, DeclaredTopicEntry,
+    KindCandidates, MemberResult, MemberStatus, WorkspaceStatus, XserviceCallers,
+    XserviceDeclaredTopics, XserviceImpact, XserviceRouteProviders, XserviceSearch,
 };
 pub use build_deps::{
     model_library_context, xservice_build_deps, ArtifactCollision, BuildDependencies,

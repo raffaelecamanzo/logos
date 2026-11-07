@@ -1797,6 +1797,17 @@ pub struct CheckRunRow {
     /// [`checked_rules`]: CheckRunRow::checked_rules
     /// [CR-140]: ../../../docs/requests/CR-140-the-recorded-check-marker-carries-what-it-evaluated.md
     pub operation: Option<String>,
+    /// How many of [`checked_rules`] the member inherited from the workspace
+    /// rules tier (S-506, [FR-CF-08]): the evaluated set's origin split, `Some(0)`
+    /// when a tier is present and supplied none.
+    ///
+    /// `None` when the run had no workspace rules tier — a single-root project,
+    /// or a member whose root declares no `rules.toml` — and on a marker written
+    /// before migration 49. Either way no rule of that run was inherited.
+    ///
+    /// [`checked_rules`]: CheckRunRow::checked_rules
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    pub workspace_rules: Option<i64>,
 }
 
 /// [`CheckRunRow::operation`] for a [`check_rules`](crate::Quality::check_rules)
@@ -1845,6 +1856,9 @@ pub struct NewCheckRun<'a> {
     /// [`CHECK_RUN_OP_CHECK`] or [`CHECK_RUN_OP_SCAN`]. Any other value is
     /// refused by migration 21's `CHECK`.
     pub operation: &'a str,
+    /// How many of `checked_rules` the workspace rules tier supplied, `None`
+    /// without a tier. See [`CheckRunRow::workspace_rules`].
+    pub workspace_rules: Option<u32>,
 }
 
 /// The fields needed to insert a `violations` row (S-020, [FR-GV-02]).
@@ -2372,6 +2386,18 @@ pub trait GraphStore {
     /// [CR-121]: ../../../docs/requests/CR-121-caller-to-callee-and-producer-to-consumer-across-services.md
     /// [FR-WS-19]: ../../../docs/specs/requirements/FR-WS-19.md
     fn config_definitions(&self, key: &str) -> Result<Vec<ConfigDefinition>>;
+
+    /// Every committed configuration definition this store holds, keyed by
+    /// canonical key (S-489, [FR-WS-36]).
+    ///
+    /// `config_corpus()[k]` equals [`config_definitions(k)`](Self::config_definitions)
+    /// for every key `k` the store defines — same rows, same `(path, value)`
+    /// order — and a key no source defines is absent. One read rather than one
+    /// per key, for a caller that must enumerate the keys to find the ones it
+    /// wants (the declared-topic relation looks for topic-named keys).
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    fn config_corpus(&self) -> Result<std::collections::BTreeMap<String, Vec<ConfigDefinition>>>;
 
     /// Every build manifest this member's last index or sync recorded, with the
     /// artifacts each produces and references (S-462, [CR-148] §3.2 A).
@@ -3758,6 +3784,33 @@ impl GraphStore for SqliteGraphStore {
             .collect::<rusqlite::Result<Vec<_>>>()
             .context("collecting configuration definitions for key")?;
         Ok(rows)
+    }
+
+    fn config_corpus(&self) -> Result<std::collections::BTreeMap<String, Vec<ConfigDefinition>>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT v.key, f.path, s.profile, v.value \
+             FROM config_values v \
+             JOIN config_sources s ON s.id = v.source_id \
+             JOIN files f ON f.id = s.file_id \
+             ORDER BY v.key, f.path, v.value",
+        )?;
+        let mut corpus: std::collections::BTreeMap<String, Vec<ConfigDefinition>> =
+            std::collections::BTreeMap::new();
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                ConfigDefinition {
+                    path: row.get(1)?,
+                    profile: row.get(2)?,
+                    value: row.get(3)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (key, definition) = row.context("collecting the configuration corpus")?;
+            corpus.entry(key).or_default().push(definition);
+        }
+        Ok(corpus)
     }
 
     fn build_manifests(&self) -> Result<Vec<BuildManifestRow>> {
@@ -5485,7 +5538,8 @@ impl GraphStore for SqliteGraphStore {
         // written before migration 21, and it stays distinguishable from a
         // recorded zero all the way to the surface (S-437, CR-140 CRA-05).
         let mut stmt = self.conn.prepare_cached(
-            "SELECT ran_at, commit_sha, violation_count, checked_rules, rules_present, operation \
+            "SELECT ran_at, commit_sha, violation_count, checked_rules, rules_present, operation, \
+                    workspace_rules \
              FROM check_run WHERE id = 1",
         )?;
         stmt.query_row([], |row| {
@@ -5496,6 +5550,7 @@ impl GraphStore for SqliteGraphStore {
                 checked_rules: row.get(3)?,
                 rules_present: row.get(4)?,
                 operation: row.get(5)?,
+                workspace_rules: row.get(6)?,
             })
         })
         .optional()
@@ -7614,17 +7669,19 @@ impl BatchWriter<'_> {
         // `CHECK (id = 1)` in migration 20 makes that structural — this ON
         // CONFLICT is how the row is kept current, not how it is kept single.
         //
-        // One statement, six values. The evaluated set (S-437) is written here
+        // One statement, seven values. The evaluated set (S-437, S-506) is written here
         // rather than by a follow-up UPDATE precisely so there is no window in
         // which the row carries a count without its denominator (CR-140
         // CRA-07); every field of the marker arrives or none of it does.
         self.conn
             .execute(
                 "INSERT INTO check_run \
-                 (id, ran_at, commit_sha, violation_count, checked_rules, rules_present, operation) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6) \
+                 (id, ran_at, commit_sha, violation_count, checked_rules, rules_present, operation, \
+                  workspace_rules) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(id) DO UPDATE SET ran_at = ?1, commit_sha = ?2, violation_count = ?3, \
-                                               checked_rules = ?4, rules_present = ?5, operation = ?6",
+                                               checked_rules = ?4, rules_present = ?5, operation = ?6, \
+                                               workspace_rules = ?7",
                 rusqlite::params![
                     run.ran_at,
                     run.commit_sha,
@@ -7632,6 +7689,7 @@ impl BatchWriter<'_> {
                     run.checked_rules,
                     run.rules_present,
                     run.operation,
+                    run.workspace_rules,
                 ],
             )
             .context("recording the check-run marker")?;

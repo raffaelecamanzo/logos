@@ -377,8 +377,8 @@ fn fresh_database_applies_all_migrations_and_records_them() {
     let store = mem();
     assert_eq!(
         store.schema_version().unwrap(),
-        47,
-        "v47 = migration 47 (S-832 CR-261 a file's declared facade; v46 = S-830 CR-260 a Go callable's signature, re-extracted)"
+        49,
+        "v49 = migration 49 (S-506 CR-165 the marker's inherited rule count; v48 = S-854 CR-271 Java same-package static calls, re-extracted)"
     );
 
     let recorded: i64 = store
@@ -386,7 +386,7 @@ fn fresh_database_applies_all_migrations_and_records_them() {
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
     assert_eq!(
-        recorded, 47,
+        recorded, 49,
         "schema_versions records every applied migration"
     );
 }
@@ -397,16 +397,16 @@ fn reopening_an_up_to_date_database_is_idempotent() {
     let path = dir.path().join("logos.db");
     {
         let store = SqliteGraphStore::open(&path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 47);
+        assert_eq!(store.schema_version().unwrap(), 49);
     }
     // Reopen: migrations must NOT re-apply (no duplicate schema_versions rows).
     let store = SqliteGraphStore::open(&path).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 47);
+    assert_eq!(store.schema_version().unwrap(), 49);
     let rows: i64 = store
         .conn
         .query_row("SELECT count(*) FROM schema_versions", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(rows, 47, "migrations must not re-apply on reopen");
+    assert_eq!(rows, 49, "migrations must not re-apply on reopen");
 }
 
 // ── NFR-RA-07: an interrupted write batch rolls back atomically ──────────────
@@ -528,7 +528,7 @@ fn database_file_is_copyable_and_reopens_intact() {
     std::fs::copy(&original, &copy).unwrap();
 
     let reopened = SqliteGraphStore::open(&copy).unwrap();
-    assert_eq!(reopened.schema_version().unwrap(), 47);
+    assert_eq!(reopened.schema_version().unwrap(), 49);
     let hits = reopened.search("portable", None, 10).unwrap();
     assert_eq!(hits.len(), 1, "all data must survive a plain file copy");
     assert_eq!(hits[0].name, "portable");
@@ -1325,11 +1325,11 @@ fn upgrading_a_v1_database_applies_migration_two_forward_only() {
     }
 
     // Opening through the store must upgrade v1 → latest without touching v1
-    // data (the runner applies v2..v47 forward-only).
+    // data (the runner applies v2..v49 forward-only).
     let store = SqliteGraphStore::open(&path).unwrap();
     assert_eq!(
         store.schema_version().unwrap(),
-        47,
+        49,
         "v1 store upgrades to the latest version"
     );
     assert!(
@@ -3399,6 +3399,57 @@ fn re_ingesting_a_configuration_source_replaces_it_and_absorbs_a_duplicate_pair(
         )
         .unwrap();
     assert_eq!((profile.as_deref(), value.as_str()), (Some("prod"), "two"));
+}
+
+/// **The whole corpus is the per-key read, all at once** (S-489, [FR-WS-36]):
+/// every key `config_corpus` holds answers exactly what `config_definitions`
+/// answers for it — same rows, same `(path, value)` order, profiles carried —
+/// and a key no source defines is absent. Two sources disagreeing on one key
+/// are both kept.
+///
+/// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+#[test]
+fn the_configuration_corpus_is_every_key_as_the_per_key_read_returns_it() {
+    let mut store = mem();
+    let base = store
+        .write_batch(|w| w.insert_file("src/main/resources/application.yml", Some("yaml"), Some("h1")))
+        .unwrap();
+    let dev = store
+        .write_batch(|w| w.insert_file("src/main/resources/application-dev.yml", Some("yaml"), Some("h2")))
+        .unwrap();
+    let base_values = NewConfigSource {
+        profile: None,
+        values: &[("spring.kafka.topics.orders", "orders"), ("app.name", "svc")],
+    };
+    let dev_values = NewConfigSource {
+        profile: Some("dev"),
+        values: &[("spring.kafka.topics.orders", "orders-dev")],
+    };
+    store.write_batch(|w| w.replace_config_source(base, Some(base_values))).unwrap();
+    store.write_batch(|w| w.replace_config_source(dev, Some(dev_values))).unwrap();
+
+    let corpus = store.config_corpus().expect("config_corpus succeeds");
+    assert_eq!(
+        corpus.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["app.name", "spring.kafka.topics.orders"],
+        "every defined key, and no other"
+    );
+    for (key, defs) in &corpus {
+        assert_eq!(defs, &store.config_definitions(key).unwrap(), "{key}");
+    }
+    let orders = &corpus["spring.kafka.topics.orders"];
+    assert_eq!(
+        orders
+            .iter()
+            .map(|d| (d.path.as_str(), d.profile.as_deref(), d.value.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("src/main/resources/application-dev.yml", Some("dev"), "orders-dev"),
+            ("src/main/resources/application.yml", None, "orders"),
+        ],
+        "both definitions of the disagreeing key, in path order"
+    );
+    assert!(mem().config_corpus().unwrap().is_empty(), "an empty store has an empty corpus");
 }
 
 /// `(config_sources, config_values)` row counts, read straight off the store.

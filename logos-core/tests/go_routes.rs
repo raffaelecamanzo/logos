@@ -1195,3 +1195,301 @@ func routes() {
     assert_eq!(route_names(rt), ["GET /api/y", "GET /x"]);
     assert_eq!(result.framework.routes_not_composed, 0);
 }
+
+// ── A group used from another file of its package (S-852, CR-270, FR-FW-03) ──
+
+/// The story's two files: a package-level group in one, a registration on it in
+/// a sibling of the same package. Gin serves the route at `/api/x`.
+const GROUP_FILE: &str = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+var router = gin.Default()
+var api = router.Group(\"/api\")
+";
+
+const USE_FILE: &str = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+func h(c *gin.Context) {}
+
+func register() {
+	api.GET(\"/x\", h)
+}
+";
+
+fn index_tree(files: &[(&str, &str)]) -> (TempDir, Engine, logos_core::models::pipeline::FrameworkStats) {
+    let tmp = TempDir::new().unwrap();
+    for (rel, contents) in files {
+        write(tmp.path(), rel, contents);
+    }
+    let engine = Engine::start(tmp.path()).expect("engine starts");
+    let stats = engine.pipeline().index().framework;
+    (tmp, engine, stats)
+}
+
+/// Before S-852 the route was promoted as `GET /x`, a path Gin does not serve.
+#[test]
+fn a_gin_group_declared_in_a_sibling_file_is_refused_and_counted() {
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", GROUP_FILE), ("handlers.go", USE_FILE)]);
+    let rt = engine.runtime().unwrap();
+
+    assert_eq!(route_names(rt), Vec::<String>::new());
+    assert!(route_links(rt).is_empty());
+    assert_eq!(stats.routes_not_composed, 1);
+}
+
+/// The control: the same lines in one file compose, and nothing is refused.
+#[test]
+fn the_same_group_lines_in_one_file_still_give_the_group_route() {
+    let one_file = format!("{GROUP_FILE}\nfunc h(c *gin.Context) {{}}\n\nfunc register() {{\n\tapi.GET(\"/x\", h)\n}}\n");
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", &one_file)]);
+    let rt = engine.runtime().unwrap();
+
+    assert_eq!(route_names(rt), ["GET /api/x"]);
+    assert_eq!(route_links(rt), [("GET /api/x".to_string(), "h".to_string())]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
+
+/// A function-local group of the same name in another file is the local, and a
+/// package-level variable that is no group is a plain router: neither is
+/// refused.
+#[test]
+fn a_local_group_and_a_package_level_non_group_variable_are_unaffected() {
+    let routes = format!("{GROUP_FILE}var engine = gin.Default()\n");
+    let handlers = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+func h(c *gin.Context) {}
+
+func local(r *gin.Engine) {
+	api := r.Group(\"/loc\")
+	api.GET(\"/y\", h)
+}
+
+func plain() {
+	engine.GET(\"/e\", h)
+	apis.GET(\"/near\", h)
+}
+
+func viaparam(api *gin.Engine) {
+	api.GET(\"/p\", h)
+}
+
+func vialocal() {
+	api := gin.New()
+	api.GET(\"/n\", h)
+}
+";
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", &routes), ("handlers.go", handlers)]);
+
+    // `apis` is one character from `api`: a name nothing declares, so a plain router.
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /e", "GET /loc/y", "GET /n", "GET /near", "GET /p"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
+
+/// A chain that starts at a sibling file's group, and a local bound to one, are
+/// uses of it as much as a registration on its name is.
+#[test]
+fn a_chain_or_a_local_derived_from_a_sibling_files_group_is_refused() {
+    let handlers = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+func h(c *gin.Context) {}
+
+func register() {
+	api.Group(\"/v1\").GET(\"/c\", h)
+	g := api.Group(\"/v2\")
+	g.GET(\"/d\", h)
+}
+";
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", GROUP_FILE), ("handlers.go", handlers)]);
+
+    assert_eq!(route_names(engine.runtime().unwrap()), Vec::<String>::new());
+    assert_eq!(stats.routes_not_composed, 2);
+}
+
+/// The package is the directory and its package clause: the same name in another
+/// directory is another package's, and a file that declares the group but names
+/// no framework (so is no candidate itself) is still part of its package.
+#[test]
+fn a_package_is_a_directory_and_a_group_file_need_not_name_gin() {
+    let group_without_gin = "package server\n\nvar api = router.Group(\"/api\")\n";
+    let engine_file = "\
+package server
+
+import \"github.com/gin-gonic/gin\"
+
+var router = gin.Default()
+";
+    // The same package name in another directory, and the external test package
+    // of the same directory: neither is the package that declares `api`.
+    let elsewhere = USE_FILE.replace("package main", "package server").replace("\"/x\"", "\"/other\"");
+    let external = USE_FILE.replace("package main", "package server_test").replace("\"/x\"", "\"/ext\"");
+    let (_tmp, engine, stats) = index_tree(&[
+        ("server/engine.go", engine_file),
+        ("server/routes.go", group_without_gin),
+        ("server/handlers.go", &USE_FILE.replace("package main", "package server")),
+        ("other/handlers.go", &elsewhere),
+        ("server/handlers_ext_test.go", &external),
+    ]);
+
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /ext", "GET /other"]);
+    assert_eq!(stats.routes_not_composed, 1);
+}
+
+/// NFR-RA-06: editing either file and syncing it alone leaves the routes, the
+/// edges and the count a fresh index of the edited tree has.
+#[test]
+fn a_synced_edit_of_either_file_equals_a_fresh_index_of_the_edited_tree() {
+    let plain_group = GROUP_FILE.replace("router.Group(\"/api\")", "router");
+    assert_ne!(plain_group, GROUP_FILE, "the fixture's group line moved: the replace did nothing");
+    let local_use = USE_FILE.replace("api.GET(\"/x\", h)", "api := router.Group(\"/z\")\n\tapi.GET(\"/x\", h)");
+    assert_ne!(local_use, USE_FILE);
+
+    let (tmp, engine, _) = index_tree(&[("routes.go", GROUP_FILE), ("handlers.go", USE_FILE)]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(route_names(rt), Vec::<String>::new());
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+
+    for (edited, contents, expected_routes, expected_refused) in [
+        ("routes.go", plain_group.as_str(), vec!["GET /x"], 0),
+        ("routes.go", GROUP_FILE, vec![], 1),
+        ("handlers.go", local_use.as_str(), vec!["GET /z/x"], 0),
+        ("handlers.go", USE_FILE, vec![], 1),
+    ] {
+        write(tmp.path(), edited, contents);
+        let synced = engine.pipeline().sync(&[root.join(edited)]).framework;
+        assert_eq!(route_names(rt), expected_routes, "after editing {edited}");
+        assert_eq!(synced.routes_not_composed, expected_refused, "after editing {edited}");
+
+        let fresh = TempDir::new().unwrap();
+        for rel in ["routes.go", "handlers.go"] {
+            write(fresh.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+        }
+        let cold = Engine::start(fresh.path()).expect("engine starts");
+        let indexed = cold.pipeline().index().framework;
+        assert_eq!(synced.routes_not_composed, indexed.routes_not_composed, "after editing {edited}");
+        assert_eq!(route_links(rt), route_links(cold.runtime().unwrap()), "after editing {edited}");
+        let diff = fingerprint_difference(
+            (tmp.path(), &graph_fingerprint(rt)),
+            (fresh.path(), &graph_fingerprint(cold.runtime().unwrap())),
+        );
+        assert!(diff.is_empty(), "sync-to-state must equal index-of-state after {edited}: {diff:#?}");
+    }
+}
+
+/// The declaring file names no framework, so the pass never admits it as a
+/// candidate: syncing it alone must still move the sibling's route, as a fresh
+/// index of the edited tree does.
+#[test]
+fn a_synced_edit_of_a_group_file_that_names_no_gin_equals_a_fresh_index() {
+    let engine_file = "package main\n\nimport \"github.com/gin-gonic/gin\"\n\nvar router = gin.Default()\n";
+    let group = "package main\n\nvar api = router.Group(\"/api\")\n";
+    let plain = "package main\n\nvar api = router\n";
+    let (tmp, engine, _) =
+        index_tree(&[("main.go", engine_file), ("routes.go", group), ("handlers.go", USE_FILE)]);
+    let rt = engine.runtime().unwrap();
+    assert_eq!(route_names(rt), Vec::<String>::new());
+    let root = tmp.path().canonicalize().expect("canonicalize root");
+
+    for (contents, expected_routes, expected_refused) in [(plain, vec!["GET /x"], 0), (group, vec![], 1)] {
+        write(tmp.path(), "routes.go", contents);
+        let synced = engine.pipeline().sync(&[root.join("routes.go")]).framework;
+        assert_eq!(route_names(rt), expected_routes, "after editing routes.go to {contents}");
+        assert_eq!(synced.routes_not_composed, expected_refused, "after editing routes.go to {contents}");
+
+        let fresh = TempDir::new().unwrap();
+        for rel in ["main.go", "routes.go", "handlers.go"] {
+            write(fresh.path(), rel, &fs::read_to_string(tmp.path().join(rel)).unwrap());
+        }
+        let cold = Engine::start(fresh.path()).expect("engine starts");
+        let indexed = cold.pipeline().index().framework;
+        assert_eq!(synced.routes_not_composed, indexed.routes_not_composed);
+        assert_eq!(route_links(rt), route_links(cold.runtime().unwrap()));
+        let diff = fingerprint_difference(
+            (tmp.path(), &graph_fingerprint(rt)),
+            (fresh.path(), &graph_fingerprint(cold.runtime().unwrap())),
+        );
+        assert!(diff.is_empty(), "sync-to-state must equal index-of-state: {diff:#?}");
+    }
+}
+
+/// A local declared without a value (`var api *gin.Engine`) and a named result
+/// are the function's own variables: one named like a sibling file's group hides
+/// it, as a `:=` local does.
+#[test]
+fn a_value_less_local_or_named_result_hides_a_sibling_files_group() {
+    let handlers = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+func h(c *gin.Context) {}
+
+func local() {
+	var api *gin.Engine
+	api = gin.New()
+	api.GET(\"/localvar\", h)
+}
+
+func named() (api *gin.Engine) {
+	api = gin.New()
+	api.GET(\"/named\", h)
+	return
+}
+
+func listed() {
+	var (
+		api *gin.Engine
+	)
+	api = gin.New()
+	api.GET(\"/listed\", h)
+}
+";
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", GROUP_FILE), ("handlers.go", handlers)]);
+
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /listed", "GET /localvar", "GET /named"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
+
+/// A package-level variable initialised to a plain router is a group once the
+/// declaring file assigns it one, wherever that assignment sits in the file.
+#[test]
+fn a_package_variable_assigned_a_group_in_its_own_file_is_refused_from_a_sibling() {
+    let routes = "\
+package main
+
+import \"github.com/gin-gonic/gin\"
+
+var router = gin.Default()
+var api = router
+
+func setup() {
+	api = router.Group(\"/api\")
+}
+";
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", routes), ("handlers.go", USE_FILE)]);
+
+    assert_eq!(route_names(engine.runtime().unwrap()), Vec::<String>::new());
+    assert_eq!(stats.routes_not_composed, 1);
+}
+
+/// The control of the one above, and the dialect's default carried by the
+/// package clause: a declaring file with no registration and no `Group` call
+/// still reads `gin.Default()` as a plain router, so the sibling keeps its route.
+#[test]
+fn a_package_variable_that_is_a_plain_router_leaves_a_siblings_route_alone() {
+    let routes = "package main\n\nimport \"github.com/gin-gonic/gin\"\n\nvar router = gin.Default()\nvar api = router\n";
+    let (_tmp, engine, stats) = index_tree(&[("routes.go", routes), ("handlers.go", USE_FILE)]);
+
+    assert_eq!(route_names(engine.runtime().unwrap()), ["GET /x"]);
+    assert_eq!(stats.routes_not_composed, 0);
+}
