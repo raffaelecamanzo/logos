@@ -71,7 +71,9 @@
 //! composed by `group`, not by `compose_prefixes`. A registration on an Express
 //! router takes the path its mount gives, usually in another file, so `mount`
 //! joins it once per run over every candidate's facts, after the per-file scans
-//! (S-822).
+//! (S-822) — and, once a candidate holds a registration back, over the mounts of
+//! every other file of a language whose query states them whose text calls the
+//! mount method; those files promote nothing themselves (S-853).
 //!
 //! # Never fabricate ([NFR-RA-05])
 //!
@@ -626,6 +628,18 @@ pub fn run(
             .collect()
     });
 
+    // A registration on a name its own file does not bind waits for the groups
+    // its package declares in other files (S-852). The package's files that name
+    // no framework are read for those groups too — and promote nothing.
+    let siblings = package_siblings(runtime, registry, root, &files, &candidate_ids, &scanned);
+    // A mount may be written in a file that names no framework (S-853): every
+    // other file of a language whose query states mounts is read for its mount
+    // facts alone, once a candidate holds a registration back for one.
+    let mut mounting = mount_files(runtime, registry, root, &files, &candidate_ids, &scanned);
+    let mut views: Vec<(&str, &mut FileMatches)> = scanned.iter_mut().map(|(_, rel, m)| (*rel, m)).collect();
+    group::join_packages(&mut views, &siblings);
+    views.extend(mounting.iter_mut().map(|(rel, m)| (*rel, m)));
+
     // A router's routes take the prefixes of the mounts the scanned files state
     // (S-822), each import's specifier read by the binder as an import row is.
     // That reading needs the resolution pass's specifier facts, which `index`
@@ -634,7 +648,6 @@ pub fn run(
     // mount names an import.
     type Imports<'n> = (binder::Index, HashMap<&'n str, &'n NodeRow>, HashMap<NodeId, &'n str>);
     let imports: std::cell::OnceCell<Imports<'_>> = std::cell::OnceCell::new();
-    let mut views: Vec<(&str, &mut FileMatches)> = scanned.iter_mut().map(|(_, rel, m)| (*rel, m)).collect();
     mount::join(&mut views, |importer, spec| {
         let (index, modules, paths) = imports.get_or_init(|| {
             let modules = file_modules(&nodes, &edges);
@@ -693,6 +706,103 @@ pub fn run(
         },
         newly_promoted,
     ))
+}
+
+/// The files of the packages a candidate holds a registration in (S-852) that
+/// are no candidate themselves, read for the groups they declare: a file that
+/// states a package-level group usually names no framework (`var api =
+/// router.Group("/api")`), so the ledger never admitted it. Only a directory that
+/// holds a registration waiting on its package is read, and only the files of the
+/// holder's own extension: a pass with nothing held reads nothing here. Only the
+/// facts are collected ([`collect_matches`]), so these files promote no route and
+/// are not counted in `files_scanned`.
+fn package_siblings<'f>(
+    runtime: &Runtime,
+    registry: &LanguageRegistry,
+    root: &Path,
+    files: &'f [crate::graph_store::FileRecord],
+    candidate_ids: &HashSet<i64>,
+    scanned: &[(i64, &str, FileMatches)],
+) -> Vec<(&'f str, FileMatches)> {
+    let extension = |rel: &str| Path::new(rel).extension().map(|e| e.to_string_lossy().into_owned());
+    let holding: HashSet<(&str, Option<String>)> = scanned
+        .iter()
+        .filter(|(_, _, m)| group::holds_registrations(m))
+        .map(|(_, rel, _)| (group::parent_dir(rel), extension(rel)))
+        .collect();
+    if holding.is_empty() {
+        return Vec::new();
+    }
+    let mut siblings: Vec<&'f str> = files
+        .iter()
+        .filter(|f| !candidate_ids.contains(&f.id))
+        .filter(|f| holding.contains(&(group::parent_dir(&f.path), extension(&f.path))))
+        .filter(|f| framework_semantics(registry, &f.path).is_some())
+        .map(|f| f.path.as_str())
+        .collect();
+    siblings.sort(); // deterministic scan order (NFR-RA-06)
+    runtime.worker_pool().install(|| {
+        siblings
+            .par_iter()
+            .map_init(Parser::new, |parser, rel| {
+                // The facts alone: what a sibling declares, not what it registers.
+                let facts = read_member_file(registry, root, rel)
+                    .and_then(|(plugin, source)| collect_matches(parser, plugin, &source))
+                    .unwrap_or_default();
+                (*rel, facts)
+            })
+            .collect()
+    })
+}
+
+/// The files that are no candidate, read for the mounts they write (S-853): an
+/// Express `app.use('/api', router)` in a file that imports no framework mounts
+/// a router a candidate exports, and composes its routes as a candidate's mount
+/// does ([`mount::join`]). The same shape as [`package_siblings`]: nothing is read
+/// unless a candidate holds a registration back for a mount, only a language
+/// whose query states mounts is read, and a file whose text calls no mount
+/// method is never parsed ([`mount::Reach`]). Only the mount facts are kept
+/// ([`mount::mounts_only`]), so these files promote no route, refuse none, and
+/// are not counted in `files_scanned`.
+fn mount_files<'f>(
+    runtime: &Runtime,
+    registry: &LanguageRegistry,
+    root: &Path,
+    files: &'f [crate::graph_store::FileRecord],
+    candidate_ids: &HashSet<i64>,
+    scanned: &[(i64, &str, FileMatches)],
+) -> Vec<(&'f str, FileMatches)> {
+    if !scanned.iter().any(|(_, _, m)| mount::holds_registrations(m)) {
+        return Vec::new();
+    }
+    // Each language's reach, read off its query once; the files, with their language.
+    let mut reach: HashMap<&str, mount::Reach> = HashMap::new();
+    let mut others: Vec<(&'f str, &str)> = Vec::new();
+    for f in files.iter().filter(|f| !candidate_ids.contains(&f.id)) {
+        let Some(plugin) = registry.for_path(&f.path) else { continue };
+        let known = reach
+            .entry(plugin.name())
+            .or_insert_with(|| plugin.query("frameworks").map_or(mount::Reach::Nothing, mount::Reach::of));
+        if *known != mount::Reach::Nothing {
+            others.push((f.path.as_str(), plugin.name()));
+        }
+    }
+    others.sort(); // deterministic scan order (NFR-RA-06)
+    runtime.worker_pool().install(|| {
+        others
+            .par_iter()
+            .map_init(Parser::new, |parser, (rel, language)| {
+                let facts = read_member_file(registry, root, rel)
+                    .filter(|(_, source)| reach[language].admits(source))
+                    .and_then(|(plugin, source)| collect_matches(parser, plugin, &source))
+                    .map(mount::mounts_only)
+                    .unwrap_or_default();
+                (*rel, facts)
+            })
+            // A file with no mount fact adds nothing to the join.
+            .filter(|(_, facts)| *facts != FileMatches::default())
+            .collect()
+    })
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -966,6 +1076,9 @@ pub struct ProvidedRoute {
 pub fn routes_in_source(plugin: &dyn LanguagePlugin, rel: &str, source: &str) -> Vec<ProvidedRoute> {
     let mut parser = Parser::new();
     let mut out = scan_source(&mut parser, plugin, rel, source, None);
+    // A registration waiting on its package's groups (S-852) has no other file
+    // here to be refused by: it keeps the route it was composed to.
+    group::join_packages(&mut [(rel, &mut out)], &[]);
     mount::join(&mut [(rel, &mut out)], |_, _| None);
     out.routes
         .into_iter()

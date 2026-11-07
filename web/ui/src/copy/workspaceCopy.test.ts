@@ -80,6 +80,7 @@ const SAMPLES: Record<string, Record<string, unknown[][]>> = {
     declaredFigure: [[0, 0, 0], [1, 1, 1], [3, 4, 2], [1, 1, null]],
     hintFigure: [[1], [2]],
     assertedFigure: [[1, 1], [2, 3]],
+    declaredTopicsObserved: [[0, 0], [1, 1], [2, 3]],
   },
   WORKSPACE_COVERAGE_TEXT: {
     heading: [[1], [2]],

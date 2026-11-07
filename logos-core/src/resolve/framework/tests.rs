@@ -3108,6 +3108,26 @@ mod java_constant_fold {
             [FoldedConstant { name: "ID".to_string(), file: "src/Api.java".to_string() }]
         );
     }
+
+    /// A Go file's registrations on a name it does not bind wait for the groups
+    /// its package declares in other files (S-852). The store-free projection has
+    /// no other file, so it keeps every one: `http.HandleFunc` and a router
+    /// `gin.Default()` made are plain, and a name nothing in the package could
+    /// declare as a group is no group.
+    #[test]
+    fn the_projection_keeps_a_go_registration_no_sibling_file_refuses() {
+        let registry = LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+        let plugin = registry.for_extension("go").expect("go plugin");
+        let source = "package main\n\nimport (\n\t\"net/http\"\n\n\t\"github.com/gin-gonic/gin\"\n)\n\n\
+                      func h(c *gin.Context) {}\n\nfunc main() {\n\thttp.HandleFunc(\"/health\", nil)\n\t\
+                      r := gin.Default()\n\tr.GET(\"/x\", h)\n\tapi := r.Group(\"/api\")\n\tapi.GET(\"/y\", h)\n}\n";
+        let mut routes: Vec<String> = routes_in_source(plugin, "src/main.go", source)
+            .into_iter()
+            .map(|r| format!("{} {}", r.method, r.path))
+            .collect();
+        routes.sort();
+        assert_eq!(routes, ["ANY /health", "GET /api/y", "GET /x"]);
+    }
 }
 
 // ── Kotlin Spring mapping annotations (S-330) ────────────────────────────────

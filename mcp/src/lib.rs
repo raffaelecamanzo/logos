@@ -24,6 +24,7 @@
 //! resolved project root and the composed extension host, and exits with its
 //! result.
 
+mod declared_topics;
 mod server;
 
 pub use server::{LogosMcp, INSTRUCTIONS};

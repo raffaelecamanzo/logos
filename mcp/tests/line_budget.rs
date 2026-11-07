@@ -520,14 +520,36 @@ fn non_blank_rust_lines(dir: &Path) -> usize {
 /// engine's.
 ///
 /// [FR-SC-32]: ../../docs/specs/requirements/FR-SC-32.md
+///
+/// **S-490 1401→1445**: the `xservice_declared_topics` twin of `logos xservice
+/// declared-topics` ([FR-WS-36]). Measured 1401→1445 (+44); no headroom. The
+/// 1401 includes whatever sibling sessions land first, so the merged budget is
+/// the sum.
+///
+/// | Region | Δ |
+/// |---|---|
+/// | `declared_topics.rs` (new): header, imports, `NAME`, the description constant and `route` | **+37** |
+/// | `server.rs`: `over` composes the route beside the `xservice_*` router and says why, plus the module `use` (measured net) | **+6** |
+/// | `lib.rs`: `mod declared_topics;` | **+1** |
+/// | `run_xservice` becomes `pub(crate)` (same line) | **0** |
+/// | | **+44** |
+///
+/// A dynamic route, not an `#[tool]` method, so `LogosMcp` gains no method: it
+/// is a blessed `no_god_containers` offender, and a worsened count there is a
+/// gating entry in the branch's delta. Delegation only: the listing, the scope
+/// note and the per-member `unread` live in `logos_core::federation`, so the CLI
+/// prints the same read-model. The `workspace_status` description grew a clause
+/// and costs zero lines.
+///
+/// [FR-WS-36]: ../../docs/specs/requirements/FR-WS-36.md
 #[test]
 fn mcp_surface_line_budget() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let non_blank = non_blank_rust_lines(&src);
 
     assert!(
-        non_blank <= 1401,
-        "mcp adapter exceeds the 1401 non-blank LOC budget (NFR-MA-02): \
+        non_blank <= 1445,
+        "mcp adapter exceeds the 1445 non-blank LOC budget (NFR-MA-02): \
          found {non_blank} lines — move logic to logos-core"
     );
 }

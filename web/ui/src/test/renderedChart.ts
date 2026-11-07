@@ -14,6 +14,9 @@
  * - `showTooltip(el, dataIndex)` opens the tooltip on one data item, as a hover
  *   would. An HTML tooltip lands in the DOM under `el`; a rich-text one is drawn
  *   on the canvas and shows up in the next frame.
+ * - `paintMarks(canvas, el)` draws one frame like `paint` and returns its
+ *   strokes and fills — each with the colour and dash it was drawn in (S-491) —
+ *   so a line's STYLE is asserted on what the canvas drew, not on the option.
  *
  * The ECharts import here is the same `echarts/core` module the seams register
  * their charts on, so `getInstanceByDom` finds the instance a component created.
@@ -31,9 +34,21 @@ export interface DrawnText {
   y: number;
 }
 
+/** One `stroke()` or `fill()` call: the paint it used, and for a stroke the
+ *  dash pattern (`[]` for a solid line) — what makes two line styles differ. */
+export interface DrawnMark {
+  kind: "stroke" | "fill";
+  /** `strokeStyle` for a stroke, `fillStyle` for a fill, as ECharts set it. */
+  color: string;
+  /** The `setLineDash` pattern in force; `[]` when solid. */
+  dash: number[];
+}
+
 export interface CanvasRecording {
   /** Every string drawn with `fillText` / `strokeText`, in draw order. */
   drawn: DrawnText[];
+  /** Every `stroke()` / `fill()`, in draw order. */
+  marks: DrawnMark[];
   /** The strings alone, in draw order. */
   texts(): string[];
   /** Forget what was drawn so far (the next `paint` starts a fresh frame). */
@@ -64,8 +79,13 @@ const HEIGHT = 600;
  *  position under the current transform (which it tracks through `save` /
  *  `restore`). Any member ECharts sets is stored; any it calls is a no-op, except
  *  the few whose return value it reads. */
-function recordingContext(canvas: HTMLCanvasElement, drawn: DrawnText[]): CanvasRenderingContext2D {
+function recordingContext(
+  canvas: HTMLCanvasElement,
+  drawn: DrawnText[],
+  marks: DrawnMark[],
+): CanvasRenderingContext2D {
   const state: Record<string | symbol, unknown> = { canvas };
+  let dash: number[] = [];
   let matrix: Matrix = IDENTITY;
   const stack: Matrix[] = [];
   const nums = (args: unknown[]) => args.map(Number) as Matrix;
@@ -96,7 +116,10 @@ function recordingContext(canvas: HTMLCanvasElement, drawn: DrawnText[]): Canvas
     createRadialGradient: () => ({ addColorStop() {} }),
     createPattern: () => ({}),
     getImageData: () => ({ data: new Uint8ClampedArray(4) }),
-    getLineDash: () => [],
+    getLineDash: () => dash.slice(),
+    setLineDash: (pattern) => void (dash = Array.isArray(pattern) ? pattern.map(Number) : []),
+    stroke: () => void marks.push({ kind: "stroke", color: String(state.strokeStyle), dash: dash.slice() }),
+    fill: () => void marks.push({ kind: "fill", color: String(state.fillStyle), dash: [] }),
     isPointInPath: () => false,
     isPointInStroke: () => false,
   };
@@ -116,6 +139,7 @@ function recordingContext(canvas: HTMLCanvasElement, drawn: DrawnText[]): Canvas
 /** Install the recording canvas and a layout size for every element. */
 export function recordCanvas(): CanvasRecording {
   const drawn: DrawnText[] = [];
+  const marks: DrawnMark[] = [];
   const proto = HTMLCanvasElement.prototype;
   const originalGetContext = proto.getContext;
   // jsdom defines the size getters on `Element.prototype` (always 0); the stub
@@ -125,14 +149,18 @@ export function recordCanvas(): CanvasRecording {
     own: Object.getOwnPropertyDescriptor(HTMLElement.prototype, key),
   }));
   proto.getContext = function getContext(this: HTMLCanvasElement) {
-    return recordingContext(this, drawn);
+    return recordingContext(this, drawn, marks);
   } as unknown as typeof proto.getContext;
   Object.defineProperty(HTMLElement.prototype, "clientWidth", { configurable: true, get: () => WIDTH });
   Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get: () => HEIGHT });
   return {
     drawn,
+    marks,
     texts: () => drawn.map((d) => d.text),
-    clear: () => void drawn.splice(0),
+    clear: () => {
+      drawn.splice(0);
+      marks.splice(0);
+    },
     restore() {
       proto.getContext = originalGetContext;
       for (const { key, own } of sizes) {
@@ -159,6 +187,13 @@ export function paint(canvas: CanvasRecording, el: Element): DrawnText[] {
   canvas.clear();
   zr.painter.refresh({ paintAll: true });
   return canvas.drawn.slice();
+}
+
+/** Draw one complete frame of the chart in `el`, as {@link paint} does, and
+ *  return its strokes and fills (S-491). */
+export function paintMarks(canvas: CanvasRecording, el: Element): DrawnMark[] {
+  paint(canvas, el);
+  return canvas.marks.slice();
 }
 
 /** Open the tooltip on data item `dataIndex` of series 0, as a hover would. */

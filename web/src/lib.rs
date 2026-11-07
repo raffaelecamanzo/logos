@@ -61,6 +61,7 @@ use axum::{
 };
 use logos_core::config::{ConfigError, PolicyFile};
 use logos_core::federation::{discover, Backing, BuildDependencies, ContractBridge, EngineRegistry};
+use logos_core::federation::DeclaredTopics;
 use logos_core::jobs::AnalysisJobs;
 use logos_core::model::EdgeKind;
 use logos_core::models::navigation::{GraphGranularity, GraphLayer};
@@ -417,8 +418,8 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// extension's, S-644) are the only other admitted `POST`s; every other
 /// path/method stays GET-only (`405`).
 /// The three member routes bridge to the [`api-facade`]'s
-/// mutating config seam; the three workspace routes write at the workspace root
-/// without an engine (below). All six are additionally gated by [`intent_guard`]
+/// mutating config seam; the four workspace routes write at the workspace root
+/// without an engine (below). All seven are additionally gated by [`intent_guard`]
 /// (same-origin + per-session token).
 ///
 /// - `/config/save` → [`Configuration::write`](logos_core::Configuration::write) (validated atomic write).
@@ -436,6 +437,10 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 ///   whole-manifest write path over `logos.workspace.toml` (S-430, [FR-UI-38]):
 ///   validated by the parser discovery runs, refused on a stale load
 ///   fingerprint, written verbatim. Engine-free for the same reason.
+/// - `/api/v1/workspace/rules/save` → [`write_workspace_rules`], the workspace
+///   rules contract (S-508, [FR-UI-38] as modified by [CR-165]): validated by the
+///   member parser, member-only tables refused with their reason, refused on a
+///   stale load fingerprint, written through the member [`write_rules`] writer.
 ///
 /// The match is exact path equality, so a route mounted with `post(` and missing
 /// from this list is refused `405` before it routes. The unit test
@@ -446,6 +451,9 @@ pub fn bind(port: u16) -> Result<std::net::TcpListener> {
 /// [`api-facade`]: ../../../docs/specs/architecture/components/api-facade.md
 /// [`write_config`]: logos_core::config::write_config
 /// [`write_secret`]: logos_core::config::write_secret
+/// [`write_workspace_rules`]: logos_core::config::write_workspace_rules
+/// [`write_rules`]: logos_core::config::write_rules
+/// [CR-165]: ../../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
 /// [FR-CF-06]: ../../../docs/specs/requirements/FR-CF-06.md
 /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
 /// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
@@ -460,6 +468,7 @@ pub const CONFIG_POST_ROUTES: &[&str] = &[
     "/api/v1/workspace/config/save",
     "/api/v1/workspace/config/secret",
     "/api/v1/workspace/manifest/save",
+    "/api/v1/workspace/rules/save",
 ];
 
 /// The enumerated deep-`verify` `POST` route (S-206, [FR-UI-25], [FR-GV-19],
@@ -628,6 +637,14 @@ pub(crate) struct WebState {
     /// first query ([FR-WS-33]); inert under [`Backing::Single`]. Never a runtime
     /// coupling: nothing that reads the bridge reads it ([BR-58]).
     build_deps: Arc<BuildDependencies>,
+    /// The declared-topic relation ([FR-WS-36], S-491), held beside the bridge
+    /// and derived on its first query; inert under [`Backing::Single`]. A
+    /// declaration, never an observed broker edge: nothing that reads the bridge
+    /// reads it ([BR-54]).
+    ///
+    /// [FR-WS-36]: ../../../docs/specs/requirements/FR-WS-36.md
+    /// [BR-54]: ../../../docs/specs/software-spec.md#327-workspace-federation
+    declared_topics: Arc<DeclaredTopics>,
     intent: IntentToken,
     /// The extension host this serve composes ([FR-DS-04], [ADR-74]):
     /// [`build_router`] mounts its active extensions' routes and admits their
@@ -674,6 +691,12 @@ impl FromRef<WebState> for Arc<ContractBridge> {
 impl FromRef<WebState> for Arc<BuildDependencies> {
     fn from_ref(state: &WebState) -> Self {
         Arc::clone(&state.build_deps)
+    }
+}
+
+impl FromRef<WebState> for Arc<DeclaredTopics> {
+    fn from_ref(state: &WebState) -> Self {
+        Arc::clone(&state.declared_topics)
     }
 }
 
@@ -822,6 +845,7 @@ fn make_state(
         backing,
         bridge: Arc::new(ContractBridge::new()),
         build_deps: Arc::new(BuildDependencies::new()),
+        declared_topics: Arc::new(DeclaredTopics::new()),
         intent,
         host: host.clone(),
         spa: Arc::new(EmbeddedSpa),
@@ -976,6 +1000,9 @@ fn build_router(state: WebState) -> Router {
         // S-464 / FR-WS-33: the build-dependency relation — a build dependency,
         // never a runtime coupling (BR-58); the service map's off-by-default layer.
         .route("/api/v1/workspace/build-deps", get(api_v1::workspace_build_deps))
+        // S-491 / FR-WS-36: the declared-topic relation — a declaration, never an
+        // observed broker edge (BR-54); the service map's declared-topic layer.
+        .route("/api/v1/workspace/declared-topics", get(api_v1::workspace_declared_topics))
         .route("/api/v1/workspace/search", get(api_v1::workspace_search))
         .route("/api/v1/workspace/callers", get(api_v1::workspace_callers))
         .route("/api/v1/workspace/impact", get(api_v1::workspace_impact))
@@ -1052,6 +1079,15 @@ fn build_router(state: WebState) -> Router {
         // S-430 / FR-UI-38: the whole-manifest save — validate, refuse a stale
         // fingerprint, write verbatim. Listed in `CONFIG_POST_ROUTES` like the rest.
         .route("/api/v1/workspace/manifest/save", post(api_v1::workspace_manifest_save));
+
+    // ── S-508 / FR-UI-38 (CR-165): the workspace rules contract,
+    // `<workspace-root>/.logos/rules.toml`, as the app-level editor's Rules
+    // section reads and saves it — engine-free like the config tier above. The
+    // save validates, refuses member-only tables, refuses a stale fingerprint and
+    // is listed in `CONFIG_POST_ROUTES`; single-root answers both `404`.
+    let router = router
+        .route("/api/v1/workspace/rules", get(api_v1::workspace_rules))
+        .route("/api/v1/workspace/rules/save", post(api_v1::workspace_rules_save));
 
     mount_extension_routes(router, extension_routes)
         // The SPA history fallback (ADR-43): an unmatched **HTML navigation** GET

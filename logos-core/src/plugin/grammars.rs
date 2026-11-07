@@ -829,8 +829,8 @@ mod tests {
         (
             "queries/frameworks.scm",
             "tsx/queries/frameworks.scm",
-            27379,
-            0xd50ef635194bcd55,
+            28012,
+            0x409938800d68a57b,
         ),
         (
             "queries/invocations.scm",
@@ -877,7 +877,7 @@ mod tests {
         vec![
             Row {
                 feature: cfg!(feature = "lang-rust"),
-                manifest: ("rust/plugin.toml", 10923, 0x228bcc338ce0dfef),
+                manifest: ("rust/plugin.toml", 11313, 0xe4cb87f41c4a11d8),
                 queries: &[
                     (
                         "queries/symbols.scm",
@@ -972,8 +972,8 @@ mod tests {
                     (
                         "queries/frameworks.scm",
                         "typescript/queries/frameworks.scm",
-                        27393,
-                        0x77b9b3378cb1728d,
+                        28026,
+                        0x26a5f5dffb6b40f3,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1020,8 +1020,8 @@ mod tests {
                     (
                         "queries/frameworks.scm",
                         "go/queries/frameworks.scm",
-                        13923,
-                        0x49ca6aa6b64204fe,
+                        15789,
+                        0x3a0dc67d4347c9f2,
                     ),
                     (
                         "queries/invocations.scm",
@@ -1056,8 +1056,8 @@ mod tests {
                     (
                         "queries/references.scm",
                         "java/queries/references.scm",
-                        19561,
-                        0xc83d1367e4390fa2,
+                        20362,
+                        0x64bcd65133c09145,
                     ),
                     (
                         "queries/frameworks.scm",

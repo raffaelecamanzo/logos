@@ -2447,7 +2447,9 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
 
     // Back to what the release before migration 25 left on disk: the columns
     // absent, migration 25 unrecorded, `user_version` 24, every hash recorded.
-    // Migrations 47 (S-832, the `files.facade` column), 46 (S-830, the Go
+    // Migrations 49 (S-506, the `check_run.workspace_rules` column), 48
+    // (S-854, the Java static-call re-extraction), 47 (S-832,
+    // the `files.facade` column), 46 (S-830, the Go
     // signature re-extraction), 45 (S-820, the
     // `nodes.callable_signature` column), 44 (S-571,
     // the `files.parse_damaged` column and the snapshot
@@ -2471,7 +2473,9 @@ fn migration_25_triggers_a_re_extraction_that_fills_the_has_body_column() {
     // its flag column) are inverted first, since the reopen re-applies them too.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \

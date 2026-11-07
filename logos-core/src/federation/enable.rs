@@ -9,7 +9,9 @@
 //! [FR-WS-17] warm-outcome sidecar, the workspace chat credential and the
 //! workspace chat's conversation store, but only where the root is a git
 //! working tree ([`maintain_root_ignore`], [CR-104]) — through [`crate::init`]'s
-//! existing managed-block writer rather than a second copy of it.
+//! existing managed-block writer rather than a second copy of it. And it writes
+//! the commented **workspace rules contract**, `<root>/.logos/rules.toml`, only
+//! when absent ([`crate::init`]'s `workspace_rules_contract`, [FR-IN-10]).
 //!
 //! The report also states the **working-tree footprint** enablement leaves
 //! behind ([`WorkingTreeFootprint`]): how many members now carry a fresh
@@ -24,6 +26,7 @@
 //! below rather than a second git-root implementation.
 //!
 //! [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
+//! [FR-IN-10]: ../../../docs/specs/requirements/FR-IN-10.md
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 //! [FR-IN-08]: ../../../docs/specs/requirements/FR-IN-08.md
 //! [NFR-MA-02]: ../../../docs/specs/requirements/NFR-MA-02.md
@@ -94,6 +97,13 @@ pub struct WorkspaceEnableReport {
     /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
     /// [CR-104]: ../../../docs/requests/CR-104-managed-workspace-root-ignore-for-the-warm-sidecar.md
     pub root_ignore: InitStep,
+    /// The workspace rules contract, `<root>/.logos/rules.toml` ([FR-IN-10],
+    /// [FR-CF-08]): `Created` with every key commented on the first run, and
+    /// `Unchanged` — the file byte-identical — whenever it already exists.
+    ///
+    /// [FR-IN-10]: ../../../docs/specs/requirements/FR-IN-10.md
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    pub root_rules: InitStep,
     /// What enabling this workspace did to the members' working trees
     /// ([FR-WS-02], [FR-IN-04]) — the fact that used to be left unsaid.
     ///
@@ -659,9 +669,10 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
 
 /// Run the non-interactive half of `init --workspace` for the approved member
 /// set: a non-clobber per-member `init`, the incremental manifest upsert, the
-/// idempotent workspace MCP injection, and — at a root that is a git working
-/// tree — the managed ignore entry for the warm-outcome sidecar
-/// ([`maintain_root_ignore`], [FR-WS-02]). Never blocks on indexing — kicking
+/// idempotent workspace MCP injection, the managed ignore entry for the
+/// warm-outcome sidecar at a root that is a git working tree
+/// ([`maintain_root_ignore`], [FR-WS-02]), and the commented workspace rules
+/// contract, written only when absent ([FR-IN-10]). Never blocks on indexing — kicking
 /// off the background warm is the caller's concern.
 ///
 /// The report carries the [`WorkingTreeFootprint`] this run left in the members'
@@ -669,8 +680,8 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
 /// second walk over them ([CRA-07]).
 ///
 /// # Errors
-/// Only if the manifest, `.mcp.json` or the workspace-root `.gitignore` cannot
-/// be written; a member's own `init` failure is caught and reported
+/// Only if the manifest, `.mcp.json`, the workspace-root `.gitignore` or the
+/// workspace rules contract cannot be written; a member's own `init` failure is caught and reported
 /// [`MemberOutcome::Degraded`], never fatal to the rest of the command.
 ///
 /// `exclude` is this run's `--exclude` globs: they are persisted into the
@@ -679,6 +690,7 @@ fn maintain_root_ignore(root: &Path) -> Result<InitStep> {
 ///
 /// [FR-WS-02]: ../../../docs/specs/requirements/FR-WS-02.md
 /// [FR-WS-40]: ../../../docs/specs/requirements/FR-WS-40.md
+/// [FR-IN-10]: ../../../docs/specs/requirements/FR-IN-10.md
 pub fn enable(
     root: &Path,
     name: &str,
@@ -716,6 +728,7 @@ pub fn enable(
     let manifest_step = super::manifest::upsert_with_exclude(root, name, &member_names, exclude)?;
     let mcp_step = init::inject_mcp_entry(root, WORKSPACE_MCP_SERVER_KEY, init::mcp_server_entry())?;
     let root_ignore = maintain_root_ignore(root)?;
+    let root_rules = init::workspace_rules_contract(root)?;
 
     Ok(WorkspaceEnableReport {
         workspace: name.to_string(),
@@ -724,6 +737,7 @@ pub fn enable(
         manifest: manifest_step,
         mcp: mcp_step,
         root_ignore,
+        root_rules,
         footprint,
         // The CLI adapter overwrites this once the warm-supervisor decision is
         // known — `enable` itself never blocks on indexing ([FR-WS-02]).

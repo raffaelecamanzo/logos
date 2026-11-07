@@ -252,8 +252,11 @@ impl GovernanceState {
 
 /// The [`CompiledRules::hash`] sentinel standing in for "no rules file exists"
 /// — a missing default `<root>/.logos/rules.toml` compiles to the empty
-/// contract under this hash, which `check_rules` reads as `rules_present =
-/// false` (the honest "no contract authored yet" signal, NFR-CC-04).
+/// contract under this hash. Without a workspace rules tier it is exactly the
+/// [`CompiledRules::rules_present`]` = false` case (the honest "no contract
+/// authored yet" signal, NFR-CC-04); under a tier the key is a
+/// [`tiered_hash`], never this sentinel, and `rules_present` is read from the
+/// compiled contract instead.
 pub(crate) const ABSENT_RULES_HASH: &str = "absent";
 
 /// The `rules.toml` contract with its layer globs compiled to `globset`
@@ -265,8 +268,33 @@ pub(crate) struct CompiledRules {
     /// The parsed contract.
     pub rules: Rules,
     /// blake3 hex hash of the file content (the cache key); the sentinel
-    /// [`ABSENT_RULES_HASH`] when no rules file exists.
+    /// [`ABSENT_RULES_HASH`] when no rules file exists. With a workspace rules
+    /// tier ([FR-CF-08]) it keys both tiers' bytes ([`tiered_hash`]), so an edit
+    /// at the root invalidates the cache like an edit in the member.
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
     pub hash: String,
+    /// Whether a contract is loaded ([FR-GV-22]): the member's own file exists,
+    /// or the workspace tier gives it at least one rule ([FR-CF-08]). Without a
+    /// tier this is `hash != ABSENT_RULES_HASH`, exactly as before.
+    ///
+    /// [FR-GV-22]: ../../../docs/specs/requirements/FR-GV-22.md
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    pub rules_present: bool,
+    /// The origin of each declared inheritable key — `None` without a
+    /// workspace rules tier, so a single-root contract carries none ([ADR-52]).
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    pub origins: Option<crate::config::RuleOrigins>,
+    /// How many of the evaluated rules the workspace tier supplied
+    /// ([`EffectiveRules::inherited_rules`](crate::config::EffectiveRules::inherited_rules));
+    /// `None` without a tier.
+    pub workspace_rules: Option<u32>,
+    /// The refusals of the workspace tier's member-only tables, one stated line
+    /// each ([FR-CF-08]) — reported as warnings by the runs that load them.
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    pub refused: Vec<String>,
     /// One compiled matcher per `[[layers]]` declaration, in declaration
     /// order (first-glob-wins, BR-15 / DL-05 tiebreak).
     layers: Vec<CompiledLayer>,
@@ -412,7 +440,11 @@ impl CompiledRules {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             rules,
+            rules_present: hash != ABSENT_RULES_HASH,
             hash,
+            origins: None,
+            workspace_rules: None,
+            refused: Vec::new(),
             layers,
             forbidden_imports,
             require_tested,
@@ -441,17 +473,31 @@ impl CompiledRules {
 /// `check --rules FILE`). A missing default file is the empty contract
 /// ([`Rules::default`]); a missing explicit file is the caller's error.
 ///
+/// The default contract is the **effective** one ([FR-CF-08], [ADR-73]): the
+/// member's file resolved over `<workspace-root>/.logos/rules.toml` when the
+/// member belongs to a workspace whose root declares one
+/// ([`Rules::inherit`](crate::config::Rules::inherit)). An explicit `--rules`
+/// file is evaluated as given, with no tier: it names the whole contract to
+/// check against. Without a tier every value here is what it was before
+/// ([ADR-52]).
+///
 /// # Errors
 /// Returns a [`ConfigError`](crate::config::ConfigError) (usage, exit 2) for
-/// an unreadable/invalid contract, or a store error from the cache tier.
+/// an unreadable/invalid contract in either tier, or a store error from the
+/// cache tier.
 ///
 /// [FR-GV-01]: ../../../docs/specs/requirements/FR-GV-01.md
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [ADR-73]: ../../../docs/specs/architecture/decisions/ADR-73.md
 fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<CompiledRules>> {
     let default_path = engine.root().join(".logos").join("rules.toml");
     let path = explicit.unwrap_or(&default_path);
 
-    // Hash the content first: the cache key for both tiers.
-    let (content, hash) = match std::fs::read_to_string(path) {
+    // Hash the member's file first: its hash keys the persisted parse cache,
+    // and — combined with the workspace tier's bytes when there is one — the
+    // in-process cache.
+    let (content, member_hash) = match std::fs::read_to_string(path) {
         Ok(text) => {
             let hash = blake3::hash(text.as_bytes()).to_hex().to_string();
             (Some(text), hash)
@@ -465,6 +511,16 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
             }
             .into());
         }
+    };
+    // FR-CF-08: the workspace tier is read beside the member's file, so its
+    // bytes key the in-process cache too.
+    let tier = match explicit {
+        Some(_) => None,
+        None => crate::config::read_rules_tier(engine.root())?,
+    };
+    let hash = match &tier {
+        None => member_hash.clone(),
+        Some(tier) => tiered_hash(&member_hash, &tier.text),
     };
 
     // Tier 1: the in-process compiled cache.
@@ -480,14 +536,15 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
     let rules = match content {
         None => Rules::default(),
         Some(ref text) => {
-            // Tier 2: the persisted parse cache (FR-GV-01 "cached by hash").
+            // Tier 2: the persisted parse cache (FR-GV-01 "cached by hash") —
+            // the member's own parse, keyed by the member's own bytes.
             let persisted = engine
                 .runtime()
                 .map(|rt| rt.submit_read(|store| store.rules_cache()))
                 .transpose()?
                 .flatten();
             match persisted {
-                Some(row) if row.rules_hash == hash => serde_json::from_str(&row.parsed_json)
+                Some(row) if row.rules_hash == member_hash => serde_json::from_str(&row.parsed_json)
                     .context("deserialising the cached rules.toml parse")?,
                 _ => {
                     // Full parse + validation (clear message, exit 2 on a bad
@@ -500,7 +557,7 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
                     if let Some(rt) = engine.runtime() {
                         let json = serde_json::to_string(&rules)
                             .context("serialising the rules.toml parse for the cache")?;
-                        let hash_owned = hash.clone();
+                        let hash_owned = member_hash.clone();
                         rt.submit_write(move |w| {
                             w.set_rules_cache(&hash_owned, &json, unix_now())
                         })?;
@@ -511,9 +568,38 @@ fn load_rules_cached(engine: &Engine, explicit: Option<&Path>) -> Result<Arc<Com
         }
     };
 
-    let compiled = Arc::new(CompiledRules::compile(rules, hash)?);
+    let member_present = content.is_some();
+    let compiled = Arc::new(match tier {
+        None => CompiledRules::compile(rules, hash)?,
+        Some(tier) => {
+            let effective = rules.inherit(Some(tier.parse()?));
+            let workspace_rules = effective.inherited_rules();
+            let shown = tier.path.display().to_string();
+            let mut compiled = CompiledRules::compile(effective.rules, hash)?;
+            // FR-GV-22 as amended by CR-165: a contract is loaded when either
+            // tier declares a rule, so an inherited policy is a real one.
+            compiled.rules_present = member_present || workspace_rules > 0;
+            compiled.origins = effective.origins;
+            compiled.workspace_rules = Some(workspace_rules);
+            compiled.refused = effective.refused.iter().map(|r| r.message(&shown)).collect();
+            compiled
+        }
+    });
     *engine.quality().state().rules.lock().expect("rules cache lock") = Some(Arc::clone(&compiled));
     Ok(compiled)
+}
+
+/// The cache key of a contract resolved over a workspace tier: both tiers'
+/// bytes, so an edit to either one misses the in-process cache. Never equal to
+/// a single file's content hash or to [`ABSENT_RULES_HASH`], so a member that
+/// gains or loses its tier cannot hit a stale entry.
+fn tiered_hash(member_hash: &str, workspace_text: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"logos-rules-tiers\0");
+    hasher.update(member_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(workspace_text.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 // ── Freshness (FR-RC-01..04, ADR-11) ────────────────────────────────────────
@@ -886,6 +972,7 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                 node_id: None,
                 message,
                 ratchet: None,
+                origin: None,
             });
         }
     }
@@ -904,6 +991,7 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                         "fn `{}` has cyclomatic complexity {cc} > max_cc = {max}",
                         f.name
                     ),
+                    origin: None,
                     ratchet: ratchet::mark(
                         budget.is_ratchet(),
                         symbol_of(&node_of, f.id),
@@ -928,6 +1016,7 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                         "fn `{}` spans {lines} lines > max_fn_lines = {max}",
                         f.name
                     ),
+                    origin: None,
                     ratchet: ratchet::mark(
                         budget.is_ratchet(),
                         symbol_of(&node_of, f.id),
@@ -965,6 +1054,7 @@ fn check_constraints(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     message: format!(
                         "`{path}` declares {count} symbols > no_god_files = {max} (OQ-06)"
                     ),
+                    origin: None,
                     ratchet: ratchet::mark(budget.is_ratchet(), path, count),
                 });
             }
@@ -1121,6 +1211,7 @@ fn module_coupling_violations(
                 .unwrap_or_default(),
             node_id: None,
             message: format!("`{label}` has {metric_label} {count} > {rule} = {max}"),
+            origin: None,
             ratchet: ratchet::mark(budget.is_ratchet(), key, count as u64),
         })
         .collect()
@@ -1152,6 +1243,7 @@ fn symbol_set_violations<'a>(
                 file,
                 node_id: Some(f.id.get()),
                 message: format!("fn `{name}` is {what} — {rule} = 0 under ratchet"),
+                origin: None,
                 ratchet: ratchet::mark(true, symbol_of(node_of, f.id), 1),
             }
         })
@@ -1211,6 +1303,7 @@ fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     node_id: None,
                     message,
                     ratchet: None,
+                    origin: None,
                 });
             }
         }
@@ -1240,6 +1333,7 @@ fn check_redundancy(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                         "{duplicates} duplicate functions exceed max_duplicates = {max}"
                     ),
                     ratchet: None,
+                    origin: None,
                 });
             }
         }
@@ -1310,6 +1404,7 @@ fn check_max_nesting_depth(
                     message: format!(
                         "fn `{name}` nests {depth} levels deep > max_nesting_depth = {max}"
                     ),
+                    origin: None,
                     ratchet: ratchet::mark(
                         budget.is_ratchet(),
                         symbol_of(&node_of, f.id),
@@ -1365,6 +1460,7 @@ fn check_brain_methods(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Ve
                     node_id: None,
                     message: format!("{brain} brain methods exceed max_brain_methods = {max}"),
                     ratchet: None,
+                    origin: None,
                 });
             }
         }
@@ -1409,6 +1505,7 @@ fn check_clone_ratio(input: &EvalInput<'_>, test_ids: &HashSet<NodeId>) -> (Vec<
                     budget.describe()
                 ),
                 ratchet: None,
+                origin: None,
             });
         }
     }
@@ -1457,6 +1554,7 @@ fn check_god_containers(
                     "`{name}` is a god container ({} methods, span {}) — no_god_containers",
                     god.method_count, god.span
                 ),
+                origin: None,
                 // FR-GV-23: a god container worsens by gaining member methods.
                 ratchet: ratchet::mark(
                     budget.is_ratchet(),
@@ -1544,6 +1642,7 @@ fn check_layer_ordering(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                      upward on `{dst_file}` (layer `{dst_layer}`, order {dst_order})"
                 ),
                 ratchet: None,
+                origin: None,
             });
         }
 
@@ -1568,6 +1667,7 @@ fn check_layer_ordering(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                          a forbidden boundary{reason}"
                     ),
                     ratchet: None,
+                    origin: None,
                 });
             }
         }
@@ -1639,6 +1739,7 @@ fn check_forbidden_imports(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                         "`{src_file}` imports `{dst_file}`, a forbidden import{reason}"
                     ),
                     ratchet: None,
+                    origin: None,
                 });
             }
         }
@@ -1712,6 +1813,7 @@ fn check_require_tested(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     ann.name
                 ),
                 ratchet: None,
+                origin: None,
             });
         }
     }
@@ -1783,6 +1885,7 @@ fn check_require_documented(input: &EvalInput<'_>) -> (Vec<Violation>, u32) {
                     ann.name
                 ),
                 ratchet: None,
+                origin: None,
             });
         }
     }
@@ -2004,7 +2107,7 @@ impl StoreFacts {
     /// `max_cycles` input and the contract's effective CR-005 thresholds — the
     /// SAME set the snapshot scores under (BR-25).
     pub(crate) fn evaluate(&self, compiled: &CompiledRules, cycles: u64) -> (Vec<Violation>, u32) {
-        evaluate(&EvalInput {
+        let (mut violations, checked) = evaluate(&EvalInput {
             compiled,
             nodes: &self.nodes,
             edges: &self.edges,
@@ -2015,7 +2118,15 @@ impl StoreFacts {
             test_node_ids: &self.test_node_ids,
             cycles,
             thresholds: effective_thresholds(&compiled.rules),
-        })
+        });
+        // FR-CF-08: under a workspace rules tier a constraint finding names the
+        // tier its budget came from; without one nothing is stamped (ADR-52).
+        if let Some(origins) = &compiled.origins {
+            for violation in &mut violations {
+                violation.origin = origins.constraint(&violation.rule);
+            }
+        }
+        (violations, checked)
     }
 }
 
@@ -2040,12 +2151,18 @@ struct EvaluatedSet {
     /// How many rules the run evaluated.
     checked_rules: u32,
     /// Whether a rules contract was authored at all —
-    /// `compiled.hash != ABSENT_RULES_HASH`, the same honest signal the report
+    /// [`CompiledRules::rules_present`] (the member's own file, or a rule
+    /// inherited from the workspace tier), the same honest signal the report
     /// carries on [`RulesReport::rules_present`].
     rules_present: bool,
     /// [`CHECK_RUN_OP_CHECK`] or [`CHECK_RUN_OP_SCAN`]; any other spelling is
     /// refused by migration 21's `CHECK`.
     operation: &'static str,
+    /// How many of `checked_rules` the workspace rules tier supplied
+    /// ([FR-CF-08]) — [`CompiledRules::workspace_rules`], `None` without a tier.
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    workspace_rules: Option<u32>,
 }
 
 /// Persist the violation set and the run marker that describes it
@@ -2101,6 +2218,7 @@ fn persist_violations(
                 checked_rules: evaluated.checked_rules,
                 rules_present: evaluated.rules_present,
                 operation: evaluated.operation,
+                workspace_rules: evaluated.workspace_rules,
             },
         )
     })?;
@@ -2128,7 +2246,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // FR-GV-23: scored against the blessed set exactly as `check` is — read
     // only; `scan` never writes it.
     let (violations, _) = classify_against_blessed(engine, &compiled, violations)?;
-    let rules_present = compiled.hash != ABSENT_RULES_HASH;
+    let rules_present = compiled.rules_present;
     let view = engine.graph().hydrate(Granularity::ExcludeContains)?;
     // BR-25: the snapshot scores under the effective rules.toml thresholds, so
     // its persisted hash gates the baseline (FR-GV-10) and the budgets agree.
@@ -2164,6 +2282,7 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
             // operation wrote it is what stops a reader attributing a `scan`'s
             // marker to a `logos check` that never ran (CR-140 §2.2).
             operation: CHECK_RUN_OP_SCAN,
+            workspace_rules: compiled.workspace_rules,
         },
     )?;
 
@@ -2173,6 +2292,8 @@ pub(crate) fn scan(engine: &Engine, reconcile: bool) -> Result<ScanResult> {
     // an n/a tier + warning, never failing the gated scan (BR-26 two-tier rule).
     let freshness = fresh.line();
     let mut warnings = fresh.warnings;
+    // FR-CF-08: a refused root table is stated, never silently dropped.
+    warnings.extend(compiled.refused.iter().cloned());
     let notes = fresh.notes;
     let temporal = scan_temporal_tier(engine, &mut warnings);
     // The files whose facts could not be persisted (FR-EH-05, S-513), read after
@@ -3151,10 +3272,10 @@ fn check_rules_run(
     }
     // Honest "is a contract authored?" signal (NFR-CC-04): the empty contract
     // that a missing default file compiles to carries the `ABSENT_RULES_HASH`
-    // sentinel; any loaded file hashes to its content. Computed here rather
-    // than at the report, because since S-437 the marker carries it too and
-    // both must be the same fact about the same run.
-    let rules_present = compiled.hash != ABSENT_RULES_HASH;
+    // sentinel and no workspace-tier rule (FR-CF-08). Read here rather than at
+    // the report, because since S-437 the marker carries it too and both must
+    // be the same fact about the same run.
+    let rules_present = compiled.rules_present;
     // FR-GV-21: the marker records HEAD at write time, which is the HEAD the
     // freshness step already resolved for this run — and, since S-437, the
     // evaluated set the run scored against (CR-140 §3.1).
@@ -3167,6 +3288,7 @@ fn check_rules_run(
             checked_rules,
             rules_present,
             operation: CHECK_RUN_OP_CHECK,
+            workspace_rules: compiled.workspace_rules,
         },
     )?;
 
@@ -3186,6 +3308,7 @@ fn check_rules_run(
             node_id: None,
             message: fault,
             ratchet: None,
+            origin: None,
         });
     }
     // S-215 / FR-GV-20: the admission-tripwire analog, folded in the same way —
@@ -3200,6 +3323,7 @@ fn check_rules_run(
             node_id: None,
             message: fault,
             ratchet: None,
+            origin: None,
         });
     }
 
@@ -3217,17 +3341,21 @@ fn check_rules_run(
         None
     };
 
+    let freshness = fresh.line();
+    let mut warnings = fresh.warnings;
+    warnings.extend(compiled.refused.iter().cloned());
     Ok(RulesReport {
         passed,
         checked_rules,
         rules_present,
         violations,
         ran_at: Some(ran_at),
-        freshness: fresh.line(),
-        warnings: fresh.warnings,
+        freshness,
+        warnings,
         notes,
         ratchet: ratchet_report,
         missing_scans,
+        origins: compiled.origins.clone(),
     })
 }
 

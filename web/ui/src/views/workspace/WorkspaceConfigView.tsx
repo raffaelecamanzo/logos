@@ -9,6 +9,11 @@
  *
  *   - the manifest, `logos.workspace.toml` ({@link ManifestGroup}, S-430):
  *     `[workspace]`, `[workspace.warm]` and the full `[governance]` family;
+ *   - the workspace rules contract, `<workspace-root>/.logos/rules.toml`
+ *     ({@link RulesGroup}, S-508): the `[constraints]` and `[metric_thresholds]`
+ *     every member inherits key by key (FR-CF-08), saved through the same
+ *     fingerprint-checked, validate-before-write path; a member-only table is
+ *     refused inline with the server's stated reason;
  *   - the workspace root's own `config.toml` ({@link TierGroup}, S-730), offered
  *     only while a mounted extension contributes workspace field groups (FR-UI-54):
  *     its tables are the ones those extensions read, so with none mounted there is
@@ -64,9 +69,9 @@
  */
 
 import { useRef, useState } from "react";
-import type { ChangeEvent, ReactNode } from "react";
+import type { ChangeEvent, ComponentType, ReactNode } from "react";
 
-import { ConfigMutateError } from "../../api/configClient.ts";
+import { ConfigMutateError, fetchWorkspaceRules, saveWorkspaceRules } from "../../api/configClient.ts";
 import { AsyncResource, useApiResource } from "../../api/hooks.tsx";
 import {
   fetchWorkspaceConfig,
@@ -77,6 +82,7 @@ import {
 } from "../../api/workspaceClient.ts";
 import type {
   ManifestSaveOutcome,
+  TierRulesFile,
   WorkspaceGovernanceAnswer,
   WorkspaceManifest,
   WorkspaceManifestDocument,
@@ -509,18 +515,7 @@ function ConflictPanel({
 
 /** The editor over one loaded manifest. Keyed by the load in {@link ManifestGroup},
  *  so "load the version on disk" re-seeds it from scratch. */
-function ManifestEditor({
-  doc,
-  notice,
-  onReload,
-}: {
-  doc: WorkspaceManifestDocument;
-  /** What the reload that seeded this editor did, stated on arrival. */
-  notice: ResultMessage | null;
-  /** Re-read the manifest from disk and re-seed this editor from it, stating
-   *  `notice` once the new editor is up. */
-  onReload: (notice: ResultMessage) => void;
-}) {
+function ManifestEditor({ doc, notice, onReload }: EditorProps<WorkspaceManifestDocument>) {
   const [raw, setRaw] = useState(doc.content);
   const [fingerprint, setFingerprint] = useState(doc.fingerprint);
   const [values, setValues] = useState<Record<string, string>>(() => initialValues(doc.parsed));
@@ -653,8 +648,33 @@ function ManifestEditor({
   );
 }
 
-/** The manifest group: load `logos.workspace.toml`, then edit it. */
-function ManifestGroup() {
+/** The editor props every reloading group hands its editor. */
+interface EditorProps<D> {
+  doc: D;
+  /** What the reload that seeded this editor did, stated on arrival. */
+  notice: ResultMessage | null;
+  /** Re-read the document from disk and re-seed this editor from it, stating
+   *  `notice` once the new editor is up. */
+  onReload: (notice: ResultMessage) => void;
+}
+
+/** A group that loads its document, then edits it — the shape the manifest, the
+ *  workspace config tier and the workspace rules groups share (S-508: one
+ *  spelling rather than three). `onReload` re-reads the document and re-seeds a
+ *  fresh `Editor`. */
+function ReloadingGroup<D>({
+  title,
+  file,
+  loadingLabel,
+  load,
+  Editor,
+}: {
+  title: string;
+  file: string;
+  loadingLabel: string;
+  load: () => Promise<D>;
+  Editor: ComponentType<EditorProps<D>>;
+}) {
   const [generation, setGeneration] = useState(0);
   const [notice, setNotice] = useState<ResultMessage | null>(null);
   // Each completed read is its own load, and the editor is keyed on THAT — not on
@@ -662,15 +682,15 @@ function ManifestGroup() {
   // brings the first load's bytes back) and would then remount nothing, and not
   // on `generation`, which changes before the new document has arrived.
   const loads = useRef(0);
-  const loaded = useApiResource<{ doc: WorkspaceManifestDocument; load: number }>(
-    () => fetchWorkspaceManifest().then((doc) => ({ doc, load: ++loads.current })),
+  const loaded = useApiResource<{ doc: D; load: number }>(
+    () => load().then((doc) => ({ doc, load: ++loads.current })),
     [generation],
   );
   return (
-    <ConfigGroup title="Workspace manifest" file="logos.workspace.toml">
-      <AsyncResource resource={loaded} loadingLabel="Loading the manifest…">
+    <ConfigGroup title={title} file={file}>
+      <AsyncResource resource={loaded} loadingLabel={loadingLabel}>
         {(l) => (
-          <ManifestEditor
+          <Editor
             key={l.load}
             doc={l.doc}
             notice={notice}
@@ -685,20 +705,25 @@ function ManifestGroup() {
   );
 }
 
+/** The manifest group: load `logos.workspace.toml`, then edit it. */
+function ManifestGroup() {
+  return (
+    <ReloadingGroup
+      title="Workspace manifest"
+      file="logos.workspace.toml"
+      loadingLabel="Loading the manifest…"
+      load={fetchWorkspaceManifest}
+      Editor={ManifestEditor}
+    />
+  );
+}
+
 // ── The workspace root's config tier (S-730) ───────────────────────────────────
 
 /** The editor over one loaded workspace-root `config.toml`: the mounted extensions'
  *  workspace field groups, the raw pane they patch, and the fingerprint save. Keyed
  *  by the load in {@link TierGroup}, like {@link ManifestEditor}. */
-function TierEditor({
-  doc,
-  notice,
-  onReload,
-}: {
-  doc: WorkspaceTierDocument;
-  notice: ResultMessage | null;
-  onReload: (notice: ResultMessage) => void;
-}) {
+function TierEditor({ doc, notice, onReload }: EditorProps<WorkspaceTierDocument>) {
   const file = doc.config;
   const [raw, setRaw] = useState(file.content);
   const [fingerprint, setFingerprint] = useState(file.fingerprint);
@@ -788,29 +813,151 @@ function TierEditor({
 /** The workspace root's `config.toml`: load it, then edit it — rendered, and read,
  *  only while a mounted extension contributes workspace field groups. */
 function TierGroup() {
-  const [generation, setGeneration] = useState(0);
-  const [notice, setNotice] = useState<ResultMessage | null>(null);
-  const loads = useRef(0);
-  const loaded = useApiResource<{ doc: WorkspaceTierDocument; load: number }>(
-    () => fetchWorkspaceConfig().then((doc) => ({ doc, load: ++loads.current })),
-    [generation],
-  );
   return (
-    <ConfigGroup title="Workspace settings" file="<workspace-root>/.logos/config.toml">
-      <AsyncResource resource={loaded} loadingLabel="Loading the workspace config…">
-        {(l) => (
-          <TierEditor
-            key={l.load}
-            doc={l.doc}
-            notice={notice}
-            onReload={(next) => {
-              setNotice(next);
-              setGeneration((n) => n + 1);
-            }}
-          />
-        )}
-      </AsyncResource>
-    </ConfigGroup>
+    <ReloadingGroup
+      title="Workspace settings"
+      file="<workspace-root>/.logos/config.toml"
+      loadingLabel="Loading the workspace config…"
+      load={fetchWorkspaceConfig}
+      Editor={TierEditor}
+    />
+  );
+}
+
+// ── The workspace rules contract (S-508, FR-UI-38 as modified by CR-165) ───────
+
+/** The file the Rules group edits, as the operator finds it on disk. */
+const RULES_FILE = "<workspace-root>/.logos/rules.toml";
+
+/** What a workspace rules save leaves untouched, stated with every write. */
+const RULES_NOTE = "Only the workspace root's .logos/rules.toml was written; no member was reindexed — each member's next check reads it.";
+
+/** What inherits, and what the root refuses (FR-CF-08, ADR-73). */
+function RulesAdvisory() {
+  return (
+    <p className={styles.help}>
+      Every member inherits each [constraints] and [metric_thresholds] key declared here, key by
+      key; a key a member declares in its own <code>rules.toml</code> overrides it. Nothing else
+      inherits: [[layers]], [[boundaries]], [[forbidden_imports]], [[require_tested]],
+      [[require_documented]], [history], [coverage], [security] and [review] are member-only, and a
+      save declaring one is refused with the reason.
+    </p>
+  );
+}
+
+/** The editor over one loaded workspace rules contract: the raw pane, the confirm
+ *  gate (it changes what every member's gate enforces, BR-35), and the fingerprint
+ *  save. Keyed by the load in {@link RulesGroup}, so a reload re-seeds it. */
+function RulesEditor({ doc, notice, onReload }: EditorProps<TierRulesFile>) {
+  const [raw, setRaw] = useState(doc.content);
+  const [fingerprint, setFingerprint] = useState(doc.fingerprint);
+  const [confirmed, setConfirmed] = useState(false);
+  const [conflict, setConflict] = useState<Extract<ManifestSaveOutcome, { outcome: "conflict" }> | null>(null);
+  const [result, setResult] = useState<ResultMessage | null>(notice);
+  const [saving, setSaving] = useState(false);
+
+  async function save(against: string, overwrote: boolean) {
+    if (!confirmed) {
+      setResult({ kind: "warn", text: "Confirm the change before saving — it changes what every member's gate enforces." });
+      return;
+    }
+    setSaving(true);
+    setResult(null);
+    try {
+      const outcome = await saveWorkspaceRules(raw, against);
+      const message = describeOutcome(outcome, overwrote, RULES_NOTE);
+      setResult(message);
+      if (outcome.outcome === "conflict") {
+        setConflict(outcome);
+        return;
+      }
+      setConflict(null);
+      setFingerprint(outcome.fingerprint);
+      // The written file carries the provenance stamp the raw pane does not: re-seed
+      // from disk so the pane and its fingerprint describe the same bytes.
+      if (outcome.outcome === "written") onReload(message);
+    } catch (e) {
+      setResult(describeError(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <div className={styles.fileHead}>
+        <Badge tone={doc.exists ? "green" : "muted"}>{doc.exists ? "on disk" : "not yet created"}</Badge>
+        {doc.error === null ? <Badge tone="green">parses</Badge> : <Badge tone="red">does not parse</Badge>}
+      </div>
+      {doc.error !== null && (
+        <ErrorPanel>
+          The workspace rules contract does not parse — every member&apos;s check fails on it until it
+          is repaired. Fix it in the raw pane below: {doc.error}
+        </ErrorPanel>
+      )}
+      <RulesAdvisory />
+      {doc.refused.length > 0 && (
+        <Callout label="REFUSED" tone="signal">
+          <p>Declared on disk but member-only, so applied to no member:</p>
+          <ul>
+            {doc.refused.map((r) => (
+              <li key={r.table}>{`${r.table} — ${r.reason}`}</li>
+            ))}
+          </ul>
+        </Callout>
+      )}
+
+      <TextareaField
+        label={`Raw TOML — ${RULES_FILE} (the full document)`}
+        value={raw}
+        onChange={(e) => setRaw(e.target.value)}
+        rows={12}
+        spellCheck={false}
+        className="mono"
+      />
+
+      <label className={styles.confirm}>
+        <input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I
+        understand this changes what every member&apos;s gate enforces.
+      </label>
+      <div className={styles.actions}>
+        <Button variant="primary" onClick={() => void save(fingerprint, false)} disabled={saving} aria-busy={saving}>
+          {saving ? "Saving…" : "Save the workspace rules.toml"}
+        </Button>
+      </div>
+      <p className={styles.help}>
+        Save validates the whole document, refuses a member-only table, and replaces the file
+        atomically with a provenance comment stamped in; a refused edit leaves the file untouched. It
+        writes only under the workspace root&apos;s <code>.logos/</code> and reindexes nothing.
+      </p>
+      <ResultPanel result={result} />
+      {conflict && (
+        <ConflictPanel
+          disk={conflict.disk_content}
+          diskLabel="The workspace rules.toml on disk now"
+          busy={saving}
+          onLoadDisk={() => onReload(DISCARDED)}
+          onOverwrite={() => void save(conflict.disk_fingerprint, true)}
+        >
+          The workspace rules contract was changed on disk after this editor loaded it. Your save was
+          refused so that change is not silently overwritten.
+        </ConflictPanel>
+      )}
+    </>
+  );
+}
+
+/** The workspace rules contract: load it, then edit it (S-508). Rendered in every
+ *  workspace — the contract is core policy, not an extension's. */
+function RulesGroup() {
+  return (
+    <ReloadingGroup
+      title="Workspace rules"
+      file={RULES_FILE}
+      loadingLabel="Loading the workspace rules…"
+      load={fetchWorkspaceRules}
+      Editor={RulesEditor}
+    />
   );
 }
 
@@ -853,6 +1000,8 @@ export function WorkspaceConfigView() {
       </Callout>
       {/* Each group is a sibling ConfigGroup owning its own reads and saves. */}
       <ManifestGroup />
+      {/* The workspace rules contract every member inherits (S-508). */}
+      <RulesGroup />
       {/* The workspace root's config.toml, for the mounted extensions' fields (S-730). */}
       {tierFields.length > 0 && <TierGroup />}
       {/* The panels of the mounted extensions (S-642). */}

@@ -380,6 +380,64 @@ fn route_providers_and_status_name_the_declared_relations_as_declared_not_observ
     );
 }
 
+/// `xservice_declared_topics` is federation-only, takes the `repo` scope, and
+/// its description says the relation is **declared** and **not an observed
+/// broker edge** ([BR-54]) — the two phrases an agent must not miss, because a
+/// declaring member looks exactly like the producers and consumers its sibling
+/// tools return. `workspace_status` names its `declared_topics` section as
+/// apart from every observed figure.
+///
+/// Near misses pinned out: "observed" alone would match a sentence asserting
+/// an observed edge, so the check is the negated phrase, in the tool's own
+/// description rather than a sibling's.
+///
+/// [BR-54]: ../../docs/specs/software-spec.md#327-workspace-federation
+#[test]
+fn xservice_declared_topics_says_it_is_declared_and_not_an_observed_broker_edge() {
+    assert!(
+        !single_tools().iter().any(|t| t.name == "xservice_declared_topics"),
+        "xservice_declared_topics must not exist without a workspace manifest",
+    );
+    let federated = federated_tools();
+    let description = |name: &str| {
+        federated
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("the federated backing registers {name}"))
+            .description
+            .as_deref()
+            .unwrap_or_default()
+            .to_string()
+    };
+    let text = description("xservice_declared_topics");
+    for phrase in ["declared", "not an observed broker edge", "NOT AN OBSERVED BROKER EDGE (BR-54)"] {
+        assert!(text.contains(phrase), "the description says {phrase:?}: {text}");
+    }
+    for field in [
+        "`topics`",
+        "`declarations`",
+        "`key`",
+        "`file`",
+        "`profile`",
+        "`observed`",
+        "`net-new`",
+        "`declared_only`",
+        "`headline`",
+        "`scope_note`",
+        "`members.unread`",
+    ] {
+        assert!(text.contains(field), "the description names {field}: {text}");
+    }
+    let tool = federated.iter().find(|t| t.name == "xservice_declared_topics").unwrap();
+    let schema = serde_json::to_string(&tool.input_schema).expect("schema serialises");
+    assert!(schema.contains("\"repo\""), "the tool takes the repo scope: {schema}");
+
+    let status = description("workspace_status");
+    for clause in ["`declared_topics`", "`declared_topic_pairs`", "NOT AN OBSERVED BROKER EDGE (BR-54)"] {
+        assert!(status.contains(clause), "workspace_status names its declared-topic section with {clause:?}: {status}");
+    }
+}
+
 /// `xservice_type_refs` is federation-only, takes the `repo` scope, and its
 /// description says the reference is **advisory** and **not a coupling**
 /// ([BR-60]) — the two words an agent must not miss, because an importer looks

@@ -160,14 +160,18 @@ fn graph(root: &Path) -> Vec<Vec<String>> {
 /// (S-712, the dispatch re-bind), 44 (S-571, the `files.parse_damaged`
 /// column and the snapshot entries' `partial_parse` flags), 45 (S-820, the
 /// `nodes.callable_signature` column), 46 (S-830, the Go signature
-/// re-extraction) and 47 (S-832, the `files.facade` column) after it; the next
-/// [`Engine::start`] re-applies all twenty-four,
+/// re-extraction), 47 (S-832, the `files.facade` column), 48 (S-854, the
+/// Java static-call re-extraction) and 49 (S-506, the
+/// `check_run.workspace_rules` column) after it; the next
+/// [`Engine::start`] re-applies all twenty-six,
 /// as a real upgrade
 /// does.
 fn downgrade_to_v23(root: &Path) {
     let conn = rusqlite::Connection::open(root.join(".logos").join("logos.db")).unwrap();
     conn.execute_batch(&format!(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \

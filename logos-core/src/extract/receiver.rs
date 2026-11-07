@@ -226,10 +226,17 @@
 //! is `.type` (`T`, `T<A>`) on a field, local, parameter or resource — every
 //! other binding proves nothing — read as its `name` marker read a declaration
 //! ([`Receivers::package_model`]): one identifier, `$` included, no type
-//! variable at the call. A name no binding anywhere in the file declares is a
-//! static type name where its single-type import or own declaration names
-//! it. A proven Java row is the written `T::m` the package rungs bind, with no
-//! shape: the row S-467's `name` marker wrote.
+//! variable at the call. A name no binding anywhere in the file declares, and
+//! no single-static import brings in (a member: S-854), is a static type name
+//! where its single-type import or own declaration names it, or where it is
+//! type-shaped by the language's convention (the `type_name` marker, which
+//! Java's query sets on a capitalised name that is no constant's
+//! all-capitals one) in a file with no static-on-demand import — the binder's
+//! package rung then scopes it, so a type of the caller's own package binds
+//! without an import and any other stays unbound (S-854). A capitalised field
+//! the class inherits from another file is not seen here, so it reads as the
+//! type of its name: a known limitation, pinned by its test. A proven Java row is the written `T::m` the
+//! package rungs bind, with no shape: the row S-467's `name` marker wrote.
 //!
 //! **1c. A receiver inside a macro (S-610).** A macro's token tree is never
 //! parsed as expressions, so the query marks no receiver there. The token-tree
@@ -357,6 +364,10 @@ struct Marks {
     implicit: bool,
     /// `refused`: never typed, and `other` whatever else is marked.
     refused: bool,
+    /// `type_name`: the receiver is a type name by the language's naming
+    /// convention, which its query states (S-854: Java's capitalised name,
+    /// never a constant's all-capitals one).
+    type_name: bool,
 }
 
 /// Where a call sits relative to the class-like declarations around it.
@@ -660,6 +671,10 @@ pub(super) struct Receivers<'tree> {
     /// The names the file's NON-static single-type imports bring into scope — a
     /// static import names a member, never a type.
     type_imports: HashSet<String>,
+    /// The names the file's single-STATIC imports bring into scope (S-854): a
+    /// member — a field the name then reads as a variable, which obscures a
+    /// type of its name as a declared binding does.
+    member_imports: HashSet<String>,
     /// The bodies the `anonymous` marker names, by node id — anonymous class
     /// bodies and every other body whose `this` is not the enclosing class's.
     anonymous: HashSet<usize>,
@@ -756,8 +771,9 @@ pub(super) struct Receivers<'tree> {
     /// - a `variable` receiver's declared type is one identifier, `$`
     ///   included, typed only where it is no type variable at the call —
     ///   what its `name` marker read — and a name no binding anywhere in the
-    ///   file declares is a static type name, when its single-type import or
-    ///   its own declaration names it (S-825).
+    ///   file declares and no static import brings in is a static type name,
+    ///   when its single-type import or its own declaration names it (S-825),
+    ///   or its `type_name` marker states it is type-shaped (S-854).
     package_model: bool,
     /// The node ids of the class-like declarations that may inherit a member
     /// this file cannot see ([`records_supertype`]), filled by
@@ -801,6 +817,7 @@ impl<'tree> Receivers<'tree> {
                 marks: HashMap::new(),
                 unproven: HashSet::new(),
                 type_imports: HashSet::new(),
+                member_imports: HashSet::new(),
                 anonymous: HashSet::new(),
                 rebinding: HashSet::new(),
                 lambda_receivers: HashMap::new(),
@@ -981,6 +998,7 @@ impl<'tree> Receivers<'tree> {
         let marks = self.marks.entry(invocation.id()).or_default();
         match capture {
             "ref.receiver.refused" => marks.refused = true,
+            "ref.receiver.type_name" => marks.type_name = true,
             "ref.receiver.name" => {
                 marks.other = true;
                 marks.typed = text().map(Typed::Name);
@@ -1135,9 +1153,11 @@ impl<'tree> Receivers<'tree> {
         self.macro_sites.push(MacroSite { row, invocation, caller, receiver });
     }
 
-    /// Note a non-static single-type import's name.
-    pub(super) fn type_import(&mut self, name: &str) {
-        self.type_imports.insert(name.to_string());
+    /// Note a single import's name: a type's, or a member's when the import
+    /// is static.
+    pub(super) fn single_import(&mut self, name: &str, is_static: bool) {
+        let names = if is_static { &mut self.member_imports } else { &mut self.type_imports };
+        names.insert(name.to_string());
     }
 
     /// Append the deferred access rows on their caller's own receiver (S-529),
@@ -1318,7 +1338,7 @@ impl<'tree> Receivers<'tree> {
                 if refs[row].form != RefForm::Method {
                     continue;
                 }
-                let Some(found) = self.proven_receiver(receiver, invocation, site.caller, file) else {
+                let Some(found) = self.proven_receiver(receiver, invocation, site.caller, file, static_wildcard) else {
                     continue;
                 };
                 let (target, peeled) = self.qualified(found, invocation, file).into_row(name);
@@ -1399,7 +1419,7 @@ impl<'tree> Receivers<'tree> {
         }
         // A receiver read inside a macro (S-610) is proven the same way.
         for site in &self.macro_sites {
-            if let Some(found) = self.proven_receiver(&site.receiver, site.invocation, site.caller, file) {
+            if let Some(found) = self.proven_receiver(&site.receiver, site.invocation, site.caller, file, static_wildcard) {
                 let (target, peeled) = found.into_row(&refs[site.row].target);
                 proven.push((site.row, target, peeled));
             }
@@ -1447,13 +1467,17 @@ impl<'tree> Receivers<'tree> {
 
     /// The type a Rust receiver the file may prove has at `invocation`, a call
     /// made by the declaration at `caller` (S-587, S-610): `x.f()`'s `x`, or
-    /// `self.x.f()`'s field `x`.
+    /// `self.x.f()`'s field `x` — and a package-model language's static type
+    /// name (S-825, S-854), which `static_wildcard` (the file has a
+    /// static-on-demand import, which may bring in a field of any name) keeps
+    /// from being proven by its shape alone.
     fn proven_receiver(
         &self,
         receiver: &Typed,
         invocation: Node<'_>,
         caller: Option<usize>,
         file: &FileDecls<'_, '_>,
+        static_wildcard: bool,
     ) -> Option<Proven> {
         // `Self` is the caller's self type only where its impl names it by one
         // segment, which the caller's module scope resolves as the call's does;
@@ -1463,14 +1487,21 @@ impl<'tree> Receivers<'tree> {
             .and_then(|c| file.decls[c].self_type.as_deref());
         let module = caller.and_then(|c| module_of(file.decls, c));
         match receiver {
-            // In a package-model language, a static type name (S-467, S-825):
-            // only where no binding anywhere in the file declares `x` — a
-            // variable obscures a type of its name, and one declared out of
-            // scope may be an inherited field's twin — and the file's
-            // single-type import of it or its own declaration names it.
+            // In a package-model language, a static type name (S-467, S-825,
+            // S-854). Only where no binding anywhere in the file declares `x`
+            // and no static import brings it in: a variable obscures a type of
+            // its name, and one declared out of scope may be an inherited
+            // field's twin. And only where a type is named: by the file's
+            // single-type import of `x`, its own declaration, or the query's
+            // `type_name` marker (the language's type-name convention) where
+            // no static-on-demand import may bring in a field of the name. The
+            // binder's package rung scopes the row: a type of the caller's own
+            // package binds without an import, any other stays unbound.
             Typed::Variable(x) => self.variable_type(x, false, invocation, own_type, module, file).or_else(|| {
-                let declared = self.bindings.contains_key(x) || self.unproven.contains(x);
-                let named = self.type_imports.contains(x) || declares_type(file.decls, x);
+                let declared =
+                    self.bindings.contains_key(x) || self.unproven.contains(x) || self.member_imports.contains(x);
+                let type_name = !static_wildcard && self.marks.get(&invocation.id()).is_some_and(|m| m.type_name);
+                let named = self.type_imports.contains(x) || declares_type(file.decls, x) || type_name;
                 (self.package_model && !declared && named).then(|| Proven { head: x.clone(), peeled: Vec::new() })
             }),
             Typed::Pointee(x) => self.variable_type(x, true, invocation, own_type, module, file),

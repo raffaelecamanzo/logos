@@ -233,13 +233,16 @@ fn a_pre_change_store_carries_no_unmarked_implementor_edge_after_its_migration_a
     // none of them marked, migrations 43, 44 (S-571, the
     // `files.parse_damaged` column and the snapshot entries' `partial_parse`
     // flags), 45 (S-820, the `nodes.callable_signature` column), 46 (S-830,
-    // the Go signature re-extraction) and 47 (S-832, the `files.facade` column)
-    // unrecorded, `user_version` 42.
+    // the Go signature re-extraction), 47 (S-832, the `files.facade` column),
+    // 48 (S-854, the Java static-call re-extraction) and 49 (S-506, the
+    // `check_run.workspace_rules` column) unrecorded, `user_version` 42.
     let conn = rusqlite::Connection::open(tmp.path().join(".logos").join("logos.db")).unwrap();
     let stripped = conn.execute("UPDATE edges SET payload = NULL WHERE payload GLOB 'dispatch:*'", []).unwrap();
     assert_eq!(stripped, 3, "precondition: the fixture's three implementor edges were marked");
     conn.execute_batch(
-        "ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
+        "ALTER TABLE check_run DROP COLUMN workspace_rules; DELETE FROM schema_versions WHERE version = 49; \
+         DELETE FROM schema_versions WHERE version = 48; \
+         ALTER TABLE files DROP COLUMN facade; DELETE FROM schema_versions WHERE version = 47; \
          DELETE FROM schema_versions WHERE version = 46; \
          ALTER TABLE nodes DROP COLUMN callable_signature; DELETE FROM schema_versions WHERE version = 45; \
          ALTER TABLE files DROP COLUMN parse_damaged; ALTER TABLE metric_snapshot_offenders DROP COLUMN partial_parse; \

@@ -686,6 +686,28 @@ fn check_human_readable_surface_names_the_absent_contract_condition() {
     );
 }
 
+/// FR-CF-08 / S-506: a workspace root whose `rules.toml` declares only a
+/// member-only table gives a member without its own contract nothing to
+/// evaluate (exit 4) — and the human surface still states the refusal, rather
+/// than only the absent-contract line.
+#[test]
+fn check_human_readable_surface_states_a_refused_root_table_at_exit_four() {
+    let tmp = TempDir::new().unwrap();
+    write(tmp.path(), "logos.workspace.toml", "[workspace]\nname = \"w\"\nmembers = [\"svc\"]\n");
+    write(tmp.path(), ".logos/rules.toml", "[[require_tested]]\npaths = [\"src/**\"]\n");
+    let member = tmp.path().join("svc");
+    write(&member, "src/core.rs", "pub fn base() {}\n");
+    logos(&member, &["index", "--quiet"]);
+    let out = logos(&member, &["check"]);
+    assert_eq!(exit_code(&out), 4, "{}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("no rules contract found — nothing was evaluated"), "{stdout}");
+    assert!(
+        stdout.contains("[[require_tested]] is member-only") && stdout.contains("applied to no member"),
+        "the refusal is stated on the human surface: {stdout}"
+    );
+}
+
 /// FR-GV-22 AC: exit 4 never fires when a contract is present, whatever the
 /// violation count — a clean, loaded contract still exits 0.
 #[test]

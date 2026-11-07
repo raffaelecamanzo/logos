@@ -96,7 +96,8 @@
 ; trailing slash, so `api.GET("/")` is `GET /api/`: Go does not opt into
 ; `@fw.group.absorbs`.
 ;
-; `@fw.group.root.default` (on every registration's receiver) makes Go's default
+; `@fw.group.root.default` (on every registration's receiver, and on the package
+; clause below) makes Go's default
 ; a plain router: a receiver whose chain crosses no `Group` call keeps its
 ; written path — `r := gin.Default()`, an `*gin.Engine` parameter, a field such
 ; as `s.router`, `http.HandleFunc`, a `ServeMux`. Only a group makes a receiver
@@ -113,6 +114,14 @@
 ;   * a call on a group that is not one of the listed methods returning that
 ;     same group (`@fw.group.foreign`: it may return anything).
 ;
+; A name no binding of the file declares is a plain router wherever it is
+; written, except where the file's own package declares it a group in another
+; file: a registration on a package-level group (`var api = router.Group("/api")`)
+; from a sibling file of the package is refused and counted, never promoted at
+; its written path, because the prefix is stated where this file cannot read it
+; (S-852, CR-270). The package is the directory and the package clause captured
+; below; the group's file need not name Gin itself, so its siblings are read too.
+;
 ; Stated ceilings:
 ;   * read as a plain router, so promoted at the written path: a group kept in
 ;     a field (`s.api.GET(…)`), returned by a helper (`newGroup().GET(…)`), or
@@ -124,6 +133,15 @@
 ;   * a group handed to another file's function (`func Register(rg
 ;     *gin.RouterGroup)` called with `r.Group("/api")`) is refused there, as a
 ;     parameter: the call-argument join is out of scope.
+
+; The package a file declares: with its directory, the key of the package-level
+; groups a sibling file's registration may be made on (S-852). It also carries
+; Go's default (a plain router) onto every Go file, so a file that declares a
+; package-level variable and registers nothing (`var router = gin.Default()`)
+; reads it as the file that registers on it does.
+(source_file
+  (package_clause
+    (package_identifier) @fw.group.package @fw.group.root.default))
 
 ; Every call on a selector is a link of a receiver chain whose result the file
 ; does not know: on a plain router it is a plain router (`gin.Default()`), on a
@@ -224,6 +242,29 @@
       (var_spec
         name: (identifier) @fw.group.name
         value: (expression_list . (_) @fw.group.init))))) @fw.group.scope
+
+; A local declared without a value (`var api *gin.Engine`, alone or in a list)
+; and a named result are the function's own variables, plain routers until
+; assigned: a binding of their own, so a package-level group of the same name in
+; another file is not what they name (S-852). An assignment still re-binds the
+; variable (`api = r.Group(…)`), through the assigned facts below.
+(statement_list
+  (var_declaration
+    (var_spec
+      name: (identifier) @fw.group.name @fw.group.root
+      !value))) @fw.group.scope
+
+(statement_list
+  (var_declaration
+    (var_spec_list
+      (var_spec
+        name: (identifier) @fw.group.name @fw.group.root
+        !value)))) @fw.group.scope
+
+(_
+  result: (parameter_list
+    (parameter_declaration
+      (identifier) @fw.group.name @fw.group.root))) @fw.group.scope
 
 ; A package-level variable is visible across the file, before its declaration
 ; as after it.

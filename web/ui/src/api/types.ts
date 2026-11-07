@@ -1109,6 +1109,45 @@ export interface Violation {
   file: string;
   node_id: number | null;
   message: string;
+  /** The ratchet verdict (FR-GV-23) — present only on an offender of a budget
+   *  declared `ratchet = true`; `blessed` is blessed debt, a `warning`. */
+  ratchet?: RatchetMark;
+  /** Which rules tier declared the broken budget (FR-CF-08) — absent without a
+   *  workspace rules tier. */
+  origin?: RuleOrigin;
+}
+
+/** Where one effective `[constraints]` / `[metric_thresholds]` key came from
+ *  (mirrors `RuleOrigin`, FR-CF-08): the member's own `rules.toml` or the
+ *  workspace root's. A key with no entry is unset. */
+export type RuleOrigin = "member" | "workspace";
+
+/** The origin of every declared inheritable key (mirrors `RuleOrigins`). */
+export interface RuleOrigins {
+  constraints: Record<string, RuleOrigin>;
+  metric_thresholds: Record<string, RuleOrigin>;
+}
+
+/** One ratchet offender's identity and verdict (mirrors `RatchetMark`, FR-GV-23). */
+export interface RatchetMark {
+  symbol: string;
+  value: number;
+  blessed: number | null;
+  status: "blessed" | "worsened" | "new";
+}
+
+/** The ratchet half of a check (mirrors `RatchetReport`, FR-GV-23) — present only
+ *  when a constraint declares `ratchet = true`. */
+export interface RatchetReport {
+  blessed_file: string;
+  blessed_file_present: boolean;
+  bless_command: string;
+  rules: string[];
+  blessed: number;
+  worsened: number;
+  new: number;
+  /** Blessed entries that no longer violate — "fixed since bless". */
+  fixed: { rule: string; symbol: string; blessed: number }[];
 }
 
 /** The architecture-rules report (mirrors `RulesReport`). */
@@ -1122,6 +1161,10 @@ export interface RulesReport {
   violations: Violation[];
   freshness: string;
   warnings: string[];
+  /** The ratchet summary (FR-GV-23); absent when no budget ratchets. */
+  ratchet?: RatchetReport;
+  /** Each declared key's origin (FR-CF-08); absent without a workspace rules tier. */
+  origins?: RuleOrigins;
 }
 
 /** The Rule-findings bundle (mirrors `GapsModel`, CR-079): the index status and the
@@ -1294,6 +1337,41 @@ export interface ConfigReadModel {
   effective_chat: EffectiveChat;
   /** Beside the literal document for the same reason (Sprint 77 HF-1). */
   effective_wiki: EffectiveWiki;
+  /** What this member inherits from its workspace rules tier (S-508, FR-CF-08) —
+   *  absent without a tier. Beside `rules`, never merged into it: the editor badges
+   *  an inherited row with the root value and never posts it (NFR-RA-05). */
+  workspace_rules?: InheritedRules;
+}
+
+/** What a member inherits from `<workspace-root>/.logos/rules.toml` (mirrors
+ *  `InheritedRules`, S-508): each declared key's origin and the tier's own values.
+ *  `origins` is `null` exactly when the tier does not parse, and `error` says why. */
+export interface InheritedRules {
+  path: string;
+  origins: RuleOrigins | null;
+  constraints: ParsedRules["constraints"];
+  metric_thresholds: ParsedRules["metric_thresholds"];
+  error: string | null;
+}
+
+/** A member-only table a workspace rules contract declares, refused there
+ *  (mirrors `RefusedRootTable`, FR-CF-08). */
+export interface RefusedRootTable {
+  table: string;
+  reason: string;
+}
+
+/** `<workspace-root>/.logos/rules.toml` as the app-level editor's Rules section
+ *  loads it (mirrors `TierRulesFile`, S-508): a broken file still loads, with its
+ *  fault, because the editor is its repair path. */
+export interface TierRulesFile {
+  path: string;
+  exists: boolean;
+  content: string;
+  fingerprint: string;
+  parsed: ParsedRules | null;
+  error: string | null;
+  refused: RefusedRootTable[];
 }
 
 /** The outcome of a validated atomic `POST /config/save` (mirrors
@@ -2334,6 +2412,100 @@ export interface XserviceBuildDeps {
   cross_context: CrossContextHint[];
 }
 
+// ── The declared-topic relation (S-489, S-491, FR-WS-36, CR-157) ─────────────
+// A member's committed `src/main` configuration DECLARING a topic — never an
+// observed broker edge (BR-54). Mirrors `federation::declared_topics` and
+// `query::XserviceDeclaredTopics`, the one read-model the CLI, MCP and web print.
+
+/** Whether a declaration's topic is one the member already shows through an
+ *  observed Producer/Consumer (`observed`), one it adds (`net-new`), or a value
+ *  no member's broker site names (`declared-only` — not a topic). */
+export type DeclarationStatus = "observed" | "net-new" | "declared-only";
+
+/** A net-new declaration's member, against its broker sites — member grain. */
+export type DeclaredTopicSite =
+  | { site: "config-only" }
+  | { site: "site-refused"; refusals: { reason: string; symbol: string }[] }
+  | { site: "site-uncaptured" }
+  /** The coverage walk could not read the member's broker sites: the split is
+   *  not determined — never render it as config-only. */
+  | { site: "site-unread" };
+
+/** One declaration: `member`'s configuration names `topic` under `key` in `file`. */
+export interface TopicDeclaration {
+  member: string;
+  topic: string;
+  provenance: "config-declared";
+  /** The canonical topic-named key. */
+  key: string;
+  /** The member-relative configuration source defining it. */
+  file: string;
+  /** The declaring file's profile; `null` for the unprofiled base. */
+  profile: string | null;
+  /** The placeholder hop, present only when the value was not a literal. */
+  via?: { keys: string[]; profiles: string[]; unprofiled: boolean };
+  shape: "spring-kafka-topics" | "last-segment" | "last-segment-suffix";
+  status: DeclarationStatus;
+  /** On a `net-new` declaration only. */
+  site?: DeclaredTopicSite;
+}
+
+/** A count at two grains: distinct `(member, topic)` pairs and the declarations
+ *  behind them. */
+export interface DeclaredPairTally {
+  pairs: number;
+  declarations: number;
+}
+
+/** The `declared_topics` headline — every figure beside its denominator (BR-51). */
+export interface DeclaredTopicHeadline {
+  declared_topic_pairs: number;
+  declarations_considered: number;
+  already_observed: DeclaredPairTally;
+  net_new: DeclaredPairTally & {
+    config_only: number;
+    site_refused: number;
+    site_uncaptured: number;
+    site_unread: number;
+    split_covers_all_members: boolean;
+  };
+  declared_only: DeclaredPairTally;
+  refused: number;
+  captured_topics: number;
+  members: {
+    members: number;
+    read: number;
+    declaring: number;
+    unread?: string[];
+    unread_reasons?: Record<string, string>;
+  };
+  /** The headline and its denominators as one server-composed line — render it,
+   *  never recompose it (BR-51). */
+  summary: string;
+}
+
+/** `GET /api/v1/workspace/declared-topics` — the `xservice declared-topics`
+ *  read-model (S-489). */
+export interface XserviceDeclaredTopics {
+  scope?: string;
+  scope_note?: string;
+  headline: DeclaredTopicHeadline;
+  /** The captured topics declared, sorted by topic; each declaration marked
+   *  `observed` or `net-new`. */
+  topics: { topic: string; declarations: TopicDeclaration[] }[];
+  /** Values no member's broker site names — not a topic, never drawn. */
+  declared_only: TopicDeclaration[];
+  /** Topic-named values the placeholder hop refused. */
+  refused: {
+    member: string;
+    key: string;
+    file: string;
+    profile: string | null;
+    value: string;
+    reason: ConfigValueRefusal;
+  }[];
+}
+
 /** `GET /api/v1/workspace/route-providers` — the resolved cross-service bindings:
  *  the service map's edges. The CLI and MCP twins also carry the declared
  *  relations beside them; this route does not (S-461) — the map reads those from
@@ -2762,8 +2934,9 @@ export interface WorkspaceTierConfigFile {
  * `GET /api/v1/workspace/config` (S-450, S-451 T2, FR-WS-30) — the workspace
  * root's config tier as its editor group loads it (mirrors
  * `WorkspaceTierDocument`). Not a `ConfigReadModel`: a file that does not parse
- * is delivered here for repair rather than refused, each half on its own, and no
- * `rules.toml` is read at this root.
+ * is delivered here for repair rather than refused, each half on its own. This
+ * read carries no `rules.toml`: the root rules contract has its own read
+ * (`TierRulesFile`, S-508).
  */
 export interface WorkspaceTierDocument {
   config: WorkspaceTierConfigFile;

@@ -268,6 +268,32 @@ describe("DashboardView migration (S-187, FR-UI-09 / FR-UI-21; CR-079)", () => {
     expect(screen.getByText("2 findings across 4 checked rules")).toBeInTheDocument();
   });
 
+  it("Rule findings widget — blessed ratchet debt is a PASS with 'N blessed · M fixed since bless' (S-508)", async () => {
+    const m = clone();
+    m.rules = {
+      passed: true,
+      checked_rules: 1,
+      rules_present: true,
+      violations: [
+        {
+          rule: "max_cc", rule_type: "constraint", severity: "warning", file: "src/old.rs", node_id: 1, message: "blessed debt",
+          ratchet: { symbol: "crate/old().", value: 20, blessed: 20, status: "blessed" },
+        },
+      ],
+      freshness: "fresh",
+      warnings: [],
+      ratchet: {
+        blessed_file: ".logos/rules-baseline.json", blessed_file_present: true, bless_command: "logos check --bless",
+        rules: ["max_cc"], blessed: 1, worsened: 0, new: 0,
+        fixed: [{ rule: "max_cc", symbol: "crate/gone().", blessed: 18 }, { rule: "max_cc", symbol: "crate/gone2().", blessed: 17 }],
+      },
+    };
+    stub(m);
+    render(<DashboardView />);
+    expect(await screen.findByText("No findings — 1 rule checked · 1 blessed · 2 fixed since bless")).toBeInTheDocument();
+    expect(screen.queryByText("FAIL")).toBeNull();
+  });
+
   it("Rule findings widget — muted onboarding state when no rules.toml is authored", async () => {
     const m = clone();
     // `passed: null` (S-352, FR-GV-22): no contract loaded and nothing else fired —

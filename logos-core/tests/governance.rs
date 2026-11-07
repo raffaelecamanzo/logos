@@ -1409,48 +1409,51 @@ fn downgrade_all_snapshots_to(root: &Path, version: i64) {
     .expect("downgrade the recorded semantics version");
 }
 
-/// The CR-257 upgrade boundary (S-826, [FR-GV-10]; S-816 pinned the v8 → v9
-/// one and S-523 the v7 → v8 one the same way): a baseline saved by a v9 build
-/// (before a Rust trait impl's methods stopped counting toward their type) is
-/// incomparable to a v10 run. The first gate after the upgrade passes
-/// informationally with the re-baseline notice; the second compares normally
-/// against the snapshot the first re-based to. One bump, one re-baseline,
-/// nothing re-blessed by hand.
+/// The CR-269 upgrade boundary (S-851, [FR-GV-10]; S-826 pinned the v9 → v10
+/// one, S-816 the v8 → v9 one and S-523 the v7 → v8 one the same way): a
+/// store saved by a v10 build (before a Rust module file and its sibling
+/// directory became one module) is incomparable to a v11 run. `session_start`
+/// resets it before the edits, with the notice naming both versions and
+/// values; the gate that follows compares normally against the snapshot the
+/// session anchored. One bump, one reset, nothing re-blessed by hand.
 ///
 /// [FR-GV-10]: ../../docs/specs/requirements/FR-GV-10.md
 #[test]
-fn a_v9_baseline_re_baselines_once_under_semantics_v10() {
+fn a_v10_store_is_reset_once_by_session_start_under_semantics_v11() {
     assert_eq!(
         logos_core::metrics::METRIC_SEMANTICS_VERSION,
-        10,
-        "CR-257 is semantics v10"
+        11,
+        "CR-269 is semantics v11"
     );
     let tmp = clean_project();
     let engine = Engine::start(tmp.path()).expect("engine starts");
     assert!(engine.pipeline().index().warnings.is_empty());
-    assert!(engine.quality().gate(None, true, true).expect("gate --save runs").saved);
-    downgrade_all_snapshots_to(tmp.path(), 9);
+    let saved = engine.quality().gate(None, true, true).expect("gate --save runs");
+    assert!(saved.saved);
+    downgrade_all_snapshots_to(tmp.path(), 10);
 
-    let first = engine.quality().gate(None, false, true).expect("gate runs");
-    assert!(first.passed, "a v9 baseline never fails a v10 gate: {}", first.message);
-    assert!(first.saved, "the first v10 gate re-baselines");
-    assert!(
-        first
-            .message
-            .contains("baseline reset: metric semantics changed"),
-        "the re-baseline is announced: {}",
-        first.message
+    let session = engine.quality().session_start().expect("session_start runs");
+    let notice = format!(
+        "baseline reset: metric semantics changed {}",
+        reset_figures((10, saved.signal), (11, session.signal))
+    );
+    assert!(session.message.contains(&notice), "the reset is announced: {}", session.message);
+    let json = serde_json::to_value(&session).expect("the session serialises");
+    assert_eq!(
+        json["baseline_reset"],
+        reset_json("metric semantics changed", (10, saved.signal), (11, session.signal)),
+        "{json:#}"
     );
 
-    let second = engine.quality().gate(None, false, true).expect("gate runs");
-    assert!(second.passed, "{}", second.message);
-    assert!(!second.saved, "the second gate compares, it does not re-baseline");
+    let gate = engine.quality().gate(None, false, true).expect("gate runs");
+    assert!(gate.passed, "{}", gate.message);
+    assert!(!gate.saved, "the gate after the reset compares, it does not re-baseline");
     assert!(
-        second.message.contains("holds the baseline"),
-        "the second gate is a normal comparison: {}",
-        second.message
+        gate.message.contains("holds the baseline"),
+        "the gate is a normal comparison: {}",
+        gate.message
     );
-    assert_eq!(second.baseline_signal, first.signal);
+    assert_eq!(gate.baseline_signal, session.signal);
 }
 
 // ── FR-GV-10 / BR-25 / UAT-QM-13 step 3: thresholds-hash auto-re-baseline ────
@@ -2349,13 +2352,14 @@ fn health_reports_store_integrity_and_counts() {
     );
     // Migration 27 (S-513, CR-168) added the persist-failure record, after
     // migration 26 (S-498, CR-162) added the snapshot offender lists.
-    // This assertion tracks the latest applied migration — the store reports 47
-    // (S-832, a file's declared facade, after 46 — S-830, a Go callable's
-    // signature re-extracted) once fully migrated (`federation::broker`'s
-    // `the_broker_arm_introduces_no_schema_migration`, `graph_store::tests`'s
+    // This assertion tracks the latest applied migration — the store reports 49
+    // (S-506, the check marker's inherited rule count, after 48 — S-854, Java
+    // same-package static calls re-extracted) once fully migrated
+    // (`federation::broker`'s `the_broker_arm_introduces_no_schema_migration`,
+    // `graph_store::tests`'s
     // four version-pinning tests and `build_dependency_relation.rs` carry the
     // same number).
-    assert_eq!(health.schema_version, 47, "migration 47 applied");
+    assert_eq!(health.schema_version, 49, "migration 49 applied");
     assert!(health.db_size_bytes > 0);
     assert!(health.db_path.ends_with("logos.db"));
     assert!(health.files >= 1 && health.nodes >= 2);
@@ -3358,6 +3362,7 @@ fn an_interrupted_run_leaves_neither_the_marker_nor_the_rows() {
                     checked_rules: 0,
                     rules_present: false,
                     operation: CHECK_RUN_OP_CHECK,
+                    workspace_rules: None,
                 },
             )?;
             Err::<(), _>(anyhow::anyhow!("interrupted mid-run"))
@@ -3764,6 +3769,7 @@ fn an_interrupted_run_leaves_no_partially_populated_evaluated_set() {
                     checked_rules: 0,
                     rules_present: false,
                     operation: CHECK_RUN_OP_SCAN,
+                    workspace_rules: None,
                 },
             )?;
             Err::<(), _>(anyhow::anyhow!("interrupted mid-run"))

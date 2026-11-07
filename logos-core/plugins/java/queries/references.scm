@@ -55,9 +55,18 @@
 ;   @ref.receiver.variable — a simple name (`mailer.send()`, `Clock.now()`):
 ;                            typed by the one binding of it in scope at the
 ;                            call (below, S-825, CR-256) — else, where no
-;                            binding anywhere in the file declares the name, a
-;                            type its single-type import or own declaration
-;                            names.
+;                            binding anywhere in the file declares the name
+;                            and no static import brings it in, a type its
+;                            single-type import or own declaration names, or
+;                            `type_name` (next) marks.
+;   @ref.receiver.type_name — a simple name spelt as Java names a type
+;                            (S-854): capitalised, and not a constant's
+;                            all-capitals name (`Helper`, `T`, never `LOG`).
+;                            Where no binding or static import of the file
+;                            declares it, `Helper.slug()` is the row
+;                            `Helper::slug`, which the package rungs scope: a
+;                            type of the caller's own package binds without
+;                            an import.
 ;   @ref.receiver.field    — `this.x.send()`: the field `x`, from field
 ;                            positions only (S-398).
 ;   @ref.receiver.this     — `this.send()`: the enclosing class.
@@ -81,6 +90,8 @@
 ;                            recorded as the free call the lexical scope binds.
 
 (method_invocation object: (identifier) @ref.receiver.variable)
+((method_invocation object: (identifier) @ref.receiver.type_name)
+  (#match? @ref.receiver.type_name "^[A-Z]([A-Za-z0-9_$]*[a-z][A-Za-z0-9_$]*)?$"))
 (method_invocation object: (this) @ref.receiver.this)
 (method_invocation object: (super) @ref.receiver.super)
 (method_invocation

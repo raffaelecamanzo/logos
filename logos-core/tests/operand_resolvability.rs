@@ -377,6 +377,16 @@ mod ts_method_residue;
 #[path = "operand_resolvability/declared_topics.rs"]
 mod declared_topics;
 
+/// S-489's estate arm of the shipped declared-topic intake — its own module,
+/// so the product's reading does not co-edit the file S-488's gate, floor and
+/// finding live in. Reads the shipped `DeclaredTopics` relation and the
+/// observed read-models through member engines over a private copy, and
+/// reproduces S-488's recorded net-new pairs by name.
+///
+/// `#[path]`-attached for the same reason every sibling above is.
+#[path = "operand_resolvability/declared_topics_intake.rs"]
+mod declared_topics_intake;
+
 /// S-492's members-only addressed-pair gate — its own module, so CR-158's
 /// re-run does not co-edit the file S-475's floor, finding and pins live in.
 /// Re-judges S-475's own target population through S-411's classifier with

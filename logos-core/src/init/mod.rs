@@ -6,7 +6,9 @@
 //!
 //! - starter policy templates (`config.toml`, `rules.toml`) written only if
 //!   absent — re-running `init` never overwrites an edited policy file
-//!   ([FR-IN-01]);
+//!   ([FR-IN-01]); the `rules.toml` one, and the workspace rules contract
+//!   `init --workspace` writes, rendered from the curated set
+//!   ([`rules_template`], [FR-IN-10]);
 //! - the generated `.logos/.gitignore` whose managed block ignores the
 //!   derived/machine-specific state (`logos.db*`, `telemetry.db*`, …) while
 //!   the checked-in policy travels ([FR-IN-04], SRS §12 layout);
@@ -39,6 +41,7 @@
 //! [FR-IN-03]: ../../../docs/specs/requirements/FR-IN-03.md
 //! [FR-IN-04]: ../../../docs/specs/requirements/FR-IN-04.md
 //! [FR-IN-09]: ../../../docs/specs/requirements/FR-IN-09.md
+//! [FR-IN-10]: ../../../docs/specs/requirements/FR-IN-10.md
 //! [FR-IN-12]: ../../../docs/specs/requirements/FR-IN-12.md
 //! [FR-SY-05]: ../../../docs/specs/requirements/FR-SY-05.md
 //! [FR-WK-08]: ../../../docs/specs/requirements/FR-WK-08.md
@@ -55,6 +58,7 @@ use crate::models::pipeline::{InitAction, InitStep};
 
 pub(crate) mod plugin;
 mod retire;
+mod rules_template;
 
 pub use plugin::ClaudePlugin;
 // Re-exported rather than reached as `init::retire::uninstall`, so the engine's
@@ -199,69 +203,6 @@ const CONFIG_TEMPLATE: &str = r#"# Logos project configuration (.logos/config.to
 # enabled = true
 # include = ["docs/**/*.md", "*.md", "README*"]
 # exclude = []
-"#;
-
-/// Starter `rules.toml`: an empty (everything-optional) architecture contract
-/// with commented examples — parses to [`crate::config::Rules::default`].
-const RULES_TEMPLATE: &str = r#"# Logos architecture contract (.logos/rules.toml) — checked-in policy
-# enforced by `logos check` and the quality gate (FR-GV-01..05). Everything
-# is optional: an omitted constraint is simply not enforced.
-# Reference: docs/howto/configuration.md
-
-# [constraints]
-# max_cycles     = 0    # maximum allowed dependency cycles
-# max_cc         = 15   # maximum cyclomatic complexity per function
-# max_fn_lines   = 100  # maximum lines per function
-# no_god_files   = 50   # maximum symbols per file
-# max_fan_in     = 30   # max inbound dependency edges for any one symbol (FR-GV-11)
-# max_fan_out    = 30   # max outbound dependency edges for any one symbol (FR-GV-11)
-# max_dead       = 0    # max project-wide dead functions, absolute (FR-GV-11)
-#   # — or, delta-from-blessed-baseline (CR-043/ADR-39): fail only when the dead
-#   # count rises above the blessed steady-state. Re-bless `baseline` after the
-#   # dead-code count legitimately changes (the gate-baseline re-bless discipline).
-# max_dead       = { baseline = 0, delta = 0 }
-# max_duplicates = 0    # max project-wide duplicate functions (FR-GV-11)
-
-# Ordered layers: a higher `order` may not depend on a lower one. Files not
-# matching any layer are exempt from layer ordering (DL-05).
-# [[layers]]
-# name  = "domain"
-# paths = ["src/domain/**"]
-# order = 0
-#
-# [[layers]]
-# name  = "infrastructure"
-# paths = ["src/infra/**"]
-# order = 1
-
-# Forbidden dependencies between named layers, reported with the reason.
-# [[boundaries]]
-# from   = "domain"
-# to     = "infrastructure"
-# reason = "the domain stays persistence-free"
-
-# Glob-level import bans (FR-GV-12): any import/reference edge from a `from`-glob
-# file into a `to`-glob file is a violation. Globs match file paths, not layer
-# names. v1 covers resolved intra-workspace edges.
-# [[forbidden_imports]]
-# from   = "src/web/**"
-# to     = "src/db/**"
-# reason = "the web layer must not import the db directly"
-
-# Git-history analytics tuning (CR-006, FR-GH-03..05). These keys tune the
-# NON-GATED temporal tier only (`logos hotspots`) — they never affect `check`
-# or the quality gate (BR-26). All optional; shown with their defaults.
-# [history]
-# window_months              = 12   # HEAD-anchored window length, in calendar months
-# co_change_max_commit_files = 50   # commits touching more files are skipped for co-change pairing only
-# defect_patterns            = ["(?i)\\bfix(es|ed)?\\b", "(?i)\\bbug\\b", "(?i)\\bhotfix\\b"]
-
-# Coverage-ingestion tuning (CR-007, FR-CV-03/09). Tunes the NON-GATED advisory
-# evidence tier only (`logos coverage`) — it never affects `check` or the quality
-# gate (BR-28). `path_strip_prefixes` are stripped from coverage-report paths
-# before they map to indexed files, so absolute build-dir paths bind.
-# [coverage]
-# path_strip_prefixes = ["/home/runner/work/myproject/", "/build/"]
 "#;
 
 /// Managed-block markers. Hash-comment flavour for `.gitignore` and hook
@@ -503,7 +444,7 @@ pub(crate) fn run(
     let mut steps = vec![
         write_if_absent(root, ".logos/config.toml", CONFIG_TEMPLATE)?,
         append_project_id_if_absent(root)?,
-        write_if_absent(root, ".logos/rules.toml", RULES_TEMPLATE)?,
+        write_if_absent(root, ".logos/rules.toml", &rules_template::member())?,
         logos_dir_gitignore(root)?,
     ];
     // FR-IN-12: read only when a step it changes was asked for, so a plain
@@ -1000,6 +941,29 @@ pub(crate) fn workspace_root_gitignore(root: &Path, patterns: &[&str]) -> Result
         GI_END,
         &block,
     )
+}
+
+/// [FR-IN-10]: the workspace rules contract `logos init --workspace` writes to
+/// `<workspace-root>/.logos/rules.toml` — **only when absent** ([FR-IN-01]'s
+/// non-clobbering rule), every key commented, so nothing is enforced until a
+/// human uncomments one ([BR-62]). An existing file is the owner's whatever it
+/// holds, and stays byte-identical.
+///
+/// The root's `.logos/` is created with its managed `.gitignore` first, as the
+/// workspace-tier writers do before anything lands there: the contract travels
+/// in version control, the serve's derived state beside it does not.
+///
+/// # Errors
+/// On I/O failure creating the directory or writing either file.
+///
+/// [FR-IN-10]: ../../../docs/specs/requirements/FR-IN-10.md
+/// [FR-IN-01]: ../../../docs/specs/requirements/FR-IN-01.md
+/// [BR-62]: ../../../docs/specs/software-spec.md#318-configuration
+pub(crate) fn workspace_rules_contract(root: &Path) -> Result<InitStep> {
+    let dir = root.join(".logos");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    logos_dir_gitignore(root)?;
+    write_if_absent(root, ".logos/rules.toml", &rules_template::workspace())
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>> {

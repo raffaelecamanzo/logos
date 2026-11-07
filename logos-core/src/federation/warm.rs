@@ -353,23 +353,19 @@ pub fn record_outcomes(summary: &WarmSummary) {
     }
 }
 
-/// The workspace root `member_root` belongs to: the directory of the nearest
+/// The workspace root `member_root` belongs to — the directory of the nearest
 /// [`MANIFEST_FILENAME`](super::MANIFEST_FILENAME) **strictly above** it,
-/// canonicalised so it can be stripped from a canonical member path.
+/// canonicalised so it can be stripped from a canonical member path. The walk
+/// is [`config::workspace_root_of`](crate::config::workspace_root_of), the one
+/// spelling the member's rules tier ([FR-CF-08]) reads through too.
 ///
 /// # Why the walk starts at the parent
-/// A member is never its own workspace root — [`member_name`](super::member_name)
-/// encodes exactly that, returning `None` for a path that relativises to the
-/// empty string. But [`Path::ancestors`] yields the path *itself* first, so a
-/// walk started at the member would adopt a member that happens to carry its own
-/// `logos.workspace.toml` — a nested workspace, and a shape
-/// [`super::discover`] explicitly contemplates, since it climbs *above* a
-/// member's git root to find the manifest.
-///
-/// Getting that wrong is not a mis-labelling, it is three failures at once: the
-/// adopted member names nothing (so every outcome in the pass is dropped), the
-/// real workspace's record is never written, and the sidecar is created **inside
-/// a member's working tree** — the one thing [FR-WS-17] AC4 and [FR-WS-14]'s
+/// A walk started at the member would adopt a member that happens to carry its
+/// own `logos.workspace.toml` — a nested workspace, a shape [`super::discover`]
+/// explicitly contemplates. Here that is three failures at once: the adopted
+/// member names nothing (so every outcome in the pass is dropped), the real
+/// workspace's record is never written, and the sidecar is created **inside a
+/// member's working tree** — the one thing [FR-WS-17] AC4 and [FR-WS-14]'s
 /// no-member-store property forbid outright. Because the resolution takes the
 /// first member that answers, one such member would poison the whole pass.
 ///
@@ -380,15 +376,11 @@ pub fn record_outcomes(summary: &WarmSummary) {
 /// know, exactly the loud posture that is right on a command's critical path and
 /// wrong for advisory evidence.
 ///
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
 /// [FR-WS-14]: ../../../docs/specs/requirements/FR-WS-14.md
 /// [FR-WS-17]: ../../../docs/specs/requirements/FR-WS-17.md
 fn workspace_root_of(member_root: &Path) -> Option<PathBuf> {
-    let start = member_root
-        .canonicalize()
-        .unwrap_or_else(|_| member_root.to_path_buf());
-    let manifest = super::find_manifest_uptree(start.parent()?)?;
-    let dir = manifest.parent()?;
-    Some(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
+    crate::config::workspace_root_of(member_root)
 }
 
 /// Run `index_member` over `members` at a bounded concurrency of at most

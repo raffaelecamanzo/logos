@@ -307,7 +307,11 @@ function RuleFindingsCard({ rules }: { rules: RulesReport }) {
       badge={findings > 0 ? <Badge tone="red">FAIL</Badge> : <Badge tone="green">PASS</Badge>}
       copy={ruleFindings}
       figure={
-        <span>{findings > 0 ? RULE_FINDINGS_TEXT.findings(findings, rules.checked_rules) : RULE_FINDINGS_TEXT.clean(checked)}</span>
+        <span>
+          {findings > 0 ? RULE_FINDINGS_TEXT.findings(findings, rules.checked_rules) : RULE_FINDINGS_TEXT.clean(checked)}
+          {/* Blessed ratchet debt passes `check`, so it is stated beside the verdict, not in it (S-508). */}
+          {rules.ratchet && ` · ${RULE_FINDINGS_TEXT.blessed(rules.ratchet.blessed, rules.ratchet.fixed.length)}`}
+        </span>
       }
     >
       {link}

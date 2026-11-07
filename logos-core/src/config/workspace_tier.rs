@@ -1,5 +1,6 @@
 //! The **workspace root as a config root** ([FR-WS-30], [ADR-67]) — the
-//! engine-free seam the web surface's `/api/v1/workspace/config*` routes call.
+//! engine-free seam the web surface's `/api/v1/workspace/config*` and
+//! `/api/v1/workspace/rules*` routes call.
 //!
 //! The workspace root holds the second tier [`resolve_chat`](super::resolve_chat)
 //! inherits from, and it holds no graph: constructing an [`Engine`](crate::Engine)
@@ -50,15 +51,17 @@
 //! [CR-145]: ../../../docs/requests/CR-145-workspace-level-chat-configuration.md
 //! [ADR-67]: ../../../docs/specs/architecture/decisions/ADR-67.md
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
 
 use super::atomic::fingerprint;
-use super::{load_secrets_from_root, parse_config, resolve_chat, write_config, write_secret};
+use super::{load_secrets_from_root, parse_config, resolve_chat, write_config, write_rules, write_secret};
+use super::{load_rules_from_root, parse_rules, EffectiveRules, ZeroAdmissionDiagnostic};
+use super::{InheritedRules, RefusedRootTable, RefusedRootTables, Rules};
 use super::{Config, ConfigError, EffectiveChat, MaskedSecret, SecretWriteOutcome};
-use super::{CONFIG_RELPATH, SECRETS_RELPATH};
+use super::{CONFIG_RELPATH, RULES_RELPATH, SECRETS_RELPATH};
 use crate::observability::{traced, Tool};
 
 /// Create `<root>/.logos/` and its managed `.gitignore` before a workspace-tier
@@ -112,10 +115,13 @@ pub struct TierConfigFile {
 ///
 /// Each half is reported on its own, so a fault in one never hides the other:
 /// a broken `secrets.toml` leaves the policy document editable, and a broken
-/// `config.toml` leaves the key state readable. No `rules.toml` is read — a
-/// rules document at the workspace root is read by nothing (workspace rules
-/// are the manifest's `[governance]`), so it must not be able to fail this read
-/// either.
+/// `config.toml` leaves the key state readable. No `rules.toml` is read here:
+/// the workspace rules tier ([FR-CF-08]) is resolved for a member by
+/// [`load_effective_rules`], so a broken root contract fails each member's
+/// governance runs and index (whatever reads the effective contract), never
+/// this config read.
+///
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
 ///
 /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
 /// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
@@ -140,7 +146,7 @@ pub struct WorkspaceTierDocument {
     pub effective_chat: Option<EffectiveChat>,
 }
 
-/// What a [`write_workspace_config`] did — the same arms, and the same wire shape
+/// What a [`write_workspace_config`] or [`write_workspace_rules`] did — the same arms, and the same wire shape
 /// (internally tagged on `outcome`), as the manifest editor's
 /// [`ManifestSaveOutcome`](crate::federation::manifest::ManifestSaveOutcome), so
 /// the SPA reads one save-outcome type for both files. Each arm names the
@@ -148,9 +154,10 @@ pub struct WorkspaceTierDocument {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum TierSaveOutcome {
-    /// The candidate replaced `config.toml` atomically.
+    /// The candidate replaced the file atomically.
     Written {
-        /// Relative to the workspace root (`.logos/config.toml`).
+        /// Relative to the workspace root (`.logos/config.toml`, or
+        /// `.logos/rules.toml` for [`write_workspace_rules`]).
         path: String,
         /// The size of the document now on disk.
         bytes_written: u64,
@@ -178,6 +185,13 @@ pub enum TierSaveOutcome {
         /// The document on disk now.
         disk_content: String,
     },
+}
+
+impl TierSaveOutcome {
+    /// Whether the save was refused because the file changed since the load.
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, TierSaveOutcome::Conflict { .. })
+    }
 }
 
 /// A read fault stated the way a surface may render it — by the file (`rel`,
@@ -244,10 +258,10 @@ fn parse_position(rendered: &str) -> Option<String> {
     None
 }
 
-/// Read `<root>/.logos/config.toml` to its literal text, or the empty document
-/// when it is absent.
-fn read_tier_config(root: &Path) -> Result<(bool, String), ConfigError> {
-    let path = root.join(CONFIG_RELPATH);
+/// Read the tier file `rel` (`.logos/config.toml`, `.logos/rules.toml`) under
+/// `root` to its literal text, or the empty document when it is absent.
+fn read_tier_file(root: &Path, rel: &str) -> Result<(bool, String), ConfigError> {
+    let path = root.join(rel);
     match std::fs::read_to_string(&path) {
         Ok(text) => Ok((true, text)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok((false, String::new())),
@@ -265,7 +279,7 @@ fn read_tier_config(root: &Path) -> Result<(bool, String), ConfigError> {
 /// cannot be delivered, so there is nothing to repair from).
 pub fn read_workspace_documents(root: &Path) -> Result<WorkspaceTierDocument> {
     traced(Tool::ConfigRead, || {
-        let (exists, content) = read_tier_config(root)?;
+        let (exists, content) = read_tier_file(root, CONFIG_RELPATH)?;
         let (parsed, error) = if exists {
             match parse_config(&content, &root.join(CONFIG_RELPATH)) {
                 Ok(config) => (Some(config), None),
@@ -313,8 +327,10 @@ pub fn read_workspace_documents(root: &Path) -> Result<WorkspaceTierDocument> {
 ///    nothing written.
 /// 4. Otherwise [`write_config`] swaps the candidate in atomically, verbatim.
 ///
-/// Steps 3 and 4 are a compare-then-swap without a lock, as the manifest's are:
-/// a write landing between the read and the rename is not detected.
+/// Steps 2 to 4 hold [`TIER_WRITE`], so two saves in one process — two tabs on
+/// one serve — are serialised and the second made against the same load is a
+/// `Conflict`, never a silent lost update. A write by **another process** landing
+/// between the read and the rename is still not detected, as for the manifest.
 ///
 /// # Errors
 /// The [`ConfigError`] the parser raises for a rejected candidate, carried in
@@ -327,28 +343,10 @@ pub fn write_workspace_config(
     loaded_fingerprint: &str,
 ) -> Result<TierSaveOutcome> {
     traced(Tool::ConfigWrite, || {
-        let path = root.join(CONFIG_RELPATH);
-        parse_config(candidate, &path)?;
-        // Bytes, not text: the comparison is of what is on disk, whatever it holds.
-        let current = match std::fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(source) => return Err(ConfigError::Io { path, source }.into()),
-        };
-        let disk_fingerprint = fingerprint(&current);
-        if current == candidate.as_bytes() {
-            return Ok(TierSaveOutcome::Unchanged {
-                path: CONFIG_RELPATH.to_string(),
-                fingerprint: disk_fingerprint,
-            });
-        }
-        if disk_fingerprint != loaded_fingerprint {
-            return Ok(TierSaveOutcome::Conflict {
-                path: CONFIG_RELPATH.to_string(),
-                loaded_fingerprint: loaded_fingerprint.to_string(),
-                disk_fingerprint,
-                disk_content: String::from_utf8_lossy(&current).into_owned(),
-            });
+        parse_config(candidate, &root.join(CONFIG_RELPATH))?;
+        let _serialised = tier_write_lock();
+        if let Some(outcome) = disk_gate(root, CONFIG_RELPATH, candidate.as_bytes(), loaded_fingerprint)? {
+            return Ok(outcome);
         }
         prepare_tier_dir(root)?;
         let written = write_config(root, candidate)?;
@@ -358,6 +356,59 @@ pub fn write_workspace_config(
             fingerprint: fingerprint(candidate.as_bytes()),
         })
     })
+}
+
+/// Serialises the workspace-tier writers' gate-then-write within this process
+/// (S-508 review): without it, two saves made against one load both pass
+/// [`disk_gate`] and both write, and the first is lost with no `Conflict`.
+static TIER_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold [`TIER_WRITE`]. A poisoned lock guards nothing but `()`, so it is taken
+/// over rather than propagated.
+fn tier_write_lock() -> std::sync::MutexGuard<'static, ()> {
+    TIER_WRITE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The clobber guard both tier writers apply after validating their candidate:
+/// a candidate whose bytes on disk would be `expected` — what the writer is about
+/// to write — when the file already holds exactly that is
+/// [`Unchanged`](TierSaveOutcome::Unchanged), decided **before** the fingerprint,
+/// since it overwrites nobody's edit; a file whose fingerprint is no longer
+/// `loaded_fingerprint` is a [`Conflict`](TierSaveOutcome::Conflict). `None`
+/// means the write may proceed. One spelling for both writers, so their safety
+/// order cannot drift apart.
+///
+/// # Errors
+/// [`ConfigError::Io`] reading the current file.
+fn disk_gate(
+    root: &Path,
+    rel: &str,
+    expected: &[u8],
+    loaded_fingerprint: &str,
+) -> Result<Option<TierSaveOutcome>, ConfigError> {
+    let path = root.join(rel);
+    // Bytes, not text: the comparison is of what is on disk, whatever it holds.
+    let current = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(source) => return Err(ConfigError::Io { path, source }),
+    };
+    let disk_fingerprint = fingerprint(&current);
+    if current == expected {
+        return Ok(Some(TierSaveOutcome::Unchanged {
+            path: rel.to_string(),
+            fingerprint: disk_fingerprint,
+        }));
+    }
+    if disk_fingerprint != loaded_fingerprint {
+        return Ok(Some(TierSaveOutcome::Conflict {
+            path: rel.to_string(),
+            loaded_fingerprint: loaded_fingerprint.to_string(),
+            disk_fingerprint,
+            disk_content: String::from_utf8_lossy(&current).into_owned(),
+        }));
+    }
+    Ok(None)
 }
 
 /// [`write_secret`] at the workspace root: write (or, blank, clear) the
@@ -373,8 +424,293 @@ pub fn write_workspace_secret(root: &Path, api_key: &str) -> Result<SecretWriteO
     })
 }
 
+// ── The workspace rules tier (S-506, FR-CF-08, ADR-73) ──────────────────────
+
+/// The workspace manifest's filename, as `config` spells it: the federation
+/// owns the canonical constant and the dependency runs federation → config only,
+/// so this borrows the one spelling `config` already keeps, which is pinned to
+/// the federation's by `the_remedy_artefact_is_this_manifest_filename`.
+const MANIFEST_FILENAME: &str = ZeroAdmissionDiagnostic::REMEDY_ARTEFACT;
+
+/// The workspace root `member_root` belongs to: the nearest **strict** ancestor
+/// holding a `logos.workspace.toml` ([FR-WS-01]), canonicalised — or `None` with
+/// no manifest above it, the single-root case ([ADR-52]).
+///
+/// The one spelling of that walk for a member: the rules tier reads through it,
+/// and the federation's warm-outcome filing asks the same question through it.
+/// The manifest is located, never parsed — a member's own command must not fail
+/// on a manifest key this build does not know.
+///
+/// # Why the walk starts at the parent
+/// A member is never its own workspace root, but [`Path::ancestors`] yields the
+/// path itself first, so a walk started at the member would adopt a member that
+/// carries its own manifest (a nested workspace) as the root of its own tier.
+///
+/// [FR-WS-01]: ../../../docs/specs/requirements/FR-WS-01.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub fn workspace_root_of(member_root: &Path) -> Option<PathBuf> {
+    let start = member_root
+        .canonicalize()
+        .unwrap_or_else(|_| member_root.to_path_buf());
+    let manifest = start
+        .parent()?
+        .ancestors()
+        .map(|dir| dir.join(MANIFEST_FILENAME))
+        .find(|candidate| candidate.is_file())?;
+    let dir = manifest.parent()?;
+    Some(dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()))
+}
+
+/// The workspace tier's `rules.toml` as a member reads it ([FR-CF-08]): the
+/// literal text, so a caller can hash exactly the bytes it parses.
+///
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesTier {
+    /// `<workspace-root>/.logos/rules.toml`.
+    pub path: PathBuf,
+    /// Its content.
+    pub text: String,
+}
+
+impl RulesTier {
+    /// Parse the tier with the member parser, unchanged — the same
+    /// `deny_unknown_fields` and validation a member's own file gets.
+    ///
+    /// # Errors
+    /// The [`ConfigError`] [`parse_rules`] returns, naming the root's path.
+    pub fn parse(&self) -> Result<super::Rules, ConfigError> {
+        parse_rules(&self.text, &self.path)
+    }
+}
+
+/// Read the workspace rules tier for `member_root` — `None` when the member
+/// belongs to no workspace or the root declares no `rules.toml`, which is the
+/// same thing to a member: no second tier.
+///
+/// # Errors
+/// [`ConfigError::Io`] when the root's `rules.toml` exists but cannot be read.
+pub fn read_rules_tier(member_root: &Path) -> Result<Option<RulesTier>, ConfigError> {
+    let Some(root) = workspace_root_of(member_root) else {
+        return Ok(None);
+    };
+    let path = root.join(RULES_RELPATH);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => Ok(Some(RulesTier { path, text })),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ConfigError::Io { path, source }),
+    }
+}
+
+/// The effective rules contract for `member_root` ([FR-CF-08], [ADR-73]): its
+/// own `<member>/.logos/rules.toml` (or the empty contract) resolved over the
+/// workspace tier by [`Rules::inherit`](super::Rules::inherit).
+///
+/// With no workspace tier this is exactly [`load_rules_from_root`], and the
+/// result carries no origin ([ADR-52]).
+///
+/// # Errors
+/// Either tier present but unreadable or invalid fails loud, through the
+/// ordinary loader ([`ConfigError`], exit 2).
+///
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+/// [ADR-73]: ../../../docs/specs/architecture/decisions/ADR-73.md
+pub fn load_effective_rules(member_root: &Path) -> Result<EffectiveRules, ConfigError> {
+    let member = load_rules_from_root(member_root)?;
+    let workspace = read_rules_tier(member_root)?
+        .map(|tier| tier.parse())
+        .transpose()?;
+    Ok(member.inherit(workspace))
+}
+
+// ── The workspace rules tier in the editors (S-508, FR-UI-12/38, CR-165) ─────
+
+/// What `member_root` inherits from its workspace rules tier, for the member
+/// Config editor ([FR-UI-12] as modified by [CR-165]) — `None` when it has no
+/// tier, so a single-root member's read-model is unchanged ([ADR-52]).
+///
+/// `member` is the member's own parsed contract, the document its editor
+/// round-trips. A tier that cannot be read or parsed is **stated**, not raised:
+/// the member's editor stays open over its own document, and the app-level
+/// editor is where the tier is repaired. Governance runs keep failing loud on it
+/// ([`load_effective_rules`]).
+///
+/// [FR-UI-12]: ../../../docs/specs/requirements/FR-UI-12.md
+/// [CR-165]: ../../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
+/// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+pub fn inherited_rules(member_root: &Path, member: &Rules) -> Option<InheritedRules> {
+    let root = workspace_root_of(member_root)?;
+    let path = root.join(RULES_RELPATH).display().to_string();
+    let parsed = read_rules_tier(member_root).and_then(|tier| tier.map(|t| t.parse()).transpose());
+    match parsed {
+        Ok(None) => None,
+        Ok(Some(tier)) => Some(InheritedRules {
+            path,
+            origins: member.clone().inherit(Some(tier.clone())).origins,
+            constraints: tier.constraints,
+            metric_thresholds: tier.metric_thresholds,
+            error: None,
+        }),
+        Err(err) => Some(InheritedRules {
+            error: Some(read_fault(&path, &err)),
+            path,
+            origins: None,
+            constraints: Default::default(),
+            metric_thresholds: Default::default(),
+        }),
+    }
+}
+
+/// The workspace root's `rules.toml` as the app-level editor's Rules section
+/// loads it ([FR-UI-38] as modified by [CR-165]) — the [`TierConfigFile`] shape,
+/// plus the member-only tables the document declares, which the tier refuses.
+///
+/// [FR-UI-38]: ../../../docs/specs/requirements/FR-UI-38.md
+/// [CR-165]: ../../../docs/requests/CR-165-workspace-rules-inherit-and-ratchet.md
+#[derive(Debug, Clone, Serialize)]
+pub struct TierRulesFile {
+    /// Relative to the workspace root (`.logos/rules.toml`).
+    pub path: String,
+    /// Whether the file exists on disk.
+    pub exists: bool,
+    /// The literal on-disk document (empty when absent).
+    pub content: String,
+    /// The load fingerprint of `content`'s bytes — posted back with a save.
+    pub fingerprint: String,
+    /// The parsed, load-path-validated contract, or `None` when `content` does
+    /// not parse or validate.
+    pub parsed: Option<Rules>,
+    /// Why `content` does not parse or validate, by file and position or key
+    /// only ([`read_fault`]); `None` exactly when `parsed` is `Some`.
+    pub error: Option<String>,
+    /// The member-only tables `content` declares: refused at the root and
+    /// applied to no member ([FR-CF-08]). Empty when it declares none or does not
+    /// parse.
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    pub refused: Vec<RefusedRootTable>,
+}
+
+/// The member-only tables `rules` declares, which the workspace tier refuses.
+fn refused_at_root(rules: Rules) -> Vec<RefusedRootTable> {
+    Rules::default().inherit(Some(rules)).refused
+}
+
+/// The app-level editor's read of `<root>/.logos/rules.toml` ([`TierRulesFile`]):
+/// a file that reads but does not parse is delivered with its fault, not
+/// refused, because the editor is its repair path.
+///
+/// # Errors
+/// [`ConfigError::Io`] when the file exists but cannot be read.
+pub fn read_workspace_rules(root: &Path) -> Result<TierRulesFile> {
+    traced(Tool::ConfigRead, || {
+        let path = root.join(RULES_RELPATH);
+        let (exists, content) = read_tier_file(root, RULES_RELPATH)?;
+        let (parsed, error, refused) = match parse_rules(&content, &path) {
+            Ok(rules) => (Some(rules.clone()), None, refused_at_root(rules)),
+            Err(err) => (None, Some(read_fault(RULES_RELPATH, &err)), Vec::new()),
+        };
+        Ok(TierRulesFile {
+            path: RULES_RELPATH.to_string(),
+            exists,
+            fingerprint: fingerprint(content.as_bytes()),
+            content,
+            parsed,
+            error,
+            refused,
+        })
+    })
+}
+
+/// Replace `<root>/.logos/rules.toml` with `candidate`, made against the load
+/// whose fingerprint is `loaded_fingerprint` — [`write_workspace_config`]'s order
+/// and posture, with one refusal of its own:
+///
+/// 1. **Validate the candidate** with the member parser ([`parse_rules`]); a
+///    rejected one leaves the root untouched.
+/// 2. **Refuse member-only tables** ([`RefusedRootTables`]): a root contract
+///    inherits only `[constraints]` and `[metric_thresholds]` ([FR-CF-08]), so a
+///    `[[layers]]` there would apply to no member. Refused with each table's
+///    reason, nothing written.
+/// 3. What `write_rules` would write — the candidate with its provenance stamp —
+///    already on disk ⇒ [`Unchanged`](TierSaveOutcome::Unchanged).
+/// 4. The disk moved since the load ⇒ [`Conflict`](TierSaveOutcome::Conflict).
+///    Steps 3 to 5 hold [`TIER_WRITE`], as [`write_workspace_config`]'s do.
+/// 5. Otherwise the member writer [`write_rules`] swaps it in atomically, with
+///    the provenance stamp a browser-written contract carries ([BR-35]). The
+///    `Written` fingerprint is of the stamped bytes now on disk.
+///
+/// # Errors
+/// The [`ConfigError`] the parser raises, or [`RefusedRootTables`], carried in
+/// the `anyhow` chain (both are the client's edit); [`ConfigError::Io`] reading
+/// the current file; [`ConfigError::Write`] when the atomic replace fails.
+///
+/// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+/// [BR-35]: ../../../docs/specs/software-spec.md#326-web-ui
+pub fn write_workspace_rules(
+    root: &Path,
+    candidate: &str,
+    loaded_fingerprint: &str,
+) -> Result<TierSaveOutcome> {
+    traced(Tool::ConfigWrite, || {
+        let path = root.join(RULES_RELPATH);
+        let refused = refused_at_root(parse_rules(candidate, &path)?);
+        if !refused.is_empty() {
+            return Err(RefusedRootTables(refused).into());
+        }
+        let _serialised = tier_write_lock();
+        // Gate on the stamped bytes `write_rules` would write, so re-saving the
+        // contract as it is reads `Unchanged`, not a rewrite of identical bytes.
+        let stamped = super::writeback::stamped_rules(candidate);
+        if let Some(outcome) = disk_gate(root, RULES_RELPATH, stamped.as_bytes(), loaded_fingerprint)? {
+            return Ok(outcome);
+        }
+        prepare_tier_dir(root)?;
+        let written = write_rules(root, candidate)?;
+        let on_disk = std::fs::read(&path).map_err(|source| ConfigError::Io { path, source })?;
+        Ok(TierSaveOutcome::Written {
+            path: written.path,
+            bytes_written: written.bytes_written,
+            fingerprint: fingerprint(&on_disk),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    /// S-508 review: two saves made in one process against the same load are
+    /// serialised by [`TIER_WRITE`] — exactly one is `Written`, the other a
+    /// `Conflict` — never two `Written` with the first silently lost. Repeated,
+    /// since the race it pins is timing-dependent without the lock.
+    #[test]
+    fn two_saves_against_one_load_never_both_write() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..40 {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let loaded = super::fingerprint(b"");
+            let barrier = Arc::new(Barrier::new(2));
+            let saves: Vec<_> = [12, 13]
+                .into_iter()
+                .map(|cc| {
+                    let (root, loaded, barrier) = (root.clone(), loaded.clone(), Arc::clone(&barrier));
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        super::write_workspace_rules(&root, &format!("[constraints]\nmax_cc = {cc}\n"), &loaded)
+                            .unwrap()
+                    })
+                })
+                .collect();
+            let outcomes: Vec<_> = saves.into_iter().map(|t| t.join().unwrap()).collect();
+            let written = outcomes
+                .iter()
+                .filter(|o| matches!(o, super::TierSaveOutcome::Written { .. }))
+                .count();
+            assert_eq!(written, 1, "round {round}: exactly one save writes: {outcomes:?}");
+        }
+    }
+
     use super::*;
 
     use std::process::Command;
@@ -583,5 +919,68 @@ mod tests {
         let err = write_workspace_config(root.path(), broken, &loaded).expect_err("an invalid candidate is refused");
         assert!(err.downcast_ref::<ConfigError>().is_some_and(|e| matches!(e, ConfigError::Parse { .. })), "{err:#}");
         assert_eq!(std::fs::read_to_string(root.path().join(CONFIG_RELPATH)).unwrap(), broken);
+    }
+
+    // ── S-506 / FR-CF-08: the workspace rules tier ──────────────────────────
+
+    /// A workspace `ws/` holding the manifest, with one member `ws/svc`.
+    fn tiered() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path().join("ws");
+        let member = ws.join("svc");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(ws.join(MANIFEST_FILENAME), "[workspace]\nname = \"w\"\nmembers = [\"svc\"]\n").unwrap();
+        let ws = ws.canonicalize().unwrap();
+        (tmp, ws, member)
+    }
+
+    /// The walk names the nearest manifest strictly above the member — never one
+    /// the member carries itself — and nothing without a manifest ([ADR-52]).
+    ///
+    /// [ADR-52]: ../../../docs/specs/architecture/decisions/ADR-52.md
+    #[test]
+    fn the_walk_finds_the_manifest_above_the_member_and_never_its_own() {
+        let (_tmp, ws, member) = tiered();
+        assert_eq!(workspace_root_of(&member), Some(ws.clone()));
+        std::fs::write(member.join(MANIFEST_FILENAME), "[workspace]\nname = \"nested\"\n").unwrap();
+        assert_eq!(workspace_root_of(&member), Some(ws.clone()), "a member's own manifest is not its tier");
+        assert_eq!(workspace_root_of(&ws), None, "the root has no tier above it");
+
+        let solo = tempfile::tempdir().unwrap();
+        assert_eq!(workspace_root_of(solo.path()), None);
+        assert_eq!(read_rules_tier(solo.path()).unwrap(), None);
+    }
+
+    /// The manifest is located, never parsed: a broken one still names the root,
+    /// and a member's own command does not fail on it.
+    #[test]
+    fn the_walk_does_not_parse_the_manifest() {
+        let (_tmp, ws, member) = tiered();
+        std::fs::write(ws.join(MANIFEST_FILENAME), "[workspace\nnot toml\n").unwrap();
+        assert_eq!(workspace_root_of(&member), Some(ws));
+    }
+
+    /// [FR-CF-08]: the root's `rules.toml` is the tier, parsed by the member
+    /// parser — an invalid one fails loud and names the root's file — and a root
+    /// with none is no tier at all.
+    ///
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
+    #[test]
+    fn the_effective_contract_reads_the_root_tier_and_fails_loud_on_a_broken_one() {
+        let (_tmp, ws, member) = tiered();
+        assert_eq!(load_effective_rules(&member).unwrap().origins, None, "no root rules.toml, no tier");
+
+        std::fs::create_dir_all(ws.join(".logos")).unwrap();
+        std::fs::write(ws.join(RULES_RELPATH), "[constraints]\nmax_cc = 15\n").unwrap();
+        let effective = load_effective_rules(&member).unwrap();
+        assert_eq!(effective.rules.constraints.max_cc, Some(super::super::Budget::Absolute(15)));
+        assert_eq!(
+            effective.origins.unwrap().constraint("max_cc"),
+            Some(super::super::RuleOrigin::Workspace)
+        );
+
+        std::fs::write(ws.join(RULES_RELPATH), "[constraints]\nmax_cc = 15\nunknown_key = 1\n").unwrap();
+        let err = load_effective_rules(&member).expect_err("an unknown root key is refused");
+        assert!(matches!(&err, ConfigError::Parse { path, .. } if path == &ws.join(RULES_RELPATH)), "{err}");
     }
 }

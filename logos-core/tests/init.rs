@@ -128,6 +128,86 @@ fn the_template_exclude_line_documents_the_built_in_default_when_uncommented() {
     );
 }
 
+/// Uncomment every commented **key line** and **table header** of a rules
+/// template — `# key = value` and `# [table]` / `# [[table]]` — and nothing else:
+/// prose comments stay comments. Exactly what a human promoting the template
+/// onto the curated set does, key by key (S-508, [FR-IN-10]).
+///
+/// [FR-IN-10]: ../../docs/specs/requirements/FR-IN-10.md
+fn uncomment_keys(template: &str) -> String {
+    template
+        .lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(rest)
+                if (rest.starts_with('[') && rest.ends_with(']') && !rest.contains(' '))
+                    || rest
+                        .split_once('=')
+                        .is_some_and(|(key, _)| {
+                            let key = key.trim_end();
+                            !key.is_empty()
+                                && key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                        }) =>
+            {
+                rest.to_string()
+            }
+            _ => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// S-508 / [FR-IN-10]: the member `rules.toml` template is **rendered from**
+/// `Constraints::recommended()` and the `[metric_thresholds]` defaults, never
+/// hand-kept beside them — it had drifted to 100 / 50 and lacked the four
+/// [CR-005] budgets. Every curated key appears commented with its curated value,
+/// and the template uncommented parses into a contract equal to the curated set.
+///
+/// [FR-IN-10]: ../../docs/specs/requirements/FR-IN-10.md
+/// [CR-005]: ../../docs/requests/CR-005-extended-structural-metrics.md
+#[test]
+fn the_member_rules_template_is_the_curated_set_with_its_values() {
+    let tmp = TempDir::new().unwrap();
+    Setup::init(tmp.path()).unwrap();
+    let template = read(tmp.path(), ".logos/rules.toml");
+
+    for key_line in [
+        "# max_fn_lines = 80",
+        "# no_god_files = 40",
+        "# max_nesting_depth = 4",
+        "# max_brain_methods = 0",
+        "# max_clone_ratio = 0.0",
+        "# no_god_containers = true",
+    ] {
+        assert!(
+            template.lines().any(|l| l == key_line || l.starts_with(&format!("{key_line} "))),
+            "the member template carries `{key_line}`:\n{template}"
+        );
+    }
+
+    let uncommented = uncomment_keys(&template);
+    let rules = logos_core::config::parse_rules(&uncommented, &tmp.path().join("uncommented.toml"))
+        .unwrap_or_else(|e| panic!("the uncommented template parses: {e}\n{uncommented}"));
+    assert_eq!(
+        rules.constraints,
+        logos_core::config::Constraints::recommended(),
+        "uncommented, the template IS the curated recommended set"
+    );
+    let thresholds = serde_json::to_value(&rules.metric_thresholds).unwrap();
+    let undeclared: Vec<&String> = thresholds
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, v)| v.is_null())
+        .map(|(k, _)| k)
+        .collect();
+    assert!(undeclared.is_empty(), "every [metric_thresholds] key is in the template: {undeclared:?}");
+    assert_eq!(
+        rules.metric_thresholds.effective(),
+        logos_core::metrics::Thresholds::default(),
+        "uncommented, the thresholds ARE the documented defaults"
+    );
+}
+
 #[test]
 fn re_init_never_clobbers_edited_policy_files() {
     let tmp = TempDir::new().unwrap();

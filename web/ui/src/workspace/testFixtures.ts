@@ -16,6 +16,7 @@ import type {
   WorkspaceReferenceResolution,
   WorkspaceStatus,
   XserviceBuildDeps,
+  XserviceDeclaredTopics,
 } from "../api/types.ts";
 
 /** The two-member roster the shell probe answers with. */
@@ -195,6 +196,35 @@ export const BOUND_EXTERNAL: BoundExternal = {
  *  that indexes no broker coupling reports (S-256). */
 export const NO_TOPICS: MemberTopics[] = [];
 
+/** The `workspace/declared-topics` answer over a workspace whose configuration
+ *  names no topic (S-491): every member read, nothing considered — the shape the
+ *  server sends, so a view is tested against a well-formed empty relation rather
+ *  than an empty object. */
+export const NO_DECLARED_TOPICS: XserviceDeclaredTopics = {
+  headline: {
+    declared_topic_pairs: 0,
+    declarations_considered: 0,
+    already_observed: { pairs: 0, declarations: 0 },
+    net_new: {
+      pairs: 0,
+      declarations: 0,
+      config_only: 0,
+      site_refused: 0,
+      site_uncaptured: 0,
+      site_unread: 0,
+      split_covers_all_members: true,
+    },
+    declared_only: { pairs: 0, declarations: 0 },
+    refused: 0,
+    captured_topics: 0,
+    members: { members: 2, read: 2, declaring: 0 },
+    summary: "0 declared topic pairs (0 declarations considered over 2 of 2 members)",
+  },
+  topics: [],
+  declared_only: [],
+  refused: [],
+};
+
 /** A pooled workspace reference resolution (S-637) over `members` members,
  *  every one read: 600 of 800 internal candidates resolved. */
 export function referenceResolution(
@@ -292,6 +322,12 @@ export interface StubOptions {
   /** The status payload's `[[links]]` rows (S-709); absent by default, as over
    *  a manifest declaring no link. */
   links?: WorkspaceStatus["links"];
+  /** The `workspace/declared-topics` answer (S-491); a workspace declaring
+   *  nothing ({@link NO_DECLARED_TOPICS}) by default. */
+  declaredTopics?: XserviceDeclaredTopics;
+  /** Answer `workspace/declared-topics` with this HTTP status instead (a failed
+   *  read), or `"pending"` to never answer it (a read in flight). */
+  declaredTopicsStatus?: number | "pending";
 }
 
 /**
@@ -311,6 +347,8 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
     buildDeps,
     buildDepsStatus,
     links,
+    declaredTopics = NO_DECLARED_TOPICS,
+    declaredTopicsStatus,
   } = opts;
   const calls: string[] = [];
   const json = (body: unknown, ok = true, code = 200) =>
@@ -330,6 +368,11 @@ export function stubApi(opts: StubOptions = {}): () => string[] {
         if (buildDepsStatus === "pending") return new Promise<Response>(() => {});
         if (buildDepsStatus !== undefined) return json({ error: "boom" }, false, buildDepsStatus);
         return json(buildDeps ?? {});
+      }
+      if (url.startsWith("/api/v1/workspace/declared-topics")) {
+        if (declaredTopicsStatus === "pending") return new Promise<Response>(() => {});
+        if (declaredTopicsStatus !== undefined) return json({ error: "boom" }, false, declaredTopicsStatus);
+        return json(declaredTopics);
       }
       if (url.startsWith("/api/v1/workspace/impact")) return json(impact);
       return json({});

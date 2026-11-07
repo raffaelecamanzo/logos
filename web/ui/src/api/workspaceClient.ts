@@ -16,7 +16,7 @@
 
 import { ApiError, apiMutate } from "../intent.ts";
 import { apiFetch, apiUrl } from "./client.ts";
-import { ConfigMutateError, FORM_HEADERS, apiErrorDetail, formBody, writeSecret } from "./configClient.ts";
+import { ConfigMutateError, saveFingerprinted, writeSecret } from "./configClient.ts";
 import type { StatisticsWindow } from "./statisticsClient.ts";
 import type {
   ManifestSaveOutcome,
@@ -33,6 +33,7 @@ import type {
   WorkspaceTierDocument,
   WorkspaceTierSaveOutcome,
   XserviceBuildDeps,
+  XserviceDeclaredTopics,
   XserviceImpact,
   XserviceRouteProviders,
 } from "./types.ts";
@@ -64,6 +65,14 @@ export function fetchWorkspaceBindings(): Promise<XserviceRouteProviders> {
  *  coupling (BR-58). App-level (unscoped) by design, like the bindings above. */
 export function fetchWorkspaceBuildDeps(): Promise<XserviceBuildDeps> {
   return apiFetch<XserviceBuildDeps>("workspace/build-deps");
+}
+
+/** `GET /api/v1/workspace/declared-topics` (S-491, FR-WS-36) — the declared-topic
+ *  relation: per captured topic, the members whose committed configuration declares
+ *  it, each `observed` or `net-new`, beside the headline. A DECLARATION, never an
+ *  observed broker edge (BR-54). App-level (unscoped) by design, like the bindings. */
+export function fetchWorkspaceDeclaredTopics(): Promise<XserviceDeclaredTopics> {
+  return apiFetch<XserviceDeclaredTopics>("workspace/declared-topics");
 }
 
 /** `GET /api/v1/workspace/impact?symbol=<s>` — the cross-service impact of a symbol:
@@ -193,17 +202,8 @@ export function fetchWorkspaceCoverage(): Promise<WorkspaceCoverageAnswer> {
  * the parser rejects (the file untouched), `400` for a missing fingerprint, `500`
  * for an I/O fault.
  */
-export async function saveWorkspaceManifest(
-  content: string,
-  fingerprint: string,
-): Promise<ManifestSaveOutcome> {
-  const res = await apiMutate(apiUrl("workspace/manifest/save"), {
-    headers: FORM_HEADERS,
-    body: formBody({ content, fingerprint }),
-    credentials: "same-origin",
-  });
-  if (res.ok || res.status === 409) return (await res.json()) as ManifestSaveOutcome;
-  throw new ConfigMutateError(res.status, await apiErrorDetail(res));
+export function saveWorkspaceManifest(content: string, fingerprint: string): Promise<ManifestSaveOutcome> {
+  return saveFingerprinted("workspace/manifest/save", { content, fingerprint });
 }
 
 /**
@@ -260,8 +260,8 @@ export async function fetchWorkspaceConfig(): Promise<WorkspaceTierDocument> {
  * candidate `content` as `<workspace-root>/.logos/config.toml` against the
  * `fingerprint` the editor loaded, through the intent-guarded {@link apiMutate}
  * seam (ADR-31, NFR-SE-06). The workspace-root twin of
- * {@link saveWorkspaceManifest}: `file=config` is the only document this root
- * carries (a `rules.toml` here would be read by nothing), and the server reaches
+ * {@link saveWorkspaceManifest}: `file=config` is the only document this route
+ * carries (the root rules contract has its own, `saveWorkspaceRules`), and the server reaches
  * no member — it writes only under `<workspace-root>/.logos/` (the file, and the
  * managed `.gitignore` on a first save) and runs no pipeline.
  *
@@ -272,17 +272,8 @@ export async function fetchWorkspaceConfig(): Promise<WorkspaceTierDocument> {
  * refused candidate (file left byte-identical), `400` for a missing fingerprint,
  * `500` for an I/O fault.
  */
-export async function saveWorkspaceConfig(
-  content: string,
-  fingerprint: string,
-): Promise<WorkspaceTierSaveOutcome> {
-  const res = await apiMutate(apiUrl("workspace/config/save"), {
-    headers: FORM_HEADERS,
-    body: formBody({ file: "config", content, fingerprint }),
-    credentials: "same-origin",
-  });
-  if (res.ok || res.status === 409) return (await res.json()) as WorkspaceTierSaveOutcome;
-  throw new ConfigMutateError(res.status, await apiErrorDetail(res));
+export function saveWorkspaceConfig(content: string, fingerprint: string): Promise<WorkspaceTierSaveOutcome> {
+  return saveFingerprinted("workspace/config/save", { file: "config", content, fingerprint });
 }
 
 /**

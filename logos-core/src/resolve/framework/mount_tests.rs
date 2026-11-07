@@ -351,3 +351,80 @@ fn a_mount_cycle_is_counted_not_unrolled() {
     let budget = crate::perf::scaled(std::time::Duration::from_secs(10));
     assert!(started.elapsed() < budget, "{:?} over {budget:?}", started.elapsed());
 }
+
+/// Every shipped TypeScript-family query names its mount method on each mount
+/// pattern, so a file that is no candidate is parsed only when it calls `use`
+/// (S-853). A query stating no mount reaches nothing; one whose mount pattern
+/// names no method reaches every file.
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn a_query_states_which_files_may_hold_a_mount() {
+    let registry = crate::plugin::LanguageRegistry::load(std::env::temp_dir()).expect("registry loads");
+    for ext in ["js", "ts", "tsx"] {
+        let query = registry.for_extension(ext).and_then(|p| p.query("frameworks")).expect("a frameworks query");
+        assert_eq!(Reach::of(query), Reach::Calling(vec!["use".to_string()]), "{ext}");
+    }
+    let tsx = registry.for_extension("tsx").expect("tsx").language().clone();
+    let compile = |source: &str| tree_sitter::Query::new(&tsx, source).expect("query compiles");
+    assert_eq!(Reach::of(&compile("(string) @fw.mount.framework")), Reach::Nothing);
+    let mount = "((call_expression function: (member_expression property: (property_identifier) @fw.mount.verb) @fw.mount.callee) (#eq? @fw.mount.verb \"use\")";
+    assert_eq!(Reach::of(&compile(&format!("{mount}\n  (#set! fw.mount.verb.name \"use\"))"))), Reach::Calling(vec!["use".to_string()]));
+    let unnamed = format!("{mount})\n{mount}\n  (#set! fw.mount.verb.name \"use\"))");
+    assert_eq!(Reach::of(&compile(&unnamed)), Reach::Every);
+    assert!(Reach::Every.admits("const a = 1;"));
+    assert!(!Reach::Nothing.admits("app.use('/api', r);"));
+}
+
+/// The text check admits every spelling of a call on the name and turns away
+/// each near miss: a directive, a longer name on either side, the name not
+/// called. A comment or a string is admitted — the query then matches nothing.
+#[test]
+fn a_file_is_parsed_for_mounts_only_when_its_text_calls_the_name() {
+    let reach = Reach::Calling(vec!["use".to_string()]);
+    for admitted in [
+        "app.use('/api', r);",
+        "app.use (r)",
+        "app\n  .use(\n'/api', r)",
+        "app.use/* why */('/api', r)",
+        "app.use // why\n('/api', r)",
+        "app.use<Router>('/api', r)",
+        "app?.use?.('/api', r)",
+        "// app.use('/api', r)",
+        "const s = \"app.use('/api', r)\";",
+        "'use strict';\napp.use(r);",
+        "$.use(x)",
+        // JavaScript's other whitespace and line terminators, which the parser
+        // skips as it skips a space.
+        "app.use\u{a0}('/api', r)",
+        "app.\u{a0}use('/api', r)",
+        "app.use\u{feff}('/api', r)",
+        "app.use\u{2003}('/api', r)",
+        "app.use // why\r('/api', r)",
+        "app.use // why\u{2028}('/api', r)",
+        "app.use // why\u{2029}('/api', r)",
+        "routeur.use('/api', r)",
+    ] {
+        assert!(reach.admits(admitted), "{admitted:?}");
+    }
+    for refused in [
+        "'use strict';\n",
+        "\"use strict\";\nconst x = 1;",
+        "const [a, b] = useState(0);",
+        "app.usex('/api', r);",
+        "app.reuse('/api', r);",
+        "app.use_('/api', r);",
+        "app.$use('/api', r);",
+        "app.éuse('/api', r);",
+        "app.useé('/api', r);",
+        "app.use\u{200d}('/api', r);",
+        "app.ūse('/api', r);",
+        "const use = 1;",
+        "app.use",
+        "app.use /* never closed (",
+        "app.use // to the end (",
+        "",
+    ] {
+        assert!(!reach.admits(refused), "{refused:?}");
+    }
+    assert!(!Reach::Calling(vec![String::new()]).admits("app.use(r)"));
+}

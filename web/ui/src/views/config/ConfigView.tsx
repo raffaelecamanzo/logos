@@ -53,8 +53,10 @@ import type {
   ConfigReadModel,
   ConfigWriteOutcome,
   FileView,
+  InheritedRules,
   ParsedConfig,
   ParsedRules,
+  RuleOrigin,
   RulesDefaults,
   VerifyReport,
 } from "../../api/types.ts";
@@ -94,6 +96,16 @@ interface FieldDescriptor {
    *  projection — never fabricated (NFR-RA-05). `undefined` when the field has
    *  no default affordance. */
   defaultHint?: string;
+  /** The workspace rules tier's own value for this key, formatted (S-508,
+   *  FR-UI-12 as modified by CR-165) — set only when the tier declares it. The
+   *  field then reads "Inherited from workspace" while the member leaves it
+   *  unset, and "Member override" once it declares its own. Display only: the
+   *  value is never pre-filled or posted (NFR-RA-05). */
+  workspaceValue?: string;
+  /** The server's origin for this key at load (FR-CF-08) — what the badge reads
+   *  while the field is untouched, so a member key the typed control cannot show
+   *  (a delta- or ratchet-form table) still reads as the member's (NFR-CC-04). */
+  origin?: RuleOrigin;
 }
 
 /** A group of typed fields rendered under an optional `[legend]`. */
@@ -148,6 +160,15 @@ function defaultHint(v: unknown): string {
   return `Default: ${fmtDefault(v)}`;
 }
 
+/** A workspace-tier value as a `rules.toml` would spell it — the ratchet and
+ *  count-delta tables as inline tables, never "[object Object]". */
+function fmtTierValue(v: unknown): string {
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    return `{ ${Object.entries(v as Record<string, unknown>).map(([k, x]) => `${k} = ${fmtDefault(x)}`).join(", ")} }`;
+  }
+  return fmtDefault(v);
+}
+
 /** `[constraints]` have no code default (an omitted key is simply "not
  *  enforced", FR-CF-03) — state that honestly, and separately show the
  *  curated recommended baseline from `Constraints::recommended()`. Never
@@ -173,14 +194,24 @@ function configGroups(c: ParsedConfig, d: ParsedConfig): FieldGroup[] {
 
 /** The `rules.toml` typed fields: the `[constraints]` and `[metric_thresholds]`
  *  tables. Repeated tables ([[layers]], …) are edited in the raw pane. */
-function rulesGroups(r: ParsedRules, d: RulesDefaults): FieldGroup[] {
+function rulesGroups(r: ParsedRules, d: RulesDefaults, tier?: InheritedRules): FieldGroup[] {
   const con = r.constraints ?? {};
   const mt = r.metric_thresholds ?? {};
   const dc = d.constraints;
   const dmt = d.metric_thresholds;
+  // S-508: the workspace tier's own value per key — only from a tier that parses.
+  const declared = (table: Record<string, unknown> | undefined, key: string) => {
+    const v = tier?.origins ? table?.[key] : undefined;
+    return v == null ? undefined : fmtTierValue(v);
+  };
+  const fromTier = (d: FieldDescriptor): FieldDescriptor => ({
+    ...d,
+    workspaceValue: declared(d.table === "constraints" ? tier?.constraints : tier?.metric_thresholds, d.key),
+    origin: (d.table === "constraints" ? tier?.origins?.constraints : tier?.origins?.metric_thresholds)?.[d.key],
+  });
   const cInt = (key: string, help: string): FieldDescriptor => ({ table: "constraints", key, control: "int", initial: initInt(con[key] as number | null | undefined), help, defaultHint: constraintHint(dc[key]) });
   const tInt = (key: keyof typeof dmt, help: string): FieldDescriptor => ({ table: "metric_thresholds", key, control: "int", initial: initInt(mt[key]), help, defaultHint: defaultHint(dmt[key]) });
-  return [
+  return withTier([
     {
       legend: "[constraints]",
       fields: [
@@ -213,7 +244,12 @@ function rulesGroups(r: ParsedRules, d: RulesDefaults): FieldGroup[] {
         tInt("cohesion_min_classes", "Cohesion minimum scoreable classes."),
       ],
     },
-  ];
+  ], fromTier);
+}
+
+/** Apply `f` to every field of `groups`. */
+function withTier(groups: FieldGroup[], f: (d: FieldDescriptor) => FieldDescriptor): FieldGroup[] {
+  return groups.map((g) => ({ ...g, fields: g.fields.map(f) }));
 }
 
 // ── Honest result-message formatting (ported from the legacy client module) ─────
@@ -304,12 +340,29 @@ function ResultPanel({ result }: { result: ResultMessage | null }) {
  *  recommended-baseline affordance rendered as a visually distinct trailing
  *  span (CR-067, FR-UI-12, BR-37) — never fabricated, always the exact string
  *  the `defaults` projection produced. */
-function fieldHint(d: FieldDescriptor): ReactNode {
-  if (!d.defaultHint) return d.help;
+function fieldHint(d: FieldDescriptor, value: string): ReactNode {
+  // Untouched, the server's origin decides; once edited, the edit does.
+  const overridden = value === d.initial && d.origin ? d.origin === "member" : value !== "";
+  const origin = d.workspaceValue === undefined ? null : <TierOrigin workspaceValue={d.workspaceValue} overridden={overridden} />;
+  if (!d.defaultHint && !origin) return d.help;
   return (
     <>
-      {d.help} <span className={styles.defaultHint}>{d.defaultHint}</span>
+      {d.help} {d.defaultHint && <span className={styles.defaultHint}>{d.defaultHint}</span>}
+      {origin && <> {origin}</>}
     </>
+  );
+}
+
+/** Where a rules key comes from (S-508, FR-UI-12 as modified by CR-165): the
+ *  workspace tier's value, inherited while the member leaves the key unset, and
+ *  overridden once it declares its own — which is what editing the row does. */
+function TierOrigin({ workspaceValue, overridden }: { workspaceValue: string; overridden: boolean }) {
+  return overridden ? (
+    <span className={styles.defaultHint}>Member override — workspace: {workspaceValue}</span>
+  ) : (
+    <span className={styles.defaultHint}>
+      <Badge tone="muted">Inherited from workspace</Badge>: {workspaceValue}
+    </span>
   );
 }
 
@@ -326,7 +379,7 @@ function FieldControl({
   const handle = (e: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
     onChange(e.target.value);
   const label = d.key;
-  const hint = fieldHint(d);
+  const hint = fieldHint(d, value);
   if (d.control === "list") {
     return <TextareaField label={label} hint={hint} rows={3} value={value} onChange={handle} className="mono" spellCheck={false} />;
   }
@@ -362,6 +415,7 @@ function FileEditor({
   isRules,
   onSaved,
   host,
+  tier,
 }: {
   file: PolicyFile;
   view: FileView<unknown>;
@@ -372,6 +426,8 @@ function FileEditor({
   /** The `config.toml` editor's host context: present, it also renders the mounted
    *  extensions' member field groups after the core ones (S-730). */
   host?: ConfigPanelHost;
+  /** The `rules.toml` editor's workspace rules tier, when the member has one (S-508). */
+  tier?: InheritedRules;
 }) {
   const [raw, setRaw] = useState<string>(view.content);
   const [values, setValues] = useState<Record<string, string>>(() => {
@@ -447,6 +503,7 @@ function FileEditor({
         <Badge tone={view.exists ? "green" : "muted"}>{view.exists ? "on disk" : "not yet created"}</Badge>
         <span className={styles.path}>{view.path}</span>
       </div>
+      {tier && <TierNote tier={tier} />}
 
       {groups.map((g, gi) => (
         <fieldset key={g.legend ?? `g${gi}`} className={styles.group}>
@@ -506,6 +563,26 @@ function FileEditor({
       <p className={styles.help}>{applyHelp}</p>
       <ResultPanel result={applyResult} />
     </Widget>
+  );
+}
+
+/** The member's workspace rules tier, named above its rules fields (S-508): the
+ *  file the inherited rows come from, or why it cannot be read — then nothing is
+ *  badged, since no origin is known. */
+function TierNote({ tier }: { tier: InheritedRules }) {
+  if (tier.error !== null) {
+    return (
+      <Callout label="WORKSPACE RULES" tone="signal">
+        The workspace rules contract this member inherits from cannot be read, so no row shows an
+        inherited value: {tier.error} Repair it in the workspace Config editor.
+      </Callout>
+    );
+  }
+  return (
+    <p className={styles.help}>
+      Keys this member leaves unset are inherited from <code>{tier.path}</code>. Saving writes only
+      this member&apos;s own document; typing a value into an inherited row makes it a member override.
+    </p>
   );
 }
 
@@ -661,8 +738,9 @@ function ConfigEditor({ model }: { model: ConfigReadModel }): ReactNode {
       <FileEditor
         file="rules"
         view={model.rules}
-        groups={rulesGroups(model.rules.parsed, model.defaults.rules)}
+        groups={rulesGroups(model.rules.parsed, model.defaults.rules, model.workspace_rules)}
         isRules
+        tier={model.workspace_rules}
       />
     </WidgetStack>
   );

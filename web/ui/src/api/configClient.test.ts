@@ -10,7 +10,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { setScopedMember } from "../workspace/scope.ts";
-import { ConfigMutateError, saveSecret } from "./configClient.ts";
+import { ConfigMutateError, fetchWorkspaceRules, saveSecret, saveWorkspaceRules } from "./configClient.ts";
 import { saveWorkspaceSecret } from "./workspaceClient.ts";
 
 const KEY = "sk-never-echo-0123456789";
@@ -65,5 +65,39 @@ describe.each(ROUTES)("$name (NFR-SE-07)", ({ save, url }) => {
   it("resolves a non-JSON 2xx to null rather than surface its body", async () => {
     stubOnce(200, `saved ${KEY}`);
     await expect(save(KEY)).resolves.toBeNull();
+  });
+});
+
+// ── S-508 (FR-UI-38 as modified by CR-165): the workspace rules contract ──────
+
+describe("the workspace rules contract routes (S-508)", () => {
+  it("reads the root contract app-level, with no member scope", async () => {
+    setScopedMember("api");
+    const doc = { path: ".logos/rules.toml", exists: false, content: "", fingerprint: "fp0", parsed: { constraints: {}, metric_thresholds: {} }, error: null, refused: [] };
+    const calls = stubOnce(200, JSON.stringify(doc));
+    await expect(fetchWorkspaceRules()).resolves.toEqual(doc);
+    expect(calls[0].url).toBe("/api/v1/workspace/rules");
+  });
+
+  it("posts the candidate with its load fingerprint and the intent token", async () => {
+    const written = { outcome: "written", path: ".logos/rules.toml", bytes_written: 9, fingerprint: "fp1" };
+    const calls = stubOnce(200, JSON.stringify(written));
+    await expect(saveWorkspaceRules("[constraints]\nmax_cc = 15\n", "fp0")).resolves.toEqual(written);
+    expect(calls[0].url).toBe("/api/v1/workspace/rules/save");
+    const body = new URLSearchParams(String(calls[0].init?.body));
+    expect(body.get("content")).toBe("[constraints]\nmax_cc = 15\n");
+    expect(body.get("fingerprint")).toBe("fp0");
+    expect(new Headers(calls[0].init?.headers).get("x-logos-intent")).toBe("test-intent-token");
+  });
+
+  it("resolves a 409 as the conflict outcome, and throws a refusal with the server's reason", async () => {
+    const conflict = { outcome: "conflict", path: ".logos/rules.toml", loaded_fingerprint: "fp0", disk_fingerprint: "fp9", disk_content: "x" };
+    stubOnce(409, JSON.stringify(conflict));
+    await expect(saveWorkspaceRules("y", "fp0")).resolves.toEqual(conflict);
+
+    stubOnce(422, JSON.stringify({ error: "not saved: [[layers]] is member-only" }));
+    const refused = saveWorkspaceRules("[[layers]]", "fp0");
+    await expect(refused).rejects.toBeInstanceOf(ConfigMutateError);
+    await expect(refused).rejects.toMatchObject({ status: 422, detail: "not saved: [[layers]] is member-only" });
   });
 });

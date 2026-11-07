@@ -24,6 +24,7 @@ import {
   layerColor,
   nodeSize,
   SELECTION_RING,
+  UNDIRECTED_EDGE_TYPES,
   visibleNodeIds,
   type CanvasEdge,
   type LoadedSet,
@@ -184,6 +185,11 @@ function linkDatum(
       opacity: dimmed ? 0.1 : forbidden ? 0.95 : 0.82,
       curveness: 0.08,
     },
+    // A directionless class drops the series' arrowhead (S-491). Set only for
+    // those types, so every other link datum is the object it always was.
+    ...(edge.edge_type && UNDIRECTED_EDGE_TYPES.has(edge.edge_type)
+      ? { symbol: ["none", "none"] as [string, string] }
+      : {}),
   };
 }
 

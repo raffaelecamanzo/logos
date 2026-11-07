@@ -36,7 +36,9 @@ impl<'e> Configuration<'e> {
     /// read-model's [`effective_chat`](crate::config::ConfigReadModel::effective_chat)
     /// and [`effective_wiki`](crate::config::ConfigReadModel::effective_wiki)
     /// slices ([FR-WS-30], S-448, Sprint 77 HF-1); the literal documents are this
-    /// root's alone.
+    /// root's alone. The [`workspace_rules`](crate::config::ConfigReadModel::workspace_rules)
+    /// slice is read from the rules tier this root's governance runs inherit
+    /// ([FR-CF-08], S-508), whatever `workspace_root` is.
     ///
     /// # Errors
     /// A present-but-invalid policy file fails loud through the load path — an
@@ -47,11 +49,18 @@ impl<'e> Configuration<'e> {
     /// [CR-025]: ../../../docs/requests/CR-025-interactive-config-editing.md
     /// [NFR-DM-04]: ../../../docs/specs/requirements/NFR-DM-04.md
     /// [FR-WS-30]: ../../../docs/specs/requirements/FR-WS-30.md
+    /// [FR-CF-08]: ../../../docs/specs/requirements/FR-CF-08.md
     pub fn read(
         &self,
         workspace_root: Option<&Path>,
     ) -> Result<crate::config::ConfigReadModel> {
-        self.on_root(Tool::ConfigRead, |root| crate::config::read_documents(root, workspace_root))
+        self.on_root(Tool::ConfigRead, |root| {
+            let mut model = crate::config::read_documents(root, workspace_root)?;
+            // S-508: what the member inherits from its workspace rules tier, beside
+            // (never inside) its own literal rules document.
+            model.workspace_rules = crate::config::inherited_rules(root, &model.rules.parsed);
+            Ok(model)
+        })
     }
 
     /// Validate an edited policy-file `candidate` against the **existing** load

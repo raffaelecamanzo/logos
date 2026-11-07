@@ -11,12 +11,28 @@ fingerprint = "7928022fdbb6636ef5e0c7d26d4a9eb0d8f81ab1329230479b6891c35a487a4f"
 reason = "Checkov CKV_GHA_7 on the workflow_dispatch `tag` input of .github/workflows/release.yml: the input only selects an existing release tag. scripts/release-tag-guard.sh runs in `plan` before dist is installed or anything is built, and refuses a tag that is not vMAJOR.MINOR.PATCH[-SUFFIX], that the checkout does not hold, whose commit is not HEAD, or that already has a GitHub Release; every later job reads the tag only from the guard's output, and `host` runs the guard again with the validated commit. The build output is therefore decided by the tag's commit, not by free text in the input. Checkov keys this finding by its line range in release.yml (84-92 at HF-4), so an edit above the `tag` input moves it and the entry then needs the new fingerprint."
 
 [[ignore]]
+fingerprint = "928e1edef6fde7f236896eadb611b720a91c72759cd9f3c6311dc76a2824c23b"
+reason = "False positive: gitleaks generic-api-key on a doc comment of spanned_lines in secret.rs (the secret-masking module); the line holds no value. Owner, 2026-11-07, Sprint 111 review."
+
+[[ignore]]
+fingerprint = "9de4af2049e40989c231ac43498d9577f6950a7e5360c80fdbd52e9f5e8dd762"
+reason = "Not a credential: an earlier reason text of this file spelled out mask.rs's fake redaction-test key (AKIA + the QWERTY keyboard row). The line no longer does, but git history keeps it. Owner, 2026-11-07, Sprint 111 review."
+
+[[ignore]]
 fingerprint = "babf052e1c560dfbe6a74f53a52ba4989e6028dfb07dbd7da7af5fcd539e34f9"
 reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/assets/config-editor.js: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
 
 [[ignore]]
+fingerprint = "d6d1747cba244f772685e3118e4d033810782419edca2450aedc99e873c65dd8"
+reason = "False positive: gitleaks generic-api-key on the signature of match_text in secret.rs (the secret-masking module); the line holds no value. Owner, 2026-11-07, Sprint 111 review."
+
+[[ignore]]
 fingerprint = "e0c9bfb72d916c8de0399fd7e9cf1d2d3d6b553c71fefa6d7981c833c3f467c9"
 reason = "Semgrep detect-non-literal-regexp (CWE-1333) on web/assets/config-editor.js: the pattern is built from escapeRe() of a TOML table or key name, and escapeRe escapes every regex metacharacter (. * + ? ^ $ { } ( ) | [ ] \\), so the name matches only itself and cannot add a repeat, an alternation or a group; no text reaches RegExp unescaped. Pinned by the escapeRe cases in web/ui/src/views/config/toml.test.ts, which also read web/assets/config-editor.js's copy."
+
+[[ignore]]
+fingerprint = "f2211265227a85eb2ffb10ce3089a03748dbcb5964e44f8f15821b0c5a0afb10"
+reason = "Not a credential: the same fake mask.rs redaction-test key in an earlier reason text of this file, reported by a second gitleaks rule match. Owner, 2026-11-07, Sprint 111 review."
 
 [[ignore]]
 path = "Cargo.lock"
@@ -46,7 +62,7 @@ expires = 2027-04-19
 path = "logos-core/src/history/security/mask.rs"
 rule = "aws-access-key-id"
 scanner = "trivy"
-reason = "Redaction-test input, not a credential: AKIAQWERTYUIOPASDFGH (the keyboard row) in mask.rs's #[cfg(test)] module, the string the masker must redact. mask.rs's production code holds no literal key; a real one elsewhere, or from another scanner, is still reported. Owner, 2026-10-31, with the [security] table."
+reason = "Redaction-test input, not a credential: an AKIA prefix followed by the QWERTY keyboard row in mask.rs's #[cfg(test)] module, the string the masker must redact. mask.rs's production code holds no literal key; a real one elsewhere, or from another scanner, is still reported. Owner, 2026-10-31, with the [security] table."
 
 [[ignore]]
 path = "logos-core/src/history/security/mask.rs"

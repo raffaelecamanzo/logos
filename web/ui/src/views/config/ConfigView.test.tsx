@@ -334,6 +334,144 @@ describe("ConfigView round-trips only the literal document (S-448, NFR-RA-05)", 
   });
 });
 
+describe("ConfigView shows where each rule comes from (S-508, FR-UI-12 as modified by CR-165)", () => {
+  /** A member that declares `max_fn_lines = 100` itself, under a workspace tier
+   *  declaring `max_cc = 15` (inherited), `max_fn_lines = 80` (overridden) and the
+   *  ratchet form of `no_god_files`, plus the threshold `god_methods = 30`. */
+  const MEMBER_RULES = "[constraints]\nmax_fn_lines = 100\n";
+  function inheritingModel(): ConfigReadModel {
+    const m = model();
+    return {
+      ...m,
+      rules: {
+        path: ".logos/rules.toml",
+        exists: true,
+        content: MEMBER_RULES,
+        parsed: { constraints: { max_fn_lines: 100 }, metric_thresholds: {} },
+      },
+      workspace_rules: {
+        path: "/ws/.logos/rules.toml",
+        origins: {
+          constraints: { max_cc: "workspace", max_fn_lines: "member", no_god_files: "workspace" },
+          metric_thresholds: { god_methods: "workspace" },
+        },
+        constraints: { max_cc: 15, max_fn_lines: 80, no_god_files: { max: 40, ratchet: true } },
+        metric_thresholds: { god_methods: 30 },
+        error: null,
+      },
+    };
+  }
+
+  function rulesRaw(): HTMLTextAreaElement {
+    return screen.getByLabelText(/Raw TOML — rules\.toml/) as HTMLTextAreaElement;
+  }
+
+  it("badges each inherited constraint and threshold with its root value", async () => {
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheritingModel()) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    expect(fieldHintText("max_cc")).toContain("Inherited from workspace: 15");
+    expect(fieldHintText("god_methods")).toContain("Inherited from workspace: 30");
+    expect(fieldHintText("no_god_files")).toContain("Inherited from workspace: { max = 40, ratchet = true }");
+    // The member's own key overrides the root's, and says so.
+    expect(fieldHintText("max_fn_lines")).toContain("Member override — workspace: 80");
+    expect(fieldHintText("max_fn_lines")).not.toContain("Inherited from workspace");
+    // A key neither tier declares carries no origin.
+    expect(fieldHintText("max_fan_in")).not.toMatch(/workspace/i);
+    // The inherited field itself stays empty: it is not the member's value.
+    expect((screen.getByLabelText("max_cc") as HTMLInputElement).value).toBe("");
+    expect(screen.getByText(/\/ws\/\.logos\/rules\.toml/)).toBeInTheDocument();
+  });
+
+  it("saving the member document never writes an inherited value", async () => {
+    const calls = mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheritingModel()) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "rules", path: ".logos/rules.toml", bytes_written: 40, provenance_stamped: true }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(rulesRaw().value).toBe(MEMBER_RULES);
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Save rules.toml" }));
+    await screen.findByText(/A provenance comment was stamped/);
+    const posted = new URLSearchParams(calls.find((c) => c.url === "/config/save")?.body).get("content");
+    expect(posted).toBe(MEMBER_RULES);
+    expect(posted).not.toContain("max_cc");
+    expect(posted).not.toContain("god_methods");
+  });
+
+  it("editing an inherited row creates a member override", async () => {
+    const calls = mockFetch({
+      "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(inheritingModel()) }),
+      "POST /config/save": () => ({
+        ok: true,
+        status: 200,
+        body: JSON.stringify({ file: "rules", path: ".logos/rules.toml", bytes_written: 52, provenance_stamped: true }),
+      }),
+    });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+
+    fireEvent.change(screen.getByLabelText("max_cc"), { target: { value: "12" } });
+    expect(rulesRaw().value).toContain("max_cc = 12");
+    expect(fieldHintText("max_cc")).toContain("Member override — workspace: 15");
+    expect(fieldHintText("max_cc")).not.toContain("Inherited from workspace");
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Save rules.toml" }));
+    await screen.findByText(/A provenance comment was stamped/);
+    const posted = new URLSearchParams(calls.find((c) => c.url === "/config/save")?.body).get("content");
+    expect(posted).toContain("max_cc = 12");
+    expect(posted).not.toContain("god_methods");
+  });
+
+  it("states a workspace rules tier that does not parse, and badges nothing", async () => {
+    const m = inheritingModel();
+    m.workspace_rules = {
+      path: "/ws/.logos/rules.toml",
+      origins: null,
+      constraints: {},
+      metric_thresholds: {},
+      error: "/ws/.logos/rules.toml is not valid TOML with only known keys (at line 1, column 13).",
+    };
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(m) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.getByText(/is not valid TOML with only known keys/)).toBeInTheDocument();
+    expect(fieldHintText("max_cc")).not.toContain("Inherited from workspace");
+  });
+
+  it("a member key the typed field cannot show still reads as the member's, from the server's origin", async () => {
+    // A delta-form `max_dead` renders as an empty typed field (absolute form only),
+    // but the member declares it: the badge must not claim it is inherited.
+    const m = inheritingModel();
+    m.rules.content = "[constraints]\nmax_dead = { baseline = 3, delta = 0 }\n";
+    m.rules.parsed = { constraints: { max_dead: { baseline: 3, delta: 0 } }, metric_thresholds: {} };
+    m.workspace_rules!.constraints.max_dead = 0;
+    m.workspace_rules!.origins!.constraints.max_dead = "member";
+    mockFetch({ "GET /api/v1/config": () => ({ ok: true, status: 200, body: JSON.stringify(m) }) });
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect((screen.getByLabelText("max_dead") as HTMLInputElement).value).toBe("");
+    expect(fieldHintText("max_dead")).toContain("Member override — workspace: 0");
+    expect(fieldHintText("max_dead")).not.toContain("Inherited from workspace");
+  });
+
+  it("a single-root read-model carries no origin and renders none", async () => {
+    mockFetch({});
+    renderView();
+    await screen.findByText(/CONFIG EDITOR/);
+    expect(screen.queryByText(/Inherited from workspace/)).toBeNull();
+    expect(screen.queryByText(/Member override/)).toBeNull();
+  });
+});
+
 describe("ConfigView rules.toml confirm gate (BR-35)", () => {
   it("does not POST until the change is confirmed, then writes", async () => {
     const calls = mockFetch({
