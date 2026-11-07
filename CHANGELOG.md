@@ -13,6 +13,8 @@ and sprint records. 1.4.2 and 1.4.4 were never released.
 
 ## [Unreleased]
 
+## [1.23.1] — 2026-11-07
+
 ## [1.23.0] — 2026-11-05
 
 ### Added

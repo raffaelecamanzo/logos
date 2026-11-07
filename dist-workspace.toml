@@ -49,3 +49,8 @@ cargo-zigbuild = true
 install-path = ["$CARGO_HOME/bin", "~/.local/bin"]
 # Whether to install an updater program
 install-updater = false
+
+# GitHub retired the macos-14 image dist 0.32 picks for Apple Silicon by default
+# ("The configuration 'macos-14-arm64-us-default' is not supported", v1.23.0 release run).
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
